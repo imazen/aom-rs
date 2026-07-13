@@ -36,6 +36,18 @@ extern "C" {
     );
 }
 
+// av1/common/cdef_block.c — CDEF direction search.
+extern "C" {
+    pub fn cdef_find_dir_c(img: *const u16, stride: i32, var: *mut i32, coeff_shift: i32) -> i32;
+}
+
+/// Reference `cdef_find_dir_c`; returns (best_dir, var).
+pub fn ref_cdef_find_dir(img: &[u16], stride: usize, coeff_shift: i32) -> (i32, i32) {
+    let mut var = 0i32;
+    let dir = unsafe { cdef_find_dir_c(img.as_ptr(), stride as i32, &mut var, coeff_shift) };
+    (dir, var)
+}
+
 // sadvar_shim.c — SAD / variance / sub-pixel variance dispatch (22 sizes).
 extern "C" {
     fn shim_sad(idx: i32, s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;

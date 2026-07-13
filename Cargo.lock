@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "aom-cdef"
+version = "0.0.1"
+dependencies = [
+ "aom-sys-ref",
+]
+
+[[package]]
 name = "aom-dist"
 version = "0.0.1"
 dependencies = [

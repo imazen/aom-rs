@@ -334,6 +334,16 @@
           "test": "avx2_sad::avx2_sad_perf_ratio (1.42x > 1.20x)"
         }
       }
+    },
+    "cdef.find_dir": {
+      "status": "green",
+      "note": "CDEF 8x8 direction search (both tracks), bd 8/10/12. cdef_filter_block + full CDEF path: TODO.",
+      "items": {
+        "cdef_find_dir": {
+          "status": "green",
+          "test": "cdef_diff::cdef_find_dir_matches_c"
+        }
+      }
     }
   }
 }

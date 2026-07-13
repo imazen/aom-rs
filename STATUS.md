@@ -92,6 +92,11 @@ if `coverage/feature_map.json` maps it to a passing test. Current: **0/349**
 state. Kernel-level differential coverage is tracked separately in
 `checklist.json` (transform/quant/entropy/intra/loopfilter/dist all green).
 
+- **CDEF direction search** (`av1/common/cdef_block.c`), both tracks:
+  `cdef_find_dir` (8x8 partial-sum direction cost search) over bd 8/10/12.
+  Harness: `aom-cdef/tests/cdef_diff.rs` — 600k comparisons (dir+var),
+  byte-identical to C. (cdef_filter_block + full CDEF path: TODO.)
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.
