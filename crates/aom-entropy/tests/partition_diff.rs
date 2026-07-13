@@ -3221,3 +3221,88 @@ fn decode_mode_info_symbols_roundtrip() {
         }
     }
 }
+
+#[test]
+fn read_inter_mode_roundtrips() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{read_inter_mode, write_inter_mode};
+    let mut rng = Rng(0x1e_1de1_c0de_0020u64);
+    let mk2 = |rng: &mut Rng, n: usize, flat: &mut [[u16; 3]]| {
+        for row in flat.iter_mut().take(n) {
+            let p = 1 + (rng.next() % 32766) as u16;
+            *row = [p, 0, 0];
+        }
+    };
+    let modes = [13i32, 14, 15, 16]; // NEARESTMV/NEARMV/GLOBALMV/NEWMV
+    for _ in 0..300_000 {
+        let mode = modes[(rng.next() % 4) as usize];
+        let newmv_ctx = (rng.next() % 6) as i32;
+        let zeromv_bit = (rng.next() % 2) as i32;
+        let refmv_ctx = (rng.next() % 6) as i32;
+        let mode_ctx = newmv_ctx | (zeromv_bit << 3) | (refmv_ctx << 4);
+        let mut nm = [[0u16; 3]; 6];
+        let mut zm = [[0u16; 3]; 2];
+        let mut rm = [[0u16; 3]; 6];
+        mk2(&mut rng, 6, &mut nm);
+        mk2(&mut rng, 2, &mut zm);
+        mk2(&mut rng, 6, &mut rm);
+        let mut enc = OdEcEnc::new();
+        let (mut nme, mut zme, mut rme) = (nm, zm, rm);
+        write_inter_mode(&mut enc, &mut nme, &mut zme, &mut rme, mode, mode_ctx);
+        let bytes = enc.done().to_vec();
+        let mut dec = OdEcDec::new(&bytes);
+        let (mut nmd, mut zmd, mut rmd) = (nm, zm, rm);
+        let d = read_inter_mode(&mut dec, &mut nmd, &mut zmd, &mut rmd, mode_ctx);
+        assert_eq!(d, mode, "inter_mode roundtrip mode={mode} ctx={mode_ctx}");
+        assert_eq!(nme, nmd, "newmv cdf");
+        assert_eq!(zme, zmd, "zeromv cdf");
+        assert_eq!(rme, rmd, "refmv cdf");
+    }
+}
+
+#[test]
+fn read_mv_roundtrips_encode_mv() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{encode_mv, read_mv};
+    let mut rng = Rng(0x1e_11de_c0de_0021u64);
+    let mk_ibc = |rng: &mut Rng, ns: usize, out: &mut [u16]| {
+        let mut vals = [0i32; 11];
+        for v in vals.iter_mut().take(ns - 1) { *v = 1 + (rng.next() % 32766) as i32; }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 { let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32); out[i] = v as u16; prev = v; }
+        out[ns - 1] = 0; out[ns] = 0;
+    };
+    let mk_comp = |rng: &mut Rng| -> [u16; 69] {
+        let mut c = [0u16; 69];
+        mk_ibc(rng, 2, &mut c[0..3]); mk_ibc(rng, 11, &mut c[3..15]); mk_ibc(rng, 2, &mut c[15..18]);
+        for i in 0..10 { let o = 18 + i * 3; mk_ibc(rng, 2, &mut c[o..o + 3]); }
+        for i in 0..2 { let o = 48 + i * 5; mk_ibc(rng, 4, &mut c[o..o + 5]); }
+        mk_ibc(rng, 4, &mut c[58..63]); mk_ibc(rng, 2, &mut c[63..66]); mk_ibc(rng, 2, &mut c[66..69]);
+        c
+    };
+    for _ in 0..300_000 {
+        // full precision so both fr + hp are coded -> exact roundtrip. diffs in class range.
+        let usehp = 1;
+        let dr = (rng.next() % 32769) as i32 - 16384;
+        let dc = (rng.next() % 32769) as i32 - 16384;
+        let mut joints = [0u16; 5];
+        mk_ibc(&mut rng, 4, &mut joints);
+        let comp0 = mk_comp(&mut rng);
+        let comp1 = mk_comp(&mut rng);
+        let mut enc = OdEcEnc::new();
+        let (mut je, mut c0e, mut c1e) = (joints, comp0, comp1);
+        encode_mv(&mut enc, &mut je, &mut c0e, &mut c1e, dr, dc, usehp);
+        let bytes = enc.done().to_vec();
+        let mut dec = OdEcDec::new(&bytes);
+        let (mut jd, mut c0d, mut c1d) = (joints, comp0, comp1);
+        let (rr, rc) = read_mv(&mut dec, &mut jd, &mut c0d, &mut c1d, usehp);
+        assert_eq!((rr, rc), (dr, dc), "mv roundtrip dr={dr} dc={dc}");
+        assert_eq!(je, jd, "joints cdf");
+        assert_eq!(c0e, c0d, "comp0 cdf");
+        assert_eq!(c1e, c1d, "comp1 cdf");
+    }
+}

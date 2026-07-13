@@ -292,6 +292,7 @@ pub fn write_intra_uv_mode(enc: &mut OdEcEnc, uv_mode_cdf: &mut [u16], uv_mode: 
 }
 
 const NEARESTMV: i32 = 13;
+const NEARMV: i32 = 14;
 const GLOBALMV: i32 = 15;
 const NEWMV: i32 = 16;
 
@@ -2878,4 +2879,90 @@ pub fn read_inter_compound_mode(dec: &mut OdEcDec, cdf: &mut [u16]) -> i32 {
 /// (`2*MAX_ANGLE_DELTA+1` symbols, offset by `-MAX_ANGLE_DELTA`).
 pub fn read_angle_delta(dec: &mut OdEcDec, cdf: &mut [u16]) -> i32 {
     read_symbol(dec, cdf, (2 * MAX_ANGLE_DELTA + 1) as usize) - MAX_ANGLE_DELTA
+}
+
+/// `read_inter_mode` — inverse of [`write_inter_mode`]: the single-ref inter mode via the
+/// 3-symbol cascade (is-not-NEWMV on `newmv_cdf[ctx&7]`, then is-not-GLOBALMV on
+/// `zeromv_cdf[(ctx>>3)&1]`, then is-not-NEARESTMV on `refmv_cdf[(ctx>>4)&15]`).
+pub fn read_inter_mode(
+    dec: &mut OdEcDec,
+    newmv_cdf: &mut [[u16; 3]; 6],
+    zeromv_cdf: &mut [[u16; 3]; 2],
+    refmv_cdf: &mut [[u16; 3]; 6],
+    mode_ctx: i32,
+) -> i32 {
+    let newmv_ctx = (mode_ctx & 7) as usize;
+    if read_symbol(dec, &mut newmv_cdf[newmv_ctx], 2) == 0 {
+        return NEWMV;
+    }
+    let zeromv_ctx = ((mode_ctx >> 3) & 1) as usize;
+    if read_symbol(dec, &mut zeromv_cdf[zeromv_ctx], 2) == 0 {
+        return GLOBALMV;
+    }
+    let refmv_ctx = ((mode_ctx >> 4) & 15) as usize;
+    if read_symbol(dec, &mut refmv_cdf[refmv_ctx], 2) != 0 {
+        NEARMV
+    } else {
+        NEARESTMV
+    }
+}
+
+/// `read_mv_component` — inverse of [`encode_mv_component`]: reads sign, class, the
+/// class-0 or bit-tree integer part, and (per `precision`) the fractional and high-
+/// precision bits, then reconstructs the signed component. When a part is not coded the
+/// decoder uses the spec default (`fr = 3`, `hp = 1`).
+pub fn read_mv_component(dec: &mut OdEcDec, cdf: &mut [u16; 69], precision: i32) -> i32 {
+    let sign = read_symbol(dec, &mut cdf[0..3], 2);
+    let mv_class = read_symbol(dec, &mut cdf[3..15], MV_CLASSES);
+    let d = if mv_class == 0 {
+        read_symbol(dec, &mut cdf[15..18], 2)
+    } else {
+        let mut dd = 0;
+        for i in 0..mv_class {
+            let off = 18 + (i as usize) * 3;
+            dd |= read_symbol(dec, &mut cdf[off..off + 3], 2) << i;
+        }
+        dd
+    };
+    let fr = if precision > MV_SUBPEL_NONE {
+        if mv_class == 0 {
+            let off = 48 + (d as usize) * 5;
+            read_symbol(dec, &mut cdf[off..off + 5], MV_FP_SIZE)
+        } else {
+            read_symbol(dec, &mut cdf[58..63], MV_FP_SIZE)
+        }
+    } else {
+        3
+    };
+    let hp = if precision > MV_SUBPEL_LOW {
+        if mv_class == 0 {
+            read_symbol(dec, &mut cdf[63..66], 2)
+        } else {
+            read_symbol(dec, &mut cdf[66..69], 2)
+        }
+    } else {
+        1
+    };
+    let offset = (d << 3) | (fr << 1) | hp;
+    let mag = mv_class_base(mv_class) + offset + 1;
+    if sign != 0 {
+        -mag
+    } else {
+        mag
+    }
+}
+
+/// `read_mv` — inverse of [`encode_mv`]: reads the MV joint, then the vertical and/or
+/// horizontal components as the joint indicates. Returns `(diff_row, diff_col)`.
+pub fn read_mv(
+    dec: &mut OdEcDec,
+    joints_cdf: &mut [u16],
+    comp0: &mut [u16; 69],
+    comp1: &mut [u16; 69],
+    precision: i32,
+) -> (i32, i32) {
+    let j = read_symbol(dec, joints_cdf, 4); // MV_JOINTS
+    let row = if j & 2 != 0 { read_mv_component(dec, comp0, precision) } else { 0 };
+    let col = if j & 1 != 0 { read_mv_component(dec, comp1, precision) } else { 0 };
+    (row, col)
 }
