@@ -194,7 +194,10 @@ both tracks, fully bit-exact.**
 - **RD + front-end primitives (aom-dist)** — `block_error` / `highbd_block_error`
   (av1_[highbd_]block_error_c): transform-domain distortion, `error=sum((coeff-dqcoeff)^2)`
   + `ssz=sum(coeff^2)` (lowbd 32-bit products; highbd 64-bit + rounded-shift 2*(bd-8)) —
-  the fast distortion the RD search pairs with the trellis rate. `subtract_block` /
+  the fast distortion the RD search pairs with the trellis rate. `block_error_qm`
+  (av1_block_error_qm — the quant-matrix RD distortion; a static inline, so the oracle
+  is a transcription cross-validated against the real av1_highbd_block_error_c in the
+  flat-matrix case + the transcription for the weighted case). `subtract_block` /
   `highbd_subtract_block` (aom_[highbd_]subtract_block_c): the residual generator
   `diff=src-pred`, natively strided — completing the front end (pred -> subtract ->
   xform_quant). Both diffed vs exported C (highbd subtract via a CONVERT_TO_BYTEPTR shim).
