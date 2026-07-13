@@ -71,3 +71,27 @@ fn partition_gather_matches_c() {
         }
     }
 }
+
+#[test]
+fn partition_plane_context_matches_c() {
+    use aom_entropy::partition::partition_plane_context;
+    let mut rng = Rng(0x9c2e_c0de_a11a_0009);
+    // square partition points: 8x8=3, 16x16=6, 32x32=9, 64x64=12, 128x128=15
+    let squares = [3i32, 6, 9, 12, 15];
+    for _ in 0..300_000 {
+        let mut above = [0i8; 64];
+        let mut left = [0i8; 64];
+        for a in &mut above {
+            *a = (rng.next() & 0xff) as i8;
+        }
+        for l in &mut left {
+            *l = (rng.next() & 0xff) as i8;
+        }
+        let bsize = squares[(rng.next() % 5) as usize];
+        let mi_col = (rng.next() % 64) as i32;
+        let mi_row = (rng.next() % 64) as i32;
+        let got = partition_plane_context(&above, &left, mi_row as usize, mi_col as usize, bsize as usize);
+        let want = c::ref_partition_plane_context(&above, &left, mi_row, mi_col, bsize);
+        assert_eq!(got, want, "partition_plane_context bsize={bsize} r={mi_row} c={mi_col}");
+    }
+}

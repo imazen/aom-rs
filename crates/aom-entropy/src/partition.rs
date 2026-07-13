@@ -21,6 +21,31 @@ const PARTITION_VERT_4: usize = 9;
 const BLOCK_8X8: usize = 3;
 const BLOCK_128X128: usize = 15;
 
+/// `mi_size_wide_log2[BLOCK_SIZES_ALL]` (`common_data.h`): log2 of a block's width in
+/// mode-info (4x4) units.
+const MI_SIZE_WIDE_LOG2: [u8; 22] =
+    [0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4];
+/// `MAX_MIB_MASK` = `MAX_MIB_SIZE - 1` = 31 (128-wide superblock in mi units).
+const MAX_MIB_MASK: usize = 31;
+/// `PARTITION_PLOFFSET`: probability models per block size.
+const PARTITION_PLOFFSET: i32 = 4;
+
+/// `partition_plane_context` (`av1_common_int.h`): the partition CDF context for a
+/// block, from the above/left partition-context bits at the block's size level
+/// (`bsl`) — `(left*2 + above) + bsl * PARTITION_PLOFFSET`.
+pub fn partition_plane_context(
+    above_ctx: &[i8],
+    left_ctx: &[i8],
+    mi_row: usize,
+    mi_col: usize,
+    bsize: usize,
+) -> i32 {
+    let bsl = MI_SIZE_WIDE_LOG2[bsize] as i32 - MI_SIZE_WIDE_LOG2[BLOCK_8X8] as i32;
+    let above = (above_ctx[mi_col] as i32 >> bsl) & 1;
+    let left = (left_ctx[mi_row & MAX_MIB_MASK] as i32 >> bsl) & 1;
+    (left * 2 + above) + bsl * PARTITION_PLOFFSET
+}
+
 /// `partition_cdf_length` (`av1_common_int.h`): the number of partition symbols a
 /// block of `bsize` codes — `PARTITION_TYPES`(4) at 8x8, `EXT_PARTITION_TYPES`(10)
 /// generally, and `EXT_PARTITION_TYPES - 2`(8) at 128x128 (no 4:1 splits).

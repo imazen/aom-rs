@@ -231,6 +231,7 @@ extern "C" {
     fn shim_partition_cdf_length(bsize: i32) -> i32;
     fn shim_partition_gather_vert(out: *mut u16, cdf_in: *const u16, bsize: i32);
     fn shim_partition_gather_horz(out: *mut u16, cdf_in: *const u16, bsize: i32);
+    fn shim_partition_plane_context(above: *const i8, left: *const i8, mi_row: i32, mi_col: i32, bsize: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
 }
@@ -238,6 +239,11 @@ extern "C" {
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `partition_plane_context` (facade over the real static inline).
+pub fn ref_partition_plane_context(above: &[i8], left: &[i8], mi_row: i32, mi_col: i32, bsize: i32) -> i32 {
+    unsafe { shim_partition_plane_context(above.as_ptr(), left.as_ptr(), mi_row, mi_col, bsize) }
 }
 
 /// Reference `partition_gather_vert_alike`.
