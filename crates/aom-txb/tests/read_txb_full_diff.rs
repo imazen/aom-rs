@@ -68,6 +68,7 @@ fn gen_coeffs(rng: &mut Rng, scan: &[i16], area: usize) -> (Vec<i32>, usize) {
         };
         if rng.next() & 1 == 1 { -mag } else { mag }
     };
+    #[allow(clippy::needless_range_loop)]
     for i in 0..eob {
         let pos = scan[i] as usize;
         if i == eob - 1 || rng.range(0, 10) >= 4 {
