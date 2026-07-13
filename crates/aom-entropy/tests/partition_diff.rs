@@ -3028,3 +3028,47 @@ fn write_inter_txfm_size_matches_c() {
         }
     }
 }
+
+#[test]
+fn pack_map_tokens_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::pack_map_tokens;
+    let mut rng = Rng(0x1e_9a70_c0de_001du64);
+    // n-symbol CDF (count at [n]); the map CDF for palette size n uses n symbols.
+    let mk = |rng: &mut Rng, n: usize, out: &mut [u16; 9]| {
+        let mut prev = 32768i32;
+        for e in out.iter_mut().take(n - 1) {
+            let v = (prev - 1 - (rng.next() % 400) as i32).max(n as i32);
+            *e = v as u16;
+            prev = v;
+        }
+        out[n - 1] = 0;
+        out[n] = 0;
+    };
+    for _ in 0..300_000 {
+        let n = 2 + (rng.next() % 7) as i32; // palette size 2..8
+        let num = 1 + (rng.next() % 40) as usize; // number of color indices (>=1)
+        let tokens: Vec<i32> = (0..num).map(|_| (rng.next() % n as u64) as i32).collect();
+        let tokens_u8: Vec<u8> = tokens.iter().map(|&t| t as u8).collect();
+        let color_ctxs: Vec<usize> = (0..num).map(|_| (rng.next() % 5) as usize).collect();
+        let color_ctxs_u8: Vec<u8> = color_ctxs.iter().map(|&c| c as u8).collect();
+        let mut map_n = [[0u16; 9]; 5];
+        let mut map_f = [0u16; 45];
+        for ctx in 0..5 {
+            let mut row = [0u16; 9];
+            mk(&mut rng, n as usize, &mut row);
+            map_n[ctx] = row;
+            for j in 0..9 {
+                map_f[ctx * 9 + j] = row[j];
+            }
+        }
+        let mut enc = OdEcEnc::new();
+        let mut map_rs = map_n;
+        pack_map_tokens(&mut enc, n, &tokens, &color_ctxs, &mut map_rs);
+        let got = enc.done().to_vec();
+        let (want, mco) = c::ref_pack_map_tokens(n, &tokens_u8, &color_ctxs_u8, &map_f);
+        assert_eq!(got, want, "bytes n={n} num={num}");
+        let map_rs_f: [u16; 45] = core::array::from_fn(|i| map_rs[i / 9][i % 9]);
+        assert_eq!(map_rs_f, mco, "map_cdf n={n} num={num}");
+    }
+}

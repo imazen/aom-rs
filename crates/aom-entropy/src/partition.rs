@@ -2770,3 +2770,36 @@ pub fn write_inter_txfm_size(
         idy += txbh;
     }
 }
+
+/// `get_unsigned_bits` (`common.h`): bits to represent `n` values (`get_msb(n) + 1`, 0 for 0).
+fn get_unsigned_bits(n: u32) -> u32 {
+    if n > 0 { get_msb(n) + 1 } else { 0 }
+}
+
+/// `write_uniform` (`av1/encoder/bitstream.c`) on the arithmetic coder: a near-uniform
+/// code for `v` in `0..n` — `l-1` low values take `l-1` bits, the rest `l` bits.
+fn write_uniform_arith(enc: &mut OdEcEnc, n: i32, v: i32) {
+    let l = get_unsigned_bits(n as u32) as i32;
+    let m = (1 << l) - n;
+    if l == 0 {
+        return;
+    }
+    if v < m {
+        write_literal(enc, v, (l - 1) as u32);
+    } else {
+        write_literal(enc, m + ((v - m) >> 1), (l - 1) as u32);
+        write_bit(enc, (v - m) & 1);
+    }
+}
+
+/// `pack_map_tokens` (`av1/encoder/bitstream.c`): the palette colour-index map. The first
+/// index is coded uniformly (`write_uniform`); each subsequent index is coded on the
+/// `map_pb_cdf[palette_size_idx][color_ctx]` CDF (`n` symbols). `tokens[i]` is the colour
+/// index and `color_ctxs[i]` its neighbour context (`color_ctxs[0]` unused). `map_cdf` is
+/// the `[PALETTE_COLOR_INDEX_CONTEXTS]` slice already selected for this palette size.
+pub fn pack_map_tokens(enc: &mut OdEcEnc, n: i32, tokens: &[i32], color_ctxs: &[usize], map_cdf: &mut [[u16; 9]; 5]) {
+    write_uniform_arith(enc, n, tokens[0]);
+    for i in 1..tokens.len() {
+        write_symbol(enc, tokens[i], &mut map_cdf[color_ctxs[i]], n as usize);
+    }
+}

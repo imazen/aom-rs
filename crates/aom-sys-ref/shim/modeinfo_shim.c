@@ -2213,3 +2213,34 @@ uint32_t shim_write_inter_txfm_size(int bsize, int max_tx, const uint8_t *inter_
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- pack_map_tokens (palette colour-index map, av1/encoder/bitstream.c) --- */
+/* First index via write_uniform(n); the rest via aom_write_symbol on map_pb_cdf
+ * [size_idx][color_ctx] (n symbols). map_cdf is the [PALETTE_COLOR_INDEX_CONTEXTS=5][9]
+ * slice for this palette size. tokens[i] is the colour index, color_ctxs[i] its context
+ * (unused for i==0). Transcribed over od_ec (aom_write_literal -> mi_literal). */
+uint32_t shim_pack_map_tokens(int n, int num, const uint8_t *tokens, const uint8_t *color_ctxs,
+                              uint16_t *map_cdf, uint8_t *out, uint16_t *map_cdf_out) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  const int l = n > 0 ? get_msb(n) + 1 : 0;
+  const int m = (1 << l) - n;
+  const int v = tokens[0];
+  if (l != 0) {
+    if (v < m) {
+      mi_literal(&ec, v, l - 1);
+    } else {
+      mi_literal(&ec, m + ((v - m) >> 1), l - 1);
+      mi_bit(&ec, (v - m) & 1);
+    }
+  }
+  for (int i = 1; i < num; i++) {
+    uint16_t *cdf = map_cdf + color_ctxs[i] * 9;
+    od_ec_encode_cdf_q15(&ec, tokens[i], cdf, n);
+    update_cdf(cdf, tokens[i], n);
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 5 * 9; i++) map_cdf_out[i] = map_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

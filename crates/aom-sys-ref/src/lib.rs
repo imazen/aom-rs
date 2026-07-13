@@ -276,6 +276,7 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_write_palette_flags_sizes(mode_dc: i32, n_y: i32, y_mode_cdf: *mut u16, y_size_cdf: *mut u16, uv_dc: i32, n_uv: i32, uv_mode_cdf: *mut u16, uv_size_cdf: *mut u16, out: *mut u8, o_ym: *mut u16, o_ys: *mut u16, o_um: *mut u16, o_us: *mut u16) -> u32;
     fn shim_delta_encode_palette_colors(colors: *const i32, num: i32, bit_depth: i32, min_val: i32, out: *mut u8) -> u32;
+    fn shim_pack_map_tokens(n: i32, num: i32, tokens: *const u8, color_ctxs: *const u8, map_cdf: *mut u16, out: *mut u8, map_cdf_out: *mut u16) -> u32;
     fn shim_write_palette_colors_v(colors_v: *const u16, n: i32, bit_depth: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_get_palette_cache(plane: i32, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_size0: i32, a_size1: i32, hl: i32, l_colors: *const u16, l_size0: i32, l_size1: i32, out_cache: *mut u16) -> i32;
@@ -566,6 +567,22 @@ pub fn ref_write_palette_flags_sizes(
     };
     out.truncate(n as usize);
     (out, oym, oys, oum, ous)
+}
+
+/// Reference `pack_map_tokens` (palette colour-index map, over pristine C od_ec). map_cdf
+/// is the [PALETTE_COLOR_INDEX_CONTEXTS=5][9] slice for the palette size. Returns
+/// (bytes, adapted map_cdf[45]).
+pub fn ref_pack_map_tokens(n: i32, tokens: &[u8], color_ctxs: &[u8], map_cdf: &[u16; 45]) -> (Vec<u8>, [u16; 45]) {
+    let mut mc = *map_cdf;
+    let mut out = vec![0u8; 256];
+    let mut mco = [0u16; 45];
+    let num = tokens.len() as i32;
+    let n_out = unsafe {
+        shim_pack_map_tokens(n, num, tokens.as_ptr(), color_ctxs.as_ptr(), mc.as_mut_ptr(),
+            out.as_mut_ptr(), mco.as_mut_ptr())
+    };
+    out.truncate(n_out as usize);
+    (out, mco)
 }
 
 /// Reference `delta_encode_palette_colors` (over pristine C od_ec, real aom_ceil_log2).
