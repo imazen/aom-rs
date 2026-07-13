@@ -53,6 +53,7 @@ pub fn sinpi_arr(n: i32) -> &'static [i32; 5] {
     &SINPI_ARR_DATA[(n - COS_BIT_MIN) as usize]
 }
 
-/// `NewSqrt2` / `NewSqrt2Bits` from `av1/common/av1_txfm.h`.
+/// `NewSqrt2` / `NewInvSqrt2` / `NewSqrt2Bits` from `av1/common/av1_txfm.h`.
 pub const NEW_SQRT2: i32 = 5793;
+pub const NEW_INV_SQRT2: i32 = 2896;
 pub const NEW_SQRT2_BITS: i32 = 12;

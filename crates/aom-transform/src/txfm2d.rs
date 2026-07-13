@@ -23,10 +23,10 @@ type Txfm1d = fn(&[i32], &mut [i32], i32, &[i8]);
 pub const TX_SIZES_ALL: usize = 19;
 
 #[rustfmt::skip]
-static TX_SIZE_WIDE: [usize; TX_SIZES_ALL] =
+pub(crate) static TX_SIZE_WIDE: [usize; TX_SIZES_ALL] =
     [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
 #[rustfmt::skip]
-static TX_SIZE_HIGH: [usize; TX_SIZES_ALL] =
+pub(crate) static TX_SIZE_HIGH: [usize; TX_SIZES_ALL] =
     [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
 
 // av1_fwd_txfm_shift_ls[tx_size][0..3]
@@ -58,13 +58,13 @@ pub const TX_TYPES: usize = 16;
 
 // TX_TYPE_1D: 0:DCT 1:ADST 2:FLIPADST 3:IDTX
 #[rustfmt::skip]
-static VTX_TAB: [usize; TX_TYPES] = [0,1,0,1,2,0,2,1,2,3,0,3,1,3,2,3];
+pub(crate) static VTX_TAB: [usize; TX_TYPES] = [0,1,0,1,2,0,2,1,2,3,0,3,1,3,2,3];
 #[rustfmt::skip]
-static HTX_TAB: [usize; TX_TYPES] = [0,0,1,1,0,2,2,2,1,3,3,0,3,1,3,2];
+pub(crate) static HTX_TAB: [usize; TX_TYPES] = [0,0,1,1,0,2,2,2,1,3,3,0,3,1,3,2];
 
 // (ud_flip, lr_flip) per tx_type
 #[rustfmt::skip]
-static FLIP_CFG: [(bool, bool); TX_TYPES] = [
+pub(crate) static FLIP_CFG: [(bool, bool); TX_TYPES] = [
     (false,false),(false,false),(false,false),(false,false),
     (true,false),(false,true),(true,true),(false,true),
     (true,false),(false,false),(false,false),(false,false),
@@ -75,7 +75,7 @@ static FLIP_CFG: [(bool, bool); TX_TYPES] = [
 //            8:IDTX4 9:IDTX8 10:IDTX16 11:IDTX32 ; -1 = INVALID
 // av1_txfm_type_ls[size_idx][tx_type_1d]
 #[rustfmt::skip]
-static TXFM_TYPE_LS: [[i32; 4]; 5] = [
+pub(crate) static TXFM_TYPE_LS: [[i32; 4]; 5] = [
     [0, 5, 5, 8],
     [1, 6, 6, 9],
     [2, 7, 7, 10],
@@ -102,7 +102,7 @@ fn txfm_func(txfm_type: i32) -> Txfm1d {
 }
 
 #[inline]
-fn log2_idx(n: usize) -> usize {
+pub(crate) fn log2_idx(n: usize) -> usize {
     match n {
         4 => 0,
         8 => 1,
@@ -113,7 +113,7 @@ fn log2_idx(n: usize) -> usize {
     }
 }
 
-fn get_rect_tx_log_ratio(col: i64, row: i64) -> i32 {
+pub(crate) fn get_rect_tx_log_ratio(col: i64, row: i64) -> i32 {
     if col == row {
         return 0;
     }

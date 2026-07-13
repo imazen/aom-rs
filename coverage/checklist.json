@@ -43,6 +43,13 @@
         "av1_iidentity16": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
         "av1_iidentity32": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"}
       }
+    },
+    "transform.inv_txfm2d_add": {
+      "status": "green",
+      "note": "Inverse 2D + reconstruction, all 19 sizes x valid tx_types x bd{8,10,12}, incl. 32-cap input remap, flips, NewInvSqrt2 rect scaling, clamp stages, highbd clip-add.",
+      "items": {
+        "av1_inv_txfm2d_add_all_sizes": {"status": "green", "test": "inv_txfm2d_diff::inv_txfm2d_differential_fuzz"}
+      }
     }
   }
 }

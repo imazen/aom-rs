@@ -26,6 +26,16 @@ Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
   + emit clamps). Harness: `tests/inv_txfm1d_diff.rs`, 4.8M differential
   comparisons + edge cases, byte-identical to C. (Decoder track.)
 
+- **Inverse 2-D transform + reconstruction** (`av1_inv_txfm2d.c`), all 19 sizes:
+  inverse config tables, `av1_gen_inv_stage_range` (reduces to a bd-constant),
+  32-cap input remapping, `NewInvSqrt2` rectangular scaling, per-stage clamp,
+  `clamp_buf` stages, and `highbd_clip_pixel_add` reconstruction. Harness:
+  `tests/inv_txfm2d_diff.rs`, all 193 combos × bd{8,10,12}, ~405k full-frame
+  reconstruction comparisons + edge cases, byte-identical to C. (Decoder track.)
+
+**→ The transform subsystem is now complete: forward 1-D/2-D + inverse 1-D/2-D,
+both tracks, fully bit-exact.**
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.

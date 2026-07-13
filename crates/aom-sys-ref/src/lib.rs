@@ -133,3 +133,64 @@ pub fn ref_fwd_txfm2d(tx_size: usize, input: &[i16], stride: usize, tx_type: usi
     unsafe { f(input.as_ptr(), out.as_mut_ptr(), stride as i32, tx_type as i32, 8) }
     out
 }
+
+// av1/common/av1_inv_txfm2d.c — inverse 2D add entry points.
+// Signature: (const int32_t*, uint16_t* dest, int stride, TX_TYPE, int bd).
+pub type Inv2dFn = unsafe extern "C" fn(*const i32, *mut u16, i32, i32, i32);
+extern "C" {
+    pub fn av1_inv_txfm2d_add_4x4_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_8x8_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_16x16_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_32x32_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_64x64_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_4x8_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_8x4_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_8x16_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_16x8_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_16x32_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_32x16_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_32x64_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_64x32_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_4x16_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_16x4_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_8x32_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_32x8_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_16x64_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+    pub fn av1_inv_txfm2d_add_64x16_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
+}
+
+/// Reference inverse 2-D transform+add for `tx_size` (0..19). `dest` is the
+/// bd-bit pixel buffer to reconstruct onto (modified in place).
+pub fn ref_inv_txfm2d_add(
+    tx_size: usize,
+    input: &[i32],
+    dest: &mut [u16],
+    stride: usize,
+    tx_type: usize,
+    bd: i32,
+) {
+    let f: Inv2dFn = match tx_size {
+        0 => av1_inv_txfm2d_add_4x4_c,
+        1 => av1_inv_txfm2d_add_8x8_c,
+        2 => av1_inv_txfm2d_add_16x16_c,
+        3 => av1_inv_txfm2d_add_32x32_c,
+        4 => av1_inv_txfm2d_add_64x64_c,
+        5 => av1_inv_txfm2d_add_4x8_c,
+        6 => av1_inv_txfm2d_add_8x4_c,
+        7 => av1_inv_txfm2d_add_8x16_c,
+        8 => av1_inv_txfm2d_add_16x8_c,
+        9 => av1_inv_txfm2d_add_16x32_c,
+        10 => av1_inv_txfm2d_add_32x16_c,
+        11 => av1_inv_txfm2d_add_32x64_c,
+        12 => av1_inv_txfm2d_add_64x32_c,
+        13 => av1_inv_txfm2d_add_4x16_c,
+        14 => av1_inv_txfm2d_add_16x4_c,
+        15 => av1_inv_txfm2d_add_8x32_c,
+        16 => av1_inv_txfm2d_add_32x8_c,
+        17 => av1_inv_txfm2d_add_16x64_c,
+        18 => av1_inv_txfm2d_add_64x16_c,
+        _ => unreachable!(),
+    };
+    ref_init();
+    unsafe { f(input.as_ptr(), dest.as_mut_ptr(), stride as i32, tx_type as i32, bd) }
+}
