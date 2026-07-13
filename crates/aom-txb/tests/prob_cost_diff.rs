@@ -52,7 +52,7 @@ fn cost_symbol_matches_c_full_range() {
 
 #[test]
 fn cost_tokens_from_cdf_matches_c() {
-    let mut rng = Rng(0x_c057_ab_cd_ef01);
+    let mut rng = Rng(0x_c057_abcd_ef01);
     for nsymbs in 2..=13usize {
         for _ in 0..3000 {
             let cdf = gen_cdf(&mut rng, nsymbs);
