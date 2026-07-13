@@ -139,6 +139,14 @@ pub fn ref_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize) -> u32 {
 
 extern "C" {
     fn shim_sad_avg(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_masked_sad(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8, m: *const u8, ms: i32, inv: i32) -> u32;
+}
+
+/// Reference `aom_masked_sad<W>x<H>_c` (wedge / diff-weighted compound RD).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_masked_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize, sp: &[u8], m: &[u8], ms: usize, inv: bool) -> u32 {
+    unsafe { shim_masked_sad(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32, sp.as_ptr(), m.as_ptr(), ms as i32, inv as i32) }
 }
 
 /// Reference `aom_sad<W>x<H>_avg_c` (compound-prediction SAD) for size index `idx`.

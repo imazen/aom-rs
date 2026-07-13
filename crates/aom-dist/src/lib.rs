@@ -45,6 +45,30 @@ pub fn sad_avg(
     s
 }
 
+/// `aom_masked_sad<W>x<H>_c`: SAD of `src` against an A64-mask blend of `ref`
+/// and a contiguous `second_pred` (wedge / difference-weighted compound RD).
+/// `AOM_BLEND_A64(m,a,b) = (m*a + (64-m)*b + 32) >> 6`. When `invert_mask`, the
+/// roles of `ref` (strided) and `second_pred` (stride = width) as blend operands
+/// a/b are swapped.
+#[allow(clippy::too_many_arguments)]
+pub fn masked_sad(
+    src: &[u8], src_stride: usize, ref_: &[u8], ref_stride: usize, second_pred: &[u8],
+    msk: &[u8], msk_stride: usize, invert_mask: bool, w: usize, h: usize,
+) -> u32 {
+    let mut sad: u32 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let rp = ref_[y * ref_stride + x] as i32;
+            let sp = second_pred[y * w + x] as i32;
+            let (a, b) = if invert_mask { (sp, rp) } else { (rp, sp) };
+            let m = msk[y * msk_stride + x] as i32;
+            let pred = (m * a + (64 - m) * b + 32) >> 6;
+            sad += (pred - src[y * src_stride + x] as i32).unsigned_abs();
+        }
+    }
+    sad
+}
+
 /// `aom_highbd_sad<W>x<H>_c`: SAD over 16-bit (10/12-bit) samples.
 pub fn highbd_sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
     let mut s: u32 = 0;
