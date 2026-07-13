@@ -980,3 +980,38 @@ fn uni_comp_ref_contexts_match_c() {
         assert_eq!(pred_ctx_last3_or_gld(&rc), c::ref_uni_comp_ref_p2_context(&rc), "ucr_p2 {rc:?}");
     }
 }
+
+#[test]
+fn write_ref_frames_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_ref_frames;
+    let mut rng = Rng(0x2ef1_c0de_a11a_0009);
+    for _ in 0..400_000 {
+        // 16 valid 2-symbol CDFs
+        let mut cdfs = [[0u16; 3]; 16];
+        for c in &mut cdfs {
+            c[0] = 1 + (rng.next() % 32766) as u16;
+            c[1] = 0;
+            c[2] = 0;
+        }
+        let seg_ref = rng.next().is_multiple_of(5);
+        let seg_skipgmv = rng.next().is_multiple_of(5);
+        let rmode_select = rng.next().is_multiple_of(2);
+        let comp_allowed = rng.next().is_multiple_of(2);
+        let is_compound = rng.next().is_multiple_of(2);
+        let comp_ref_type = (rng.next() % 2) as i32;
+        let ref0 = (rng.next() % 8) as i32; // 0..7
+        let ref1 = (rng.next() % 8) as i32;
+
+        let mut my = cdfs;
+        let mut enc = OdEcEnc::new();
+        write_ref_frames(&mut enc, &mut my, seg_ref, seg_skipgmv, rmode_select, comp_allowed, is_compound, comp_ref_type, ref0, ref1);
+        let got = enc.done().to_vec();
+
+        let flat: [u16; 48] = std::array::from_fn(|i| cdfs[i / 3][i % 3]);
+        let (want, oc) = c::ref_write_ref_frames(&flat, seg_ref, seg_skipgmv, rmode_select, comp_allowed, is_compound, comp_ref_type, ref0, ref1);
+        assert_eq!(got, want, "ref_frames bytes comp={is_compound} crt={comp_ref_type} r=({ref0},{ref1})");
+        let my_flat: [u16; 48] = std::array::from_fn(|i| my[i / 3][i % 3]);
+        assert_eq!(my_flat, oc, "ref_frames cdfs comp={is_compound} r=({ref0},{ref1})");
+    }
+}

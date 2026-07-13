@@ -831,3 +831,80 @@ pub fn pred_ctx_brf_or_arf2(rc: &[u8; 8]) -> i32 {
 pub fn pred_ctx_last2_or_l3gld(rc: &[u8; 8]) -> i32 {
     ref_count_ctx(rc[2] as i32, rc[3] as i32 + rc[4] as i32)
 }
+
+// write_ref_frames CDF blob slots (each a 3-entry 2-symbol CDF):
+//  0 reference_mode(comp_inter) | 1 comp_ref_type | 2..4 uni_comp_ref p/p1/p2
+//  5..7 comp_ref p/p1/p2 | 8..9 comp_bwdref p/p1 | 10..15 single_ref p1..p6
+/// `write_ref_frames` (`av1/encoder/bitstream.c`): the block reference-frame signalling
+/// cascade. Seg-fixed refs code nothing; otherwise the reference-mode SELECT bit (when
+/// allowed), then for compound the uni/bi split and its ref bits, or for single the
+/// backward/forward ref bit-tree — each `WRITE_REF_BIT` an `aom_write_symbol` on the
+/// pred-context-selected 2-symbol CDF (the caller pre-selects each via the validated
+/// context helpers). Only the CDFs on the taken path adapt.
+#[allow(clippy::too_many_arguments)]
+pub fn write_ref_frames(
+    enc: &mut OdEcEnc,
+    cdfs: &mut [[u16; 3]; 16],
+    seg_ref_active: bool,
+    seg_skipgmv_active: bool,
+    reference_mode_is_select: bool,
+    is_comp_ref_allowed: bool,
+    is_compound: bool,
+    comp_ref_type: i32,
+    ref0: i32,
+    ref1: i32,
+) {
+    if seg_ref_active || seg_skipgmv_active {
+        return;
+    }
+    if reference_mode_is_select && is_comp_ref_allowed {
+        write_symbol(enc, is_compound as i32, &mut cdfs[0], 2);
+    }
+    if is_compound {
+        write_symbol(enc, comp_ref_type, &mut cdfs[1], 2);
+        if comp_ref_type == 0 {
+            // UNIDIR_COMP_REFERENCE
+            let bit = (ref0 == 5) as i32; // BWDREF
+            write_symbol(enc, bit, &mut cdfs[2], 2);
+            if bit == 0 {
+                let bit1 = (ref1 == 3 || ref1 == 4) as i32; // LAST3 || GOLDEN
+                write_symbol(enc, bit1, &mut cdfs[3], 2);
+                if bit1 != 0 {
+                    write_symbol(enc, (ref1 == 4) as i32, &mut cdfs[4], 2); // GOLDEN
+                }
+            }
+            return;
+        }
+        // BIDIR_COMP_REFERENCE
+        let bit = (ref0 == 4 || ref0 == 3) as i32; // GOLDEN || LAST3
+        write_symbol(enc, bit, &mut cdfs[5], 2);
+        if bit == 0 {
+            write_symbol(enc, (ref0 == 2) as i32, &mut cdfs[6], 2); // LAST2
+        } else {
+            write_symbol(enc, (ref0 == 4) as i32, &mut cdfs[7], 2); // GOLDEN
+        }
+        let bit_bwd = (ref1 == 7) as i32; // ALTREF
+        write_symbol(enc, bit_bwd, &mut cdfs[8], 2);
+        if bit_bwd == 0 {
+            write_symbol(enc, (ref1 == 6) as i32, &mut cdfs[9], 2); // ALTREF2
+        }
+    } else {
+        let bit0 = (ref0 <= 7 && ref0 >= 5) as i32; // BWDREF..ALTREF
+        write_symbol(enc, bit0, &mut cdfs[10], 2); // single_ref_p1
+        if bit0 != 0 {
+            let bit1 = (ref0 == 7) as i32; // ALTREF
+            write_symbol(enc, bit1, &mut cdfs[11], 2); // single_ref_p2
+            if bit1 == 0 {
+                write_symbol(enc, (ref0 == 6) as i32, &mut cdfs[15], 2); // single_ref_p6, ALTREF2
+            }
+        } else {
+            let bit2 = (ref0 == 3 || ref0 == 4) as i32; // LAST3 || GOLDEN
+            write_symbol(enc, bit2, &mut cdfs[12], 2); // single_ref_p3
+            if bit2 == 0 {
+                write_symbol(enc, (ref0 != 1) as i32, &mut cdfs[13], 2); // single_ref_p4, != LAST
+            } else {
+                write_symbol(enc, (ref0 != 3) as i32, &mut cdfs[14], 2); // single_ref_p5, != LAST3
+            }
+        }
+    }
+}

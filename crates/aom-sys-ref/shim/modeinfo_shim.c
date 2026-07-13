@@ -579,3 +579,58 @@ UNI_REF_SHIM(p, uni_comp_ref_p_context)
 UNI_REF_SHIM(p1, uni_comp_ref_p1_context)
 UNI_REF_SHIM(p2, uni_comp_ref_p2_context)
 #undef UNI_REF_SHIM
+
+/* write_ref_frames cascade over pristine C od_ec. cdfs flat [16][3]. */
+static void rref_sym(od_ec_enc *ec, uint16_t *cdfs, int slot, int sym) {
+  uint16_t *c = cdfs + slot * 3;
+  od_ec_encode_cdf_q15(ec, sym, c, 2);
+  update_cdf(c, sym, 2);
+}
+uint32_t shim_write_ref_frames(uint16_t *cdfs, int seg_ref, int seg_skipgmv,
+                               int rmode_select, int comp_allowed, int is_compound,
+                               int comp_ref_type, int ref0, int ref1, uint8_t *out,
+                               uint16_t *out_cdfs) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (!(seg_ref || seg_skipgmv)) {
+    if (rmode_select && comp_allowed) rref_sym(&ec, cdfs, 0, is_compound);
+    if (is_compound) {
+      rref_sym(&ec, cdfs, 1, comp_ref_type);
+      if (comp_ref_type == 0) {
+        int bit = (ref0 == 5);
+        rref_sym(&ec, cdfs, 2, bit);
+        if (!bit) {
+          int bit1 = (ref1 == 3 || ref1 == 4);
+          rref_sym(&ec, cdfs, 3, bit1);
+          if (bit1) rref_sym(&ec, cdfs, 4, (ref1 == 4));
+        }
+        goto done;
+      }
+      int bit = (ref0 == 4 || ref0 == 3);
+      rref_sym(&ec, cdfs, 5, bit);
+      if (!bit) rref_sym(&ec, cdfs, 6, (ref0 == 2));
+      else rref_sym(&ec, cdfs, 7, (ref0 == 4));
+      int bit_bwd = (ref1 == 7);
+      rref_sym(&ec, cdfs, 8, bit_bwd);
+      if (!bit_bwd) rref_sym(&ec, cdfs, 9, (ref1 == 6));
+    } else {
+      int bit0 = (ref0 <= 7 && ref0 >= 5);
+      rref_sym(&ec, cdfs, 10, bit0);
+      if (bit0) {
+        int bit1 = (ref0 == 7);
+        rref_sym(&ec, cdfs, 11, bit1);
+        if (!bit1) rref_sym(&ec, cdfs, 15, (ref0 == 6));
+      } else {
+        int bit2 = (ref0 == 3 || ref0 == 4);
+        rref_sym(&ec, cdfs, 12, bit2);
+        if (!bit2) rref_sym(&ec, cdfs, 13, (ref0 != 1));
+        else rref_sym(&ec, cdfs, 14, (ref0 != 3));
+      }
+    }
+  }
+done:;
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 48; i++) out_cdfs[i] = cdfs[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
