@@ -122,6 +122,32 @@ pub fn hadamard_16x16(src: &[i16], src_stride: usize) -> [i32; 256] {
     coeff
 }
 
+/// `aom_hadamard_32x32_c`: four 16x16 Hadamards over the quadrants, then a 4-point
+/// combine (`>>2`) across the quadrant coefficients. Returns 1024 coeffs.
+pub fn hadamard_32x32(src: &[i16], src_stride: usize) -> [i32; 1024] {
+    let mut coeff = [0i32; 1024];
+    for idx in 0..4 {
+        let off = (idx >> 1) * 16 * src_stride + (idx & 1) * 16;
+        let sub = hadamard_16x16(&src[off..], src_stride);
+        coeff[idx * 256..idx * 256 + 256].copy_from_slice(&sub);
+    }
+    for idx in 0..256 {
+        let a0 = coeff[idx];
+        let a1 = coeff[idx + 256];
+        let a2 = coeff[idx + 512];
+        let a3 = coeff[idx + 768];
+        let b0 = a0.wrapping_add(a1) >> 2;
+        let b1 = a0.wrapping_sub(a1) >> 2;
+        let b2 = a2.wrapping_add(a3) >> 2;
+        let b3 = a2.wrapping_sub(a3) >> 2;
+        coeff[idx] = b0.wrapping_add(b2);
+        coeff[idx + 256] = b1.wrapping_add(b3);
+        coeff[idx + 512] = b0.wrapping_sub(b2);
+        coeff[idx + 768] = b1.wrapping_sub(b3);
+    }
+    coeff
+}
+
 /// `aom_satd_c`: sum of absolute coefficients.
 pub fn satd(coeff: &[i32]) -> i32 {
     let mut s: i32 = 0;

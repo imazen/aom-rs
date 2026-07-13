@@ -70,10 +70,11 @@ extern "C" {
     pub fn aom_hadamard_4x4_c(src: *const i16, stride: isize, coeff: *mut i32);
     pub fn aom_hadamard_8x8_c(src: *const i16, stride: isize, coeff: *mut i32);
     pub fn aom_hadamard_16x16_c(src: *const i16, stride: isize, coeff: *mut i32);
+    pub fn aom_hadamard_32x32_c(src: *const i16, stride: isize, coeff: *mut i32);
     pub fn aom_satd_c(coeff: *const i32, length: i32) -> i32;
 }
 
-/// Reference `aom_hadamard_<n>x<n>_c` for `n` in {4,8,16}; returns `n*n` coeffs.
+/// Reference `aom_hadamard_<n>x<n>_c` for `n` in {4,8,16,32}; returns `n*n` coeffs.
 pub fn ref_hadamard(n: usize, src: &[i16], stride: usize) -> Vec<i32> {
     let mut coeff = vec![0i32; n * n];
     unsafe {
@@ -81,6 +82,7 @@ pub fn ref_hadamard(n: usize, src: &[i16], stride: usize) -> Vec<i32> {
             4 => aom_hadamard_4x4_c(src.as_ptr(), stride as isize, coeff.as_mut_ptr()),
             8 => aom_hadamard_8x8_c(src.as_ptr(), stride as isize, coeff.as_mut_ptr()),
             16 => aom_hadamard_16x16_c(src.as_ptr(), stride as isize, coeff.as_mut_ptr()),
+            32 => aom_hadamard_32x32_c(src.as_ptr(), stride as isize, coeff.as_mut_ptr()),
             _ => unreachable!(),
         }
     }

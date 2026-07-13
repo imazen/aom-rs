@@ -1,6 +1,6 @@
 //! Differential harness for Hadamard transform + SATD vs C libaom v3.14.1.
 
-use aom_dist::hadamard::{hadamard_16x16, hadamard_4x4, hadamard_8x8, satd};
+use aom_dist::hadamard::{hadamard_16x16, hadamard_32x32, hadamard_4x4, hadamard_8x8, satd};
 use aom_sys_ref as c;
 
 struct Rng(u64);
@@ -22,7 +22,7 @@ impl Rng {
 #[test]
 fn hadamard_satd_byte_identical() {
     let mut rng = Rng(0x_4ada_0badc0de_11);
-    for &n in &[4usize, 8, 16] {
+    for &n in &[4usize, 8, 16, 32] {
         let stride = n + 4;
         for _ in 0..50_000 {
             let src: Vec<i16> = (0..stride * n).map(|_| rng.diff()).collect();
@@ -30,6 +30,7 @@ fn hadamard_satd_byte_identical() {
                 4 => hadamard_4x4(&src, stride).to_vec(),
                 8 => hadamard_8x8(&src, stride).to_vec(),
                 16 => hadamard_16x16(&src, stride).to_vec(),
+                32 => hadamard_32x32(&src, stride).to_vec(),
                 _ => unreachable!(),
             };
             let want = c::ref_hadamard(n, &src, stride);
