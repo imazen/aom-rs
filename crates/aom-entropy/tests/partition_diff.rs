@@ -487,3 +487,19 @@ fn write_drl_idx_matches_c() {
         assert_eq!(my_df, odf, "drl cdf mode={mode} idx={ref_mv_idx} cnt={ref_mv_count}");
     }
 }
+
+#[test]
+fn mv_class_joint_math_matches_c() {
+    use aom_entropy::partition::{get_mv_class, get_mv_joint};
+    let mut rng = Rng(0x0acc_c0de_a11a_0009);
+    // joint: rows/cols across zero + nonzero (int16 range)
+    for _ in 0..200_000 {
+        let row = (rng.next() % 65536) as i32 - 32768;
+        let col = (rng.next() % 65536) as i32 - 32768;
+        assert_eq!(get_mv_joint(row, col), c::ref_get_mv_joint(row, col), "mv_joint r={row} c={col}");
+    }
+    // class: z = |diff|-1 >= 0; valid MV range keeps class <= MV_CLASS_10 (z <= 16383)
+    for z in 0..16384 {
+        assert_eq!(get_mv_class(z), c::ref_get_mv_class(z), "mv_class z={z}");
+    }
+}

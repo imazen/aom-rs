@@ -296,3 +296,16 @@ done:;
   od_ec_enc_clear(&ec);
   return n;
 }
+
+/* MV class/joint math via the real av1_get_mv_class / av1_get_mv_joint. */
+#include "av1/encoder/encodemv.h"
+int shim_get_mv_joint(int row, int col) {
+  MV mv = { (int16_t)row, (int16_t)col };
+  return av1_get_mv_joint(&mv);
+}
+/* returns (class << 20) | (offset & 0xFFFFF) */
+int shim_get_mv_class(int z) {
+  int offset = 0;
+  int c = av1_get_mv_class(z, &offset);
+  return (c << 20) | (offset & 0xFFFFF);
+}

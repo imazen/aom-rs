@@ -242,6 +242,8 @@ extern "C" {
     fn shim_write_intra_y_mode_kf(kf_y_cdf: *mut u16, mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_size_group_lookup(bsize: i32) -> i32;
     fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_get_mv_joint(row: i32, col: i32) -> i32;
+    fn shim_get_mv_class(z: i32) -> i32;
     fn shim_write_drl_idx(drl_cdf: *mut u16, mode: i32, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, out_cdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_mode(newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, mode: i32, mode_ctx: i32, out: *mut u8, out_newmv: *mut u16, out_zeromv: *mut u16, out_refmv: *mut u16) -> u32;
@@ -252,6 +254,17 @@ extern "C" {
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `av1_get_mv_joint`.
+pub fn ref_get_mv_joint(row: i32, col: i32) -> i32 {
+    unsafe { shim_get_mv_joint(row, col) }
+}
+
+/// Reference `av1_get_mv_class` -> (class, offset).
+pub fn ref_get_mv_class(z: i32) -> (i32, i32) {
+    let v = unsafe { shim_get_mv_class(z) };
+    (v >> 20, v & 0xFFFFF)
 }
 
 /// Reference `write_drl_idx` (over the pristine C od_ec + the real av1_drl_ctx).

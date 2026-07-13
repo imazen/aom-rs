@@ -381,3 +381,25 @@ pub fn write_drl_idx(
         }
     }
 }
+
+const CLASS0_SIZE_MV: i32 = 2;
+
+/// `av1_get_mv_joint` (`encodemv.h`): the MV joint type from which components are
+/// nonzero — `(col!=0) | ((row!=0)<<1)` (ZERO=0, HNZVZ=1, HZVNZ=2, HNZVNZ=3).
+pub fn get_mv_joint(row: i32, col: i32) -> i32 {
+    (col != 0) as i32 | (((row != 0) as i32) << 1)
+}
+
+/// `av1_mv_class_base` (`encodemv.h`): `c ? CLASS0_SIZE << (c+2) : 0`.
+fn mv_class_base(c: i32) -> i32 {
+    if c != 0 { CLASS0_SIZE_MV << (c + 2) } else { 0 }
+}
+
+/// `av1_get_mv_class` (`encodemv.h`): the magnitude class of `z` (= |mv_diff|-1) and its
+/// offset within the class — `class = log2(z>>3)` (0 when `z>>3 == 0`),
+/// `offset = z - av1_mv_class_base(class)`.
+pub fn get_mv_class(z: i32) -> (i32, i32) {
+    let zz = (z >> 3) as u32;
+    let c = if zz == 0 { 0 } else { 31 - zz.leading_zeros() as i32 };
+    (c, z - mv_class_base(c))
+}
