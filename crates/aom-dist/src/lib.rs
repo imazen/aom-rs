@@ -358,3 +358,27 @@ pub fn highbd_subtract_block(
         }
     }
 }
+
+/// `av1_block_error_qm` (`av1/encoder/tx_search.c`): the quant-matrix-weighted
+/// transform-domain distortion used by the QM RD path. Per coefficient the diff
+/// and coeff are scaled by `qmatrix[scan[i]]`, squared, and rounded `>> 2*AOM_QM_BITS`
+/// (=10); both sums then get the `>> 2*(bd-8)` bit-depth normalization. Returns
+/// `(error, ssz)`. With a flat matrix (all weights `1<<AOM_QM_BITS` = 32) this
+/// reduces to [`highbd_block_error`].
+pub fn block_error_qm(coeff: &[i32], dqcoeff: &[i32], qmatrix: &[u8], scan: &[i16], bd: u8) -> (i64, i64) {
+    let shift = 2 * (bd as i32 - 8);
+    let rounding = (1i64 << shift) >> 1;
+    let mut error = 0i64;
+    let mut sqcoeff = 0i64;
+    for i in 0..coeff.len() {
+        let weight = qmatrix[scan[i] as usize] as i64;
+        let dd = (coeff[i] as i64 - dqcoeff[i] as i64) * weight;
+        let cc = coeff[i] as i64 * weight;
+        // 2*AOM_QM_BITS = 10; rounding half = 1 << 9 = 512.
+        error += (dd * dd + (1 << 9)) >> 10;
+        sqcoeff += (cc * cc + (1 << 9)) >> 10;
+    }
+    error = (error + rounding) >> shift;
+    sqcoeff = (sqcoeff + rounding) >> shift;
+    (error, sqcoeff)
+}

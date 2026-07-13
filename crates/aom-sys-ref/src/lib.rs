@@ -162,6 +162,15 @@ extern "C" {
     fn av1_highbd_block_error_c(coeff: *const i32, dqcoeff: *const i32, block_size: isize, ssz: *mut i64, bd: i32) -> i64;
     fn aom_subtract_block_c(rows: i32, cols: i32, diff: *mut i16, diff_stride: isize, src: *const u8, src_stride: isize, pred: *const u8, pred_stride: isize);
     fn shim_highbd_subtract_block(rows: i32, cols: i32, diff: *mut i16, diff_stride: i32, src: *const u16, src_stride: i32, pred: *const u16, pred_stride: i32);
+    fn shim_block_error_qm(coeff: *const i32, dqcoeff: *const i32, block_size: isize, qmatrix: *const u8, scan: *const i16, ssz: *mut i64, bd: i32) -> i64;
+}
+
+/// Reference `av1_block_error_qm` (QM-weighted transform-domain distortion; the
+/// static inline is transcribed in sadvar_shim.c). Returns (error, ssz).
+pub fn ref_block_error_qm(coeff: &[i32], dqcoeff: &[i32], qmatrix: &[u8], scan: &[i16], bd: u8) -> (i64, i64) {
+    let mut ssz = 0i64;
+    let err = unsafe { shim_block_error_qm(coeff.as_ptr(), dqcoeff.as_ptr(), coeff.len() as isize, qmatrix.as_ptr(), scan.as_ptr(), &mut ssz, bd as i32) };
+    (err, ssz)
 }
 
 /// Reference `aom_subtract_block_c` (residual = src - pred). Writes `diff`.

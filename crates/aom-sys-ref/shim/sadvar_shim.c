@@ -286,3 +286,29 @@ unsigned int shim_obmc_sad(int i,const uint8_t*r,int rs,const int*ws,const int*m
 /* SSE (sum of squared errors), generic w x h */
 int64_t aom_sse_c(const uint8_t*,int,const uint8_t*,int,int,int);
 int64_t shim_sse(const uint8_t*a,int as,const uint8_t*b,int bs,int w,int h){return aom_sse_c(a,as,b,bs,w,h);}
+
+/* Transcribed verbatim from the static-inline av1_block_error_qm
+ * (av1/encoder/tx_search.c) — not exported, so copied here. The flat-matrix
+ * case is cross-checked against the real av1_highbd_block_error_c in the Rust
+ * test, so only the per-weight multiply is transcription-only. */
+int64_t shim_block_error_qm(const int32_t *coeff, const int32_t *dqcoeff,
+                            long block_size, const unsigned char *qmatrix,
+                            const int16_t *scan, int64_t *ssz, int bd) {
+  int i;
+  int64_t error = 0, sqcoeff = 0;
+  int shift = 2 * (bd - 8);
+  int rounding = (1 << shift) >> 1;
+  for (i = 0; i < block_size; i++) {
+    int64_t weight = qmatrix[scan[i]];
+    int64_t dd = coeff[i] - dqcoeff[i];
+    dd *= weight;
+    int64_t cc = coeff[i];
+    cc *= weight;
+    error += (dd * dd + (1 << 9)) >> 10;   /* 2*AOM_QM_BITS = 10 */
+    sqcoeff += (cc * cc + (1 << 9)) >> 10;
+  }
+  error = (error + rounding) >> shift;
+  sqcoeff = (sqcoeff + rounding) >> shift;
+  *ssz = sqcoeff;
+  return error;
+}
