@@ -1862,3 +1862,74 @@ pub fn write_intra_uv_and_angle_delta(
         }
     }
 }
+
+const DC_PRED: i32 = 0;
+const UV_DC_PRED: i32 = 0;
+
+/// `write_intra_prediction_modes` (`av1/encoder/bitstream.c`), complete: the entire
+/// intra mode-info fragment for one block over a single range coder — Y mode + Y angle
+/// delta, then the chroma mode/cfl/angle, then (when allowed) the palette mode info, then
+/// the filter-intra mode info. This is the first full per-block mode-info driver
+/// composition; all four constituents are already bit-exact, this fixes their ordering
+/// and per-block gating. CDFs are the caller's context-selected slices; the palette /
+/// filter-intra allow gates and neighbour palettes are the caller's.
+#[allow(clippy::too_many_arguments)]
+pub fn write_intra_prediction_modes(
+    enc: &mut OdEcEnc,
+    // Y
+    mode: i32,
+    bsize: usize,
+    y_cdf: &mut [u16],
+    angle_delta_y: i32,
+    y_angle_cdf: &mut [u16],
+    // UV
+    monochrome: bool,
+    is_chroma_ref: bool,
+    uv_mode: i32,
+    cfl_allowed: bool,
+    cfl_alpha_idx: i32,
+    cfl_joint_sign: i32,
+    angle_delta_uv: i32,
+    uv_mode_cdf: &mut [u16],
+    cfl_sign_cdf: &mut [u16],
+    cfl_alpha_cdf: &mut [[u16; 17]; 6],
+    uv_angle_cdf: &mut [u16],
+    // Palette
+    allow_palette: bool,
+    bit_depth: i32,
+    palette_size: [i32; 2],
+    palette_colors: &[u16],
+    mb_to_top_edge: i32,
+    has_above: bool,
+    above_colors: &[u16],
+    above_size: [i32; 2],
+    has_left: bool,
+    left_colors: &[u16],
+    left_size: [i32; 2],
+    pal_y_mode_cdf: &mut [u16],
+    pal_y_size_cdf: &mut [u16],
+    pal_uv_mode_cdf: &mut [u16],
+    pal_uv_size_cdf: &mut [u16],
+    // Filter intra
+    filter_allowed: bool,
+    use_filter_intra: i32,
+    filter_intra_mode: i32,
+    fi_use_cdf: &mut [u16],
+    fi_mode_cdf: &mut [u16],
+) {
+    write_intra_y_and_angle_delta(enc, y_cdf, mode, bsize, angle_delta_y, y_angle_cdf);
+    write_intra_uv_and_angle_delta(
+        enc, monochrome, is_chroma_ref, uv_mode, cfl_allowed, bsize, cfl_alpha_idx,
+        cfl_joint_sign, angle_delta_uv, uv_mode_cdf, cfl_sign_cdf, cfl_alpha_cdf, uv_angle_cdf,
+    );
+    if allow_palette {
+        let mode_is_dc_pred = mode == DC_PRED;
+        let uv_dc_pred = !monochrome && uv_mode == UV_DC_PRED && is_chroma_ref;
+        write_palette_mode_info(
+            enc, mode_is_dc_pred, uv_dc_pred, bit_depth, palette_size, palette_colors,
+            pal_y_mode_cdf, pal_y_size_cdf, pal_uv_mode_cdf, pal_uv_size_cdf, mb_to_top_edge,
+            has_above, above_colors, above_size, has_left, left_colors, left_size,
+        );
+    }
+    write_filter_intra_mode_info(enc, fi_use_cdf, fi_mode_cdf, filter_allowed, use_filter_intra, filter_intra_mode);
+}

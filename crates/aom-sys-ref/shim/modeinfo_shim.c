@@ -1315,3 +1315,118 @@ uint32_t shim_write_intra_uv_and_angle(int monochrome, int is_chroma_ref, int uv
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- full write_intra_prediction_modes over ONE coder (av1/encoder/bitstream.c) --- */
+/* Sequences Y mode + Y angle, UV mode + cfl + UV angle, palette, filter-intra over a
+ * single od_ec — the whole intra-mode-info per-block fragment. Reuses the palette inline
+ * helpers (wpc_plane_inline/wpc_v_inline). allow_palette / filter_allowed are the
+ * caller's resolved gates; mode_dc/uv_dc are derived per write_palette_mode_info. */
+uint32_t shim_write_intra_pred_modes(
+    int mode, int bsize, uint16_t *y_cdf, int angle_delta_y, uint16_t *y_angle_cdf,
+    int monochrome, int is_chroma_ref, int uv_mode, int cfl_allowed, int cfl_idx,
+    int cfl_joint_sign, int angle_delta_uv, uint16_t *uv_mode_cdf, uint16_t *cfl_sign_cdf,
+    uint16_t *cfl_alpha_cdf, uint16_t *uv_angle_cdf,
+    int allow_palette, int bit_depth, const uint8_t *palette_size, const uint16_t *palette_colors,
+    int mb_to_top_edge, int ha, const uint16_t *a_colors, int a_s0, int a_s1, int hl,
+    const uint16_t *l_colors, int l_s0, int l_s1, uint16_t *pal_y_mode_cdf, uint16_t *pal_y_size_cdf,
+    uint16_t *pal_uv_mode_cdf, uint16_t *pal_uv_size_cdf,
+    int filter_allowed, int use_filter_intra, int filter_intra_mode, uint16_t *fi_use_cdf,
+    uint16_t *fi_mode_cdf, uint8_t *out, uint16_t *o_all) {
+  MB_MODE_INFO ami, lmi;
+  MACROBLOCKD xd;
+  for (int i = 0; i < 3 * PALETTE_MAX_SIZE; i++) {
+    ami.palette_mode_info.palette_colors[i] = a_colors[i];
+    lmi.palette_mode_info.palette_colors[i] = l_colors[i];
+  }
+  ami.palette_mode_info.palette_size[0] = (uint8_t)a_s0;
+  ami.palette_mode_info.palette_size[1] = (uint8_t)a_s1;
+  lmi.palette_mode_info.palette_size[0] = (uint8_t)l_s0;
+  lmi.palette_mode_info.palette_size[1] = (uint8_t)l_s1;
+  xd.above_mbmi = ha ? &ami : (MB_MODE_INFO *)0;
+  xd.left_mbmi = hl ? &lmi : (MB_MODE_INFO *)0;
+  xd.mb_to_top_edge = mb_to_top_edge;
+
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  /* Y mode + Y angle. */
+  od_ec_encode_cdf_q15(&ec, mode, y_cdf, INTRA_MODES);
+  update_cdf(y_cdf, mode, INTRA_MODES);
+  if (av1_use_angle_delta((BLOCK_SIZE)bsize) && av1_is_directional_mode((PREDICTION_MODE)mode)) {
+    const int s = angle_delta_y + MAX_ANGLE_DELTA, n = 2 * MAX_ANGLE_DELTA + 1;
+    od_ec_encode_cdf_q15(&ec, s, y_angle_cdf, n); update_cdf(y_angle_cdf, s, n);
+  }
+  /* UV mode + cfl + UV angle. */
+  if (!monochrome && is_chroma_ref) {
+    const int n = UV_INTRA_MODES - !cfl_allowed;
+    od_ec_encode_cdf_q15(&ec, uv_mode, uv_mode_cdf, n); update_cdf(uv_mode_cdf, uv_mode, n);
+    if (uv_mode == UV_CFL_PRED) {
+      od_ec_encode_cdf_q15(&ec, cfl_joint_sign, cfl_sign_cdf, CFL_JOINT_SIGNS);
+      update_cdf(cfl_sign_cdf, cfl_joint_sign, CFL_JOINT_SIGNS);
+      if (CFL_SIGN_U(cfl_joint_sign) != CFL_SIGN_ZERO) {
+        uint16_t *c = cfl_alpha_cdf + CFL_CONTEXT_U(cfl_joint_sign) * 17;
+        od_ec_encode_cdf_q15(&ec, CFL_IDX_U(cfl_idx), c, CFL_ALPHABET_SIZE);
+        update_cdf(c, CFL_IDX_U(cfl_idx), CFL_ALPHABET_SIZE);
+      }
+      if (CFL_SIGN_V(cfl_joint_sign) != CFL_SIGN_ZERO) {
+        uint16_t *c = cfl_alpha_cdf + CFL_CONTEXT_V(cfl_joint_sign) * 17;
+        od_ec_encode_cdf_q15(&ec, CFL_IDX_V(cfl_idx), c, CFL_ALPHABET_SIZE);
+        update_cdf(c, CFL_IDX_V(cfl_idx), CFL_ALPHABET_SIZE);
+      }
+    }
+    const int im = get_uv_mode((UV_PREDICTION_MODE)uv_mode);
+    if (av1_use_angle_delta((BLOCK_SIZE)bsize) && av1_is_directional_mode((PREDICTION_MODE)im)) {
+      const int s = angle_delta_uv + MAX_ANGLE_DELTA, n2 = 2 * MAX_ANGLE_DELTA + 1;
+      od_ec_encode_cdf_q15(&ec, s, uv_angle_cdf, n2); update_cdf(uv_angle_cdf, s, n2);
+    }
+  }
+  /* Palette. */
+  if (allow_palette) {
+    const int mode_dc = (mode == DC_PRED);
+    const int uv_dc = (!monochrome && uv_mode == UV_DC_PRED && is_chroma_ref);
+    if (mode_dc) {
+      const int n = palette_size[0];
+      od_ec_encode_cdf_q15(&ec, n > 0, pal_y_mode_cdf, 2); update_cdf(pal_y_mode_cdf, n > 0, 2);
+      if (n > 0) {
+        od_ec_encode_cdf_q15(&ec, n - PALETTE_MIN_SIZE, pal_y_size_cdf, PALETTE_SIZES);
+        update_cdf(pal_y_size_cdf, n - PALETTE_MIN_SIZE, PALETTE_SIZES);
+        wpc_plane_inline(&ec, &xd, palette_colors, n, 0, bit_depth, 1);
+      }
+    }
+    if (uv_dc) {
+      const int n = palette_size[1];
+      od_ec_encode_cdf_q15(&ec, n > 0, pal_uv_mode_cdf, 2); update_cdf(pal_uv_mode_cdf, n > 0, 2);
+      if (n > 0) {
+        od_ec_encode_cdf_q15(&ec, n - PALETTE_MIN_SIZE, pal_uv_size_cdf, PALETTE_SIZES);
+        update_cdf(pal_uv_size_cdf, n - PALETTE_MIN_SIZE, PALETTE_SIZES);
+        wpc_plane_inline(&ec, &xd, palette_colors + PALETTE_MAX_SIZE, n, 1, bit_depth, 0);
+        wpc_v_inline(&ec, palette_colors + 2 * PALETTE_MAX_SIZE, n, bit_depth);
+      }
+    }
+  }
+  /* Filter intra. */
+  if (filter_allowed) {
+    od_ec_encode_cdf_q15(&ec, use_filter_intra, fi_use_cdf, 2);
+    update_cdf(fi_use_cdf, use_filter_intra, 2);
+    if (use_filter_intra) {
+      od_ec_encode_cdf_q15(&ec, filter_intra_mode, fi_mode_cdf, FILTER_INTRA_MODES);
+      update_cdf(fi_mode_cdf, filter_intra_mode, FILTER_INTRA_MODES);
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  /* Pack every adapted CDF into o_all in a fixed layout (see the Rust side). */
+  int k = 0;
+  for (int i = 0; i < 14; i++) o_all[k++] = y_cdf[i];
+  for (int i = 0; i < 8; i++) o_all[k++] = y_angle_cdf[i];
+  for (int i = 0; i < 15; i++) o_all[k++] = uv_mode_cdf[i];
+  for (int i = 0; i < 9; i++) o_all[k++] = cfl_sign_cdf[i];
+  for (int i = 0; i < 6 * 17; i++) o_all[k++] = cfl_alpha_cdf[i];
+  for (int i = 0; i < 8; i++) o_all[k++] = uv_angle_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = pal_y_mode_cdf[i];
+  for (int i = 0; i < 8; i++) o_all[k++] = pal_y_size_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = pal_uv_mode_cdf[i];
+  for (int i = 0; i < 8; i++) o_all[k++] = pal_uv_size_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = fi_use_cdf[i];
+  for (int i = 0; i < 6; i++) o_all[k++] = fi_mode_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

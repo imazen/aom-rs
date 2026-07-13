@@ -1810,3 +1810,137 @@ fn write_intra_uv_and_angle_delta_matches_c() {
         assert_eq!(ruac, ouac, "uv_angle_cdf");
     }
 }
+
+#[test]
+fn write_intra_prediction_modes_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_intra_prediction_modes;
+    use aom_sys_ref::IntraPredModesRef;
+    let mut rng = Rng(0x1a_9de5_c0de_000d);
+    fn mk(rng: &mut Rng, nsyms: usize) -> Vec<u16> {
+        let mut c = vec![0u16; nsyms + 1];
+        let mut prev = 32768i32;
+        for e in c.iter_mut().take(nsyms - 1) {
+            let v = (prev - 1 - (rng.next() % 300) as i32).max(1);
+            *e = v as u16;
+            prev = v;
+        }
+        c
+    }
+    // strictly-increasing colours of length k at plane offset (valid for delta coder).
+    let fill = |rng: &mut Rng, arr: &mut [u16; 24], plane: usize, k: usize, bd: i32| {
+        let maxv = 1i32 << bd;
+        let step = (maxv / (k as i32 + 2)).max(1);
+        let mut cur = (rng.next() % step as u64) as i32;
+        for j in 0..k {
+            arr[plane * 8 + j] = cur as u16;
+            cur += 1 + (rng.next() % step as u64) as i32;
+        }
+    };
+    for _ in 0..200_000 {
+        let bd = [8i32, 10, 12][(rng.next() % 3) as usize];
+        let maxv = 1u64 << bd;
+        let mode = (rng.next() % 13) as i32;
+        let bsize = (rng.next() % 22) as usize;
+        let angle_delta_y = (rng.next() % 7) as i32 - 3;
+        let monochrome = rng.next().is_multiple_of(5);
+        let is_chroma_ref = !rng.next().is_multiple_of(5);
+        let cfl_allowed = rng.next().is_multiple_of(2);
+        let n_uvmode = if cfl_allowed { 14 } else { 13 };
+        let uv_mode = (rng.next() % n_uvmode as u64) as i32;
+        let cfl_idx = (rng.next() % 256) as i32;
+        let cfl_joint_sign = (rng.next() % 8) as i32;
+        let angle_delta_uv = (rng.next() % 7) as i32 - 3;
+        let allow_palette = rng.next().is_multiple_of(2);
+        let n_y = 2 + (rng.next() % 7) as usize;
+        let n_uv = 2 + (rng.next() % 7) as usize;
+        let mut pc = [0u16; 24];
+        fill(&mut rng, &mut pc, 0, n_y, bd);
+        fill(&mut rng, &mut pc, 1, n_uv, bd);
+        for j in 0..n_uv {
+            pc[16 + j] = (rng.next() % maxv) as u16;
+        }
+        let palette_size = [n_y as u8, n_uv as u8];
+        let mk_nb = |rng: &mut Rng| -> ([u16; 24], [i32; 2]) {
+            let ay = (rng.next() % 9) as usize;
+            let au = (rng.next() % 9) as usize;
+            let mut a = [0u16; 24];
+            fill(rng, &mut a, 0, ay, bd);
+            fill(rng, &mut a, 1, au, bd);
+            (a, [ay as i32, au as i32])
+        };
+        let ha = rng.next().is_multiple_of(2);
+        let hl = rng.next().is_multiple_of(2);
+        let (a_colors, a_size) = mk_nb(&mut rng);
+        let (l_colors, l_size) = mk_nb(&mut rng);
+        let mte = -((rng.next() % 20) as i32) * 32;
+        let filter_allowed = rng.next().is_multiple_of(2);
+        let use_filter_intra = (rng.next() % 2) as i32;
+        let filter_intra_mode = (rng.next() % 5) as i32;
+
+        // CDFs.
+        let yc: [u16; 14] = mk(&mut rng, 13).try_into().unwrap();
+        let yac: [u16; 8] = mk(&mut rng, 7).try_into().unwrap();
+        let uc: [u16; 15] = mk(&mut rng, 14).try_into().unwrap();
+        let sc: [u16; 9] = mk(&mut rng, 8).try_into().unwrap();
+        let mut alpha_n = [[0u16; 17]; 6];
+        let mut alpha_f = [0u16; 102];
+        for ctx in 0..6 {
+            let row = mk(&mut rng, 16);
+            for j in 0..17 {
+                alpha_n[ctx][j] = row[j];
+                alpha_f[ctx * 17 + j] = row[j];
+            }
+        }
+        let uac: [u16; 8] = mk(&mut rng, 7).try_into().unwrap();
+        let pym: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let pys: [u16; 8] = mk(&mut rng, 7).try_into().unwrap();
+        let pum: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let pus: [u16; 8] = mk(&mut rng, 7).try_into().unwrap();
+        let fiu: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let fim: [u16; 6] = mk(&mut rng, 5).try_into().unwrap();
+
+        // Rust.
+        let mut enc = OdEcEnc::new();
+        let (mut ryc, mut ryac, mut ruc, mut rsc, mut ran, mut ruac) = (yc, yac, uc, sc, alpha_n, uac);
+        let (mut rpym, mut rpys, mut rpum, mut rpus, mut rfiu, mut rfim) = (pym, pys, pum, pus, fiu, fim);
+        write_intra_prediction_modes(
+            &mut enc, mode, bsize, &mut ryc, angle_delta_y, &mut ryac, monochrome, is_chroma_ref,
+            uv_mode, cfl_allowed, cfl_idx, cfl_joint_sign, angle_delta_uv, &mut ruc, &mut rsc,
+            &mut ran, &mut ruac, allow_palette, bd, [n_y as i32, n_uv as i32], &pc, mte, ha,
+            &a_colors, a_size, hl, &l_colors, l_size, &mut rpym, &mut rpys, &mut rpum, &mut rpus,
+            filter_allowed, use_filter_intra, filter_intra_mode, &mut rfiu, &mut rfim,
+        );
+        let got = enc.done().to_vec();
+
+        // C.
+        let inp = IntraPredModesRef {
+            mode, bsize: bsize as i32, y_cdf: &yc, angle_delta_y, y_angle_cdf: &yac,
+            monochrome, is_chroma_ref, uv_mode, cfl_allowed, cfl_idx, cfl_joint_sign, angle_delta_uv,
+            uv_mode_cdf: &uc, cfl_sign_cdf: &sc, cfl_alpha_cdf: &alpha_f, uv_angle_cdf: &uac,
+            allow_palette, bit_depth: bd, palette_size: &palette_size, palette_colors: &pc,
+            mb_to_top_edge: mte, ha, a_colors: &a_colors, a_size: &a_size, hl, l_colors: &l_colors,
+            l_size: &l_size, pal_y_mode_cdf: &pym, pal_y_size_cdf: &pys, pal_uv_mode_cdf: &pum,
+            pal_uv_size_cdf: &pus, filter_allowed, use_filter_intra, filter_intra_mode,
+            fi_use_cdf: &fiu, fi_mode_cdf: &fim,
+        };
+        let (want, o_all) = c::ref_write_intra_pred_modes(&inp);
+        assert_eq!(got, want, "bytes mode={mode} bsize={bsize} mono={monochrome} cr={is_chroma_ref} uv={uv_mode} pal={allow_palette} fi={filter_allowed}");
+
+        // Compare all adapted CDFs (packed order matches the shim).
+        let mut all = Vec::with_capacity(187);
+        all.extend_from_slice(&ryc);
+        all.extend_from_slice(&ryac);
+        all.extend_from_slice(&ruc);
+        all.extend_from_slice(&rsc);
+        for row in &ran { all.extend_from_slice(row); }
+        all.extend_from_slice(&ruac);
+        all.extend_from_slice(&rpym);
+        all.extend_from_slice(&rpys);
+        all.extend_from_slice(&rpum);
+        all.extend_from_slice(&rpus);
+        all.extend_from_slice(&rfiu);
+        all.extend_from_slice(&rfim);
+        assert_eq!(all.as_slice(), &o_all[..], "adapted CDFs mode={mode} uv={uv_mode} pal={allow_palette}");
+    }
+}

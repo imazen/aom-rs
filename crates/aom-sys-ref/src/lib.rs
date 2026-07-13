@@ -296,6 +296,8 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_write_intra_uv_and_angle(monochrome: i32, is_chroma_ref: i32, uv_mode: i32, cfl_allowed: i32, bsize: i32, cfl_idx: i32, cfl_joint_sign: i32, angle_delta_uv: i32, uv_mode_cdf: *mut u16, cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, uv_angle_cdf: *mut u16, out: *mut u8, o_uvcdf: *mut u16, o_signcdf: *mut u16, o_alphacdf: *mut u16, o_uvacdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_write_intra_pred_modes(mode: i32, bsize: i32, y_cdf: *mut u16, angle_delta_y: i32, y_angle_cdf: *mut u16, monochrome: i32, is_chroma_ref: i32, uv_mode: i32, cfl_allowed: i32, cfl_idx: i32, cfl_joint_sign: i32, angle_delta_uv: i32, uv_mode_cdf: *mut u16, cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, uv_angle_cdf: *mut u16, allow_palette: i32, bit_depth: i32, palette_size: *const u8, palette_colors: *const u16, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_s0: i32, a_s1: i32, hl: i32, l_colors: *const u16, l_s0: i32, l_s1: i32, pal_y_mode_cdf: *mut u16, pal_y_size_cdf: *mut u16, pal_uv_mode_cdf: *mut u16, pal_uv_size_cdf: *mut u16, filter_allowed: i32, use_filter_intra: i32, filter_intra_mode: i32, fi_use_cdf: *mut u16, fi_mode_cdf: *mut u16, out: *mut u8, o_all: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_get_comp_index_context(enable: i32, bits_minus_1: i32, cur_order_hint: i32, fwd_order_hint: i32, bck_order_hint: i32, ha: i32, a_has2: i32, a_cidx: i32, a_rf0: i32, hl: i32, l_has2: i32, l_cidx: i32, l_rf0: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_ref_frames(cdfs: *mut u16, seg_ref: i32, seg_skipgmv: i32, rmode_select: i32, comp_allowed: i32, is_compound: i32, comp_ref_type: i32, ref0: i32, ref1: i32, out: *mut u8, out_cdfs: *mut u16) -> u32;
@@ -617,6 +619,83 @@ pub fn ref_write_intra_uv_and_angle(
     };
     out.truncate(n as usize);
     (out, ouc, osc, oac, ouac)
+}
+
+/// Inputs for the full `write_intra_prediction_modes` oracle. CDFs are the caller's
+/// context-selected slices; palette neighbour arrays use the full 3*PALETTE_MAX_SIZE layout.
+pub struct IntraPredModesRef<'a> {
+    pub mode: i32,
+    pub bsize: i32,
+    pub y_cdf: &'a [u16; 14],
+    pub angle_delta_y: i32,
+    pub y_angle_cdf: &'a [u16; 8],
+    pub monochrome: bool,
+    pub is_chroma_ref: bool,
+    pub uv_mode: i32,
+    pub cfl_allowed: bool,
+    pub cfl_idx: i32,
+    pub cfl_joint_sign: i32,
+    pub angle_delta_uv: i32,
+    pub uv_mode_cdf: &'a [u16; 15],
+    pub cfl_sign_cdf: &'a [u16; 9],
+    pub cfl_alpha_cdf: &'a [u16; 102],
+    pub uv_angle_cdf: &'a [u16; 8],
+    pub allow_palette: bool,
+    pub bit_depth: i32,
+    pub palette_size: &'a [u8; 2],
+    pub palette_colors: &'a [u16; 24],
+    pub mb_to_top_edge: i32,
+    pub ha: bool,
+    pub a_colors: &'a [u16; 24],
+    pub a_size: &'a [i32; 2],
+    pub hl: bool,
+    pub l_colors: &'a [u16; 24],
+    pub l_size: &'a [i32; 2],
+    pub pal_y_mode_cdf: &'a [u16; 3],
+    pub pal_y_size_cdf: &'a [u16; 8],
+    pub pal_uv_mode_cdf: &'a [u16; 3],
+    pub pal_uv_size_cdf: &'a [u16; 8],
+    pub filter_allowed: bool,
+    pub use_filter_intra: i32,
+    pub filter_intra_mode: i32,
+    pub fi_use_cdf: &'a [u16; 3],
+    pub fi_mode_cdf: &'a [u16; 6],
+}
+
+/// Reference full `write_intra_prediction_modes` over one od_ec. Returns (bytes, all
+/// adapted CDFs packed: y[14] y_angle[8] uv[15] cfl_sign[9] cfl_alpha[102] uv_angle[8]
+/// pal_y_mode[3] pal_y_size[8] pal_uv_mode[3] pal_uv_size[8] fi_use[3] fi_mode[6] = 187).
+pub fn ref_write_intra_pred_modes(inp: &IntraPredModesRef) -> (Vec<u8>, [u16; 187]) {
+    let mut yc = *inp.y_cdf;
+    let mut yac = *inp.y_angle_cdf;
+    let mut uc = *inp.uv_mode_cdf;
+    let mut sc = *inp.cfl_sign_cdf;
+    let mut ac = *inp.cfl_alpha_cdf;
+    let mut uac = *inp.uv_angle_cdf;
+    let mut pym = *inp.pal_y_mode_cdf;
+    let mut pys = *inp.pal_y_size_cdf;
+    let mut pum = *inp.pal_uv_mode_cdf;
+    let mut pus = *inp.pal_uv_size_cdf;
+    let mut fiu = *inp.fi_use_cdf;
+    let mut fim = *inp.fi_mode_cdf;
+    let mut out = vec![0u8; 128];
+    let mut o_all = [0u16; 187];
+    let n = unsafe {
+        shim_write_intra_pred_modes(
+            inp.mode, inp.bsize, yc.as_mut_ptr(), inp.angle_delta_y, yac.as_mut_ptr(),
+            inp.monochrome as i32, inp.is_chroma_ref as i32, inp.uv_mode, inp.cfl_allowed as i32,
+            inp.cfl_idx, inp.cfl_joint_sign, inp.angle_delta_uv, uc.as_mut_ptr(), sc.as_mut_ptr(),
+            ac.as_mut_ptr(), uac.as_mut_ptr(), inp.allow_palette as i32, inp.bit_depth,
+            inp.palette_size.as_ptr(), inp.palette_colors.as_ptr(), inp.mb_to_top_edge,
+            inp.ha as i32, inp.a_colors.as_ptr(), inp.a_size[0], inp.a_size[1], inp.hl as i32,
+            inp.l_colors.as_ptr(), inp.l_size[0], inp.l_size[1], pym.as_mut_ptr(), pys.as_mut_ptr(),
+            pum.as_mut_ptr(), pus.as_mut_ptr(), inp.filter_allowed as i32, inp.use_filter_intra,
+            inp.filter_intra_mode, fiu.as_mut_ptr(), fim.as_mut_ptr(), out.as_mut_ptr(),
+            o_all.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, o_all)
 }
 
 /// Reference `get_comp_index_context` (body transcribed; ref-buffer order hints passed
