@@ -1566,3 +1566,98 @@ fn read_uncompressed_header_key_frame_roundtrips() {
         assert!(!rb.error, "no over-read (desync)");
     }
 }
+
+#[test]
+fn read_uncompressed_header_inter_frame_roundtrips() {
+    use aom_entropy::header::{
+        read_uncompressed_header, write_frame_header_obu, CdefHeader, DeltaQParams, FilmGrainParams,
+        FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, FrameSizeWithRefs, InterRefSignaling,
+        LoopfilterHeader, QuantParamsHeader, RestorationHeader, SegmentationHeader, TileInfoHeader,
+        WarpedMotionParams,
+    };
+    let ident = WarpedMotionParams { wmtype: 0, wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16] };
+    let mut rng = Rng(0x1e_12e5_c0de_0230);
+    for _ in 0..20_000 {
+        let base_q = 1 + (rng.next() % 255) as i32;
+        let refresh = (rng.next() % 256) as i32;
+        let primary_ref = (rng.next() % 8) as i32;
+        let might_ref_mvs = rng.next() & 1 == 1;
+        let might_warp = rng.next() & 1 == 1;
+        let skip_allowed = rng.next() & 1 == 1;
+        let mut prefix = FrameHeaderPrefix {
+            reduced_still_picture_hdr: false, show_existing_frame: false, existing_fb_idx_to_show: 0,
+            decoder_model_info_present_flag: false, equal_picture_interval: false, frame_presentation_time: 0,
+            frame_presentation_time_length: 1, frame_id_numbers_present_flag: false, frame_id_length: 0,
+            display_frame_id: 0, frame_type: 1, show_frame: true, showable_frame: true,
+            error_resilient_mode: false, disable_cdf_update: false, force_screen_content_tools: 2,
+            allow_screen_content_tools: false, force_integer_mv: 2, cur_frame_force_integer_mv: false,
+            superres_upscaled_width: 256, superres_upscaled_height: 256, max_frame_width: 256,
+            max_frame_height: 256, current_frame_id: 0, enable_order_hint: false, order_hint: 0,
+            order_hint_bits_minus_1: -1, primary_ref_frame: primary_ref, buffer_removal_time_present: false,
+            operating_points_cnt_minus_1: 0, op_decoder_model_param_present: [false; 32],
+            operating_point_idc: [0; 32], temporal_layer_id: 0, spatial_layer_id: 0,
+            buffer_removal_times: [0; 32], buffer_removal_time_length: 1, refresh_frame_flags: refresh,
+            ref_frame_map_order_hint: [0; 8],
+        };
+        prefix.showable_frame = true; // frame_type != KEY
+        let fh = FrameHeaderObu {
+            prefix, allow_screen_content_tools: false, superres_scaled: false, allow_intrabc: false,
+            frame_size: FrameSizeHeader {
+                frame_size_override: false, num_bits_width: 16, num_bits_height: 16,
+                superres_upscaled_width: 256, superres_upscaled_height: 256, enable_superres: false,
+                scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0,
+            },
+            inter_ref: InterRefSignaling {
+                enable_order_hint: false, frame_refs_short_signaling: false,
+                ref_map_idx: [(rng.next() % 8) as i32, (rng.next() % 8) as i32, (rng.next() % 8) as i32,
+                    (rng.next() % 8) as i32, (rng.next() % 8) as i32, (rng.next() % 8) as i32, (rng.next() % 8) as i32],
+                set_ref_frame_config: false, rtc_reference: [0; 7], rtc_ref_idx: [0; 7],
+                number_spatial_layers: 1, frame_id_numbers_present_flag: false, frame_id_length: 0,
+                current_frame_id: 0, ref_frame_id: [0; 8], delta_frame_id_length: 0,
+            },
+            frame_size_with_refs: FrameSizeWithRefs {
+                superres_upscaled_width: 256, superres_upscaled_height: 256, render_width: 256, render_height: 256,
+                ref_cfg_valid: [false; 7], ref_y_crop_width: [0; 7], ref_y_crop_height: [0; 7],
+                ref_render_width: [0; 7], ref_render_height: [0; 7], enable_superres: false, scale_denominator: 8,
+                frame_size: FrameSizeHeader { frame_size_override: true, num_bits_width: 16, num_bits_height: 16, superres_upscaled_width: 1, superres_upscaled_height: 1, enable_superres: false, scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0 },
+            },
+            cur_frame_force_integer_mv: false, allow_high_precision_mv: rng.next() & 1 == 1,
+            interp_filter: (rng.next() % 5) as i32, switchable_motion_mode: rng.next() & 1 == 1,
+            might_allow_ref_frame_mvs: might_ref_mvs, allow_ref_frame_mvs: might_ref_mvs && rng.next() & 1 == 1,
+            refresh_frame_context_disabled: rng.next() & 1 == 1,
+            tile_info: TileInfoHeader { mi_cols: 64, mi_rows: 64, mib_size_log2: 4, uniform_spacing: true, log2_cols: 0, min_log2_cols: 0, max_log2_cols: 0, log2_rows: 0, min_log2_rows: 0, max_log2_rows: 0, cols: 1, rows: 1, col_start_sb: [0; 65], row_start_sb: [0; 65], max_width_sb: 64, max_height_sb: 64 },
+            quant: QuantParamsHeader { base_qindex: base_q, y_dc_delta_q: 0, u_dc_delta_q: 0, u_ac_delta_q: 0, v_dc_delta_q: 0, v_ac_delta_q: 0, using_qmatrix: false, qmatrix_level_y: 0, qmatrix_level_u: 0, qmatrix_level_v: 0 },
+            num_planes: 3, separate_uv_delta_q: false,
+            segmentation: SegmentationHeader { enabled: false, has_primary_ref: primary_ref != 7, update_map: false, temporal_update: false, update_data: false, feature_mask: [0; 8], feature_data: [[0; 8]; 8] },
+            delta_q: DeltaQParams { base_qindex: base_q, delta_q_present: rng.next() & 1 == 1, delta_q_res: 1, allow_intrabc: false, delta_lf_present: false, delta_lf_res: 1, delta_lf_multi: false },
+            all_lossless: false, coded_lossless: false,
+            loopfilter: LoopfilterHeader { allow_intrabc: false, filter_level: [(rng.next() % 64) as i32, (rng.next() % 64) as i32], filter_level_u: 0, filter_level_v: 0, sharpness_level: 0, mode_ref_delta_enabled: true, mode_ref_delta_update: false, ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1], mode_deltas: [0, 0], last_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1], last_mode_deltas: [0, 0] },
+            cdef: CdefHeader { enable_cdef: true, allow_intrabc: false, cdef_damping: 3 + (rng.next() % 4) as i32, cdef_bits: 0, nb_cdef_strengths: 1, cdef_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0], cdef_uv_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0] },
+            restoration: RestorationHeader { enable_restoration: true, allow_intrabc: false, frame_restoration_type: [0; 3], sb_size_128: false, restoration_unit_size: [256; 3], subsampling_x: 1, subsampling_y: 1 },
+            tx_mode_select: rng.next() & 1 == 1, reference_mode_select: rng.next() & 1 == 1, skip_mode_allowed: skip_allowed, skip_mode_flag: skip_allowed && rng.next() & 1 == 1, might_allow_warped_motion: might_warp, allow_warped_motion: might_warp && rng.next() & 1 == 1, reduced_tx_set_used: rng.next() & 1 == 1,
+            global_motion: [ident; 7], ref_global_motion: [ident; 7],
+            film_grain_params_present: false,
+            film_grain: FilmGrainParams { apply_grain: false, random_seed: 0, is_inter_frame: true, update_parameters: false, ref_idx: 0, num_y_points: 0, scaling_points_y: [[0; 2]; 14], monochrome: false, chroma_scaling_from_luma: false, subsampling_x: 1, subsampling_y: 1, num_cb_points: 0, scaling_points_cb: [[0; 2]; 10], num_cr_points: 0, scaling_points_cr: [[0; 2]; 10], scaling_shift: 8, ar_coeff_lag: 0, ar_coeffs_y: [0; 24], ar_coeffs_cb: [0; 25], ar_coeffs_cr: [0; 25], ar_coeff_shift: 6, grain_scale_shift: 0, cb_mult: 0, cb_luma_mult: 0, cb_offset: 0, cr_mult: 0, cr_luma_mult: 0, cr_offset: 0, overlap_flag: false, clip_to_restricted_range: false },
+            large_scale: false,
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_frame_header_obu(&mut wb, &fh);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        let g = read_uncompressed_header(&mut rb, &fh);
+        assert_eq!(g.prefix.frame_type, 1, "inter frame_type");
+        assert_eq!(g.prefix.refresh_frame_flags, refresh, "refresh flags");
+        assert_eq!(g.prefix.primary_ref_frame, primary_ref, "primary ref");
+        assert_eq!(g.inter_ref.ref_map_idx, fh.inter_ref.ref_map_idx, "remapped idx");
+        assert_eq!(g.allow_high_precision_mv, fh.allow_high_precision_mv, "allow_hp");
+        assert_eq!(g.interp_filter, fh.interp_filter, "interp filter");
+        assert_eq!(g.switchable_motion_mode, fh.switchable_motion_mode, "switchable motion");
+        if might_ref_mvs {
+            assert_eq!(g.allow_ref_frame_mvs, fh.allow_ref_frame_mvs, "ref frame mvs");
+        }
+        assert_eq!(g.reference_mode_select, fh.reference_mode_select, "reference mode select");
+        assert_eq!(g.reduced_tx_set_used, fh.reduced_tx_set_used, "reduced tx");
+        assert_eq!(g.global_motion[0].wmtype, 0, "gm identity");
+        assert!(!rb.error, "no over-read (inter desync)");
+    }
+}
