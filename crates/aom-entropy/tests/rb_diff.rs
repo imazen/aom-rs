@@ -644,3 +644,24 @@ fn read_trailing_and_restoration_invert_write() {
         }
     }
 }
+
+#[test]
+fn read_signed_primitive_refsubexpfin_inverts_write() {
+    // Same GM parameter ranges as wb_diff::signed_subexpfin_matches_c (n = GM_ALPHA_MAX+1
+    // / (1<<trans_bits)+1, k = SUBEXPFIN_K = 3). write side is byte-identical to C, so a
+    // clean read-back pins read_signed_primitive_refsubexpfin to the C reader.
+    let mut rng = Rng(0x1e_5ec0_c0de_0180);
+    for &n in &[4097i32, (1 << 12) + 1, (1 << 9) + 1] {
+        for _ in 0..200_000 {
+            let bound = 2 * n as u64 - 1;
+            let r = (rng.next() % bound) as i32 - (n - 1);
+            let v = (rng.next() % bound) as i32 - (n - 1);
+            let mut wb = WriteBitBuffer::new();
+            wb.write_signed_primitive_refsubexpfin(n as u16, 3, r as i16, v as i16);
+            let bytes = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&bytes);
+            let g = rb.read_signed_primitive_refsubexpfin(n as u16, 3, r as i16);
+            assert_eq!(g, v as i16, "refsubexpfin n={n} ref={r} v={v}");
+        }
+    }
+}

@@ -95,3 +95,83 @@ impl<'a> ReadBitBuffer<'a> {
         }
     }
 }
+
+/// `get_msb`: floor(log2(n)) for n > 0.
+fn msb32(n: u32) -> u32 {
+    31 - n.leading_zeros()
+}
+
+/// `inv_recenter_nonneg` (`aom_dsp/recenter.h`): inverse of `recenter_nonneg`.
+fn inv_recenter_nonneg(r: u16, v: u16) -> u16 {
+    if v > (r << 1) {
+        v
+    } else if v & 1 == 0 {
+        (v >> 1) + r
+    } else {
+        r - ((v + 1) >> 1)
+    }
+}
+
+/// `inv_recenter_finite_nonneg` (`aom_dsp/recenter.h`): inverse of `recenter_finite_nonneg`.
+fn inv_recenter_finite_nonneg(n: u16, r: u16, v: u16) -> u16 {
+    if (r << 1) <= n {
+        inv_recenter_nonneg(r, v)
+    } else {
+        n - 1 - inv_recenter_nonneg(n - 1 - r, v)
+    }
+}
+
+impl ReadBitBuffer<'_> {
+    /// `read_primitive_quniform`: inverse of `wb_write_primitive_quniform` — a
+    /// truncated-uniform value in `[0, n)`.
+    fn read_primitive_quniform(&mut self, n: u16) -> u16 {
+        if n <= 1 {
+            return 0;
+        }
+        let l = msb32(n as u32) + 1;
+        let m = (1u32 << l) - n as u32;
+        let v = self.read_unsigned_literal(l - 1);
+        if v < m {
+            v as u16
+        } else {
+            ((v << 1) - m + self.read_bit()) as u16
+        }
+    }
+
+    /// `read_primitive_subexpfin`: inverse of `wb_write_primitive_subexpfin`.
+    fn read_primitive_subexpfin(&mut self, n: u16, k: u16) -> u16 {
+        let (n, k) = (n as i32, k as i32);
+        let mut i = 0i32;
+        let mut mk = 0i32;
+        loop {
+            let b = if i != 0 { k + i - 1 } else { k };
+            let a = 1i32 << b;
+            if n <= mk + 3 * a {
+                return self.read_primitive_quniform((n - mk) as u16) + mk as u16;
+            }
+            if self.read_bit() != 0 {
+                i += 1;
+                mk += a;
+            } else {
+                return (self.read_unsigned_literal(b as u32) as i32 + mk) as u16;
+            }
+        }
+    }
+
+    /// `read_primitive_refsubexpfin`: inverse of `wb_write_primitive_refsubexpfin` —
+    /// subexp-coded relative to `ref` after recentering into `[0, n)`.
+    fn read_primitive_refsubexpfin(&mut self, n: u16, k: u16, ref_: u16) -> u16 {
+        let v = self.read_primitive_subexpfin(n, k);
+        inv_recenter_finite_nonneg(n, ref_, v)
+    }
+
+    /// `aom_rb_read_signed_primitive_refsubexpfin` — inverse of
+    /// [`crate::wb::WriteBitBuffer::write_signed_primitive_refsubexpfin`]: a signed value
+    /// in `[-(n-1), n-1]` subexp-coded relative to `ref` (global-motion parameters).
+    pub fn read_signed_primitive_refsubexpfin(&mut self, n: u16, k: u16, ref_: i16) -> i16 {
+        let ref_u = (ref_ as i32 + n as i32 - 1) as u16;
+        let scaled_n = (n << 1) - 1;
+        let v = self.read_primitive_refsubexpfin(scaled_n, k, ref_u);
+        (v as i32 - (n as i32 - 1)) as i16
+    }
+}
