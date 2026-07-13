@@ -4,7 +4,7 @@
 //! These are the highbd counterparts of the speed-0 encoder motion-search /
 //! RDO workhorses (`aom_highbd_sad*`, `aom_highbd_*_variance*`).
 
-use aom_dist::{highbd_sad, highbd_sad_avg, highbd_sub_pixel_variance, highbd_variance};
+use aom_dist::{highbd_masked_sad, highbd_sad, highbd_sad_avg, highbd_sub_pixel_variance, highbd_variance};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 22] = [
@@ -55,6 +55,16 @@ fn hbd_sad_variance_byte_identical() {
                     let ga = highbd_sad_avg(&a, a_stride, &b, b_stride, &sp, w, h);
                     let wa = c::ref_hbd_sad_avg(idx, &a, a_stride, &b, b_stride, &sp);
                     assert_eq!(ga, wa, "hbd_sad_avg {w}x{h} bd={bd}");
+                }
+
+                // highbd masked SAD (all 22 sizes, both polarities)
+                let sp2: Vec<u16> = (0..w * h).map(|_| rng.px(mask)).collect();
+                let m_stride = w + 8;
+                let msk: Vec<u8> = (0..m_stride * (h + 2)).map(|_| (rng.next() % 65) as u8).collect();
+                for inv in [false, true] {
+                    let gm = highbd_masked_sad(&a, a_stride, &b, b_stride, &sp2, &msk, m_stride, inv, w, h);
+                    let wm = c::ref_hbd_masked_sad(idx, &a, a_stride, &b, b_stride, &sp2, &msk, m_stride, inv);
+                    assert_eq!(gm, wm, "hbd_masked_sad {w}x{h} bd={bd} inv={inv}");
                 }
 
                 // highbd variance (bd-normalised)

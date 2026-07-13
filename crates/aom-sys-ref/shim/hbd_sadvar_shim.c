@@ -363,3 +363,53 @@ unsigned int shim_hbd_sad_avg(int i,const uint16_t*s,int ss,const uint16_t*r,int
   case 20: return aom_highbd_sad128x64_avg_c(sp8,ss,rp,rs,pp);
   case 21: return aom_highbd_sad128x128_avg_c(sp8,ss,rp,rs,pp);
   default: return 0;}}
+
+/* highbd masked SAD (wedge / diff-weighted compound), all 22 sizes */
+unsigned int aom_highbd_masked_sad4x4_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad4x8_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad4x16_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad8x4_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad8x8_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad8x16_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad8x32_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad16x4_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad16x8_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad16x16_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad16x32_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad16x64_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad32x8_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad32x16_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad32x32_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad32x64_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad64x16_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad64x32_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad64x64_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad64x128_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad128x64_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int aom_highbd_masked_sad128x128_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*,const uint8_t*,int,int);
+unsigned int shim_hbd_masked_sad(int i,const uint16_t*s,int ss,const uint16_t*r,int rs,const uint16_t*p,const uint8_t*m,int ms,int inv){
+  const uint8_t* sp8=CONVERT_TO_BYTEPTR(s); const uint8_t* rp=CONVERT_TO_BYTEPTR(r); const uint8_t* pp=CONVERT_TO_BYTEPTR(p);
+  switch(i){
+  case 0: return aom_highbd_masked_sad4x4_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 1: return aom_highbd_masked_sad4x8_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 2: return aom_highbd_masked_sad4x16_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 3: return aom_highbd_masked_sad8x4_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 4: return aom_highbd_masked_sad8x8_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 5: return aom_highbd_masked_sad8x16_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 6: return aom_highbd_masked_sad8x32_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 7: return aom_highbd_masked_sad16x4_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 8: return aom_highbd_masked_sad16x8_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 9: return aom_highbd_masked_sad16x16_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 10: return aom_highbd_masked_sad16x32_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 11: return aom_highbd_masked_sad16x64_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 12: return aom_highbd_masked_sad32x8_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 13: return aom_highbd_masked_sad32x16_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 14: return aom_highbd_masked_sad32x32_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 15: return aom_highbd_masked_sad32x64_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 16: return aom_highbd_masked_sad64x16_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 17: return aom_highbd_masked_sad64x32_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 18: return aom_highbd_masked_sad64x64_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 19: return aom_highbd_masked_sad64x128_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 20: return aom_highbd_masked_sad128x64_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  case 21: return aom_highbd_masked_sad128x128_c(sp8,ss,rp,rs,pp,m,ms,inv);
+  default: return 0;}}

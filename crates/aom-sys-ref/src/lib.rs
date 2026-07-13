@@ -199,6 +199,14 @@ extern "C" {
     fn shim_hbd_var(i: i32, bd: i32, a: *const u16, as_: i32, b: *const u16, bs: i32, sse: *mut u32) -> u32;
     fn shim_hbd_subpel_var(i: i32, bd: i32, a: *const u16, as_: i32, xo: i32, yo: i32, b: *const u16, bs: i32, sse: *mut u32) -> u32;
     fn shim_hbd_sad_avg(i: i32, s: *const u16, ss: i32, r: *const u16, rs: i32, p: *const u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_hbd_masked_sad(i: i32, s: *const u16, ss: i32, r: *const u16, rs: i32, p: *const u16, m: *const u8, ms: i32, inv: i32) -> u32;
+}
+
+/// Reference `aom_highbd_masked_sad<W>x<H>_c` (highbd wedge / compound SAD).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_hbd_masked_sad(idx: usize, s: &[u16], ss: usize, r: &[u16], rs: usize, p: &[u16], m: &[u8], ms: usize, inv: bool) -> u32 {
+    unsafe { shim_hbd_masked_sad(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32, p.as_ptr(), m.as_ptr(), ms as i32, inv as i32) }
 }
 
 /// Reference `aom_highbd_sad<W>x<H>_avg_c` (highbd compound-prediction SAD).

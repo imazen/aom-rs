@@ -69,6 +69,27 @@ pub fn masked_sad(
     sad
 }
 
+/// `aom_highbd_masked_sad<W>x<H>_c`: highbd wedge / diff-weighted compound SAD.
+/// Mask stays 8-bit (0..=64); samples are 16-bit.
+#[allow(clippy::too_many_arguments)]
+pub fn highbd_masked_sad(
+    src: &[u16], src_stride: usize, ref_: &[u16], ref_stride: usize, second_pred: &[u16],
+    msk: &[u8], msk_stride: usize, invert_mask: bool, w: usize, h: usize,
+) -> u32 {
+    let mut sad: u32 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let rp = ref_[y * ref_stride + x] as i32;
+            let sp = second_pred[y * w + x] as i32;
+            let (a, b) = if invert_mask { (sp, rp) } else { (rp, sp) };
+            let m = msk[y * msk_stride + x] as i32;
+            let pred = (m * a + (64 - m) * b + 32) >> 6;
+            sad += (pred - src[y * src_stride + x] as i32).unsigned_abs();
+        }
+    }
+    sad
+}
+
 /// `aom_highbd_sad<W>x<H>_c`: SAD over 16-bit (10/12-bit) samples.
 pub fn highbd_sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
     let mut s: u32 = 0;
