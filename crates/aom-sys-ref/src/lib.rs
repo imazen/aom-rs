@@ -1076,6 +1076,33 @@ extern "C" {
     fn shim_quantize_fp_qm(coeff: *const i32, n: i32, round: *const i16, quant: *const i16, dequant: *const i16, scan: *const i16, iscan: *const i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
     #[allow(clippy::too_many_arguments)]
     fn shim_highbd_quantize_fp_qm(coeff: *const i32, n: i32, round: *const i16, quant: *const i16, dequant: *const i16, scan: *const i16, iscan: *const i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_quantize_dc(coeff: *const i32, n: i32, round: *const i16, quant: i16, dequant: i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_highbd_quantize_dc(coeff: *const i32, n: i32, round: *const i16, quant: i16, dequant: i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
+}
+
+/// Reference `av1_quantize_dc_facade` (`quantize_dc`, DC-only). `qm`/`iqm` are
+/// `None` for the flat path. Returns (qcoeff, dqcoeff, eob).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_quantize_dc(log_scale: i32, coeff: &[i32], round: &[i16; 2], quant: i16, dequant: i16, qm: Option<&[u8]>, iqm: Option<&[u8]>) -> (Vec<i32>, Vec<i32>, u16) {
+    let n = coeff.len();
+    let (mut q, mut dq) = (vec![0i32; n], vec![0i32; n]);
+    let qp = qm.map_or(core::ptr::null(), |s| s.as_ptr());
+    let iqp = iqm.map_or(core::ptr::null(), |s| s.as_ptr());
+    let eob = unsafe { shim_quantize_dc(coeff.as_ptr(), n as i32, round.as_ptr(), quant, dequant, qp, iqp, log_scale, q.as_mut_ptr(), dq.as_mut_ptr()) };
+    (q, dq, eob)
+}
+
+/// Reference `av1_highbd_quantize_dc_facade` (`highbd_quantize_dc`, DC-only).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_highbd_quantize_dc(log_scale: i32, coeff: &[i32], round: &[i16; 2], quant: i16, dequant: i16, qm: Option<&[u8]>, iqm: Option<&[u8]>) -> (Vec<i32>, Vec<i32>, u16) {
+    let n = coeff.len();
+    let (mut q, mut dq) = (vec![0i32; n], vec![0i32; n]);
+    let qp = qm.map_or(core::ptr::null(), |s| s.as_ptr());
+    let iqp = iqm.map_or(core::ptr::null(), |s| s.as_ptr());
+    let eob = unsafe { shim_highbd_quantize_dc(coeff.as_ptr(), n as i32, round.as_ptr(), quant, dequant, qp, iqp, log_scale, q.as_mut_ptr(), dq.as_mut_ptr()) };
+    (q, dq, eob)
 }
 
 /// Reference lowbd `av1_quantize_fp_facade` QM path (`quantize_fp_helper_c` with

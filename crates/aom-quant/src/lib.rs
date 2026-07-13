@@ -526,3 +526,71 @@ pub fn av1_highbd_quantize_fp_qm(
     }
     (eob + 1) as u16
 }
+
+/// Bit-exact port of `quantize_dc` (`av1/encoder/av1_quantize.c`) — the DC-only
+/// quantizer (`AV1_XFORM_QUANT_DC`): quantizes coefficient 0 only, zeroing the
+/// rest. `quant`/`dequant` are the DC scalars; `round[0]` is the DC round. `qm`/
+/// `iqm` (when `Some`) weight position 0. Lowbd: the rounded coeff is clamped to
+/// the i16 range. Returns eob (0 or 1).
+#[allow(clippy::too_many_arguments)]
+pub fn av1_quantize_dc(
+    round: &[i16; 2],
+    quant: i16,
+    dequant: i16,
+    log_scale: i32,
+    qm: Option<&[u8]>,
+    iqm: Option<&[u8]>,
+    coeff: &[i32],
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+) -> u16 {
+    let n = coeff.len();
+    qcoeff[..n].fill(0);
+    dqcoeff[..n].fill(0);
+    let wt = qm.map_or(1 << AOM_QM_BITS, |m| m[0] as i32);
+    let iwt = iqm.map_or(1 << AOM_QM_BITS, |m| m[0] as i32);
+    let coeff_v = coeff[0];
+    let sign = aomsign(coeff_v);
+    let abs_coeff = (coeff_v ^ sign).wrapping_sub(sign);
+    let clamped = (abs_coeff.wrapping_add(round_power_of_two(round[0] as i32, log_scale)))
+        .clamp(i16::MIN as i32, i16::MAX as i32);
+    let tmp32 = ((clamped as i64 * wt as i64 * quant as i64) >> (16 - log_scale + AOM_QM_BITS)) as i32;
+    qcoeff[0] = (tmp32 ^ sign).wrapping_sub(sign);
+    let dequant_v = (dequant as i32 * iwt + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS;
+    let abs_dqcoeff = tmp32.wrapping_mul(dequant_v) >> log_scale;
+    dqcoeff[0] = (abs_dqcoeff ^ sign).wrapping_sub(sign);
+    (tmp32 != 0) as u16
+}
+
+/// Bit-exact port of `highbd_quantize_dc` (`av1/encoder/av1_quantize.c`) — the
+/// highbd (10/12-bit) DC-only quantizer. Like [`av1_quantize_dc`] but 64-bit
+/// with no i16 clamp on the rounded coefficient. Returns eob (0 or 1).
+#[allow(clippy::too_many_arguments)]
+pub fn av1_highbd_quantize_dc(
+    round: &[i16; 2],
+    quant: i16,
+    dequant: i16,
+    log_scale: i32,
+    qm: Option<&[u8]>,
+    iqm: Option<&[u8]>,
+    coeff: &[i32],
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+) -> u16 {
+    let n = coeff.len();
+    qcoeff[..n].fill(0);
+    dqcoeff[..n].fill(0);
+    let wt = qm.map_or(1 << AOM_QM_BITS, |m| m[0] as i64);
+    let iwt = iqm.map_or(1 << AOM_QM_BITS, |m| m[0] as i32);
+    let coeff_v = coeff[0];
+    let sign = aomsign(coeff_v);
+    let abs_coeff = ((coeff_v ^ sign).wrapping_sub(sign)) as i64;
+    let tmp = abs_coeff + round_power_of_two(round[0] as i32, log_scale) as i64;
+    let tmpw = tmp * wt;
+    let abs_qcoeff = ((tmpw * quant as i64) >> (16 - log_scale + AOM_QM_BITS)) as i32;
+    qcoeff[0] = (abs_qcoeff ^ sign).wrapping_sub(sign);
+    let dequant_v = (dequant as i32 * iwt + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS;
+    let abs_dqcoeff = abs_qcoeff.wrapping_mul(dequant_v) >> log_scale;
+    dqcoeff[0] = (abs_dqcoeff ^ sign).wrapping_sub(sign);
+    (abs_qcoeff != 0) as u16
+}

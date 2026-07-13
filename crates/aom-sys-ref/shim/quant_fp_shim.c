@@ -64,3 +64,52 @@ uint16_t shim_highbd_quantize_fp_qm(const tran_low_t *coeff, int n,
                                 &sc, &qparam);
   return eob;
 }
+
+// DC-only quantizer (AV1_XFORM_QUANT_DC): reaches the static quantize_dc /
+// highbd_quantize_dc through the real facades. quant/dequant are the DC scalars.
+uint16_t shim_quantize_dc(const tran_low_t *coeff, int n, const int16_t *round,
+                          int16_t quant, int16_t dequant, const qm_val_t *qm,
+                          const qm_val_t *iqm, int log_scale, tran_low_t *qcoeff,
+                          tran_low_t *dqcoeff) {
+  MACROBLOCK_PLANE p;
+  memset(&p, 0, sizeof(p));
+  int16_t q2[2] = { quant, quant };
+  int16_t dq2[2] = { dequant, dequant };
+  p.round_QTX = round;
+  p.quant_fp_QTX = q2;
+  p.dequant_QTX = dq2;
+  SCAN_ORDER sc;
+  memset(&sc, 0, sizeof(sc));
+  QUANT_PARAM qparam;
+  memset(&qparam, 0, sizeof(qparam));
+  qparam.log_scale = log_scale;
+  qparam.qmatrix = qm;
+  qparam.iqmatrix = iqm;
+  uint16_t eob = 0;
+  av1_quantize_dc_facade(coeff, (intptr_t)n, &p, qcoeff, dqcoeff, &eob, &sc, &qparam);
+  return eob;
+}
+
+uint16_t shim_highbd_quantize_dc(const tran_low_t *coeff, int n,
+                                 const int16_t *round, int16_t quant,
+                                 int16_t dequant, const qm_val_t *qm,
+                                 const qm_val_t *iqm, int log_scale,
+                                 tran_low_t *qcoeff, tran_low_t *dqcoeff) {
+  MACROBLOCK_PLANE p;
+  memset(&p, 0, sizeof(p));
+  int16_t q2[2] = { quant, quant };
+  int16_t dq2[2] = { dequant, dequant };
+  p.round_QTX = round;
+  p.quant_fp_QTX = q2;
+  p.dequant_QTX = dq2;
+  SCAN_ORDER sc;
+  memset(&sc, 0, sizeof(sc));
+  QUANT_PARAM qparam;
+  memset(&qparam, 0, sizeof(qparam));
+  qparam.log_scale = log_scale;
+  qparam.qmatrix = qm;
+  qparam.iqmatrix = iqm;
+  uint16_t eob = 0;
+  av1_highbd_quantize_dc_facade(coeff, (intptr_t)n, &p, qcoeff, dqcoeff, &eob, &sc, &qparam);
+  return eob;
+}
