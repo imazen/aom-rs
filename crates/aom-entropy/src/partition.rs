@@ -776,3 +776,18 @@ pub fn get_comp_reference_type_context(
         2
     }
 }
+
+/// `av1_get_pred_context_single_ref_p1` (`pred_common.c`): the P1 single-ref CDF context
+/// from the neighbours' forward vs backward reference counts — 1 if equal, 0 if forward
+/// < backward, else 2. `ref_counts` is `neighbors_ref_counts[REF_FRAMES]`.
+pub fn single_ref_p1_context(ref_counts: &[u8; 8]) -> i32 {
+    let fwd = ref_counts[1] as i32 + ref_counts[2] as i32 + ref_counts[3] as i32 + ref_counts[4] as i32;
+    let bwd = ref_counts[5] as i32 + ref_counts[6] as i32 + ref_counts[7] as i32;
+    if fwd == bwd {
+        1
+    } else if fwd < bwd {
+        0
+    } else {
+        2
+    }
+}

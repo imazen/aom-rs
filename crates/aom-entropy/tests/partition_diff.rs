@@ -934,3 +934,16 @@ fn get_comp_reference_type_context_matches_c() {
         );
     }
 }
+
+#[test]
+fn single_ref_p1_context_matches_c() {
+    use aom_entropy::partition::single_ref_p1_context;
+    let mut rng = Rng(0x51e1_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let mut counts = [0u8; 8];
+        for c in &mut counts {
+            *c = (rng.next() % 3) as u8; // neighbor ref counts are small (0..2)
+        }
+        assert_eq!(single_ref_p1_context(&counts), c::ref_single_ref_p1_context(&counts), "single_ref_p1 {counts:?}");
+    }
+}

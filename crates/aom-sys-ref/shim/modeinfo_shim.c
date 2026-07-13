@@ -548,3 +548,10 @@ int shim_get_comp_reference_type_context(int ha, int a_r0, int a_r1, int a_ibc, 
   xd.up_available = ha; xd.left_available = hl;
   return av1_get_comp_reference_type_context(&xd);
 }
+
+/* Facade for the count-based single/comp ref contexts: set neighbors_ref_counts. */
+int shim_single_ref_p1_context(const uint8_t *ref_counts) {
+  MACROBLOCKD xd;
+  for (int i = 0; i < 8; i++) xd.neighbors_ref_counts[i] = ref_counts[i];
+  return av1_get_pred_context_single_ref_p1(&xd);
+}
