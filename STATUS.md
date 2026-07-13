@@ -48,6 +48,18 @@ both tracks, fully bit-exact.**
   byte-identical to C over log_scale{0,1,2} x 12-bit magnitudes.
   Harness: `aom-quant/tests/highbd_quant_diff.rs`.
 
+- **Quant-matrix (QM) quantizers — full family (aom-quant)**: the per-position
+  weighted paths of all four scalar quantizers — aom_quantize_b_qm /
+  aom_highbd_quantize_b_qm (from `aom_*quantize_b_helper_c`) and av1_quantize_fp_qm
+  / av1_highbd_quantize_fp_qm (the QM branch of `*quantize_fp_helper_c`). The two
+  b-quantizers diff against the exported C helpers directly; the two (static) fp
+  helpers are reached through the *real* facades (`av1_*quantize_fp_facade`) via
+  `shim/quant_fp_shim.c` — no transcription. Harness:
+  `aom-quant/tests/quantize_qm_diff.rs`, n={16,64,256,1024} x ls{0,1,2} x 2000,
+  qm/iqm over the full qm_val_t range 1..=255, byte-identical qcoeff/dqcoeff/eob.
+  With the no-qm variants this closes the entire scalar quantizer surface
+  (b + fp, lowbd + highbd, qm + flat). Adaptive `_adaptive` variants: TODO.
+
 - **Entropy coder** (`aom_dsp/entenc.c`, `entdec.c`), both tracks: the Daala
   `od_ec` range coder. Encoder (`od_ec_enc`) produces byte-identical output to C
   (uint64 low + backward carry propagation + flush); decoder (`od_ec_dec`,
@@ -160,12 +172,18 @@ both tracks, fully bit-exact.**
   level-1-vs-level `diff`), get_two_coeff_cost_simple (cost + cost_low),
   get_coeff_cost_eob/general. Integer-identical to C (`trellis_cost_diff.rs`).
 
-- **av1_optimize_txb — the coefficient trellis (aom-txb)** — RD-optimal
-  coefficient rounding, the largest/hottest speed-0 function. Full non-QM trellis
+- **av1_optimize_txb — the coefficient trellis (aom-txb), BOTH paths** — RD-optimal
+  coefficient rounding, the largest/hottest speed-0 function. Full trellis
   (update_coeff_general/_eob/_simple + update_skip, RDCOST/get_coeff_dist/
   get_qc_dqc_low) byte-identical to C: optimized qcoeff/dqcoeff + reduced eob +
   rate. `optimize_diff.rs` — 19 sizes x 7 tx_types x 60 self-consistent blocks x
-  sharpness 0..7.
+  sharpness 0..7. **Quant-matrix path (`optimize_txb_qm`)** shares one core: the
+  two QM-dependent helpers — get_dqv (folds iqmatrix: `(iqm*dqv+16)>>5`) and
+  get_coeff_dist (folds qmatrix: `((diff*qm)^2+512)>>10`) — take `Option<&[u8]>`,
+  non-QM delegates with None/None (behavior unchanged). Helpers diffed directly vs
+  the real C static inlines (400k cases, in-module); full QM trellis diffed via
+  `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
+  rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
 - **per-block entropy-context propagation (aom-txb)** — the neighbour-context
   loop gating every txb (both tracks): get_txb_ctx (above/left -> txb_skip_ctx /
@@ -216,11 +234,13 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **Coefficient coding, next stage**: `av1_write_coeffs_txb` bitstream diff.
-   Kernels + scan orders + ctx tables are now green in aom-txb; the remaining
-   work is a C harness that fabricates the minimal FRAME_CONTEXT/MACROBLOCK
-   state (start with the plane=1 path, which skips av1_write_tx_type) and a
-   Rust writer on aom-entropy's bit-exact od_ec, diffing produced bytes.
+1. **av1_xform_quant composition** (`av1/encoder/encodemb.c`): the per-block
+   encoder workhorse = av1_xform (fwd transform) + av1_quant (quantize + entropy
+   ctx). Every piece is already bit-exact — av1_fwd_txfm2d (aom-transform, forward
+   validated), all scalar quantizers (aom-quant), txb_entropy_context (aom-txb).
+   The chunk is the Rust composition + an end-to-end residual->(qcoeff,dqcoeff,eob)
+   differential (shim chaining av1_fwd_txfm2d_<size>_c + the quantizer). Proves the
+   block-encode path integrates; surfaces any layout/scan/dc-ac wiring gaps.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
    per-mode bit-exact, differential per predictor.
 3. **Loop filters**: deblock, CDEF, loop-restoration (decoder + encoder search).
@@ -237,8 +257,9 @@ NOT met. The gap is the kernel (libaom hand-tuned asm ~2x faster), not dispatch
 ## Gate posture (honest)
 
 Real, verified, ratcheting progress across BOTH tracks — but still a fraction of
-the whole. Green so far: full transform subsystem, two quantizers, and the entire
-symbol-coding stack (range coder + CDF adaptation). None of the four project
+the whole. Green so far: full transform subsystem, the *entire* scalar quantizer
+surface (fp+b, lowbd+highbd, QM+flat), the full coefficient trellis (QM+flat), and
+the entire symbol-coding stack (range coder + CDF adaptation). None of the four project
 gates (full-corpus correctness, ≤1.20× perf, full coverage, zenavif parity) is
 satisfied yet; the machinery that makes each mechanically checkable is in place
 and every landed module is byte-exact vs C within it.
