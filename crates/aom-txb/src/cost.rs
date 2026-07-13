@@ -40,7 +40,7 @@ pub struct CoeffCostTables<'a> {
 
 /// `get_br_ctx_eob` (txb_common.h).
 #[inline]
-fn get_br_ctx_eob(c: usize, bhl: u32, tx_class: TxClass) -> usize {
+pub(crate) fn get_br_ctx_eob(c: usize, bhl: u32, tx_class: TxClass) -> usize {
     if c == 0 {
         return 0;
     }
@@ -60,7 +60,7 @@ fn get_br_ctx_eob(c: usize, bhl: u32, tx_class: TxClass) -> usize {
 
 /// `get_golomb_cost`.
 #[inline]
-fn golomb_cost(abs_qc: i32) -> i32 {
+pub(crate) fn golomb_cost(abs_qc: i32) -> i32 {
     if abs_qc >= 1 + NUM_BASE_LEVELS as i32 + COEFF_BASE_RANGE {
         let r = abs_qc - COEFF_BASE_RANGE - NUM_BASE_LEVELS as i32;
         let length = (31 - (r as u32).leading_zeros()) as i32 + 1; // get_msb(r)+1

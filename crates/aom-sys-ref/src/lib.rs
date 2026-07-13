@@ -761,6 +761,12 @@ extern "C" {
     fn shim_iscan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_cost_tokens_from_cdf(costs: *mut i32, cdf: *const u16, inv_map: *const i32);
     #[allow(clippy::too_many_arguments)]
+    fn shim_two_coeff_cost_simple(ci: i32, abs_qc: i32, coeff_ctx: i32, base: *const i32, lps: *const i32, bhl: i32, tx_class: i32, levels: *const u8, cost_low: *mut i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_coeff_cost_eob(ci: i32, abs_qc: i32, sign: i32, coeff_ctx: i32, dc_sign_ctx: i32, base_eob: *const i32, dc_sign: *const i32, lps: *const i32, bhl: i32, tx_class: i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_coeff_cost_general(is_last: i32, ci: i32, abs_qc: i32, sign: i32, coeff_ctx: i32, dc_sign_ctx: i32, base_eob: *const i32, base: *const i32, dc_sign: *const i32, lps: *const i32, bhl: i32, tx_class: i32, levels: *const u8) -> i32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_ext_tx_derive(tx_size: i32, is_inter: i32, reduced: i32, tx_type: i32, use_fi: i32, fi_mode: i32, mode: i32, out: *mut i32);
     #[allow(clippy::too_many_arguments)]
     fn shim_fill_lv_map(txb_skip_cdf: *const u16, base_eob_cdf: *const u16, base_cdf: *const u16, eob_extra_cdf: *const u16, dc_sign_cdf: *const u16, br_cdf: *const u16, o_txb_skip: *mut i32, o_base_eob: *mut i32, o_base: *mut i32, o_eob_extra: *mut i32, o_dc_sign: *mut i32, o_lps: *mut i32);
@@ -860,4 +866,24 @@ pub fn ref_ext_tx_derive(tx_size: usize, is_inter: bool, reduced: bool, tx_type:
     let mut out = [0i32; 7];
     unsafe { shim_ext_tx_derive(tx_size as i32, is_inter as i32, reduced as i32, tx_type as i32, use_fi as i32, fi_mode as i32, mode as i32, out.as_mut_ptr()) }
     out
+}
+
+/// Reference `get_two_coeff_cost_simple`; returns (cost, cost_low).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_two_coeff_cost_simple(ci: usize, abs_qc: i32, coeff_ctx: usize, base: &[i32], lps: &[i32], bhl: u32, tx_class: i32, levels: &[u8]) -> (i32, i32) {
+    let mut cost_low = 0i32;
+    let cost = unsafe { shim_two_coeff_cost_simple(ci as i32, abs_qc, coeff_ctx as i32, base.as_ptr(), lps.as_ptr(), bhl as i32, tx_class, levels.as_ptr(), &mut cost_low) };
+    (cost, cost_low)
+}
+
+/// Reference `get_coeff_cost_eob`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_coeff_cost_eob(ci: usize, abs_qc: i32, sign: usize, coeff_ctx: usize, dc_sign_ctx: usize, base_eob: &[i32], dc_sign: &[i32], lps: &[i32], bhl: u32, tx_class: i32) -> i32 {
+    unsafe { shim_coeff_cost_eob(ci as i32, abs_qc, sign as i32, coeff_ctx as i32, dc_sign_ctx as i32, base_eob.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), bhl as i32, tx_class) }
+}
+
+/// Reference `get_coeff_cost_general`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_coeff_cost_general(is_last: bool, ci: usize, abs_qc: i32, sign: usize, coeff_ctx: usize, dc_sign_ctx: usize, base_eob: &[i32], base: &[i32], dc_sign: &[i32], lps: &[i32], bhl: u32, tx_class: i32, levels: &[u8]) -> i32 {
+    unsafe { shim_coeff_cost_general(is_last as i32, ci as i32, abs_qc, sign as i32, coeff_ctx as i32, dc_sign_ctx as i32, base_eob.as_ptr(), base.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), bhl as i32, tx_class, levels.as_ptr()) }
 }

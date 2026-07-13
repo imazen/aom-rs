@@ -409,3 +409,52 @@ void shim_ext_tx_derive(int tx_size, int is_inter, int reduced, int tx_type,
   out[5] = av1_ext_tx_used[st][tx_type];
   out[6] = use_fi ? fimode_to_intradir[fi_mode] : mode;
 }
+
+/* ---- trellis per-coefficient cost helpers (real txb_rdopt_utils.h) --------- */
+static void tc_build(LV_MAP_COEFF_COST *cc, const int *base_eob,
+                     const int *base, const int *dc_sign, const int *lps) {
+  memcpy(cc->base_eob_cost, base_eob, sizeof(cc->base_eob_cost));
+  memcpy(cc->base_cost, base, sizeof(cc->base_cost));
+  memcpy(cc->dc_sign_cost, dc_sign, sizeof(cc->dc_sign_cost));
+  memcpy(cc->lps_cost, lps, sizeof(cc->lps_cost));
+}
+
+int shim_two_coeff_cost_simple(int ci, int abs_qc, int coeff_ctx,
+                               const int *base, const int *lps, int bhl,
+                               int tx_class, const uint8_t *levels,
+                               int *cost_low) {
+  LV_MAP_COEFF_COST cc;
+  memset(&cc, 0, sizeof(cc));
+  memcpy(cc.base_cost, base, sizeof(cc.base_cost));
+  memcpy(cc.lps_cost, lps, sizeof(cc.lps_cost));
+  return get_two_coeff_cost_simple(ci, abs_qc, coeff_ctx, &cc, bhl,
+                                   (TX_CLASS)tx_class, levels, cost_low);
+}
+
+int shim_coeff_cost_eob(int ci, int abs_qc, int sign, int coeff_ctx,
+                        int dc_sign_ctx, const int *base_eob, const int *dc_sign,
+                        const int *lps, int bhl, int tx_class) {
+  LV_MAP_COEFF_COST cc;
+  memset(&cc, 0, sizeof(cc));
+  tc_build(&cc, base_eob, cc.base_cost /*unused*/, dc_sign, lps);
+  memcpy(cc.base_eob_cost, base_eob, sizeof(cc.base_eob_cost));
+  memcpy(cc.dc_sign_cost, dc_sign, sizeof(cc.dc_sign_cost));
+  memcpy(cc.lps_cost, lps, sizeof(cc.lps_cost));
+  return get_coeff_cost_eob(ci, abs_qc, sign, coeff_ctx, dc_sign_ctx, &cc, bhl,
+                            (TX_CLASS)tx_class);
+}
+
+int shim_coeff_cost_general(int is_last, int ci, int abs_qc, int sign,
+                            int coeff_ctx, int dc_sign_ctx, const int *base_eob,
+                            const int *base, const int *dc_sign, const int *lps,
+                            int bhl, int tx_class, const uint8_t *levels) {
+  LV_MAP_COEFF_COST cc;
+  memset(&cc, 0, sizeof(cc));
+  memcpy(cc.base_eob_cost, base_eob, sizeof(cc.base_eob_cost));
+  memcpy(cc.base_cost, base, sizeof(cc.base_cost));
+  memcpy(cc.dc_sign_cost, dc_sign, sizeof(cc.dc_sign_cost));
+  memcpy(cc.lps_cost, lps, sizeof(cc.lps_cost));
+  return get_coeff_cost_general(is_last, ci, abs_qc, sign, coeff_ctx,
+                                dc_sign_ctx, &cc, bhl, (TX_CLASS)tx_class,
+                                levels);
+}

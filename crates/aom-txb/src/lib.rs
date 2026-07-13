@@ -28,6 +28,8 @@ mod fill;
 pub use fill::{fill_lv_map_coeff_cost, LvMapCoeffCost};
 mod ext_tx;
 pub use ext_tx::{ext_tx_derive, ext_tx_set, ext_tx_set_type, write_tx_type, ExtTxDeriv};
+mod trellis_cost;
+pub use trellis_cost::{br_cost_with_diff, coeff_cost_eob, coeff_cost_general, two_coeff_cost_simple};
 
 /// `TX_PAD_HOR` (enums.h): horizontal padding of the levels buffer.
 pub const TX_PAD_HOR: usize = 4;
