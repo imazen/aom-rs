@@ -366,3 +366,67 @@ fn read_loopfilter_inverts_write() {
         assert_eq!(g.mode_deltas, mode_d, "mode_deltas");
     }
 }
+
+#[test]
+fn read_segmentation_inverts_write() {
+    use aom_entropy::header::{encode_segmentation, read_segmentation, SegmentationHeader};
+    const DATA_MAX: [i32; 8] = [255, 63, 63, 63, 63, 7, 0, 0];
+    const SIGNED: [bool; 8] = [true, true, true, true, true, false, false, false];
+    let mut rng = Rng(0x1e_5e62_c0de_0140);
+    for _ in 0..100_000 {
+        let enabled = rng.next() & 1 == 1;
+        let has_pr = rng.next() & 1 == 1;
+        let (mut update_map, mut temporal, mut update_data) = (false, false, false);
+        let mut mask = [0u32; 8];
+        let mut data = [[0i32; 8]; 8];
+        if enabled {
+            if has_pr {
+                update_map = rng.next() & 1 == 1;
+                temporal = update_map && rng.next() & 1 == 1;
+                update_data = rng.next() & 1 == 1;
+            } else {
+                update_map = true;
+                update_data = true;
+            }
+            if update_data {
+                for i in 0..8 {
+                    mask[i] = (rng.next() % 256) as u32;
+                    for j in 0..8 {
+                        if mask[i] & (1 << j) != 0 {
+                            let dm = DATA_MAX[j];
+                            data[i][j] = if dm == 0 {
+                                0
+                            } else if SIGNED[j] {
+                                (rng.next() % (2 * dm as u64 + 1)) as i32 - dm
+                            } else {
+                                (rng.next() % (dm as u64 + 1)) as i32
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        let seg = SegmentationHeader {
+            enabled,
+            has_primary_ref: has_pr,
+            update_map,
+            temporal_update: temporal,
+            update_data,
+            feature_mask: mask,
+            feature_data: data,
+        };
+        let mut wb = WriteBitBuffer::new();
+        encode_segmentation(&mut wb, &seg);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        let g = read_segmentation(&mut rb, has_pr);
+        assert_eq!(g.enabled, enabled, "seg enabled");
+        assert_eq!(
+            (g.update_map, g.temporal_update, g.update_data),
+            (update_map, temporal, update_data),
+            "seg flags pr={has_pr}"
+        );
+        assert_eq!(g.feature_mask, mask, "seg mask");
+        assert_eq!(g.feature_data, data, "seg data");
+    }
+}

@@ -1732,3 +1732,50 @@ pub fn read_loopfilter(
     }
     lf
 }
+
+/// `read_segmentation` (setup_segmentation, `av1/decoder/decodeframe.c`) — inverse of
+/// [`encode_segmentation`]: the enabled flag, the update-map/temporal/update-data flags
+/// (only present with a primary ref; otherwise forced map+data on, temporal off), then
+/// the per-segment per-feature active bits + signed/unsigned data. `has_primary_ref`
+/// (primary_ref_frame != PRIMARY_REF_NONE) comes from the frame-header parse.
+pub fn read_segmentation(rb: &mut ReadBitBuffer, has_primary_ref: bool) -> SegmentationHeader {
+    let mut seg = SegmentationHeader {
+        enabled: false,
+        has_primary_ref,
+        update_map: false,
+        temporal_update: false,
+        update_data: false,
+        feature_mask: [0; MAX_SEGMENTS],
+        feature_data: [[0; SEG_LVL_MAX]; MAX_SEGMENTS],
+    };
+    seg.enabled = rb.read_bit() != 0;
+    if !seg.enabled {
+        return seg;
+    }
+    if has_primary_ref {
+        seg.update_map = rb.read_bit() != 0;
+        if seg.update_map {
+            seg.temporal_update = rb.read_bit() != 0;
+        }
+        seg.update_data = rb.read_bit() != 0;
+    } else {
+        seg.update_map = true;
+        seg.update_data = true;
+    }
+    if seg.update_data {
+        for i in 0..MAX_SEGMENTS {
+            for j in 0..SEG_LVL_MAX {
+                if rb.read_bit() != 0 {
+                    seg.feature_mask[i] |= 1 << j;
+                    let ubits = get_unsigned_bits(SEG_FEATURE_DATA_MAX[j] as u32);
+                    seg.feature_data[i][j] = if SEG_FEATURE_SIGNED[j] {
+                        rb.read_inv_signed_literal(ubits)
+                    } else {
+                        rb.read_literal(ubits)
+                    };
+                }
+            }
+        }
+    }
+    seg
+}
