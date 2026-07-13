@@ -81,12 +81,13 @@ both tracks, fully bit-exact.**
   `variance.c`): `aom_sad`, `aom_variance`, `aom_sub_pixel_variance` (bilinear
   2-tap) over all 22 block sizes. Harness: `aom-dist/tests/dist_diff.rs` —
   ~198k comparisons (SAD + variance + subpel var/sse), byte-identical to C.
-  (avg/masked/obmc SAD + highbd subpel-var: TODO.)
+  (avg/masked/obmc SAD: TODO.)
 
 - **Highbd (10/12-bit) SAD + variance** (`aom_dsp/sad.c`, `variance.c`),
   encoder critical path: `aom_highbd_sad*` + `aom_highbd_{8,10,12}_variance*` over
   all 22 sizes × 3 bit depths. Harness: `aom-dist/tests/hbd_dist_diff.rs` —
-  ~198k comparisons, byte-identical to C.
+  ~297k comparisons (SAD + variance + sub-pixel variance), byte-identical
+  to C. The highbd distortion trio (speed-0 highbd motion-search / RDO) is complete.
 
 ## Coverage gate (auto-derived, honest)
 
