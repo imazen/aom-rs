@@ -2482,3 +2482,122 @@ pub fn read_sequence_header(rb: &mut ReadBitBuffer, reduced_still_picture_hdr: b
     s.enable_restoration = rb.read_bit() != 0;
     s
 }
+
+/// `read_frame_header_prefix` — inverse of [`write_frame_header_prefix`]
+/// (the frame-type/ref state machine at the top of `read_uncompressed_header`). Takes a
+/// `cfg` supplying the sequence/decoder-model inputs (its output fields are ignored) and
+/// returns `(decoded, frame_size_override_flag, early_return)` where `early_return` marks
+/// the show-existing-frame short path. Every output field is set to its inferred default
+/// then overwritten when actually coded (matching libaom's derivations: showable = frame
+/// isn't KEY, S-frame forces error-resilient, key+show forces refresh-all, etc.).
+pub fn read_frame_header_prefix(
+    rb: &mut ReadBitBuffer,
+    cfg: &FrameHeaderPrefix,
+) -> (FrameHeaderPrefix, i32, bool) {
+    let mut p = cfg.clone();
+    // inferred defaults
+    p.show_existing_frame = false;
+    p.existing_fb_idx_to_show = 0;
+    p.display_frame_id = 0;
+    p.frame_type = 0; // KEY
+    p.show_frame = true;
+    p.showable_frame = false;
+    p.error_resilient_mode = false;
+    p.frame_presentation_time = 0;
+    p.current_frame_id = 0;
+    p.order_hint = 0;
+    p.primary_ref_frame = 7; // PRIMARY_REF_NONE
+    p.buffer_removal_time_present = false;
+    p.buffer_removal_times = [0; 32];
+    p.refresh_frame_flags = 0xff;
+    p.ref_frame_map_order_hint = [0; 8];
+
+    if !cfg.reduced_still_picture_hdr {
+        p.show_existing_frame = rb.read_bit() != 0;
+        if p.show_existing_frame {
+            p.existing_fb_idx_to_show = rb.read_literal(3);
+            if cfg.decoder_model_info_present_flag && !cfg.equal_picture_interval {
+                p.frame_presentation_time = rb.read_unsigned_literal(cfg.frame_presentation_time_length);
+            }
+            if cfg.frame_id_numbers_present_flag {
+                p.display_frame_id = rb.read_literal(cfg.frame_id_length);
+            }
+            return (p, 0, true);
+        }
+        p.frame_type = rb.read_literal(2);
+        p.show_frame = rb.read_bit() != 0;
+        if p.show_frame {
+            if cfg.decoder_model_info_present_flag && !cfg.equal_picture_interval {
+                p.frame_presentation_time = rb.read_unsigned_literal(cfg.frame_presentation_time_length);
+            }
+            p.showable_frame = p.frame_type != 0;
+        } else {
+            p.showable_frame = rb.read_bit() != 0;
+        }
+        if p.frame_type == 3 {
+            p.error_resilient_mode = true;
+        } else if !(p.frame_type == 0 && p.show_frame) {
+            p.error_resilient_mode = rb.read_bit() != 0;
+        }
+    }
+
+    p.disable_cdf_update = rb.read_bit() != 0;
+    p.allow_screen_content_tools = if cfg.force_screen_content_tools == 2 {
+        rb.read_bit() != 0
+    } else {
+        cfg.force_screen_content_tools != 0
+    };
+    p.cur_frame_force_integer_mv = if p.allow_screen_content_tools {
+        if cfg.force_integer_mv == 2 {
+            rb.read_bit() != 0
+        } else {
+            cfg.force_integer_mv != 0
+        }
+    } else {
+        false
+    };
+
+    let sframe = p.frame_type == 3;
+    let intra_only = p.frame_type == 0 || p.frame_type == 2;
+    let mut frame_size_override_flag = 0;
+    if !cfg.reduced_still_picture_hdr {
+        if cfg.frame_id_numbers_present_flag {
+            p.current_frame_id = rb.read_literal(cfg.frame_id_length);
+        }
+        frame_size_override_flag = if sframe { 1 } else { rb.read_bit() as i32 };
+        if cfg.enable_order_hint {
+            p.order_hint = rb.read_literal((cfg.order_hint_bits_minus_1 + 1) as u32);
+        }
+        if !p.error_resilient_mode && !intra_only {
+            p.primary_ref_frame = rb.read_literal(3);
+        }
+    }
+
+    if cfg.decoder_model_info_present_flag {
+        p.buffer_removal_time_present = rb.read_bit() != 0;
+        if p.buffer_removal_time_present {
+            for op in 0..=cfg.operating_points_cnt_minus_1 as usize {
+                if cfg.op_decoder_model_param_present[op] {
+                    let idc = cfg.operating_point_idc[op];
+                    if idc == 0
+                        || (((idc >> cfg.temporal_layer_id) & 0x1) != 0
+                            && ((idc >> (cfg.spatial_layer_id + 8)) & 0x1) != 0)
+                    {
+                        p.buffer_removal_times[op] =
+                            rb.read_unsigned_literal(cfg.buffer_removal_time_length);
+                    }
+                }
+            }
+        }
+    }
+
+    if (p.frame_type == 0 && !p.show_frame) || p.frame_type == 1 || p.frame_type == 2 {
+        p.refresh_frame_flags = rb.read_literal(8);
+    }
+    if (!intra_only || p.refresh_frame_flags != 0xff) && p.error_resilient_mode && cfg.enable_order_hint {
+        for oh in p.ref_frame_map_order_hint.iter_mut() {
+            *oh = rb.read_literal((cfg.order_hint_bits_minus_1 + 1) as u32);
+        }
+    }
+    (p, frame_size_override_flag, false)
+}

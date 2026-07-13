@@ -1159,3 +1159,134 @@ fn read_sequence_header_inverts_write() {
         );
     }
 }
+
+#[test]
+fn read_frame_header_prefix_inverts_write() {
+    use aom_entropy::header::{read_frame_header_prefix, write_frame_header_prefix, FrameHeaderPrefix};
+    let mut rng = Rng(0x1e_f5e1_c0de_0200);
+    for _ in 0..300_000 {
+        let reduced = rng.next().is_multiple_of(8); // exercise the degenerate reduced path occasionally
+        let dmi = rng.next() & 1 == 1;
+        let eqpi = rng.next() & 1 == 1;
+        let fptl = 1 + (rng.next() % 20) as u32;
+        let fidp = rng.next() & 1 == 1;
+        let fidlen = 8 + (rng.next() % 8) as u32;
+        let force_sct = (rng.next() % 3) as i32;
+        let force_int = (rng.next() % 3) as i32;
+        let eoh = rng.next() & 1 == 1;
+        let ohbm1 = (rng.next() % 8) as i32;
+        let opcnt = (rng.next() % 4) as i32;
+        let brtl = 1 + (rng.next() % 20) as u32;
+        let tlid = (rng.next() % 8) as i32;
+        let slid = (rng.next() % 4) as i32;
+        let mut opdmpp = [false; 32];
+        let mut opidc = [0i32; 32];
+        for op in 0..=opcnt as usize {
+            opdmpp[op] = rng.next() & 1 == 1;
+            opidc[op] = (rng.next() % 4096) as i32;
+        }
+
+        let show_existing = !reduced && rng.next().is_multiple_of(6);
+        let (mut frame_type, mut show_frame, mut showable, mut err_res) = (0i32, true, false, false);
+        let (mut efb, mut fpt, mut dfid) = (0i32, 0u32, 0i32);
+        if reduced {
+            // KEY/show/no-err inferred
+        } else if show_existing {
+            efb = (rng.next() % 8) as i32;
+            fpt = if dmi && !eqpi { (rng.next() % (1u64 << fptl)) as u32 } else { 0 };
+            dfid = if fidp { (rng.next() % (1u64 << fidlen)) as i32 } else { 0 };
+        } else {
+            frame_type = (rng.next() % 4) as i32;
+            show_frame = rng.next() & 1 == 1;
+            if show_frame {
+                fpt = if dmi && !eqpi { (rng.next() % (1u64 << fptl)) as u32 } else { 0 };
+                showable = frame_type != 0;
+            } else {
+                showable = rng.next() & 1 == 1;
+            }
+            err_res = if frame_type == 3 {
+                true
+            } else if frame_type == 0 && show_frame {
+                false
+            } else {
+                rng.next() & 1 == 1
+            };
+        }
+        let sframe = frame_type == 3;
+        let intra_only = frame_type == 0 || frame_type == 2;
+        let disable_cdf = rng.next() & 1 == 1;
+        let allow_sct = if force_sct == 2 { rng.next() & 1 == 1 } else { force_sct != 0 };
+        let cur_int_mv = if allow_sct {
+            if force_int == 2 { rng.next() & 1 == 1 } else { force_int != 0 }
+        } else {
+            false
+        };
+        let (max_w, max_h) = (1 + (rng.next() % 1024) as i32, 1 + (rng.next() % 1024) as i32);
+        let want_override = if sframe { 1 } else { (rng.next() & 1) as i32 };
+        let (sup_w, sup_h) = if want_override == 1 && !sframe { (max_w + 1, max_h) } else { (max_w, max_h) };
+        let current_frame_id = if !reduced && fidp { (rng.next() % (1u64 << fidlen)) as i32 } else { 0 };
+        let order_hint = if !reduced && eoh { (rng.next() % (1u64 << (ohbm1 + 1))) as i32 } else { 0 };
+        let primary_ref = if !reduced && !err_res && !intra_only { (rng.next() % 8) as i32 } else { 7 };
+        let brt_present = dmi && rng.next() & 1 == 1;
+        let mut brts = [0u32; 32];
+        if brt_present {
+            for op in 0..=opcnt as usize {
+                if opdmpp[op] {
+                    let idc = opidc[op];
+                    if idc == 0 || (((idc >> tlid) & 1) != 0 && ((idc >> (slid + 8)) & 1) != 0) {
+                        brts[op] = (rng.next() % (1u64 << brtl)) as u32;
+                    }
+                }
+            }
+        }
+        let refresh_written = (frame_type == 0 && !show_frame) || frame_type == 1 || frame_type == 2;
+        let refresh = if refresh_written { (rng.next() % 256) as i32 } else { 0xff };
+        let rfmoh_written = (!intra_only || refresh != 0xff) && err_res && eoh;
+        let mut rfmoh = [0i32; 8];
+        if rfmoh_written {
+            for oh in rfmoh.iter_mut() {
+                *oh = (rng.next() % (1u64 << (ohbm1 + 1))) as i32;
+            }
+        }
+
+        let p = FrameHeaderPrefix {
+            reduced_still_picture_hdr: reduced, show_existing_frame: show_existing,
+            existing_fb_idx_to_show: efb, decoder_model_info_present_flag: dmi,
+            equal_picture_interval: eqpi, frame_presentation_time: fpt,
+            frame_presentation_time_length: fptl, frame_id_numbers_present_flag: fidp,
+            frame_id_length: fidlen, display_frame_id: dfid, frame_type, show_frame,
+            showable_frame: showable, error_resilient_mode: err_res, disable_cdf_update: disable_cdf,
+            force_screen_content_tools: force_sct, allow_screen_content_tools: allow_sct,
+            force_integer_mv: force_int, cur_frame_force_integer_mv: cur_int_mv,
+            superres_upscaled_width: sup_w, superres_upscaled_height: sup_h, max_frame_width: max_w,
+            max_frame_height: max_h, current_frame_id, enable_order_hint: eoh, order_hint,
+            order_hint_bits_minus_1: ohbm1, primary_ref_frame: primary_ref,
+            buffer_removal_time_present: brt_present, operating_points_cnt_minus_1: opcnt,
+            op_decoder_model_param_present: opdmpp, operating_point_idc: opidc,
+            temporal_layer_id: tlid, spatial_layer_id: slid, buffer_removal_times: brts,
+            buffer_removal_time_length: brtl, refresh_frame_flags: refresh,
+            ref_frame_map_order_hint: rfmoh,
+        };
+        let mut wb = WriteBitBuffer::new();
+        let (wover, wearly) = write_frame_header_prefix(&mut wb, &p);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        let (g, gover, gearly) = read_frame_header_prefix(&mut rb, &p);
+        assert_eq!((gover, gearly), (wover, wearly), "override/early ft={frame_type} se={show_existing}");
+        assert_eq!(g.show_existing_frame, show_existing, "show_existing");
+        if show_existing {
+            assert_eq!((g.existing_fb_idx_to_show, g.frame_presentation_time, g.display_frame_id), (efb, fpt, dfid), "show_existing fields");
+            continue;
+        }
+        assert_eq!(
+            (g.frame_type, g.show_frame, g.showable_frame, g.error_resilient_mode, g.frame_presentation_time),
+            (frame_type, show_frame, showable, err_res, fpt), "frame type block red={reduced}"
+        );
+        assert_eq!(
+            (g.disable_cdf_update, g.allow_screen_content_tools, g.cur_frame_force_integer_mv, g.current_frame_id, g.order_hint, g.primary_ref_frame),
+            (disable_cdf, allow_sct, cur_int_mv, current_frame_id, order_hint, primary_ref), "tools/id block"
+        );
+        assert_eq!((g.buffer_removal_time_present, g.buffer_removal_times), (brt_present, brts), "buffer removal");
+        assert_eq!((g.refresh_frame_flags, g.ref_frame_map_order_hint), (refresh, rfmoh), "refresh/order hints");
+    }
+}
