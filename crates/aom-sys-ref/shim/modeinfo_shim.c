@@ -797,3 +797,53 @@ uint32_t shim_write_tx_size_vartx(int bsize, int top_tx_size, const uint8_t *int
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- palette signalling: contexts + flag/size symbols (no colours) --- */
+#include "av1/common/pred_common.h" /* av1_get_palette_bsize_ctx / _mode_ctx */
+
+int shim_get_palette_bsize_ctx(int bsize) {
+  return av1_get_palette_bsize_ctx((BLOCK_SIZE)bsize);
+}
+
+int shim_get_palette_mode_ctx(int ha, int a_psize, int hl, int l_psize) {
+  MB_MODE_INFO ami, lmi;
+  MACROBLOCKD xd;
+  ami.palette_mode_info.palette_size[0] = (uint8_t)a_psize;
+  lmi.palette_mode_info.palette_size[0] = (uint8_t)l_psize;
+  xd.above_mbmi = ha ? &ami : (MB_MODE_INFO *)0;
+  xd.left_mbmi = hl ? &lmi : (MB_MODE_INFO *)0;
+  return av1_get_palette_mode_ctx(&xd);
+}
+
+/* Codes the palette Y/UV mode + size symbols exactly as write_palette_mode_info,
+ * but omitting the colour payload (that is a separate port). PALETTE_MIN_SIZE=2,
+ * PALETTE_SIZES=7. mode_dc / uv_dc gate the two planes. */
+uint32_t shim_write_palette_flags_sizes(int mode_dc, int n_y, uint16_t *y_mode_cdf,
+                                        uint16_t *y_size_cdf, int uv_dc, int n_uv,
+                                        uint16_t *uv_mode_cdf, uint16_t *uv_size_cdf,
+                                        uint8_t *out, uint16_t *o_ym, uint16_t *o_ys,
+                                        uint16_t *o_um, uint16_t *o_us) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (mode_dc) {
+    od_ec_encode_cdf_q15(&ec, n_y > 0, y_mode_cdf, 2);
+    update_cdf(y_mode_cdf, n_y > 0, 2);
+    if (n_y > 0) {
+      od_ec_encode_cdf_q15(&ec, n_y - PALETTE_MIN_SIZE, y_size_cdf, PALETTE_SIZES);
+      update_cdf(y_size_cdf, n_y - PALETTE_MIN_SIZE, PALETTE_SIZES);
+    }
+  }
+  if (uv_dc) {
+    od_ec_encode_cdf_q15(&ec, n_uv > 0, uv_mode_cdf, 2);
+    update_cdf(uv_mode_cdf, n_uv > 0, 2);
+    if (n_uv > 0) {
+      od_ec_encode_cdf_q15(&ec, n_uv - PALETTE_MIN_SIZE, uv_size_cdf, PALETTE_SIZES);
+      update_cdf(uv_size_cdf, n_uv - PALETTE_MIN_SIZE, PALETTE_SIZES);
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 3; i++) { o_ym[i] = y_mode_cdf[i]; o_um[i] = uv_mode_cdf[i]; }
+  for (int i = 0; i < 8; i++) { o_ys[i] = y_size_cdf[i]; o_us[i] = uv_size_cdf[i]; }
+  od_ec_enc_clear(&ec);
+  return nb;
+}

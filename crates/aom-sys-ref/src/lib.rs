@@ -269,6 +269,10 @@ extern "C" {
     fn shim_txfm_partition_update(above_ctx: *mut u8, left_ctx: *mut u8, tx_size: i32, txb_size: i32);
     #[allow(clippy::too_many_arguments)]
     fn shim_write_tx_size_vartx(bsize: i32, top_tx_size: i32, inter_tx_size: *const u8, mb_to_right_edge: i32, mb_to_bottom_edge: i32, above_in: *const u8, left_in: *const u8, cdf: *mut u16, out: *mut u8, above_out: *mut u8, left_out: *mut u8, cdf_out: *mut u16) -> u32;
+    fn shim_get_palette_bsize_ctx(bsize: i32) -> i32;
+    fn shim_get_palette_mode_ctx(ha: i32, a_psize: i32, hl: i32, l_psize: i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_palette_flags_sizes(mode_dc: i32, n_y: i32, y_mode_cdf: *mut u16, y_size_cdf: *mut u16, uv_dc: i32, n_uv: i32, uv_mode_cdf: *mut u16, uv_size_cdf: *mut u16, out: *mut u8, o_ym: *mut u16, o_ys: *mut u16, o_um: *mut u16, o_us: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_ref_frames(cdfs: *mut u16, seg_ref: i32, seg_skipgmv: i32, rmode_select: i32, comp_allowed: i32, is_compound: i32, comp_ref_type: i32, ref0: i32, ref1: i32, out: *mut u8, out_cdfs: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
@@ -441,6 +445,44 @@ pub fn ref_write_tx_size_vartx(
     };
     out.truncate(n as usize);
     (out, ao, lo, co)
+}
+
+/// Reference `av1_get_palette_bsize_ctx` (static inline, pred_common.h).
+pub fn ref_get_palette_bsize_ctx(bsize: i32) -> i32 {
+    unsafe { shim_get_palette_bsize_ctx(bsize) }
+}
+
+/// Reference `av1_get_palette_mode_ctx` (facade over the real static inline).
+pub fn ref_get_palette_mode_ctx(ha: bool, a_psize: i32, hl: bool, l_psize: i32) -> i32 {
+    unsafe { shim_get_palette_mode_ctx(ha as i32, a_psize, hl as i32, l_psize) }
+}
+
+/// Reference palette Y/UV mode+size symbol coding (write_palette_mode_info minus the
+/// colour payload). Returns (bytes, y_mode_cdf[3], y_size_cdf[8], uv_mode_cdf[3],
+/// uv_size_cdf[8]) all adapted.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn ref_write_palette_flags_sizes(
+    mode_dc: bool,
+    n_y: i32,
+    y_mode_cdf: &[u16; 3],
+    y_size_cdf: &[u16; 8],
+    uv_dc: bool,
+    n_uv: i32,
+    uv_mode_cdf: &[u16; 3],
+    uv_size_cdf: &[u16; 8],
+) -> (Vec<u8>, [u16; 3], [u16; 8], [u16; 3], [u16; 8]) {
+    let (mut ym, mut ys, mut um, mut us) = (*y_mode_cdf, *y_size_cdf, *uv_mode_cdf, *uv_size_cdf);
+    let mut out = vec![0u8; 32];
+    let (mut oym, mut oys, mut oum, mut ous) = ([0u16; 3], [0u16; 8], [0u16; 3], [0u16; 8]);
+    let n = unsafe {
+        shim_write_palette_flags_sizes(
+            mode_dc as i32, n_y, ym.as_mut_ptr(), ys.as_mut_ptr(), uv_dc as i32, n_uv,
+            um.as_mut_ptr(), us.as_mut_ptr(), out.as_mut_ptr(), oym.as_mut_ptr(),
+            oys.as_mut_ptr(), oum.as_mut_ptr(), ous.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oym, oys, oum, ous)
 }
 
 /// Reference `av1_get_intra_inter_context` (facade over the real exported fn).

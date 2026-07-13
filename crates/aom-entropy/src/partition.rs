@@ -1204,3 +1204,64 @@ pub fn write_tx_size_vartx(
         }
     }
 }
+
+// --- palette signalling: contexts + flag/size symbols (av1/encoder/bitstream.c) ---
+
+const PALETTE_MIN_SIZE: i32 = 2;
+const PALETTE_SIZES: usize = 7;
+/// `num_pels_log2_lookup[BLOCK_SIZES_ALL]` (`common_data.h`): log2 of a block's pixel
+/// count (`log2(w*h)`).
+const NUM_PELS_LOG2_LOOKUP: [i32; 22] =
+    [4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12, 13, 13, 14, 6, 6, 8, 8, 10, 10];
+
+/// `av1_get_palette_bsize_ctx` (`pred_common.h`): the palette size-CDF context —
+/// `num_pels_log2_lookup[bsize] - num_pels_log2_lookup[BLOCK_8X8]` (BLOCK_8X8 = 6).
+pub fn palette_bsize_ctx(bsize: usize) -> i32 {
+    NUM_PELS_LOG2_LOOKUP[bsize] - NUM_PELS_LOG2_LOOKUP[BLOCK_8X8]
+}
+
+/// `av1_get_palette_mode_ctx` (`pred_common.h`): the palette-Y mode-CDF context — the
+/// count of present neighbours (above, left) that themselves use a Y palette, in
+/// `{0, 1, 2}`.
+pub fn palette_mode_ctx(has_above: bool, above_palette_size0: i32, has_left: bool, left_palette_size0: i32) -> i32 {
+    let mut ctx = 0;
+    if has_above {
+        ctx += i32::from(above_palette_size0 > 0);
+    }
+    if has_left {
+        ctx += i32::from(left_palette_size0 > 0);
+    }
+    ctx
+}
+
+/// `write_palette_mode_info` (`av1/encoder/bitstream.c`) — the flag/size portion (the
+/// colour payload is coded separately). For a DC_PRED luma block, code the Y-palette
+/// on/off flag (`n_y > 0`) on the (bsize_ctx, mode_ctx)-selected `palette_y_mode_cdf`,
+/// and when on the size symbol (`n_y - PALETTE_MIN_SIZE`) on `palette_y_size_cdf`
+/// (`PALETTE_SIZES` symbols). The chroma-reference UV_DC_PRED path is the analogue on
+/// the UV CDFs. All CDFs adapt in place.
+#[allow(clippy::too_many_arguments)]
+pub fn write_palette_mode_info_flags(
+    enc: &mut OdEcEnc,
+    mode_is_dc_pred: bool,
+    n_y: i32,
+    palette_y_mode_cdf: &mut [u16],
+    palette_y_size_cdf: &mut [u16],
+    uv_dc_pred: bool,
+    n_uv: i32,
+    palette_uv_mode_cdf: &mut [u16],
+    palette_uv_size_cdf: &mut [u16],
+) {
+    if mode_is_dc_pred {
+        write_symbol(enc, i32::from(n_y > 0), palette_y_mode_cdf, 2);
+        if n_y > 0 {
+            write_symbol(enc, n_y - PALETTE_MIN_SIZE, palette_y_size_cdf, PALETTE_SIZES);
+        }
+    }
+    if uv_dc_pred {
+        write_symbol(enc, i32::from(n_uv > 0), palette_uv_mode_cdf, 2);
+        if n_uv > 0 {
+            write_symbol(enc, n_uv - PALETTE_MIN_SIZE, palette_uv_size_cdf, PALETTE_SIZES);
+        }
+    }
+}

@@ -1255,3 +1255,65 @@ fn write_tx_size_vartx_matches_c() {
         }
     }
 }
+
+#[test]
+fn palette_contexts_and_flags_match_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{palette_bsize_ctx, palette_mode_ctx, write_palette_mode_info_flags};
+    // bsize_ctx over all block sizes.
+    for bsize in 0..22usize {
+        assert_eq!(palette_bsize_ctx(bsize), c::ref_get_palette_bsize_ctx(bsize as i32), "bsize_ctx {bsize}");
+    }
+    // mode_ctx over neighbour presence x palette sizes.
+    for ha in [false, true] {
+        for a in [0, 1, 5, 8] {
+            for hl in [false, true] {
+                for l in [0, 1, 5, 8] {
+                    assert_eq!(
+                        palette_mode_ctx(ha, a, hl, l),
+                        c::ref_get_palette_mode_ctx(ha, a, hl, l),
+                        "mode_ctx ha={ha} a={a} hl={hl} l={l}"
+                    );
+                }
+            }
+        }
+    }
+    // flag/size symbols.
+    let mut rng = Rng(0x9a1e_77e0_c0de_0002);
+    for _ in 0..200_000 {
+        let mode_dc = rng.next().is_multiple_of(2);
+        let uv_dc = rng.next().is_multiple_of(2);
+        // n in {0} (no palette) or 2..=8 (PALETTE_MIN_SIZE..PALETTE_MAX_SIZE).
+        let n_y = if rng.next().is_multiple_of(3) { 0 } else { 2 + (rng.next() % 7) as i32 };
+        let n_uv = if rng.next().is_multiple_of(3) { 0 } else { 2 + (rng.next() % 7) as i32 };
+        let p2 = 1 + (rng.next() % 32766) as u16;
+        let ym = [p2, 0, 0];
+        let um = [1 + (rng.next() % 32766) as u16, 0, 0];
+        // 7-symbol size CDFs (8 entries: 7 cumulative + count), strictly decreasing.
+        let mk7 = |rng: &mut Rng| {
+            let mut c = [0u16; 8];
+            let mut prev = 32768i32;
+            for e in c.iter_mut().take(7) {
+                let span = (prev - (7 - 0)).max(1);
+                let v = prev - 1 - (rng.next() % span.max(1) as u64) as i32;
+                *e = v.max(1) as u16;
+                prev = v.max(1);
+            }
+            c[6] = 0; // last cumulative is AOM_ICDF top == 0
+            c
+        };
+        let ys = mk7(&mut rng);
+        let us = mk7(&mut rng);
+        let mut enc = OdEcEnc::new();
+        let (mut rym, mut rys, mut rum, mut rus) = (ym, ys, um, us);
+        write_palette_mode_info_flags(&mut enc, mode_dc, n_y, &mut rym, &mut rys, uv_dc, n_uv, &mut rum, &mut rus);
+        let got = enc.done().to_vec();
+        let (want, oym, oys, oum, ous) =
+            c::ref_write_palette_flags_sizes(mode_dc, n_y, &ym, &ys, uv_dc, n_uv, &um, &us);
+        assert_eq!(got, want, "bytes mode_dc={mode_dc} n_y={n_y} uv_dc={uv_dc} n_uv={n_uv}");
+        assert_eq!(rym, oym, "y_mode_cdf");
+        assert_eq!(rys, oys, "y_size_cdf");
+        assert_eq!(rum, oum, "uv_mode_cdf");
+        assert_eq!(rus, ous, "uv_size_cdf");
+    }
+}
