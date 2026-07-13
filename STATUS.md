@@ -191,6 +191,15 @@ both tracks, fully bit-exact.**
   `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
   rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
+- **Framing / OBU-wrapper primitives (aom-entropy)** — the byte-level writers that
+  wrap the (already bit-exact) coefficient coding into an AV1 bitstream: `WriteBitBuffer`
+  (aom_write_bit_buffer — the byte-aligned MSB-first bit writer for the uncompressed
+  headers, distinct from od_ec), the `leb128` varint codec (aom_uleb_encode/decode/
+  size_in_bytes — OBU sizes, UINT32_MAX-capped), and `write_obu_header`
+  (av1_write_obu_header byte output). All diffed vs C (leb128/wb via exported C or a
+  driver shim; the OBU header via a verbatim transcription + an independent spec anchor).
+  Remaining framing: the sequence/frame/tile-group header *content* (large, config-dependent).
+
 - **RD-search primitives (aom-encode `rd` module + aom-dist)** — the estimator set the
   mode search composes, all bit-exact: `model_rd_from_var_lapndz` (the fixed-point
   Laplacian rate/dist model from variance+qstep, 3 q10 tables extracted from rd.c;
