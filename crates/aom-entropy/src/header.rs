@@ -504,3 +504,116 @@ pub fn write_tx_mode(wb: &mut WriteBitBuffer, coded_lossless: bool, tx_mode_sele
         wb.write_bit(tx_mode_select as u32);
     }
 }
+
+// ---- film grain -----------------------------------------------------------
+
+/// The film-grain params written into the frame header (`aom_film_grain_t`), plus
+/// the seq/frame context the writer reads (monochrome, subsampling, inter frame).
+#[derive(Clone, Debug)]
+pub struct FilmGrainParams {
+    pub apply_grain: bool,
+    pub random_seed: i32,
+    pub is_inter_frame: bool,
+    pub update_parameters: bool,
+    pub ref_idx: i32,
+    pub num_y_points: i32,
+    pub scaling_points_y: [[i32; 2]; 14],
+    pub monochrome: bool,
+    pub chroma_scaling_from_luma: bool,
+    pub subsampling_x: i32,
+    pub subsampling_y: i32,
+    pub num_cb_points: i32,
+    pub scaling_points_cb: [[i32; 2]; 10],
+    pub num_cr_points: i32,
+    pub scaling_points_cr: [[i32; 2]; 10],
+    pub scaling_shift: i32,
+    pub ar_coeff_lag: i32,
+    pub ar_coeffs_y: [i32; 24],
+    pub ar_coeffs_cb: [i32; 25],
+    pub ar_coeffs_cr: [i32; 25],
+    pub ar_coeff_shift: i32,
+    pub grain_scale_shift: i32,
+    pub cb_mult: i32,
+    pub cb_luma_mult: i32,
+    pub cb_offset: i32,
+    pub cr_mult: i32,
+    pub cr_luma_mult: i32,
+    pub cr_offset: i32,
+    pub overlap_flag: bool,
+    pub clip_to_restricted_range: bool,
+}
+
+/// `write_film_grain_params` (`av1/encoder/bitstream.c`): the grain apply flag and,
+/// when applying, the random seed, the copy-from-ref index (when not updating), or
+/// the full scaling-point / AR-coeff / multiplier parameter set. The `!update`
+/// ref-search is encoder logic with no byte effect beyond the 3-bit `ref_idx`.
+pub fn write_film_grain_params(wb: &mut WriteBitBuffer, p: &FilmGrainParams) {
+    wb.write_bit(p.apply_grain as u32);
+    if !p.apply_grain {
+        return;
+    }
+    wb.write_literal(p.random_seed, 16);
+    if p.is_inter_frame {
+        wb.write_bit(p.update_parameters as u32);
+    }
+    if !p.update_parameters {
+        wb.write_literal(p.ref_idx, 3);
+        return;
+    }
+    wb.write_literal(p.num_y_points, 4);
+    for pt in &p.scaling_points_y[..p.num_y_points as usize] {
+        wb.write_literal(pt[0], 8);
+        wb.write_literal(pt[1], 8);
+    }
+    if !p.monochrome {
+        wb.write_bit(p.chroma_scaling_from_luma as u32);
+    }
+    let chroma_absent = p.monochrome
+        || p.chroma_scaling_from_luma
+        || (p.subsampling_x == 1 && p.subsampling_y == 1 && p.num_y_points == 0);
+    if !chroma_absent {
+        wb.write_literal(p.num_cb_points, 4);
+        for pt in &p.scaling_points_cb[..p.num_cb_points as usize] {
+            wb.write_literal(pt[0], 8);
+            wb.write_literal(pt[1], 8);
+        }
+        wb.write_literal(p.num_cr_points, 4);
+        for pt in &p.scaling_points_cr[..p.num_cr_points as usize] {
+            wb.write_literal(pt[0], 8);
+            wb.write_literal(pt[1], 8);
+        }
+    }
+    wb.write_literal(p.scaling_shift - 8, 2);
+    wb.write_literal(p.ar_coeff_lag, 2);
+    let num_pos_luma = 2 * p.ar_coeff_lag * (p.ar_coeff_lag + 1);
+    let num_pos_chroma = num_pos_luma + (p.num_y_points > 0) as i32;
+    if p.num_y_points != 0 {
+        for &c in &p.ar_coeffs_y[..num_pos_luma as usize] {
+            wb.write_literal(c + 128, 8);
+        }
+    }
+    if p.num_cb_points != 0 || p.chroma_scaling_from_luma {
+        for &c in &p.ar_coeffs_cb[..num_pos_chroma as usize] {
+            wb.write_literal(c + 128, 8);
+        }
+    }
+    if p.num_cr_points != 0 || p.chroma_scaling_from_luma {
+        for &c in &p.ar_coeffs_cr[..num_pos_chroma as usize] {
+            wb.write_literal(c + 128, 8);
+        }
+    }
+    wb.write_literal(p.ar_coeff_shift - 6, 2);
+    wb.write_literal(p.grain_scale_shift, 2);
+    if p.num_cb_points != 0 {
+        wb.write_literal(p.cb_mult, 8);
+        wb.write_literal(p.cb_luma_mult, 8);
+        wb.write_literal(p.cb_offset, 9);
+    }
+    if p.num_cr_points != 0 {
+        wb.write_literal(p.cr_mult, 8);
+        wb.write_literal(p.cr_luma_mult, 8);
+        wb.write_literal(p.cr_offset, 9);
+    }
+    wb.write_bit(p.overlap_flag as u32);
+    wb.write_bit(p.clip_to_restricted_range as u32);
+}

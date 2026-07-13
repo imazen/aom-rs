@@ -370,3 +370,97 @@ fn write_delta_q_params_and_tx_mode_match_c() {
         assert_eq!(wb.bytes(), &c::ref_write_tx_mode(coded_lossless, tx_mode_select)[..], "tx_mode cl={coded_lossless} sel={tx_mode_select}");
     }
 }
+
+#[test]
+fn write_film_grain_params_matches_c() {
+    use aom_entropy::header::{write_film_grain_params, FilmGrainParams};
+    let mut rng = Rng(0xf11a_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let num_y_points = rng.range(0, 15); // max 14
+        let num_cb_points = rng.range(0, 11); // max 10
+        let num_cr_points = rng.range(0, 11);
+        let ar_coeff_lag = rng.range(0, 4); // 0..3
+
+        let mut scaling_points_y = [[0i32; 2]; 14];
+        let mut scaling_points_cb = [[0i32; 2]; 10];
+        let mut scaling_points_cr = [[0i32; 2]; 10];
+        for pt in &mut scaling_points_y {
+            pt[0] = rng.range(0, 256);
+            pt[1] = rng.range(0, 256);
+        }
+        for pt in &mut scaling_points_cb {
+            pt[0] = rng.range(0, 256);
+            pt[1] = rng.range(0, 256);
+        }
+        for pt in &mut scaling_points_cr {
+            pt[0] = rng.range(0, 256);
+            pt[1] = rng.range(0, 256);
+        }
+        let mut ar_coeffs_y = [0i32; 24];
+        let mut ar_coeffs_cb = [0i32; 25];
+        let mut ar_coeffs_cr = [0i32; 25];
+        for c in &mut ar_coeffs_y {
+            *c = rng.range(-128, 128);
+        }
+        for c in &mut ar_coeffs_cb {
+            *c = rng.range(-128, 128);
+        }
+        for c in &mut ar_coeffs_cr {
+            *c = rng.range(-128, 128);
+        }
+
+        let p = FilmGrainParams {
+            apply_grain: rng.next().is_multiple_of(2),
+            random_seed: rng.range(0, 65536),
+            is_inter_frame: rng.next().is_multiple_of(2),
+            // mostly-true so the full parameter path is exercised more often
+            update_parameters: !rng.next().is_multiple_of(4),
+            ref_idx: rng.range(0, 8),
+            num_y_points,
+            scaling_points_y,
+            monochrome: rng.next().is_multiple_of(3),
+            chroma_scaling_from_luma: rng.next().is_multiple_of(2),
+            subsampling_x: rng.range(0, 2),
+            subsampling_y: rng.range(0, 2),
+            num_cb_points,
+            scaling_points_cb,
+            num_cr_points,
+            scaling_points_cr,
+            scaling_shift: rng.range(8, 12), // -8 -> 0..3
+            ar_coeff_lag,
+            ar_coeffs_y,
+            ar_coeffs_cb,
+            ar_coeffs_cr,
+            ar_coeff_shift: rng.range(6, 10), // -6 -> 0..3
+            grain_scale_shift: rng.range(0, 4),
+            cb_mult: rng.range(0, 256),
+            cb_luma_mult: rng.range(0, 256),
+            cb_offset: rng.range(0, 512),
+            cr_mult: rng.range(0, 256),
+            cr_luma_mult: rng.range(0, 256),
+            cr_offset: rng.range(0, 512),
+            overlap_flag: rng.next().is_multiple_of(2),
+            clip_to_restricted_range: rng.next().is_multiple_of(2),
+        };
+
+        let mut wb = WriteBitBuffer::new();
+        write_film_grain_params(&mut wb, &p);
+        let got = wb.bytes().to_vec();
+
+        let s = [
+            p.apply_grain as i32, p.random_seed, p.is_inter_frame as i32,
+            p.update_parameters as i32, p.ref_idx, p.num_y_points, p.monochrome as i32,
+            p.chroma_scaling_from_luma as i32, p.subsampling_x, p.subsampling_y,
+            p.num_cb_points, p.num_cr_points, p.scaling_shift, p.ar_coeff_lag,
+            p.ar_coeff_shift, p.grain_scale_shift, p.cb_mult, p.cb_luma_mult, p.cb_offset,
+            p.cr_mult, p.cr_luma_mult, p.cr_offset, p.overlap_flag as i32,
+            p.clip_to_restricted_range as i32,
+        ];
+        let flat2 = |a: &[[i32; 2]]| -> Vec<i32> { a.iter().flatten().copied().collect() };
+        let spy: [i32; 28] = flat2(&scaling_points_y).try_into().unwrap();
+        let spcb: [i32; 20] = flat2(&scaling_points_cb).try_into().unwrap();
+        let spcr: [i32; 20] = flat2(&scaling_points_cr).try_into().unwrap();
+        let want = c::ref_write_film_grain_params(&s, &spy, &spcb, &spcr, &ar_coeffs_y, &ar_coeffs_cb, &ar_coeffs_cr);
+        assert_eq!(got, want, "write_film_grain_params {p:?}");
+    }
+}

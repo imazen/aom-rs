@@ -331,3 +331,75 @@ uint32_t shim_write_tx_mode(int coded_lossless, int tx_mode_select, uint8_t *out
   if (!coded_lossless) aom_wb_write_bit(&wb, tx_mode_select);
   return aom_wb_bytes_written(&wb);
 }
+
+/* write_film_grain_params, transcribed control flow over the real aom_wb. The
+ * !update_parameters ref search is encoder logic (no byte effect beyond ref_idx),
+ * so ref_idx is passed in. Scalars are packed in s[] (see the Rust binding). */
+uint32_t shim_write_film_grain_params(const int *s, const int *spy, const int *spcb,
+                                      const int *spcr, const int *ary, const int *arcb,
+                                      const int *arcr, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  const int apply_grain = s[0], random_seed = s[1], is_inter = s[2];
+  const int update_parameters = s[3], ref_idx = s[4], num_y_points = s[5];
+  const int monochrome = s[6], chroma_from_luma = s[7], ssx = s[8], ssy = s[9];
+  const int num_cb_points = s[10], num_cr_points = s[11], scaling_shift = s[12];
+  const int ar_coeff_lag = s[13], ar_coeff_shift = s[14], grain_scale_shift = s[15];
+  const int cb_mult = s[16], cb_luma_mult = s[17], cb_offset = s[18];
+  const int cr_mult = s[19], cr_luma_mult = s[20], cr_offset = s[21];
+  const int overlap_flag = s[22], clip_to_restricted_range = s[23];
+
+  aom_wb_write_bit(&wb, apply_grain);
+  if (!apply_grain) return aom_wb_bytes_written(&wb);
+  aom_wb_write_literal(&wb, random_seed, 16);
+  if (is_inter) aom_wb_write_bit(&wb, update_parameters);
+  if (!update_parameters) {
+    aom_wb_write_literal(&wb, ref_idx, 3);
+    return aom_wb_bytes_written(&wb);
+  }
+  aom_wb_write_literal(&wb, num_y_points, 4);
+  for (int i = 0; i < num_y_points; i++) {
+    aom_wb_write_literal(&wb, spy[i * 2 + 0], 8);
+    aom_wb_write_literal(&wb, spy[i * 2 + 1], 8);
+  }
+  if (!monochrome) aom_wb_write_bit(&wb, chroma_from_luma);
+  if (monochrome || chroma_from_luma || (ssx == 1 && ssy == 1 && num_y_points == 0)) {
+    /* chroma points absent */
+  } else {
+    aom_wb_write_literal(&wb, num_cb_points, 4);
+    for (int i = 0; i < num_cb_points; i++) {
+      aom_wb_write_literal(&wb, spcb[i * 2 + 0], 8);
+      aom_wb_write_literal(&wb, spcb[i * 2 + 1], 8);
+    }
+    aom_wb_write_literal(&wb, num_cr_points, 4);
+    for (int i = 0; i < num_cr_points; i++) {
+      aom_wb_write_literal(&wb, spcr[i * 2 + 0], 8);
+      aom_wb_write_literal(&wb, spcr[i * 2 + 1], 8);
+    }
+  }
+  aom_wb_write_literal(&wb, scaling_shift - 8, 2);
+  aom_wb_write_literal(&wb, ar_coeff_lag, 2);
+  int num_pos_luma = 2 * ar_coeff_lag * (ar_coeff_lag + 1);
+  int num_pos_chroma = num_pos_luma;
+  if (num_y_points > 0) ++num_pos_chroma;
+  if (num_y_points)
+    for (int i = 0; i < num_pos_luma; i++) aom_wb_write_literal(&wb, ary[i] + 128, 8);
+  if (num_cb_points || chroma_from_luma)
+    for (int i = 0; i < num_pos_chroma; i++) aom_wb_write_literal(&wb, arcb[i] + 128, 8);
+  if (num_cr_points || chroma_from_luma)
+    for (int i = 0; i < num_pos_chroma; i++) aom_wb_write_literal(&wb, arcr[i] + 128, 8);
+  aom_wb_write_literal(&wb, ar_coeff_shift - 6, 2);
+  aom_wb_write_literal(&wb, grain_scale_shift, 2);
+  if (num_cb_points) {
+    aom_wb_write_literal(&wb, cb_mult, 8);
+    aom_wb_write_literal(&wb, cb_luma_mult, 8);
+    aom_wb_write_literal(&wb, cb_offset, 9);
+  }
+  if (num_cr_points) {
+    aom_wb_write_literal(&wb, cr_mult, 8);
+    aom_wb_write_literal(&wb, cr_luma_mult, 8);
+    aom_wb_write_literal(&wb, cr_offset, 9);
+  }
+  aom_wb_write_bit(&wb, overlap_flag);
+  aom_wb_write_bit(&wb, clip_to_restricted_range);
+  return aom_wb_bytes_written(&wb);
+}

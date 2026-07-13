@@ -210,6 +210,18 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_write_delta_q_params(base_qindex: i32, delta_q_present: i32, delta_q_res: i32, allow_intrabc: i32, delta_lf_present: i32, delta_lf_res: i32, delta_lf_multi: i32, out: *mut u8) -> u32;
     fn shim_write_tx_mode(coded_lossless: i32, tx_mode_select: i32, out: *mut u8) -> u32;
+    fn shim_write_film_grain_params(s: *const i32, spy: *const i32, spcb: *const i32, spcr: *const i32, ary: *const i32, arcb: *const i32, arcr: *const i32, out: *mut u8) -> u32;
+}
+
+/// Reference `write_film_grain_params` (transcribed control flow over the real aom_wb).
+/// `s` packs the 24 scalars in the order the shim reads them; the point/coeff arrays
+/// are passed flat.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_film_grain_params(s: &[i32; 24], spy: &[i32; 28], spcb: &[i32; 20], spcr: &[i32; 20], ary: &[i32; 24], arcb: &[i32; 25], arcr: &[i32; 25]) -> Vec<u8> {
+    let mut out = vec![0u8; 256];
+    let n = unsafe { shim_write_film_grain_params(s.as_ptr(), spy.as_ptr(), spcb.as_ptr(), spcr.as_ptr(), ary.as_ptr(), arcb.as_ptr(), arcr.as_ptr(), out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `write_delta_q_params` (transcribed control flow over the real aom_wb).
