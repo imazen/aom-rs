@@ -1099,3 +1099,108 @@ pub fn txfm_partition_update(above_ctx: &mut [u8], left_ctx: &mut [u8], tx_size:
         *a = txw;
     }
 }
+
+/// `tx_size_wide_unit[TX_SIZES_ALL]` (`common_data.h`): tx width in 4x4 units.
+const TX_SIZE_WIDE_UNIT: [i32; 19] = [1, 2, 4, 8, 16, 1, 2, 2, 4, 4, 8, 8, 16, 1, 4, 2, 8, 4, 16];
+/// `tx_size_high_unit[TX_SIZES_ALL]` (`common_data.h`): tx height in 4x4 units.
+const TX_SIZE_HIGH_UNIT: [i32; 19] = [1, 2, 4, 8, 16, 2, 1, 4, 2, 8, 4, 16, 8, 4, 1, 8, 2, 16, 4];
+/// `sub_tx_size_map[TX_SIZES_ALL]` (`common_data.h`): one var-tx split step.
+const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
+/// `MAX_VARTX_DEPTH` (`enums.h`).
+const MAX_VARTX_DEPTH: i32 = 2;
+
+/// `max_block_wide` (`av1_common_int.h`) for luma (plane 0, subsampling_x = 0): the
+/// block width in 4x4 tx units, clipped to the frame's right edge.
+fn max_block_wide(bsize: usize, mb_to_right_edge: i32) -> i32 {
+    let mut max_blocks_wide = BLOCK_SIZE_WIDE[bsize];
+    if mb_to_right_edge < 0 {
+        max_blocks_wide += mb_to_right_edge >> 3; // 3 + subsampling_x(=0)
+    }
+    max_blocks_wide >> 2 // MI_SIZE_LOG2
+}
+
+/// `max_block_high` (`av1_common_int.h`) for luma (plane 0, subsampling_y = 0).
+fn max_block_high(bsize: usize, mb_to_bottom_edge: i32) -> i32 {
+    let mut max_blocks_high = BLOCK_SIZE_HIGH[bsize];
+    if mb_to_bottom_edge < 0 {
+        max_blocks_high += mb_to_bottom_edge >> 3; // 3 + subsampling_y(=0)
+    }
+    max_blocks_high >> 2 // MI_SIZE_LOG2
+}
+
+/// `av1_get_txb_size_index` (`blockd.h`): index into `inter_tx_size[]` for the txb at
+/// (blk_row, blk_col) within a block of size `bsize`.
+fn get_txb_size_index(bsize: usize, blk_row: i32, blk_col: i32) -> usize {
+    const TW_W_LOG2: [i32; 22] = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 0, 1, 1, 2, 2, 3];
+    const TW_H_LOG2: [i32; 22] = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 1, 0, 2, 1, 3, 2];
+    const STRIDE_LOG2: [i32; 22] = [0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 2, 2, 0, 1, 0, 1, 0, 1];
+    let index = ((blk_row >> TW_H_LOG2[bsize]) << STRIDE_LOG2[bsize]) + (blk_col >> TW_W_LOG2[bsize]);
+    index as usize
+}
+
+/// `write_tx_size_vartx` (`av1/encoder/bitstream.c`): the recursive variable-transform
+/// -size split coder for an inter block. Starting from the block's top `tx_size`, it
+/// walks the quadtree — at each node either coding a "no further split" flag (0) into
+/// `txfm_partition_cdf[ctx]` and stamping the neighbour context, or coding a "split"
+/// flag (1) and recursing into the four `sub_tx_size_map` children (down to
+/// `MAX_VARTX_DEPTH`). `inter_tx_size[]` (indexed by `av1_get_txb_size_index`) holds
+/// the chosen per-txb sizes that decide each node. `above_ctx`/`left_ctx` are the
+/// per-superblock neighbour txfm-context arrays (mutated in place).
+#[allow(clippy::too_many_arguments)]
+pub fn write_tx_size_vartx(
+    enc: &mut OdEcEnc,
+    txfm_partition_cdf: &mut [[u16; 3]],
+    bsize: usize,
+    inter_tx_size: &[usize; 16],
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    above_ctx: &mut [u8],
+    left_ctx: &mut [u8],
+    tx_size: usize,
+    depth: i32,
+    blk_row: i32,
+    blk_col: i32,
+) {
+    let max_blocks_high = max_block_high(bsize, mb_to_bottom_edge);
+    let max_blocks_wide = max_block_wide(bsize, mb_to_right_edge);
+    if blk_row >= max_blocks_high || blk_col >= max_blocks_wide {
+        return;
+    }
+
+    let (bc, br) = (blk_col as usize, blk_row as usize);
+    if depth == MAX_VARTX_DEPTH {
+        txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], tx_size, tx_size);
+        return;
+    }
+
+    let ctx = txfm_partition_context(above_ctx[bc], left_ctx[br], bsize, tx_size);
+    let txb_size_index = get_txb_size_index(bsize, blk_row, blk_col);
+    let write_txfm_partition = tx_size == inter_tx_size[txb_size_index];
+    if write_txfm_partition {
+        write_symbol(enc, 0, &mut txfm_partition_cdf[ctx], 2);
+        txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], tx_size, tx_size);
+    } else {
+        let sub_txs = SUB_TX_SIZE_MAP[tx_size];
+        let bsw = TX_SIZE_WIDE_UNIT[sub_txs];
+        let bsh = TX_SIZE_HIGH_UNIT[sub_txs];
+        write_symbol(enc, 1, &mut txfm_partition_cdf[ctx], 2);
+        if sub_txs == TX_4X4 {
+            txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], sub_txs, tx_size);
+            return;
+        }
+        let mut row = 0;
+        while row < TX_SIZE_HIGH_UNIT[tx_size] {
+            let offsetr = blk_row + row;
+            let mut col = 0;
+            while col < TX_SIZE_WIDE_UNIT[tx_size] {
+                let offsetc = blk_col + col;
+                write_tx_size_vartx(
+                    enc, txfm_partition_cdf, bsize, inter_tx_size, mb_to_right_edge,
+                    mb_to_bottom_edge, above_ctx, left_ctx, sub_txs, depth + 1, offsetr, offsetc,
+                );
+                col += bsw;
+            }
+            row += bsh;
+        }
+    }
+}

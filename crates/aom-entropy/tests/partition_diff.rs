@@ -1199,3 +1199,59 @@ fn txfm_partition_update_matches_c() {
         }
     }
 }
+
+#[test]
+fn write_tx_size_vartx_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_tx_size_vartx;
+    // max_txsize_rect_lookup[BLOCK_SIZES_ALL] — the block's top var-tx size.
+    const MAX_TX_RECT: [usize; 22] =
+        [0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18];
+    // Inter block sizes >= 8x8 (var-tx applies): squares, rects, and 128s.
+    let bsizes: [usize; 13] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 18, 19];
+    let nbr: [u8; 6] = [0, 4, 8, 16, 32, 64];
+    let mut rng = Rng(0x7a12_b0de_5a1e_0001);
+    for &bsize in &bsizes {
+        let top = MAX_TX_RECT[bsize];
+        for _ in 0..6000 {
+            // Any inter_tx_size values are valid — the recursion always terminates.
+            let mut its = [0u8; 16];
+            for v in its.iter_mut() {
+                *v = (rng.next() % 19) as u8;
+            }
+            let its_usize: [usize; 16] = core::array::from_fn(|i| its[i] as usize);
+            let mut above = [0u8; 32];
+            let mut left = [0u8; 32];
+            for i in 0..32 {
+                above[i] = nbr[(rng.next() % 6) as usize];
+                left[i] = nbr[(rng.next() % 6) as usize];
+            }
+            // Frame-edge clip in whole tx units (each -32 in 1/8-pel = -1 tx unit).
+            let re = -((rng.next() % 4) as i32) * 32;
+            let be = -((rng.next() % 4) as i32) * 32;
+            // Random starting txfm_partition_cdf (21 ctxs, 2-symbol [prob,0,count]).
+            let mut cdf = [[0u16; 3]; 21];
+            let mut cflat = [0u16; 63];
+            for c in 0..21 {
+                let p = 1 + (rng.next() % 32766) as u16;
+                cdf[c] = [p, 0, 0];
+                cflat[c * 3] = p;
+            }
+            let mut enc = OdEcEnc::new();
+            let mut a_rs = above;
+            let mut l_rs = left;
+            let mut cdf_rs = cdf;
+            write_tx_size_vartx(
+                &mut enc, &mut cdf_rs, bsize, &its_usize, re, be, &mut a_rs, &mut l_rs, top, 0, 0, 0,
+            );
+            let got = enc.done().to_vec();
+            let (want, ao, lo, co) =
+                c::ref_write_tx_size_vartx(bsize as i32, top as i32, &its, re, be, &above, &left, &cflat);
+            assert_eq!(got, want, "bytes bsize={bsize} top={top} re={re} be={be} its={its:?}");
+            assert_eq!(a_rs, ao, "above bsize={bsize} its={its:?}");
+            assert_eq!(l_rs, lo, "left bsize={bsize} its={its:?}");
+            let co_nested: [[u16; 3]; 21] = core::array::from_fn(|c| [co[c * 3], co[c * 3 + 1], co[c * 3 + 2]]);
+            assert_eq!(cdf_rs, co_nested, "cdf bsize={bsize} its={its:?}");
+        }
+    }
+}

@@ -268,6 +268,8 @@ extern "C" {
     fn shim_txfm_partition_context(above: u8, left: u8, bsize: i32, tx_size: i32) -> i32;
     fn shim_txfm_partition_update(above_ctx: *mut u8, left_ctx: *mut u8, tx_size: i32, txb_size: i32);
     #[allow(clippy::too_many_arguments)]
+    fn shim_write_tx_size_vartx(bsize: i32, top_tx_size: i32, inter_tx_size: *const u8, mb_to_right_edge: i32, mb_to_bottom_edge: i32, above_in: *const u8, left_in: *const u8, cdf: *mut u16, out: *mut u8, above_out: *mut u8, left_out: *mut u8, cdf_out: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_ref_frames(cdfs: *mut u16, seg_ref: i32, seg_skipgmv: i32, rmode_select: i32, comp_allowed: i32, is_compound: i32, comp_ref_type: i32, ref0: i32, ref1: i32, out: *mut u8, out_cdfs: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_get_comp_reference_type_context(ha: i32, a_r0: i32, a_r1: i32, a_ibc: i32, hl: i32, l_r0: i32, l_r1: i32, l_ibc: i32) -> i32;
@@ -410,6 +412,35 @@ pub fn ref_txfm_partition_context(above: u8, left: u8, bsize: i32, tx_size: i32)
 /// Reference `txfm_partition_update` — fills above[0..bw]=txw, left[0..bh]=txh in place.
 pub fn ref_txfm_partition_update(above: &mut [u8], left: &mut [u8], tx_size: i32, txb_size: i32) {
     unsafe { shim_txfm_partition_update(above.as_mut_ptr(), left.as_mut_ptr(), tx_size, txb_size) };
+}
+
+/// Reference `write_tx_size_vartx` (the recursion, over the pristine C od_ec + real
+/// libaom helpers). Returns (bytes, above_ctx[32], left_ctx[32], adapted_cdf[21][3]).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_tx_size_vartx(
+    bsize: i32,
+    top_tx_size: i32,
+    inter_tx_size: &[u8; 16],
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    above_in: &[u8; 32],
+    left_in: &[u8; 32],
+    cdf: &[u16; 63],
+) -> (Vec<u8>, [u8; 32], [u8; 32], [u16; 63]) {
+    let mut c = *cdf;
+    let mut out = vec![0u8; 64];
+    let mut ao = [0u8; 32];
+    let mut lo = [0u8; 32];
+    let mut co = [0u16; 63];
+    let n = unsafe {
+        shim_write_tx_size_vartx(
+            bsize, top_tx_size, inter_tx_size.as_ptr(), mb_to_right_edge, mb_to_bottom_edge,
+            above_in.as_ptr(), left_in.as_ptr(), c.as_mut_ptr(), out.as_mut_ptr(),
+            ao.as_mut_ptr(), lo.as_mut_ptr(), co.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, ao, lo, co)
 }
 
 /// Reference `av1_get_intra_inter_context` (facade over the real exported fn).

@@ -716,3 +716,84 @@ void shim_txfm_partition_update(uint8_t *above_ctx, uint8_t *left_ctx, int tx_si
   txfm_partition_update((TXFM_CONTEXT *)above_ctx, (TXFM_CONTEXT *)left_ctx,
                         (TX_SIZE)tx_size, (TX_SIZE)txb_size);
 }
+
+/* --- write_tx_size_vartx recursion (av1/encoder/bitstream.c) --- */
+/* Body copied verbatim from write_tx_size_vartx; aom_write_symbol(w,s,cdf,2) is
+ * expanded to od_ec_encode_cdf_q15 + update_cdf (exactly what aom_write_symbol does
+ * when CDF adaptation is on). All decisions call the real libaom helpers. */
+static void shim_wtsv_rec(MACROBLOCKD *xd, const MB_MODE_INFO *mbmi, TX_SIZE tx_size,
+                          int depth, int blk_row, int blk_col, od_ec_enc *ec,
+                          uint16_t (*txfm_partition_cdf)[3]) {
+  const int max_blocks_high = max_block_high(xd, mbmi->bsize, 0);
+  const int max_blocks_wide = max_block_wide(xd, mbmi->bsize, 0);
+  if (blk_row >= max_blocks_high || blk_col >= max_blocks_wide) return;
+
+  if (depth == MAX_VARTX_DEPTH) {
+    txfm_partition_update(xd->above_txfm_context + blk_col,
+                          xd->left_txfm_context + blk_row, tx_size, tx_size);
+    return;
+  }
+
+  const int ctx = txfm_partition_context(xd->above_txfm_context + blk_col,
+                                         xd->left_txfm_context + blk_row,
+                                         mbmi->bsize, tx_size);
+  const int txb_size_index = av1_get_txb_size_index(mbmi->bsize, blk_row, blk_col);
+  const int write_txfm_partition = tx_size == mbmi->inter_tx_size[txb_size_index];
+  if (write_txfm_partition) {
+    od_ec_encode_cdf_q15(ec, 0, txfm_partition_cdf[ctx], 2);
+    update_cdf(txfm_partition_cdf[ctx], 0, 2);
+    txfm_partition_update(xd->above_txfm_context + blk_col,
+                          xd->left_txfm_context + blk_row, tx_size, tx_size);
+  } else {
+    const TX_SIZE sub_txs = sub_tx_size_map[tx_size];
+    const int bsw = tx_size_wide_unit[sub_txs];
+    const int bsh = tx_size_high_unit[sub_txs];
+    od_ec_encode_cdf_q15(ec, 1, txfm_partition_cdf[ctx], 2);
+    update_cdf(txfm_partition_cdf[ctx], 1, 2);
+    if (sub_txs == TX_4X4) {
+      txfm_partition_update(xd->above_txfm_context + blk_col,
+                            xd->left_txfm_context + blk_row, sub_txs, tx_size);
+      return;
+    }
+    for (int row = 0; row < tx_size_high_unit[tx_size]; row += bsh) {
+      const int offsetr = blk_row + row;
+      for (int col = 0; col < tx_size_wide_unit[tx_size]; col += bsw) {
+        const int offsetc = blk_col + col;
+        shim_wtsv_rec(xd, mbmi, sub_txs, depth + 1, offsetr, offsetc, ec,
+                      txfm_partition_cdf);
+      }
+    }
+  }
+}
+
+/* above/left are 32-slot (MAX_MIB_SIZE) neighbour txfm-context arrays; inter_tx_size
+ * is the 16-entry per-txb chosen tx sizes; cdf is 21x3 flattened txfm_partition_cdf. */
+uint32_t shim_write_tx_size_vartx(int bsize, int top_tx_size, const uint8_t *inter_tx_size,
+                                  int mb_to_right_edge, int mb_to_bottom_edge,
+                                  const uint8_t *above_in, const uint8_t *left_in,
+                                  uint16_t *cdf, uint8_t *out, uint8_t *above_out,
+                                  uint8_t *left_out, uint16_t *cdf_out) {
+  MACROBLOCKD xd;
+  MB_MODE_INFO mbmi;
+  uint8_t above[32], left[32];
+  uint16_t local_cdf[21][3];
+  for (int i = 0; i < 32; i++) { above[i] = above_in[i]; left[i] = left_in[i]; }
+  for (int i = 0; i < 21; i++) for (int j = 0; j < 3; j++) local_cdf[i][j] = cdf[i * 3 + j];
+  mbmi.bsize = (BLOCK_SIZE)bsize;
+  for (int i = 0; i < 16; i++) mbmi.inter_tx_size[i] = (TX_SIZE)inter_tx_size[i];
+  xd.mb_to_right_edge = mb_to_right_edge;
+  xd.mb_to_bottom_edge = mb_to_bottom_edge;
+  xd.plane[0].subsampling_x = 0;
+  xd.plane[0].subsampling_y = 0;
+  xd.above_txfm_context = (TXFM_CONTEXT *)above;
+  xd.left_txfm_context = (TXFM_CONTEXT *)left;
+
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  shim_wtsv_rec(&xd, &mbmi, (TX_SIZE)top_tx_size, 0, 0, 0, &ec, local_cdf);
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 32; i++) { above_out[i] = above[i]; left_out[i] = left[i]; }
+  for (int i = 0; i < 21; i++) for (int j = 0; j < 3; j++) cdf_out[i * 3 + j] = local_cdf[i][j];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
