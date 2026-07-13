@@ -270,3 +270,37 @@ uint32_t shim_write_tile_info(int mi_cols, int mi_rows, int mib_size_log2,
   }
   return aom_wb_bytes_written(&wb);
 }
+
+/* Transcribed control flow of encode_restoration_mode over the real aom_wb
+ * (debug-only asserts omitted — no byte effect). RESTORE_* = 0..3. */
+uint32_t shim_encode_restoration_mode(int enable_restoration, int allow_intrabc,
+                                      const int *frame_restoration_type, int sb_size_128,
+                                      const int *restoration_unit_size, int ssx, int ssy,
+                                      int num_planes, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  if (!enable_restoration || allow_intrabc) return aom_wb_bytes_written(&wb);
+  int all_none = 1, chroma_none = 1;
+  for (int p = 0; p < num_planes; ++p) {
+    int ft = frame_restoration_type[p];
+    if (ft != 0) { all_none = 0; chroma_none &= p == 0; }
+    switch (ft) {
+      case 0: aom_wb_write_bit(&wb, 0); aom_wb_write_bit(&wb, 0); break;
+      case 1: aom_wb_write_bit(&wb, 1); aom_wb_write_bit(&wb, 0); break;
+      case 2: aom_wb_write_bit(&wb, 1); aom_wb_write_bit(&wb, 1); break;
+      case 3: aom_wb_write_bit(&wb, 0); aom_wb_write_bit(&wb, 1); break;
+      default: break;
+    }
+  }
+  if (!all_none) {
+    int sb_size = sb_size_128 ? 128 : 64;
+    int rus = restoration_unit_size[0];
+    if (sb_size == 64) aom_wb_write_bit(&wb, rus > 64);
+    if (rus > 64) aom_wb_write_bit(&wb, rus > 128);
+  }
+  if (num_planes > 1) {
+    int s = AOMMIN(ssx, ssy);
+    if (s && !chroma_none)
+      aom_wb_write_bit(&wb, restoration_unit_size[1] != restoration_unit_size[0]);
+  }
+  return aom_wb_bytes_written(&wb);
+}

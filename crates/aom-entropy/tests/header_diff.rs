@@ -305,3 +305,35 @@ fn write_tile_info_matches_c() {
         assert_eq!(got, want, "write_tile_info {t:?}");
     }
 }
+
+#[test]
+fn encode_restoration_mode_matches_c() {
+    use aom_entropy::header::{encode_restoration_mode, RestorationHeader};
+    let mut rng = Rng(0x25e0_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let mut frt = [0u8; 3];
+        for f in &mut frt {
+            *f = rng.range(0, 4) as u8; // RESTORE_NONE..SWITCHABLE
+        }
+        // restoration_unit_size: exercise the >64 / >128 branches (valid: 64/128/256).
+        let rus_pick = |rng: &mut Rng| -> i32 { [64, 128, 256][rng.range(0, 3) as usize] };
+        let rus0 = rus_pick(&mut rng);
+        let rus1 = if rng.next().is_multiple_of(2) { rus0 } else { rus_pick(&mut rng) };
+        let r = RestorationHeader {
+            enable_restoration: rng.next().is_multiple_of(2),
+            allow_intrabc: rng.next().is_multiple_of(7),
+            frame_restoration_type: frt,
+            sb_size_128: rng.next().is_multiple_of(2),
+            restoration_unit_size: [rus0, rus1, rus1],
+            subsampling_x: rng.range(0, 2),
+            subsampling_y: rng.range(0, 2),
+        };
+        let num_planes = if rng.next().is_multiple_of(4) { 1 } else { 3 };
+        let mut wb = WriteBitBuffer::new();
+        encode_restoration_mode(&mut wb, &r, num_planes);
+        let got = wb.bytes().to_vec();
+        let frt_i = [frt[0] as i32, frt[1] as i32, frt[2] as i32];
+        let want = c::ref_encode_restoration_mode(r.enable_restoration, r.allow_intrabc, &frt_i, r.sb_size_128, &r.restoration_unit_size, r.subsampling_x, r.subsampling_y, num_planes);
+        assert_eq!(got, want, "encode_restoration_mode {r:?} np={num_planes}");
+    }
+}

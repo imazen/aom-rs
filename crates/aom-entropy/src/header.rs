@@ -380,3 +380,78 @@ pub fn write_tile_info(wb: &mut WriteBitBuffer, t: &TileInfoHeader) {
         wb.write_literal(3, 2);
     }
 }
+
+// ---- loop restoration -----------------------------------------------------
+
+const RESTORE_NONE: u8 = 0;
+const RESTORE_WIENER: u8 = 1;
+const RESTORE_SGRPROJ: u8 = 2;
+const RESTORE_SWITCHABLE: u8 = 3;
+
+/// The loop-restoration frame-header state (`cm->rst_info` + seq/features flags).
+#[derive(Clone, Copy, Debug)]
+pub struct RestorationHeader {
+    pub enable_restoration: bool,
+    pub allow_intrabc: bool,
+    /// Per-plane `frame_restoration_type` (`RESTORE_*`).
+    pub frame_restoration_type: [u8; 3],
+    /// `sb_size == BLOCK_128X128`.
+    pub sb_size_128: bool,
+    pub restoration_unit_size: [i32; 3],
+    pub subsampling_x: i32,
+    pub subsampling_y: i32,
+}
+
+/// `encode_restoration_mode` (`av1/encoder/bitstream.c`): the per-plane restoration
+/// type (2 bits, mapped NONE=00 WIENER=10 SGRPROJ=11 SWITCHABLE=01), then (when any
+/// plane restores) the luma restoration-unit-size increments, and the chroma
+/// unit-size-differs flag.
+pub fn encode_restoration_mode(wb: &mut WriteBitBuffer, r: &RestorationHeader, num_planes: usize) {
+    if !r.enable_restoration || r.allow_intrabc {
+        return;
+    }
+    let mut all_none = true;
+    let mut chroma_none = true;
+    for p in 0..num_planes {
+        let ft = r.frame_restoration_type[p];
+        if ft != RESTORE_NONE {
+            all_none = false;
+            chroma_none &= p == 0;
+        }
+        match ft {
+            RESTORE_NONE => {
+                wb.write_bit(0);
+                wb.write_bit(0);
+            }
+            RESTORE_WIENER => {
+                wb.write_bit(1);
+                wb.write_bit(0);
+            }
+            RESTORE_SGRPROJ => {
+                wb.write_bit(1);
+                wb.write_bit(1);
+            }
+            RESTORE_SWITCHABLE => {
+                wb.write_bit(0);
+                wb.write_bit(1);
+            }
+            _ => unreachable!(),
+        }
+    }
+    if !all_none {
+        let sb_size = if r.sb_size_128 { 128 } else { 64 };
+        let rus = r.restoration_unit_size[0];
+        if sb_size == 64 {
+            wb.write_bit((rus > 64) as u32);
+        }
+        if rus > 64 {
+            wb.write_bit((rus > 128) as u32);
+        }
+    }
+    if num_planes > 1 {
+        let s = r.subsampling_x.min(r.subsampling_y);
+        if s != 0 && !chroma_none {
+            wb.write_bit((r.restoration_unit_size[1] != r.restoration_unit_size[0]) as u32);
+        }
+    }
+}

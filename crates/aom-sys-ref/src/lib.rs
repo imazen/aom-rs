@@ -205,6 +205,17 @@ extern "C" {
     fn shim_write_frame_size(frame_size_override: i32, num_bits_width: i32, num_bits_height: i32, up_w: i32, up_h: i32, enable_superres: i32, denom: i32, scaling_active: i32, rw: i32, rh: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_tile_info(mi_cols: i32, mi_rows: i32, mib_size_log2: i32, uniform_spacing: i32, log2_cols: i32, min_log2_cols: i32, max_log2_cols: i32, log2_rows: i32, min_log2_rows: i32, max_log2_rows: i32, cols: i32, rows: i32, col_start_sb: *const i32, row_start_sb: *const i32, max_width_sb: i32, max_height_sb: i32, out: *mut u8) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_restoration_mode(enable_restoration: i32, allow_intrabc: i32, frame_restoration_type: *const i32, sb_size_128: i32, restoration_unit_size: *const i32, ssx: i32, ssy: i32, num_planes: i32, out: *mut u8) -> u32;
+}
+
+/// Reference `encode_restoration_mode` (transcribed control flow over the real aom_wb).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_restoration_mode(enable_restoration: bool, allow_intrabc: bool, frame_restoration_type: &[i32; 3], sb_size_128: bool, restoration_unit_size: &[i32; 3], ssx: i32, ssy: i32, num_planes: usize) -> Vec<u8> {
+    let mut out = vec![0u8; 16];
+    let n = unsafe { shim_encode_restoration_mode(enable_restoration as i32, allow_intrabc as i32, frame_restoration_type.as_ptr(), sb_size_128 as i32, restoration_unit_size.as_ptr(), ssx, ssy, num_planes as i32, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `write_tile_info` (transcribed control flow over the real aom_wb).
