@@ -1,7 +1,7 @@
 //! Differential harness for SAD / variance / sub-pixel variance vs C libaom
 //! v3.14.1 across all 22 block sizes.
 
-use aom_dist::{masked_sad, sad, sad_avg, sub_pixel_variance, variance};
+use aom_dist::{masked_sad, obmc_sad, sad, sad_avg, sub_pixel_variance, variance};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 22] = [
@@ -65,6 +65,13 @@ fn sad_variance_subpel_byte_identical() {
                 let wm = c::ref_masked_sad(idx, &a, a_stride, &b, b_stride, &sp2, &msk, m_stride, inv);
                 assert_eq!(gm, wm, "masked_sad {w}x{h} inv={inv}");
             }
+
+            // OBMC SAD: wsrc/mask contiguous i32 (mask in [0,4096], wsrc weighted).
+            let wsrc: Vec<i32> = (0..w * h).map(|_| (rng.next() % (256 * 4096)) as i32).collect();
+            let obmc_mask: Vec<i32> = (0..w * h).map(|_| (rng.next() % 4097) as i32).collect();
+            let go = obmc_sad(&a, a_stride, &wsrc, &obmc_mask, w, h);
+            let wo = c::ref_obmc_sad(idx, &a, a_stride, &wsrc, &obmc_mask);
+            assert_eq!(go, wo, "obmc_sad {w}x{h}");
 
             // variance
             let (gv, gs) = variance(&a, a_stride, &b, b_stride, w, h);

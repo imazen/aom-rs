@@ -141,6 +141,12 @@ extern "C" {
     fn shim_sad_avg(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_masked_sad(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8, m: *const u8, ms: i32, inv: i32) -> u32;
+    fn shim_obmc_sad(i: i32, r: *const u8, rs: i32, ws: *const i32, m: *const i32) -> u32;
+}
+
+/// Reference `aom_obmc_sad<W>x<H>_c` (overlapped block motion-comp SAD).
+pub fn ref_obmc_sad(idx: usize, r: &[u8], rs: usize, ws: &[i32], m: &[i32]) -> u32 {
+    unsafe { shim_obmc_sad(idx as i32, r.as_ptr(), rs as i32, ws.as_ptr(), m.as_ptr()) }
 }
 
 /// Reference `aom_masked_sad<W>x<H>_c` (wedge / diff-weighted compound RD).

@@ -45,6 +45,20 @@ pub fn sad_avg(
     s
 }
 
+/// `aom_obmc_sad<W>x<H>_c`: overlapped block motion-comp SAD. `wsrc` and `mask`
+/// are contiguous i32 buffers (stride = width); `sad += (|wsrc - pre*mask| + 2048)
+/// >> 12` (ROUND_POWER_OF_TWO by 12).
+pub fn obmc_sad(pre: &[u8], pre_stride: usize, wsrc: &[i32], mask: &[i32], w: usize, h: usize) -> u32 {
+    let mut sad: u32 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let d = (wsrc[y * w + x] - pre[y * pre_stride + x] as i32 * mask[y * w + x]).unsigned_abs();
+            sad += (d + 2048) >> 12;
+        }
+    }
+    sad
+}
+
 /// `aom_masked_sad<W>x<H>_c`: SAD of `src` against an A64-mask blend of `ref`
 /// and a contiguous `second_pred` (wedge / difference-weighted compound RD).
 /// `AOM_BLEND_A64(m,a,b) = (m*a + (64-m)*b + 32) >> 6`. When `invert_mask`, the
