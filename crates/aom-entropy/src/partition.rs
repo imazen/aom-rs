@@ -947,6 +947,7 @@ pub fn neg_interleave(x: i32, ref_: i32, max: i32) -> i32 {
 /// is then set to the spatial prediction). Otherwise the neg-interleaved id is coded on
 /// the (cdf_num-selected) `spatial_pred_seg_cdf` (`MAX_SEGMENTS`=8). The spatial
 /// prediction `pred` + `cdf_num` (av1_get_spatial_seg_pred) are the caller's.
+#[allow(clippy::too_many_arguments)]
 pub fn write_segment_id(
     enc: &mut OdEcEnc,
     pred_cdf: &mut [u16],
