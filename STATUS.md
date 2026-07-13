@@ -191,6 +191,14 @@ both tracks, fully bit-exact.**
   `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
   rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
+- **RD + front-end primitives (aom-dist)** — `block_error` / `highbd_block_error`
+  (av1_[highbd_]block_error_c): transform-domain distortion, `error=sum((coeff-dqcoeff)^2)`
+  + `ssz=sum(coeff^2)` (lowbd 32-bit products; highbd 64-bit + rounded-shift 2*(bd-8)) —
+  the fast distortion the RD search pairs with the trellis rate. `subtract_block` /
+  `highbd_subtract_block` (aom_[highbd_]subtract_block_c): the residual generator
+  `diff=src-pred`, natively strided — completing the front end (pred -> subtract ->
+  xform_quant). Both diffed vs exported C (highbd subtract via a CONVERT_TO_BYTEPTR shim).
+
 - **Transform-block loop — one coding-block plane (aom-encode)** — encode_coding_block_plane
   iterates a plane's txbs in raster order (av1_foreach_transformed_block_in_plane),
   threading the above/left ENTROPY_CONTEXT arrays: get_txb_ctx reads the neighbour context,
