@@ -1779,3 +1779,38 @@ pub fn read_segmentation(rb: &mut ReadBitBuffer, has_primary_ref: bool) -> Segme
     }
     seg
 }
+
+/// `read_frame_size` — inverse of [`write_frame_size`]: the coded (superres-upscaled)
+/// frame dimensions (only when `frame_size_override`, else the caller's inferred size),
+/// then the superres scale + render size. `frame_size_override` / `num_bits_*` /
+/// `enable_superres` / the inferred size come from the sequence + frame-header parse.
+#[allow(clippy::too_many_arguments)]
+pub fn read_frame_size(
+    rb: &mut ReadBitBuffer,
+    frame_size_override: bool,
+    num_bits_width: u32,
+    num_bits_height: u32,
+    enable_superres: bool,
+    inferred_width: i32,
+    inferred_height: i32,
+) -> FrameSizeHeader {
+    let (w, h) = if frame_size_override {
+        (rb.read_literal(num_bits_width) + 1, rb.read_literal(num_bits_height) + 1)
+    } else {
+        (inferred_width, inferred_height)
+    };
+    let scale_denominator = read_superres_scale(rb, enable_superres);
+    let (scaling_active, render_width, render_height) = read_render_size(rb);
+    FrameSizeHeader {
+        frame_size_override,
+        num_bits_width,
+        num_bits_height,
+        superres_upscaled_width: w,
+        superres_upscaled_height: h,
+        enable_superres,
+        scale_denominator,
+        scaling_active,
+        render_width,
+        render_height,
+    }
+}

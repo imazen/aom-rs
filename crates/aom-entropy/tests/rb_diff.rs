@@ -430,3 +430,52 @@ fn read_segmentation_inverts_write() {
         assert_eq!(g.feature_data, data, "seg data");
     }
 }
+
+#[test]
+fn read_frame_size_inverts_write() {
+    use aom_entropy::header::{read_frame_size, write_frame_size, FrameSizeHeader};
+    let mut rng = Rng(0x1e_f512_c0de_0150);
+    for _ in 0..100_000 {
+        let nbw = 8 + (rng.next() % 9) as u32; // 8..=16
+        let nbh = 8 + (rng.next() % 9) as u32;
+        let over = rng.next() & 1 == 1;
+        let w = 1 + (rng.next() % (1u64 << nbw)) as i32;
+        let h = 1 + (rng.next() % (1u64 << nbh)) as i32;
+        let en_sr = rng.next() & 1 == 1;
+        let denom = if en_sr && rng.next() & 1 == 1 { 9 + (rng.next() % 8) as i32 } else { 8 };
+        let sc_active = rng.next() & 1 == 1;
+        let (rw, rh) = if sc_active {
+            (1 + (rng.next() % 65536) as i32, 1 + (rng.next() % 65536) as i32)
+        } else {
+            (0, 0)
+        };
+        let fs = FrameSizeHeader {
+            frame_size_override: over,
+            num_bits_width: nbw,
+            num_bits_height: nbh,
+            superres_upscaled_width: w,
+            superres_upscaled_height: h,
+            enable_superres: en_sr,
+            scale_denominator: denom,
+            scaling_active: sc_active,
+            render_width: rw,
+            render_height: rh,
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_frame_size(&mut wb, &fs);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        // for !override the size is inferred: pass the same (w,h).
+        let g = read_frame_size(&mut rb, over, nbw, nbh, en_sr, w, h);
+        assert_eq!(
+            (g.superres_upscaled_width, g.superres_upscaled_height),
+            (w, h),
+            "frame size over={over}"
+        );
+        assert_eq!(g.scale_denominator, if en_sr { denom } else { 8 }, "superres");
+        assert_eq!(g.scaling_active, sc_active, "render active");
+        if sc_active {
+            assert_eq!((g.render_width, g.render_height), (rw, rh), "render size");
+        }
+    }
+}
