@@ -3769,3 +3769,114 @@ fn read_leaf_symbols_roundtrip() {
         }
     }
 }
+
+#[test]
+fn read_composite_leaf_symbols_roundtrip() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        read_cdef, read_cfl_alphas, read_intrabc_info, read_skip_mode, write_cdef, write_cfl_alphas,
+        write_intrabc_info, write_skip_mode,
+    };
+    let mut rng = Rng(0x1e_c0a1_c0de_00b0u64);
+    // 69-u16 nmv component blob (sign/classes/class0/bits/fp/hp sub-CDFs).
+    let mk_comp = |rng: &mut Rng| -> [u16; 69] {
+        let mut c = [0u16; 69];
+        mk_ns_cdf(rng, 2, &mut c[0..3]);
+        mk_ns_cdf(rng, 11, &mut c[3..15]);
+        mk_ns_cdf(rng, 2, &mut c[15..18]);
+        for i in 0..10 {
+            let o = 18 + i * 3;
+            mk_ns_cdf(rng, 2, &mut c[o..o + 3]);
+        }
+        for i in 0..2 {
+            let o = 48 + i * 5;
+            mk_ns_cdf(rng, 4, &mut c[o..o + 5]);
+        }
+        mk_ns_cdf(rng, 4, &mut c[58..63]);
+        mk_ns_cdf(rng, 2, &mut c[63..66]);
+        mk_ns_cdf(rng, 2, &mut c[66..69]);
+        c
+    };
+    for _ in 0..80_000 {
+        // cfl_alphas
+        {
+            let js = (rng.next() % 8) as i32;
+            let sign_u = (js + 1) / 3;
+            let sign_v = (js + 1) % 3;
+            let u = if sign_u != 0 { (rng.next() % 16) as i32 } else { 0 };
+            let v = if sign_v != 0 { (rng.next() % 16) as i32 } else { 0 };
+            let idx = (u << 4) | v;
+            let mut sc = [0u16; 9];
+            mk_ns_cdf(&mut rng, 8, &mut sc);
+            let mut ac = [[0u16; 17]; 6];
+            for c in ac.iter_mut() {
+                mk_ns_cdf(&mut rng, 16, c);
+            }
+            let mut enc = OdEcEnc::new();
+            let (mut se, mut ae) = (sc, ac);
+            write_cfl_alphas(&mut enc, &mut se, &mut ae, idx, js);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut sd, mut ad) = (sc, ac);
+            let (gjs, gidx) = read_cfl_alphas(&mut dec, &mut sd, &mut ad);
+            assert_eq!((gjs, gidx), (js, idx), "cfl js={js} idx={idx}");
+            assert_eq!((se, ae), (sd, ad), "cfl cdf");
+        }
+        // skip_mode (coded path)
+        {
+            let skip_mode = (rng.next() & 1) as i32;
+            let mut c = [0u16; 3];
+            mk_ns_cdf(&mut rng, 2, &mut c);
+            let mut enc = OdEcEnc::new();
+            let mut ce = c;
+            write_skip_mode(&mut enc, &mut ce, true, false, true, false, skip_mode);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let mut cd = c;
+            let got = read_skip_mode(&mut dec, &mut cd, true, false, true, false);
+            assert_eq!(got, skip_mode, "skip_mode");
+            assert_eq!(ce, cd, "skip_mode cdf");
+        }
+        // intrabc (integer-pel DV rounds through MV_SUBPEL_NONE)
+        {
+            let use_intrabc = (rng.next() & 1) as i32;
+            let dr = if use_intrabc != 0 { ((rng.next() % 401) as i32 - 200) * 8 } else { 0 };
+            let dc = if use_intrabc != 0 { ((rng.next() % 401) as i32 - 200) * 8 } else { 0 };
+            let mut ic = [0u16; 3];
+            mk_ns_cdf(&mut rng, 2, &mut ic);
+            let mut joints = [0u16; 5];
+            mk_ns_cdf(&mut rng, 4, &mut joints);
+            let comp0 = mk_comp(&mut rng);
+            let comp1 = mk_comp(&mut rng);
+            let mut enc = OdEcEnc::new();
+            let (mut ie, mut je, mut c0e, mut c1e) = (ic, joints, comp0, comp1);
+            write_intrabc_info(&mut enc, &mut ie, &mut je, &mut c0e, &mut c1e, use_intrabc, dr, dc);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut id, mut jd, mut c0d, mut c1d) = (ic, joints, comp0, comp1);
+            let (gu, gr, gc) = read_intrabc_info(&mut dec, &mut id, &mut jd, &mut c0d, &mut c1d);
+            assert_eq!((gu, gr, gc), (use_intrabc, dr, dc), "intrabc dv=({dr},{dc})");
+            assert_eq!((ie, je, c0e, c1e), (id, jd, c0d, c1d), "intrabc cdf");
+        }
+        // cdef (single SB-upper-left call)
+        {
+            let bits = (rng.next() % 4) as u32; // 0..3
+            let strength = if bits > 0 { (rng.next() % (1u64 << bits)) as i32 } else { 0 };
+            let skip = (rng.next() & 1) as i32;
+            let sb128 = rng.next() & 1 == 1;
+            let sb_size = if sb128 { 15usize } else { 12usize }; // BLOCK_128X128 / BLOCK_64X64
+            let mib = if sb128 { 32 } else { 16 };
+            let mut te = [false; 4];
+            let mut enc = OdEcEnc::new();
+            write_cdef(&mut enc, false, false, 0, 0, mib, sb_size, skip, &mut te, bits, strength);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let mut td = [false; 4];
+            let got = read_cdef(&mut dec, false, false, 0, 0, mib, sb_size, skip, &mut td, bits);
+            let expected = if skip == 0 { strength } else { -1 };
+            assert_eq!(got, expected, "cdef bits={bits} skip={skip} sb128={sb128}");
+            assert_eq!(te, td, "cdef transmitted state");
+        }
+    }
+}

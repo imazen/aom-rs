@@ -3403,3 +3403,100 @@ pub fn read_segment_id(dec: &mut OdEcDec, pred_cdf: &mut [u16], pred: i32, last_
     let coded_id = read_symbol(dec, pred_cdf, MAX_SEGMENTS_MI);
     neg_deinterleave(coded_id, pred, last_active_segid + 1)
 }
+
+/// `read_cfl_alphas` — inverse of [`write_cfl_alphas`]: the CfL joint sign, then the
+/// per-plane alpha magnitudes for whichever planes are signed. Returns
+/// `(joint_sign, idx)` with `idx = (u_alpha << 4) | v_alpha`.
+pub fn read_cfl_alphas(
+    dec: &mut OdEcDec,
+    cfl_sign_cdf: &mut [u16],
+    cfl_alpha_cdf: &mut [[u16; 17]; 6],
+) -> (i32, i32) {
+    let joint_sign = read_symbol(dec, cfl_sign_cdf, CFL_JOINT_SIGNS);
+    let mut idx = 0;
+    if cfl_sign_u(joint_sign) != 0 {
+        let ctx = cfl_context_u(joint_sign) as usize;
+        idx |= read_symbol(dec, &mut cfl_alpha_cdf[ctx], CFL_ALPHABET_SIZE) << 4;
+    }
+    if cfl_sign_v(joint_sign) != 0 {
+        let ctx = cfl_context_v(joint_sign) as usize;
+        idx |= read_symbol(dec, &mut cfl_alpha_cdf[ctx], CFL_ALPHABET_SIZE);
+    }
+    (joint_sign, idx)
+}
+
+/// `read_skip_mode` — inverse of [`write_skip_mode`]: the skip-mode flag, coded only
+/// when the frame allows it and no segment feature suppresses it; 0 otherwise.
+#[allow(clippy::too_many_arguments)]
+pub fn read_skip_mode(
+    dec: &mut OdEcDec,
+    skip_mode_cdf: &mut [u16],
+    frame_skip_mode_flag: bool,
+    seg_skip_active: bool,
+    is_comp_ref_allowed: bool,
+    seg_ref_or_gmv_active: bool,
+) -> i32 {
+    if !frame_skip_mode_flag || seg_skip_active || !is_comp_ref_allowed || seg_ref_or_gmv_active {
+        return 0;
+    }
+    read_symbol(dec, skip_mode_cdf, 2)
+}
+
+/// `read_intrabc_info` — inverse of [`write_intrabc_info`]: the intrabc flag, then (if
+/// set) the block vector via the MV reader at `MV_SUBPEL_NONE` (integer-pel DV).
+/// Returns `(use_intrabc, diff_row, diff_col)`.
+pub fn read_intrabc_info(
+    dec: &mut OdEcDec,
+    intrabc_cdf: &mut [u16],
+    ndvc_joints: &mut [u16],
+    ndvc_comp0: &mut [u16; 69],
+    ndvc_comp1: &mut [u16; 69],
+) -> (i32, i32, i32) {
+    let use_intrabc = read_symbol(dec, intrabc_cdf, 2);
+    if use_intrabc != 0 {
+        let (r, c) = read_mv(dec, ndvc_joints, ndvc_comp0, ndvc_comp1, MV_SUBPEL_NONE);
+        (use_intrabc, r, c)
+    } else {
+        (use_intrabc, 0, 0)
+    }
+}
+
+/// `read_cdef` — inverse of [`write_cdef`]: the per-64x64-unit CDEF strength literal,
+/// once per unit (tracked in `cdef_transmitted`, reset at the SB upper-left) and only
+/// for a non-skip block. Returns the strength, or `-1` when nothing is read.
+#[allow(clippy::too_many_arguments)]
+pub fn read_cdef(
+    dec: &mut OdEcDec,
+    coded_lossless: bool,
+    allow_intrabc: bool,
+    mi_row: i32,
+    mi_col: i32,
+    mib_size: i32,
+    sb_size: usize,
+    skip: i32,
+    cdef_transmitted: &mut [bool; 4],
+    cdef_bits: u32,
+) -> i32 {
+    if coded_lossless || allow_intrabc {
+        return -1;
+    }
+    let sb_mask = mib_size - 1;
+    if (mi_row & sb_mask) == 0 && (mi_col & sb_mask) == 0 {
+        *cdef_transmitted = [false; 4];
+    }
+    let index_mask = 1 << (6 - MI_SIZE_LOG2);
+    let cdef_unit_row = i32::from((mi_row & index_mask) != 0);
+    let cdef_unit_col = i32::from((mi_col & index_mask) != 0);
+    let index = if sb_size == BLOCK_128X128 {
+        (cdef_unit_col + 2 * cdef_unit_row) as usize
+    } else {
+        0
+    };
+    if !cdef_transmitted[index] && skip == 0 {
+        let strength = read_literal(dec, cdef_bits);
+        cdef_transmitted[index] = true;
+        strength
+    } else {
+        -1
+    }
+}
