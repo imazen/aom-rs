@@ -964,3 +964,24 @@ pub fn write_segment_id(
     let coded_id = neg_interleave(segment_id, pred, last_active_segid + 1);
     write_symbol(enc, coded_id, pred_cdf, MAX_SEGMENTS_MI);
 }
+
+/// `write_intrabc_info` (`av1/encoder/bitstream.c`): the intra-block-copy flag on
+/// `intrabc_cdf` (2 symbols), then, when used, the block delta (motion) vector via
+/// `av1_encode_dv` — which is [`encode_mv`] at `MV_SUBPEL_NONE` precision on the DV nmv
+/// context. `diff_*` are the DV minus its reference.
+#[allow(clippy::too_many_arguments)]
+pub fn write_intrabc_info(
+    enc: &mut OdEcEnc,
+    intrabc_cdf: &mut [u16],
+    ndvc_joints: &mut [u16],
+    ndvc_comp0: &mut [u16; 69],
+    ndvc_comp1: &mut [u16; 69],
+    use_intrabc: i32,
+    diff_row: i32,
+    diff_col: i32,
+) {
+    write_symbol(enc, use_intrabc, intrabc_cdf, 2);
+    if use_intrabc != 0 {
+        encode_mv(enc, ndvc_joints, ndvc_comp0, ndvc_comp1, diff_row, diff_col, MV_SUBPEL_NONE);
+    }
+}

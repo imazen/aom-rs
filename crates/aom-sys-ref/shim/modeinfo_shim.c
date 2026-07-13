@@ -653,3 +653,28 @@ uint32_t shim_write_segment_id(uint16_t *cdf, int seg_enabled, int update_map,
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* write_intrabc_info: flag + av1_encode_dv (= encode_mv at MV_SUBPEL_NONE). */
+uint32_t shim_write_intrabc_info(uint16_t *intrabc_cdf, uint16_t *joints, uint16_t *comp0,
+                                 uint16_t *comp1, int use_intrabc, int diff_row,
+                                 int diff_col, uint8_t *out, uint16_t *out_ibc,
+                                 uint16_t *out_joints, uint16_t *out_c0, uint16_t *out_c1) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  od_ec_encode_cdf_q15(&ec, use_intrabc, intrabc_cdf, 2);
+  update_cdf(intrabc_cdf, use_intrabc, 2);
+  if (use_intrabc) {
+    MV diff = { (int16_t)diff_row, (int16_t)diff_col };
+    int j = av1_get_mv_joint(&diff);
+    od_ec_encode_cdf_q15(&ec, j, joints, 4);
+    update_cdf(joints, j, 4);
+    if (mv_joint_vertical(j)) mv_comp_wb(&ec, comp0, diff.row, MV_SUBPEL_NONE);
+    if (mv_joint_horizontal(j)) mv_comp_wb(&ec, comp1, diff.col, MV_SUBPEL_NONE);
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 3; i++) out_ibc[i] = intrabc_cdf[i];
+  for (int i = 0; i < 5; i++) out_joints[i] = joints[i];
+  for (int i = 0; i < 69; i++) { out_c0[i] = comp0[i]; out_c1[i] = comp1[i]; }
+  od_ec_enc_clear(&ec);
+  return nb;
+}

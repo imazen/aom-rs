@@ -1065,3 +1065,59 @@ fn neg_interleave_and_segment_id_match_c() {
         assert_eq!(mc, oc, "seg_id cdf");
     }
 }
+
+#[test]
+fn write_intrabc_info_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_intrabc_info;
+    let mut rng = Rng(0x1bcc_c0de_a11a_0009);
+    let mk = |rng: &mut Rng, ns: usize, out: &mut [u16]| {
+        let mut vals = [0i32; 11];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            out[i] = v as u16;
+            prev = v;
+        }
+        out[ns - 1] = 0;
+        out[ns] = 0;
+    };
+    let mk_comp = |rng: &mut Rng| -> [u16; 69] {
+        let mut c = [0u16; 69];
+        mk(rng, 2, &mut c[0..3]);
+        mk(rng, 11, &mut c[3..15]);
+        mk(rng, 2, &mut c[15..18]);
+        for i in 0..10 { let o = 18 + i * 3; mk(rng, 2, &mut c[o..o + 3]); }
+        for i in 0..2 { let o = 48 + i * 5; mk(rng, 4, &mut c[o..o + 5]); }
+        mk(rng, 4, &mut c[58..63]); mk(rng, 2, &mut c[63..66]); mk(rng, 2, &mut c[66..69]);
+        c
+    };
+    for _ in 0..200_000 {
+        let mut ibc = [0u16; 3];
+        mk(&mut rng, 2, &mut ibc);
+        let mut joints = [0u16; 5];
+        mk(&mut rng, 4, &mut joints);
+        let comp0 = mk_comp(&mut rng);
+        let comp1 = mk_comp(&mut rng);
+        let use_intrabc = (rng.next() % 2) as i32;
+        // DV diffs (integer, multiples of 8) in valid class range
+        let dr = ((rng.next() % 4097) as i32 - 2048) * 8;
+        let dc = ((rng.next() % 4097) as i32 - 2048) * 8;
+
+        let mut mib = ibc; let mut mj = joints; let mut m0 = comp0; let mut m1 = comp1;
+        let mut enc = OdEcEnc::new();
+        write_intrabc_info(&mut enc, &mut mib, &mut mj, &mut m0, &mut m1, use_intrabc, dr, dc);
+        let got = enc.done().to_vec();
+        let (want, oib, oj, o0, o1) = c::ref_write_intrabc_info(&ibc, &joints, &comp0, &comp1, use_intrabc, dr, dc);
+        assert_eq!(got, want, "intrabc bytes use={use_intrabc} d=({dr},{dc})");
+        assert_eq!(mib, oib, "intrabc ibc cdf");
+        assert_eq!(mj, oj, "intrabc joints cdf");
+        assert_eq!(m0, o0, "intrabc comp0");
+        assert_eq!(m1, o1, "intrabc comp1");
+    }
+}
