@@ -624,3 +624,45 @@ fn write_color_config_matches_c() {
         assert_eq!(got, want, "write_color_config {c:?}");
     }
 }
+
+#[test]
+fn timing_and_decoder_model_match_c() {
+    use aom_entropy::header::{
+        write_dec_model_op_parameters, write_decoder_model_info, write_timing_info_header,
+        DecoderModelInfo, TimingInfoHeader,
+    };
+    let mut rng = Rng(0x71de_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        // timing info
+        let t = TimingInfoHeader {
+            num_units_in_display_tick: rng.next() as u32,
+            time_scale: rng.next() as u32,
+            equal_picture_interval: rng.next().is_multiple_of(2),
+            num_ticks_per_picture: (rng.next() as u32 & 0x00ff_fffe) + 1, // -1 safe, not u32::MAX
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_timing_info_header(&mut wb, &t);
+        assert_eq!(wb.bytes(), &c::ref_write_timing_info(t.num_units_in_display_tick, t.time_scale, t.equal_picture_interval, t.num_ticks_per_picture)[..], "timing {t:?}");
+
+        // decoder model info: the *_length fields are in [1, 32] (written -1 in 5 bits)
+        let d = DecoderModelInfo {
+            encoder_decoder_buffer_delay_length: rng.range(1, 33),
+            num_units_in_decoding_tick: rng.next() as u32,
+            buffer_removal_time_length: rng.range(1, 33),
+            frame_presentation_time_length: rng.range(1, 33),
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_decoder_model_info(&mut wb, &d);
+        assert_eq!(wb.bytes(), &c::ref_write_decoder_model_info(d.encoder_decoder_buffer_delay_length, d.num_units_in_decoding_tick, d.buffer_removal_time_length, d.frame_presentation_time_length)[..], "decoder_model {d:?}");
+
+        // op parameters: delay_len in [1, 32]; delays fit that width
+        let delay_len = rng.range(1, 33) as u32;
+        let mask: u32 = if delay_len >= 32 { u32::MAX } else { (1u32 << delay_len) - 1 };
+        let dec_delay = rng.next() as u32 & mask;
+        let enc_delay = rng.next() as u32 & mask;
+        let low_delay = rng.next().is_multiple_of(2);
+        let mut wb = WriteBitBuffer::new();
+        write_dec_model_op_parameters(&mut wb, dec_delay, enc_delay, low_delay, delay_len);
+        assert_eq!(wb.bytes(), &c::ref_write_dec_model_op(dec_delay, enc_delay, low_delay, delay_len)[..], "op_params len={delay_len}");
+    }
+}

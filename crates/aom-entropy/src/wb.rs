@@ -88,6 +88,15 @@ impl WriteBitBuffer {
         &self.buf[..self.bytes_written()]
     }
 
+    /// `aom_wb_write_uvlc`: unsigned variable-length (Exp-Golomb) code — `msb(v+1)`
+    /// zero bits then `v+1` in `msb(v+1)+1` bits. `v` must not be `u32::MAX`.
+    pub fn write_uvlc(&mut self, v: u32) {
+        let v = v + 1;
+        let leading_zeroes = msb32(v);
+        self.write_literal(0, leading_zeroes);
+        self.write_unsigned_literal(v, leading_zeroes + 1);
+    }
+
     /// `wb_write_primitive_quniform` (`bitwriter_buffer.c`): a truncated-uniform
     /// value `v in [0, n)`.
     fn write_primitive_quniform(&mut self, n: u16, v: u16) {

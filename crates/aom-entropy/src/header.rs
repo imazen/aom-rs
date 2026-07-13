@@ -898,3 +898,57 @@ pub fn write_color_config(wb: &mut WriteBitBuffer, c: &ColorConfigParams) {
     }
     wb.write_bit(c.separate_uv_delta_q as u32);
 }
+
+// ---- timing info / decoder model ------------------------------------------
+
+/// The `aom_timing_info_t` fields written by `write_timing_info_header`.
+#[derive(Clone, Copy, Debug)]
+pub struct TimingInfoHeader {
+    pub num_units_in_display_tick: u32,
+    pub time_scale: u32,
+    pub equal_picture_interval: bool,
+    pub num_ticks_per_picture: u32,
+}
+
+/// `write_timing_info_header`: two 32-bit tick fields, the equal-picture-interval
+/// flag, and (when equal) the ticks-per-picture minus one as a uvlc.
+pub fn write_timing_info_header(wb: &mut WriteBitBuffer, t: &TimingInfoHeader) {
+    wb.write_unsigned_literal(t.num_units_in_display_tick, 32);
+    wb.write_unsigned_literal(t.time_scale, 32);
+    wb.write_bit(t.equal_picture_interval as u32);
+    if t.equal_picture_interval {
+        wb.write_uvlc(t.num_ticks_per_picture - 1);
+    }
+}
+
+/// The `aom_dec_model_info_t` fields written by `write_decoder_model_info`.
+#[derive(Clone, Copy, Debug)]
+pub struct DecoderModelInfo {
+    pub encoder_decoder_buffer_delay_length: i32,
+    pub num_units_in_decoding_tick: u32,
+    pub buffer_removal_time_length: i32,
+    pub frame_presentation_time_length: i32,
+}
+
+/// `write_decoder_model_info`: the three `-1` delay/time lengths (5 bits each) around
+/// the 32-bit decoding-tick field.
+pub fn write_decoder_model_info(wb: &mut WriteBitBuffer, d: &DecoderModelInfo) {
+    wb.write_literal(d.encoder_decoder_buffer_delay_length - 1, 5);
+    wb.write_unsigned_literal(d.num_units_in_decoding_tick, 32);
+    wb.write_literal(d.buffer_removal_time_length - 1, 5);
+    wb.write_literal(d.frame_presentation_time_length - 1, 5);
+}
+
+/// `write_dec_model_op_parameters`: the decoder/encoder buffer delays (at
+/// `buffer_delay_length` bits) + the low-delay-mode flag, for one operating point.
+pub fn write_dec_model_op_parameters(
+    wb: &mut WriteBitBuffer,
+    decoder_buffer_delay: u32,
+    encoder_buffer_delay: u32,
+    low_delay_mode_flag: bool,
+    buffer_delay_length: u32,
+) {
+    wb.write_unsigned_literal(decoder_buffer_delay, buffer_delay_length);
+    wb.write_unsigned_literal(encoder_buffer_delay, buffer_delay_length);
+    wb.write_bit(low_delay_mode_flag as u32);
+}

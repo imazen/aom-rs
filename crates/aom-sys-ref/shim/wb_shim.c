@@ -577,3 +577,40 @@ uint32_t shim_write_color_config(const int *c, uint8_t *out) {
   aom_wb_write_bit(&wb, sep_uv);
   return aom_wb_bytes_written(&wb);
 }
+
+/* Directly exercises the real aom_wb_write_uvlc so the Rust port is validated. */
+uint32_t shim_wb_uvlc(uint32_t v, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  aom_wb_write_uvlc(&wb, v);
+  return aom_wb_bytes_written(&wb);
+}
+
+/* Timing-info / decoder-model seq-header components over the real aom_wb. */
+uint32_t shim_write_timing_info(uint32_t disp_tick, uint32_t time_scale,
+                                int equal_pic, uint32_t ticks_per_pic, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  aom_wb_write_unsigned_literal(&wb, disp_tick, 32);
+  aom_wb_write_unsigned_literal(&wb, time_scale, 32);
+  aom_wb_write_bit(&wb, equal_pic);
+  if (equal_pic) aom_wb_write_uvlc(&wb, ticks_per_pic - 1);
+  return aom_wb_bytes_written(&wb);
+}
+
+uint32_t shim_write_decoder_model_info(int ed_delay_len, uint32_t dec_tick,
+                                       int rem_time_len, int pres_time_len, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  aom_wb_write_literal(&wb, ed_delay_len - 1, 5);
+  aom_wb_write_unsigned_literal(&wb, dec_tick, 32);
+  aom_wb_write_literal(&wb, rem_time_len - 1, 5);
+  aom_wb_write_literal(&wb, pres_time_len - 1, 5);
+  return aom_wb_bytes_written(&wb);
+}
+
+uint32_t shim_write_dec_model_op(uint32_t dec_delay, uint32_t enc_delay,
+                                 int low_delay, int delay_len, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  aom_wb_write_unsigned_literal(&wb, dec_delay, delay_len);
+  aom_wb_write_unsigned_literal(&wb, enc_delay, delay_len);
+  aom_wb_write_bit(&wb, low_delay);
+  return aom_wb_bytes_written(&wb);
+}

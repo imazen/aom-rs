@@ -71,3 +71,20 @@ fn signed_subexpfin_matches_c() {
         }
     }
 }
+
+#[test]
+fn uvlc_matches_c() {
+    let mut rng = Rng(0x00c1_c0de_a11a_0009);
+    // small values densely, plus the full 32-bit range (excluding u32::MAX).
+    for v in 0u32..2000 {
+        let mut wb = WriteBitBuffer::new();
+        wb.write_uvlc(v);
+        assert_eq!(wb.bytes(), &c::ref_wb_uvlc(v)[..], "uvlc {v}");
+    }
+    for _ in 0..500_000 {
+        let v = (rng.next() as u32) & 0xffff_fffe; // avoid u32::MAX
+        let mut wb = WriteBitBuffer::new();
+        wb.write_uvlc(v);
+        assert_eq!(wb.bytes(), &c::ref_wb_uvlc(v)[..], "uvlc {v}");
+    }
+}

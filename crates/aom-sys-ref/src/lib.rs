@@ -216,6 +216,42 @@ extern "C" {
     fn shim_write_sequence_header(s: *const i32, out: *mut u8) -> u32;
     fn shim_write_ext_tile_info(pre_bits: i32, rows: i32, cols: i32, out: *mut u8) -> u32;
     fn shim_write_color_config(c: *const i32, out: *mut u8) -> u32;
+    fn shim_wb_uvlc(v: u32, out: *mut u8) -> u32;
+    fn shim_write_timing_info(disp_tick: u32, time_scale: u32, equal_pic: i32, ticks_per_pic: u32, out: *mut u8) -> u32;
+    fn shim_write_decoder_model_info(ed_delay_len: i32, dec_tick: u32, rem_time_len: i32, pres_time_len: i32, out: *mut u8) -> u32;
+    fn shim_write_dec_model_op(dec_delay: u32, enc_delay: u32, low_delay: i32, delay_len: i32, out: *mut u8) -> u32;
+}
+
+/// Reference `aom_wb_write_uvlc`.
+pub fn ref_wb_uvlc(v: u32) -> Vec<u8> {
+    let mut out = vec![0u8; 16];
+    let n = unsafe { shim_wb_uvlc(v, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference `write_timing_info_header`.
+pub fn ref_write_timing_info(disp_tick: u32, time_scale: u32, equal_pic: bool, ticks_per_pic: u32) -> Vec<u8> {
+    let mut out = vec![0u8; 32];
+    let n = unsafe { shim_write_timing_info(disp_tick, time_scale, equal_pic as i32, ticks_per_pic, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference `write_decoder_model_info`.
+pub fn ref_write_decoder_model_info(ed_delay_len: i32, dec_tick: u32, rem_time_len: i32, pres_time_len: i32) -> Vec<u8> {
+    let mut out = vec![0u8; 16];
+    let n = unsafe { shim_write_decoder_model_info(ed_delay_len, dec_tick, rem_time_len, pres_time_len, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference `write_dec_model_op_parameters`.
+pub fn ref_write_dec_model_op(dec_delay: u32, enc_delay: u32, low_delay: bool, delay_len: u32) -> Vec<u8> {
+    let mut out = vec![0u8; 16];
+    let n = unsafe { shim_write_dec_model_op(dec_delay, enc_delay, low_delay as i32, delay_len as i32, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `write_color_config` (transcribed control flow over the real aom_wb).
