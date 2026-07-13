@@ -191,6 +191,18 @@ both tracks, fully bit-exact.**
   `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
   rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
+- **Complete plane-0 txb bitstream: av1_write_tx_type wired in (aom-txb)** — the full
+  av1_write_coeffs_txb order (txb_skip -> luma tx_type -> coefficients). The eob+coeffs
+  payload is factored into a shared write_txb_body, so write_coeffs_txb (coeff-only) is
+  byte-unchanged and write_coeffs_txb_full reuses it; tx_type is written (via the ported
+  write_tx_type) iff luma + ext-tx set >1 + the qindex/skip/seg gate. Oracle: the shim
+  gains the tx_type params + ext-tx CDF and writes the same symbol (real
+  av1_get_ext_tx_set_type / av1_num_ext_tx_set / av1_ext_tx_ind); signal_gate=0
+  reproduces the coeff-only oracle. write_txb_full_diff.rs (19 tx x 16 tt x intra/inter x
+  reduced x filter-intra x plane 0/1 x gate/update) + aom-encode's encode_block_coeffs_full
+  (residual -> complete txb bytes, encode_block_full_diff.rs) are byte-identical to C with
+  both CDF buffers adapting in lockstep.
+
 - **Full speed-0 block coefficient pipeline, residual -> bitstream bytes (aom-encode)**
   — the new composition crate wiring the per-block encoder from the already bit-exact
   sub-modules. `xform_quant` = av1_xform (av1_fwd_txfm2d) + av1_quant (quantizer
@@ -259,16 +271,16 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **av1_write_tx_type into the txb bitstream**: write_tx_type is ported+validated
-   (aom-txb ext_tx.rs, ext_tx_diff.rs). The C writes it *inside* av1_write_coeffs_txb,
-   between the txb_skip flag and eob, so a complete-txb writer (txb_skip -> tx_type ->
-   eob -> coeffs) is a new aom-txb entry taking the tx-type/mode context (is_inter,
-   intra dir, filter-intra, ext-tx-set) + the tx_type CDFs; then encode_block_coeffs
-   calls it. Needs a matching shim (extend shim_write_coeffs_txb with the tx_type call).
-2. **Transform-block loop / cost_coeffs RD wiring**: drive xform_quant_optimize +
-   write across a block's txbs; av1_cost_coeffs_txb is ported for the RD side.
+1. **Transform-block loop** (`av1_foreach_transformed_block` / the tx-block iteration
+   in encodemb): drive encode_block_coeffs_full across a coding block's txbs, threading
+   the per-plane above/left ENTROPY_CONTEXT arrays (each txb's txb_entropy_context feeds
+   the next txb's get_txb_ctx). Needs the block->txb partition (tx_size within the block)
+   + the entropy-context array management. This lifts "one txb" to "one coding block".
+2. **Reconstruction / distortion for RD**: inverse-transform dqcoeff (aom-transform inv
+   is validated) + pixel SSE (aom-dist) to get the block distortion; with the trellis
+   rate this is the RD cost the mode search compares.
 3. **Mode & partition search (RDO)** — the hardest bit-identity target; the layer that
-   drives xform_quant_optimize per candidate.
+   drives encode_block_coeffs_full per candidate.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
    per-mode bit-exact, differential per predictor.
 3. **Loop filters**: deblock, CDEF, loop-restoration (decoder + encoder search).
