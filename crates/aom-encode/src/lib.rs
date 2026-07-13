@@ -17,7 +17,10 @@ use aom_quant::{
     aom_quantize_b_no_qmatrix, aom_quantize_b_qm, av1_quantize_fp_no_qmatrix, av1_quantize_fp_qm,
 };
 use aom_transform::txfm2d::av1_fwd_txfm2d;
-use aom_txb::{scan, txb_entropy_context, txb_high, txb_wide};
+use aom_txb::{
+    get_txb_ctx, optimize_txb, optimize_txb_qm, scan, txb_entropy_context, txb_high, txb_wide,
+    CoeffCostTables,
+};
 
 /// Full (un-adjusted) transform width per `TX_SIZE` — the residual/coeff buffer
 /// dimensions the forward transform reads/writes before 64-point repacking.
@@ -123,4 +126,89 @@ pub fn xform_quant(
     };
 
     XformQuantResult { coeff, qcoeff, dqcoeff, eob, txb_entropy_ctx }
+}
+
+/// Neighbour entropy contexts + plane geometry for `get_txb_ctx` (the block's
+/// above/left `ENTROPY_CONTEXT` bytes; each is `cul_level | dc_sign<<3`).
+#[derive(Clone, Copy, Debug)]
+pub struct BlockContext<'a> {
+    pub above: &'a [i8],
+    pub left: &'a [i8],
+    pub plane: usize,
+    /// Plane block size (BlockSize discriminant).
+    pub plane_bsize: usize,
+}
+
+/// RD inputs for the coefficient trellis (`av1_optimize_b`).
+#[derive(Clone, Copy)]
+pub struct OptimizeInputs<'a> {
+    pub cost: &'a CoeffCostTables<'a>,
+    pub rdmult: i64,
+    pub sharpness: i32,
+}
+
+/// Output of [`xform_quant_optimize`]: the final (trellis-optimized) block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XformQuantOptResult {
+    pub qcoeff: Vec<i32>,
+    pub dqcoeff: Vec<i32>,
+    pub eob: u16,
+    pub txb_entropy_ctx: u8,
+    /// Total coefficient rate (the trellis result, or the skip-txb cost at eob 0).
+    pub rate: i32,
+}
+
+/// The full speed-0 block coefficient pipeline: `av1_xform_quant` (with
+/// `use_optimize_b`) + `get_txb_ctx` + `av1_optimize_b` (the trellis) + the final
+/// entropy-context write. Returns the trellis-optimized block byte-identical to
+/// libaom. At `eob == 0` the trellis is skipped and the rate is `av1_cost_skip_txb`
+/// (the `txb_skip` = 1 cost), matching `av1_optimize_b`'s early return.
+pub fn xform_quant_optimize(
+    residual: &[i16],
+    tx_size: usize,
+    tx_type: usize,
+    kind: QuantKind,
+    qp: &QuantParams,
+    bctx: &BlockContext,
+    opt: &OptimizeInputs,
+) -> XformQuantOptResult {
+    // av1_xform_quant with use_optimize_b: quantize but defer the entropy ctx.
+    let xq = xform_quant(residual, tx_size, tx_type, kind, qp, true);
+    let XformQuantResult { coeff, mut qcoeff, mut dqcoeff, eob, .. } = xq;
+
+    // get_txb_ctx: neighbour contexts -> (txb_skip_ctx, dc_sign_ctx).
+    let (txb_skip_ctx, dc_sign_ctx) =
+        get_txb_ctx(bctx.plane_bsize, tx_size, bctx.plane, bctx.above, bctx.left);
+    let txb_skip_ctx = txb_skip_ctx as usize;
+    let dc_sign_ctx = dc_sign_ctx as usize;
+
+    // av1_optimize_b: eob 0 -> skip-txb cost; else run the trellis.
+    if eob == 0 {
+        let rate = opt.cost.txb_skip[txb_skip_ctx * 2 + 1];
+        return XformQuantOptResult { qcoeff, dqcoeff, eob: 0, txb_entropy_ctx: 0, rate };
+    }
+
+    let dequant = [qp.dequant[0], qp.dequant[1]];
+    let sc = scan(tx_size, tx_type);
+    let tcoeff = &coeff[..qcoeff.len()];
+    let res = match (qp.qm, qp.iqm) {
+        (Some(qm), Some(iqm)) => optimize_txb_qm(
+            tx_size, tx_type, &mut qcoeff, &mut dqcoeff, tcoeff, eob as usize, dequant, opt.rdmult,
+            dc_sign_ctx, txb_skip_ctx, opt.sharpness, sc, opt.cost, iqm, qm,
+        ),
+        _ => optimize_txb(
+            tx_size, tx_type, &mut qcoeff, &mut dqcoeff, tcoeff, eob as usize, dequant, opt.rdmult,
+            dc_sign_ctx, txb_skip_ctx, opt.sharpness, sc, opt.cost,
+        ),
+    };
+
+    // Trellis tail: entropy ctx from the *optimized* qcoeff / eob.
+    let txb_entropy_ctx = txb_entropy_context(&qcoeff, tx_size, tx_type, res.eob);
+    XformQuantOptResult {
+        qcoeff,
+        dqcoeff,
+        eob: res.eob as u16,
+        txb_entropy_ctx,
+        rate: res.rate,
+    }
 }
