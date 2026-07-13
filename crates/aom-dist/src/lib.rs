@@ -27,6 +27,30 @@ pub fn sad(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: usize, h: us
     s
 }
 
+/// `aom_sse_c`: sum of squared errors over a generic w×h region (RD distortion).
+pub fn sse(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: usize, h: usize) -> i64 {
+    let mut sse: i64 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let diff = (a[y * a_stride + x] as i32 - b[y * b_stride + x] as i32).abs();
+            sse += (diff * diff) as i64;
+        }
+    }
+    sse
+}
+
+/// `aom_highbd_sse_c`: SSE over 16-bit samples.
+pub fn highbd_sse(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> i64 {
+    let mut sse: i64 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let diff = (a[y * a_stride + x] as i32 - b[y * b_stride + x] as i32).abs();
+            sse += (diff * diff) as i64;
+        }
+    }
+    sse
+}
+
 /// `aom_sad<W>x<H>_avg_c`: SAD of `src` against the rounded average of `ref` and
 /// a contiguous `second_pred` (compound-prediction motion search). Matches
 /// `aom_comp_avg_pred` (comp = ROUND_POWER_OF_TWO(ref+second_pred, 1)) followed

@@ -142,6 +142,18 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_masked_sad(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8, m: *const u8, ms: i32, inv: i32) -> u32;
     fn shim_obmc_sad(i: i32, r: *const u8, rs: i32, ws: *const i32, m: *const i32) -> u32;
+    fn shim_sse(a: *const u8, as_: i32, b: *const u8, bs: i32, w: i32, h: i32) -> i64;
+    fn shim_hbd_sse(a: *const u16, as_: i32, b: *const u16, bs: i32, w: i32, h: i32) -> i64;
+}
+
+/// Reference `aom_sse_c` (sum of squared errors, generic w×h).
+pub fn ref_sse(a: &[u8], as_: usize, b: &[u8], bs: usize, w: usize, h: usize) -> i64 {
+    unsafe { shim_sse(a.as_ptr(), as_ as i32, b.as_ptr(), bs as i32, w as i32, h as i32) }
+}
+
+/// Reference `aom_highbd_sse_c`.
+pub fn ref_hbd_sse(a: &[u16], as_: usize, b: &[u16], bs: usize, w: usize, h: usize) -> i64 {
+    unsafe { shim_hbd_sse(a.as_ptr(), as_ as i32, b.as_ptr(), bs as i32, w as i32, h as i32) }
 }
 
 /// Reference `aom_obmc_sad<W>x<H>_c` (overlapped block motion-comp SAD).

@@ -1,7 +1,7 @@
 //! Differential harness for SAD / variance / sub-pixel variance vs C libaom
 //! v3.14.1 across all 22 block sizes.
 
-use aom_dist::{masked_sad, obmc_sad, sad, sad_avg, sub_pixel_variance, variance};
+use aom_dist::{highbd_sse, masked_sad, obmc_sad, sad, sad_avg, sse, sub_pixel_variance, variance};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 22] = [
@@ -72,6 +72,16 @@ fn sad_variance_subpel_byte_identical() {
             let go = obmc_sad(&a, a_stride, &wsrc, &obmc_mask, w, h);
             let wo = c::ref_obmc_sad(idx, &a, a_stride, &wsrc, &obmc_mask);
             assert_eq!(go, wo, "obmc_sad {w}x{h}");
+
+            // SSE (sum of squared errors, generic w×h) lowbd + highbd
+            let gs = sse(&a, a_stride, &b, b_stride, w, h);
+            let ws2 = c::ref_sse(&a, a_stride, &b, b_stride, w, h);
+            assert_eq!(gs, ws2, "sse {w}x{h}");
+            let ah: Vec<u16> = a.iter().map(|&v| v as u16 * 15).collect();
+            let bh: Vec<u16> = b.iter().map(|&v| v as u16 * 15).collect();
+            let ghs = highbd_sse(&ah, a_stride, &bh, b_stride, w, h);
+            let whs = c::ref_hbd_sse(&ah, a_stride, &bh, b_stride, w, h);
+            assert_eq!(ghs, whs, "highbd_sse {w}x{h}");
 
             // variance
             let (gv, gs) = variance(&a, a_stride, &b, b_stride, w, h);

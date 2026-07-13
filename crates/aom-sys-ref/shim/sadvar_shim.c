@@ -282,3 +282,7 @@ unsigned int shim_obmc_sad(int i,const uint8_t*r,int rs,const int*ws,const int*m
   case 20: return aom_obmc_sad128x64_c(r,rs,ws,m);
   case 21: return aom_obmc_sad128x128_c(r,rs,ws,m);
   default: return 0;}}
+
+/* SSE (sum of squared errors), generic w x h */
+int64_t aom_sse_c(const uint8_t*,int,const uint8_t*,int,int,int);
+int64_t shim_sse(const uint8_t*a,int as,const uint8_t*b,int bs,int w,int h){return aom_sse_c(a,as,b,bs,w,h);}

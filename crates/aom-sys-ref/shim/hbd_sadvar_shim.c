@@ -463,3 +463,8 @@ unsigned int shim_hbd_obmc_sad(int i,const uint16_t*r,int rs,const int*ws,const 
   case 20: return aom_highbd_obmc_sad128x64_c(rp,rs,ws,m);
   case 21: return aom_highbd_obmc_sad128x128_c(rp,rs,ws,m);
   default: return 0;}}
+
+/* highbd SSE */
+int64_t aom_highbd_sse_c(const uint8_t*,int,const uint8_t*,int,int,int);
+int64_t shim_hbd_sse(const uint16_t*a,int as,const uint16_t*b,int bs,int w,int h){
+  return aom_highbd_sse_c(CONVERT_TO_BYTEPTR(a),as,CONVERT_TO_BYTEPTR(b),bs,w,h);}
