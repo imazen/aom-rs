@@ -1885,3 +1885,87 @@ pub fn read_color_config(rb: &mut ReadBitBuffer, profile: i32) -> ColorConfigPar
     c.separate_uv_delta_q = rb.read_bit() != 0;
     c
 }
+
+/// `read_frame_header_trailing_flags` — inverse of [`write_frame_header_trailing_flags`]:
+/// reference-mode-select (inter frames), skip-mode flag (when allowed), warped-motion
+/// flag (when it might be allowed), and reduced-tx-set. Gates come from the frame parse.
+/// Returns `(reference_mode_select, skip_mode_flag, allow_warped_motion, reduced_tx_set_used)`.
+pub fn read_frame_header_trailing_flags(
+    rb: &mut ReadBitBuffer,
+    intra_only: bool,
+    skip_mode_allowed: bool,
+    might_allow_warped_motion: bool,
+) -> (bool, bool, bool, bool) {
+    let reference_mode_select = if !intra_only { rb.read_bit() != 0 } else { false };
+    let skip_mode_flag = if skip_mode_allowed { rb.read_bit() != 0 } else { false };
+    let allow_warped_motion = if might_allow_warped_motion { rb.read_bit() != 0 } else { false };
+    let reduced_tx_set_used = rb.read_bit() != 0;
+    (reference_mode_select, skip_mode_flag, allow_warped_motion, reduced_tx_set_used)
+}
+
+/// `read_restoration_mode` — inverse of [`encode_restoration_mode`]: the per-plane
+/// loop-restoration type (2-bit lr_type -> NONE/SWITCHABLE/WIENER/SGRPROJ), then the luma
+/// restoration-unit size (1–2 bits by SB size) and the chroma unit size (same or half).
+/// `enable_restoration` / `allow_intrabc` / `sb_size_128` / subsampling come from the
+/// sequence + frame parse.
+pub fn read_restoration_mode(
+    rb: &mut ReadBitBuffer,
+    enable_restoration: bool,
+    allow_intrabc: bool,
+    sb_size_128: bool,
+    subsampling_x: i32,
+    subsampling_y: i32,
+    num_planes: usize,
+) -> RestorationHeader {
+    // lr_type -> RESTORE_*; matches remap_lr_type = {NONE, SWITCHABLE, WIENER, SGRPROJ}.
+    const REMAP: [u8; 4] = [RESTORE_NONE, RESTORE_SWITCHABLE, RESTORE_WIENER, RESTORE_SGRPROJ];
+    let mut r = RestorationHeader {
+        enable_restoration,
+        allow_intrabc,
+        frame_restoration_type: [RESTORE_NONE; 3],
+        sb_size_128,
+        restoration_unit_size: [256; 3],
+        subsampling_x,
+        subsampling_y,
+    };
+    if !enable_restoration || allow_intrabc {
+        return r;
+    }
+    let mut all_none = true;
+    let mut chroma_none = true;
+    for p in 0..num_planes {
+        let ft = REMAP[rb.read_literal(2) as usize];
+        r.frame_restoration_type[p] = ft;
+        if ft != RESTORE_NONE {
+            all_none = false;
+            chroma_none &= p == 0;
+        }
+    }
+    if !all_none {
+        let sb_size = if sb_size_128 { 128 } else { 64 };
+        let rus = if sb_size == 64 {
+            if rb.read_bit() == 0 {
+                64
+            } else if rb.read_bit() != 0 {
+                256
+            } else {
+                128
+            }
+        } else if rb.read_bit() != 0 {
+            256
+        } else {
+            128
+        };
+        r.restoration_unit_size[0] = rus;
+        let mut chroma = rus;
+        if num_planes > 1 {
+            let s = subsampling_x.min(subsampling_y);
+            if s != 0 && !chroma_none && rb.read_bit() != 0 {
+                chroma = rus >> 1;
+            }
+        }
+        r.restoration_unit_size[1] = chroma;
+        r.restoration_unit_size[2] = chroma;
+    }
+    r
+}

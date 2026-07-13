@@ -566,3 +566,81 @@ fn read_color_config_inverts_write() {
         assert_eq!(got, want, "color_config profile={profile} bd={bit_depth} mono={monochrome} srgb={want_srgb}");
     }
 }
+
+#[test]
+fn read_trailing_and_restoration_invert_write() {
+    use aom_entropy::header::{
+        encode_restoration_mode, read_frame_header_trailing_flags, read_restoration_mode,
+        write_frame_header_trailing_flags, RestorationHeader,
+    };
+    let mut rng = Rng(0x1e_712a_c0de_0170);
+    for _ in 0..100_000 {
+        // trailing flags
+        {
+            let intra_only = rng.next() & 1 == 1;
+            let skip_allowed = rng.next() & 1 == 1;
+            let might_warp = rng.next() & 1 == 1;
+            let ref_sel = !intra_only && rng.next() & 1 == 1;
+            let skip_flag = skip_allowed && rng.next() & 1 == 1;
+            let warp = might_warp && rng.next() & 1 == 1;
+            let reduced = rng.next() & 1 == 1;
+            let mut wb = WriteBitBuffer::new();
+            write_frame_header_trailing_flags(
+                &mut wb, intra_only, ref_sel, skip_allowed, skip_flag, might_warp, warp, reduced,
+            );
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let g = read_frame_header_trailing_flags(&mut rb, intra_only, skip_allowed, might_warp);
+            assert_eq!(g, (ref_sel, skip_flag, warp, reduced), "trailing flags");
+        }
+        // restoration mode
+        {
+            let enable = rng.next() & 1 == 1;
+            let intrabc = rng.next() & 1 == 1;
+            let sb128 = rng.next() & 1 == 1;
+            let ssx = (rng.next() % 2) as i32;
+            let ssy = (rng.next() % 2) as i32;
+            let num_planes = if rng.next() & 1 == 1 { 3 } else { 1 };
+            let mut ft = [0u8; 3];
+            // types are only in the bitstream when restoration is on; NONE otherwise.
+            if enable && !intrabc {
+                for t in ft.iter_mut().take(num_planes) {
+                    *t = (rng.next() % 4) as u8;
+                }
+            }
+            let all_none = ft[..num_planes].iter().all(|&t| t == 0);
+            let chroma_none = ft[..num_planes].iter().enumerate().all(|(p, &t)| t == 0 || p == 0);
+            let mut rus = [256i32; 3];
+            if enable && !intrabc && !all_none {
+                let rus0 = if sb128 {
+                    [128, 256][(rng.next() % 2) as usize]
+                } else {
+                    [64, 128, 256][(rng.next() % 3) as usize]
+                };
+                rus[0] = rus0;
+                let mut chroma = rus0;
+                if num_planes > 1 && ssx.min(ssy) != 0 && !chroma_none && rng.next() & 1 == 1 {
+                    chroma = rus0 >> 1;
+                }
+                rus[1] = chroma;
+                rus[2] = chroma;
+            }
+            let r = RestorationHeader {
+                enable_restoration: enable,
+                allow_intrabc: intrabc,
+                frame_restoration_type: ft,
+                sb_size_128: sb128,
+                restoration_unit_size: rus,
+                subsampling_x: ssx,
+                subsampling_y: ssy,
+            };
+            let mut wb = WriteBitBuffer::new();
+            encode_restoration_mode(&mut wb, &r, num_planes);
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let g = read_restoration_mode(&mut rb, enable, intrabc, sb128, ssx, ssy, num_planes);
+            assert_eq!(g.frame_restoration_type, ft, "restoration types np={num_planes}");
+            assert_eq!(g.restoration_unit_size, rus, "restoration unit size");
+        }
+    }
+}
