@@ -346,3 +346,48 @@ void shim_cost_tokens_from_cdf(int *costs, const uint16_t *cdf,
                                const int *inv_map) {
   av1_cost_tokens_from_cdf(costs, cdf, inv_map);
 }
+
+/* ---- av1_fill_coeff_costs per-(txs_ctx, plane) LV_MAP_COEFF_COST fill -------
+ * Transcribes the inner body of av1_fill_coeff_costs (rd.c): the caller supplies
+ * the 6 coeff CDF groups already selected for this (txs_ctx, plane) as flat
+ * buffers; we fill the LV_MAP_COEFF_COST tables via the real
+ * av1_cost_tokens_from_cdf + the base_cost[4..7] and lps_cost cumulation/diff
+ * fixups. Outputs are flat, matching the Rust LvMapCoeffCost layout. */
+void shim_fill_lv_map(const uint16_t *txb_skip_cdf, const uint16_t *base_eob_cdf,
+                      const uint16_t *base_cdf, const uint16_t *eob_extra_cdf,
+                      const uint16_t *dc_sign_cdf, const uint16_t *br_cdf,
+                      int *o_txb_skip, int *o_base_eob, int *o_base,
+                      int *o_eob_extra, int *o_dc_sign, int *o_lps) {
+  for (int ctx = 0; ctx < TXB_SKIP_CONTEXTS; ++ctx)
+    av1_cost_tokens_from_cdf(o_txb_skip + ctx * 2, txb_skip_cdf + ctx * 3, NULL);
+  for (int ctx = 0; ctx < SIG_COEF_CONTEXTS_EOB; ++ctx)
+    av1_cost_tokens_from_cdf(o_base_eob + ctx * 3, base_eob_cdf + ctx * 4, NULL);
+  for (int ctx = 0; ctx < SIG_COEF_CONTEXTS; ++ctx)
+    av1_cost_tokens_from_cdf(o_base + ctx * 8, base_cdf + ctx * 5, NULL);
+  for (int ctx = 0; ctx < SIG_COEF_CONTEXTS; ++ctx) {
+    o_base[ctx * 8 + 4] = 0;
+    o_base[ctx * 8 + 5] =
+        o_base[ctx * 8 + 1] + av1_cost_literal(1) - o_base[ctx * 8 + 0];
+    o_base[ctx * 8 + 6] = o_base[ctx * 8 + 2] - o_base[ctx * 8 + 1];
+    o_base[ctx * 8 + 7] = o_base[ctx * 8 + 3] - o_base[ctx * 8 + 2];
+  }
+  for (int ctx = 0; ctx < EOB_COEF_CONTEXTS; ++ctx)
+    av1_cost_tokens_from_cdf(o_eob_extra + ctx * 2, eob_extra_cdf + ctx * 3,
+                             NULL);
+  for (int ctx = 0; ctx < DC_SIGN_CONTEXTS; ++ctx)
+    av1_cost_tokens_from_cdf(o_dc_sign + ctx * 2, dc_sign_cdf + ctx * 3, NULL);
+  for (int ctx = 0; ctx < LEVEL_CONTEXTS; ++ctx) {
+    int *lps = o_lps + ctx * (COEFF_BASE_RANGE + 1 + COEFF_BASE_RANGE + 1);
+    int br_rate[BR_CDF_SIZE];
+    int prev_cost = 0, i, j;
+    av1_cost_tokens_from_cdf(br_rate, br_cdf + ctx * 5, NULL);
+    for (i = 0; i < COEFF_BASE_RANGE; i += BR_CDF_SIZE - 1) {
+      for (j = 0; j < BR_CDF_SIZE - 1; j++) lps[i + j] = prev_cost + br_rate[j];
+      prev_cost += br_rate[j];
+    }
+    lps[i] = prev_cost;
+    lps[0 + COEFF_BASE_RANGE + 1] = lps[0];
+    for (i = 1; i <= COEFF_BASE_RANGE; ++i)
+      lps[i + COEFF_BASE_RANGE + 1] = lps[i] - lps[i - 1];
+  }
+}

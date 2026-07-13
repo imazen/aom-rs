@@ -761,6 +761,8 @@ extern "C" {
     fn shim_iscan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_cost_tokens_from_cdf(costs: *mut i32, cdf: *const u16, inv_map: *const i32);
     #[allow(clippy::too_many_arguments)]
+    fn shim_fill_lv_map(txb_skip_cdf: *const u16, base_eob_cdf: *const u16, base_cdf: *const u16, eob_extra_cdf: *const u16, dc_sign_cdf: *const u16, br_cdf: *const u16, o_txb_skip: *mut i32, o_base_eob: *mut i32, o_base: *mut i32, o_eob_extra: *mut i32, o_dc_sign: *mut i32, o_lps: *mut i32);
+    #[allow(clippy::too_many_arguments)]
     fn shim_cost_coeffs_txb(qcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_coeffs_txb(tcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, plane_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, allow_update_cdf: i32, cdfs: *mut u16, out: *mut u8, out_cap: i32) -> i32;
@@ -830,4 +832,21 @@ pub fn ref_cost_tokens_from_cdf(nsymbs: usize, cdf: &[u16], inv_map: Option<&[i3
     let im = inv_map.map_or(core::ptr::null(), |m| m.as_ptr());
     unsafe { shim_cost_tokens_from_cdf(costs.as_mut_ptr(), cdf.as_ptr(), im) }
     costs
+}
+
+/// Reference `av1_fill_coeff_costs` per (txs_ctx, plane). Returns the flat
+/// (txb_skip[13*2], base_eob[4*3], base[42*8], eob_extra[9*2], dc_sign[3*2],
+/// lps[21*26]) tables.
+#[allow(clippy::type_complexity)]
+pub fn ref_fill_lv_map(txb_skip_cdf: &[u16], base_eob_cdf: &[u16], base_cdf: &[u16], eob_extra_cdf: &[u16], dc_sign_cdf: &[u16], br_cdf: &[u16]) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>) {
+    let mut txb_skip = vec![0i32; 13 * 2];
+    let mut base_eob = vec![0i32; 4 * 3];
+    let mut base = vec![0i32; 42 * 8];
+    let mut eob_extra = vec![0i32; 9 * 2];
+    let mut dc_sign = vec![0i32; 3 * 2];
+    let mut lps = vec![0i32; 21 * 26];
+    unsafe {
+        shim_fill_lv_map(txb_skip_cdf.as_ptr(), base_eob_cdf.as_ptr(), base_cdf.as_ptr(), eob_extra_cdf.as_ptr(), dc_sign_cdf.as_ptr(), br_cdf.as_ptr(), txb_skip.as_mut_ptr(), base_eob.as_mut_ptr(), base.as_mut_ptr(), eob_extra.as_mut_ptr(), dc_sign.as_mut_ptr(), lps.as_mut_ptr());
+    }
+    (txb_skip, base_eob, base, eob_extra, dc_sign, lps)
 }

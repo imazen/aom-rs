@@ -24,6 +24,8 @@ mod cost;
 pub use cost::{cost_coeffs_txb, CoeffCostTables};
 mod prob_cost;
 pub use prob_cost::{cost_symbol, cost_tokens_from_cdf};
+mod fill;
+pub use fill::{fill_lv_map_coeff_cost, LvMapCoeffCost};
 
 /// `TX_PAD_HOR` (enums.h): horizontal padding of the levels buffer.
 pub const TX_PAD_HOR: usize = 4;
