@@ -323,3 +323,43 @@ uint32_t shim_hbd_subpel_var(int i,int bd,const uint16_t*a,int as,int xo,int yo,
   case 64: return aom_highbd_10_sub_pixel_variance128x128_c(ap,as,xo,yo,bp,bs,sse);
   case 65: return aom_highbd_12_sub_pixel_variance128x128_c(ap,as,xo,yo,bp,bs,sse);
   default: return 0;}}
+
+/* highbd avg SAD (compound prediction); 17 non-4-side sizes */
+unsigned int aom_highbd_sad8x8_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad8x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad8x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad16x8_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad16x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad16x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad16x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad32x8_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad32x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad32x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad32x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad64x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad64x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad64x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad64x128_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad128x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_highbd_sad128x128_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int shim_hbd_sad_avg(int i,const uint16_t*s,int ss,const uint16_t*r,int rs,const uint16_t*p){
+  const uint8_t* sp8=CONVERT_TO_BYTEPTR(s); const uint8_t* rp=CONVERT_TO_BYTEPTR(r); const uint8_t* pp=CONVERT_TO_BYTEPTR(p);
+  switch(i){
+  case 4: return aom_highbd_sad8x8_avg_c(sp8,ss,rp,rs,pp);
+  case 5: return aom_highbd_sad8x16_avg_c(sp8,ss,rp,rs,pp);
+  case 6: return aom_highbd_sad8x32_avg_c(sp8,ss,rp,rs,pp);
+  case 8: return aom_highbd_sad16x8_avg_c(sp8,ss,rp,rs,pp);
+  case 9: return aom_highbd_sad16x16_avg_c(sp8,ss,rp,rs,pp);
+  case 10: return aom_highbd_sad16x32_avg_c(sp8,ss,rp,rs,pp);
+  case 11: return aom_highbd_sad16x64_avg_c(sp8,ss,rp,rs,pp);
+  case 12: return aom_highbd_sad32x8_avg_c(sp8,ss,rp,rs,pp);
+  case 13: return aom_highbd_sad32x16_avg_c(sp8,ss,rp,rs,pp);
+  case 14: return aom_highbd_sad32x32_avg_c(sp8,ss,rp,rs,pp);
+  case 15: return aom_highbd_sad32x64_avg_c(sp8,ss,rp,rs,pp);
+  case 16: return aom_highbd_sad64x16_avg_c(sp8,ss,rp,rs,pp);
+  case 17: return aom_highbd_sad64x32_avg_c(sp8,ss,rp,rs,pp);
+  case 18: return aom_highbd_sad64x64_avg_c(sp8,ss,rp,rs,pp);
+  case 19: return aom_highbd_sad64x128_avg_c(sp8,ss,rp,rs,pp);
+  case 20: return aom_highbd_sad128x64_avg_c(sp8,ss,rp,rs,pp);
+  case 21: return aom_highbd_sad128x128_avg_c(sp8,ss,rp,rs,pp);
+  default: return 0;}}

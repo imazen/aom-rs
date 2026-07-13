@@ -4,7 +4,7 @@
 //! These are the highbd counterparts of the speed-0 encoder motion-search /
 //! RDO workhorses (`aom_highbd_sad*`, `aom_highbd_*_variance*`).
 
-use aom_dist::{highbd_sad, highbd_sub_pixel_variance, highbd_variance};
+use aom_dist::{highbd_sad, highbd_sad_avg, highbd_sub_pixel_variance, highbd_variance};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 22] = [
@@ -48,6 +48,14 @@ fn hbd_sad_variance_byte_identical() {
                 let got = highbd_sad(&a, a_stride, &b, b_stride, w, h);
                 let want = c::ref_hbd_sad(idx, &a, a_stride, &b, b_stride);
                 assert_eq!(got, want, "hbd_sad {w}x{h} bd={bd}");
+
+                // highbd avg SAD (compound); 17 non-4-side sizes only
+                if !matches!((w, h), (4, 4) | (4, 8) | (4, 16) | (8, 4) | (16, 4)) {
+                    let sp: Vec<u16> = (0..w * h).map(|_| rng.px(mask)).collect();
+                    let ga = highbd_sad_avg(&a, a_stride, &b, b_stride, &sp, w, h);
+                    let wa = c::ref_hbd_sad_avg(idx, &a, a_stride, &b, b_stride, &sp);
+                    assert_eq!(ga, wa, "hbd_sad_avg {w}x{h} bd={bd}");
+                }
 
                 // highbd variance (bd-normalised)
                 let (gv, gs) = highbd_variance(&a, a_stride, &b, b_stride, w, h, bd);

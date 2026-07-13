@@ -56,6 +56,21 @@ pub fn highbd_sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usi
     s
 }
 
+/// `aom_highbd_sad<W>x<H>_avg_c`: highbd compound-prediction SAD.
+pub fn highbd_sad_avg(
+    src: &[u16], src_stride: usize, ref_: &[u16], ref_stride: usize, second_pred: &[u16],
+    w: usize, h: usize,
+) -> u32 {
+    let mut s: u32 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let comp = (ref_[y * ref_stride + x] as u32 + second_pred[y * w + x] as u32 + 1) >> 1;
+            s += (src[y * src_stride + x] as i32 - comp as i32).unsigned_abs();
+        }
+    }
+    s
+}
+
 /// libaom `highbd_variance64`: returns (sse: u64, sum: i64). Note `tsse`
 /// accumulates the 32-bit-truncated square (`(uint32_t)(diff*diff)`) into u64.
 fn highbd_variance64(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> (u64, i64) {
