@@ -365,17 +365,23 @@ static void mv_comp_wb(od_ec_enc *ec, uint16_t *cdf, int comp, int precision) {
   if (precision > MV_SUBPEL_LOW_PRECISION) { if (mv_class == 0) S(63, hp, 2); else S(66, hp, 2); }
 #undef S
 }
+/* av1_encode_mv body writing into an existing od_ec (reused by the inter-mode MVs). */
+static void encode_mv_into(od_ec_enc *ec, uint16_t *joints_cdf, uint16_t *comp0, uint16_t *comp1,
+                           int diff_row, int diff_col, int usehp) {
+  MV diff = { (int16_t)diff_row, (int16_t)diff_col };
+  int j = av1_get_mv_joint(&diff);
+  od_ec_encode_cdf_q15(ec, j, joints_cdf, 4);
+  update_cdf(joints_cdf, j, 4);
+  if (mv_joint_vertical(j)) mv_comp_wb(ec, comp0, diff.row, usehp);
+  if (mv_joint_horizontal(j)) mv_comp_wb(ec, comp1, diff.col, usehp);
+}
+
 uint32_t shim_encode_mv(uint16_t *joints_cdf, uint16_t *comp0, uint16_t *comp1,
                         int diff_row, int diff_col, int usehp, uint8_t *out,
                         uint16_t *out_joints, uint16_t *out_comp0, uint16_t *out_comp1) {
   od_ec_enc ec;
   od_ec_enc_init(&ec, 256);
-  MV diff = { (int16_t)diff_row, (int16_t)diff_col };
-  int j = av1_get_mv_joint(&diff);
-  od_ec_encode_cdf_q15(&ec, j, joints_cdf, 4);
-  update_cdf(joints_cdf, j, 4);
-  if (mv_joint_vertical(j)) mv_comp_wb(&ec, comp0, diff.row, usehp);
-  if (mv_joint_horizontal(j)) mv_comp_wb(&ec, comp1, diff.col, usehp);
+  encode_mv_into(&ec, joints_cdf, comp0, comp1, diff_row, diff_col, usehp);
   uint32_t nb = 0;
   const unsigned char *buf = od_ec_enc_done(&ec, &nb);
   for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
@@ -1858,4 +1864,31 @@ int shim_mode_context_analyzer(int rf0, int rf1, int mc_val) {
   const int8_t idx = av1_ref_frame_type(rf);
   mode_context[idx] = (int16_t)mc_val;
   return av1_mode_context_analyzer(mode_context, rf);
+}
+
+/* --- inter-block MV coding (pack_inter_mode_mvs, bitstream.c) --- */
+/* The mode-dependent av1_encode_mv calls: NEWMV/NEW_NEWMV code one MV per ref (0..1+
+ * is_compound); NEAREST_NEWMV/NEAR_NEWMV code ref 1; NEW_NEARESTMV/NEW_NEARMV code ref 0.
+ * All share one nmvc (joints/comps adapt across the two refs). usehp is the caller's
+ * resolved precision (allow_hp / MV_SUBPEL_NONE under force_integer_mv). */
+uint32_t shim_write_inter_block_mvs(int mode, int is_compound, int diff_row0, int diff_col0,
+    int diff_row1, int diff_col1, int usehp, uint16_t *joints, uint16_t *comp0, uint16_t *comp1,
+    uint8_t *out, uint16_t *o_joints, uint16_t *o_c0, uint16_t *o_c1) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (mode == NEWMV || mode == NEW_NEWMV) {
+    for (int ref = 0; ref < 1 + is_compound; ++ref) {
+      if (ref == 0) encode_mv_into(&ec, joints, comp0, comp1, diff_row0, diff_col0, usehp);
+      else encode_mv_into(&ec, joints, comp0, comp1, diff_row1, diff_col1, usehp);
+    }
+  } else if (mode == NEAREST_NEWMV || mode == NEAR_NEWMV) {
+    encode_mv_into(&ec, joints, comp0, comp1, diff_row1, diff_col1, usehp);
+  } else if (mode == NEW_NEARESTMV || mode == NEW_NEARMV) {
+    encode_mv_into(&ec, joints, comp0, comp1, diff_row0, diff_col0, usehp);
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 5; i++) o_joints[i] = joints[i];
+  for (int i = 0; i < 69; i++) { o_c0[i] = comp0[i]; o_c1[i] = comp1[i]; }
+  od_ec_enc_clear(&ec);
+  return nb;
 }

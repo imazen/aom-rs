@@ -2517,3 +2517,57 @@ fn inter_mode_gates_and_ctx_match_c() {
         assert_eq!(got, want, "rf0={rf0} rf1={rf1} mc_val={mc_val}");
     }
 }
+
+#[test]
+fn write_inter_block_mvs_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_inter_block_mvs;
+    let mut rng = Rng(0x1eb1_2c0d_e001_5015);
+    let mk_ibc = |rng: &mut Rng, ns: usize, out: &mut [u16]| {
+        let mut vals = [0i32; 11];
+        for v in vals.iter_mut().take(ns - 1) { *v = 1 + (rng.next() % 32766) as i32; }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 { let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32); out[i] = v as u16; prev = v; }
+        out[ns - 1] = 0; out[ns] = 0;
+    };
+    let mk_comp = |rng: &mut Rng| -> [u16; 69] {
+        let mut c = [0u16; 69];
+        mk_ibc(rng, 2, &mut c[0..3]); mk_ibc(rng, 11, &mut c[3..15]); mk_ibc(rng, 2, &mut c[15..18]);
+        for i in 0..10 { let o = 18 + i * 3; mk_ibc(rng, 2, &mut c[o..o + 3]); }
+        for i in 0..2 { let o = 48 + i * 5; mk_ibc(rng, 4, &mut c[o..o + 5]); }
+        mk_ibc(rng, 4, &mut c[58..63]); mk_ibc(rng, 2, &mut c[63..66]); mk_ibc(rng, 2, &mut c[66..69]);
+        c
+    };
+    // Modes that code MVs (+ some that don't, to exercise the no-op paths).
+    let modes = [16i32, 24, 19, 21, 20, 22, 13, 14, 15, 17, 18, 23];
+    for _ in 0..200_000 {
+        let mode = modes[(rng.next() % modes.len() as u64) as usize];
+        let is_compound = rng.next().is_multiple_of(2);
+        let usehp = (rng.next() % 2) as i32; // 0/1 (or -1 for NONE)
+        let usehp = if rng.next().is_multiple_of(5) { -1 } else { usehp };
+        // Non-zero MV diffs (multiples of 1, in valid class range |diff| <= 16384).
+        let nz = |rng: &mut Rng| -> (i32, i32) {
+            loop {
+                let r = (rng.next() % 32769) as i32 - 16384;
+                let c = (rng.next() % 32769) as i32 - 16384;
+                if r != 0 || c != 0 { return (r, c); }
+            }
+        };
+        let (r0, c0d) = nz(&mut rng);
+        let (r1, c1d) = nz(&mut rng);
+        let mut joints = [0u16; 5];
+        mk_ibc(&mut rng, 4, &mut joints);
+        let comp0 = mk_comp(&mut rng);
+        let comp1 = mk_comp(&mut rng);
+
+        let mut enc = OdEcEnc::new();
+        let (mut rjo, mut rc0, mut rc1) = (joints, comp0, comp1);
+        write_inter_block_mvs(&mut enc, mode, is_compound, [r0, r1], [c0d, c1d], usehp, &mut rjo, &mut rc0, &mut rc1);
+        let got = enc.done().to_vec();
+        let (want, ojo, oc0, oc1) = c::ref_write_inter_block_mvs(mode, is_compound, r0, c0d, r1, c1d, usehp, &joints, &comp0, &comp1);
+        assert_eq!(got, want, "bytes mode={mode} comp={is_compound} usehp={usehp}");
+        assert_eq!(rjo, ojo, "joints"); assert_eq!(rc0, oc0, "comp0"); assert_eq!(rc1, oc1, "comp1");
+    }
+}

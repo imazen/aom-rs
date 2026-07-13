@@ -2328,3 +2328,41 @@ pub fn mode_context_analyzer(mode_context_val: i32, is_compound: bool) -> i32 {
     let refmv_ctx = (mode_context_val >> 4) & 15; // REFMV_OFFSET=4, REFMV_CTX_MASK=15
     COMPOUND_MODE_CTX_MAP[(refmv_ctx >> 1) as usize][newmv_ctx.min(4) as usize]
 }
+
+// PREDICTION_MODE inter values (av1/common/enums.h); NEWMV/NEW_NEWMV defined above.
+const NEAREST_NEWMV: i32 = 19;
+const NEW_NEARESTMV: i32 = 20;
+const NEAR_NEWMV: i32 = 21;
+const NEW_NEARMV: i32 = 22;
+
+/// The mode-dependent inter-block MV coding of `pack_inter_mode_mvs`
+/// (`av1/encoder/bitstream.c`): NEWMV / NEW_NEWMV code one MV per reference (0..1+
+/// is_compound); NEAREST_NEWMV / NEAR_NEWMV code the second reference's MV; NEW_NEARESTMV
+/// / NEW_NEARMV code the first reference's. All share one `nmvc` (joints + both component
+/// CDFs adapt across the two references). `usehp` is the caller's resolved precision
+/// (`allow_high_precision_mv`, or `MV_SUBPEL_NONE` under `cur_frame_force_integer_mv`).
+/// Each coded `diff = mv - ref_mv` must be non-zero (a zero diff would use a NEAR/NEAREST
+/// mode instead).
+#[allow(clippy::too_many_arguments)]
+pub fn write_inter_block_mvs(
+    enc: &mut OdEcEnc,
+    mode: i32,
+    is_compound: bool,
+    diff_row: [i32; 2],
+    diff_col: [i32; 2],
+    usehp: i32,
+    joints_cdf: &mut [u16],
+    comp0: &mut [u16; 69],
+    comp1: &mut [u16; 69],
+) {
+    if mode == NEWMV || mode == NEW_NEWMV {
+        let refs = 1 + is_compound as usize;
+        for r in 0..refs {
+            encode_mv(enc, joints_cdf, comp0, comp1, diff_row[r], diff_col[r], usehp);
+        }
+    } else if mode == NEAREST_NEWMV || mode == NEAR_NEWMV {
+        encode_mv(enc, joints_cdf, comp0, comp1, diff_row[1], diff_col[1], usehp);
+    } else if mode == NEW_NEARESTMV || mode == NEW_NEARMV {
+        encode_mv(enc, joints_cdf, comp0, comp1, diff_row[0], diff_col[0], usehp);
+    }
+}

@@ -293,6 +293,8 @@ extern "C" {
     fn shim_have_nearmv_in_inter_mode(mode: i32) -> i32;
     fn shim_mode_context_analyzer(rf0: i32, rf1: i32, mc_val: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_write_inter_block_mvs(mode: i32, is_compound: i32, diff_row0: i32, diff_col0: i32, diff_row1: i32, diff_col1: i32, usehp: i32, joints: *mut u16, comp0: *mut u16, comp1: *mut u16, out: *mut u8, o_joints: *mut u16, o_c0: *mut u16, o_c1: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_segment_id(update_map: i32, preskip: i32, segid_preskip: i32, skip: i32, temporal_update: i32, seg_id_predicted: i32, pred_cdf: *mut u16, seg_cdf: *mut u16, seg_enabled: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, out: *mut u8, o_predcdf: *mut u16, o_segcdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_prefix(update_map: i32, segid_preskip: i32, temporal_update: i32, seg_id_predicted: i32, pred_cdf: *mut u16, seg_cdf: *mut u16, seg_enabled: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, skip_mode_cdf: *mut u16, frame_skip_mode_flag: i32, sm_seg_skip: i32, sm_comp_allowed: i32, sm_seg_ref_gmv: i32, skip_mode: i32, skip_cdf: *mut u16, skip_seg_active: i32, skip_txfm: i32, coded_lossless: i32, allow_intrabc: i32, mi_row: i32, mi_col: i32, mib_size: i32, sb_size: i32, cdef_trans_in: *const i32, cdef_bits: i32, cdef_strength: i32, dq_present: i32, dlf_present: i32, dlf_multi: i32, num_planes: i32, bsize: i32, cur_qindex: i32, cur_base_qindex: i32, dq_res: i32, mbmi_dlf: *const i32, xd_dlf_in: *const i32, mbmi_dlf_base: i32, xd_dlf_base_in: i32, dlf_res: i32, dq_cdf: *mut u16, dlf_multi_cdf: *mut u16, dlf_cdf: *mut u16, intra_inter_cdf: *mut u16, seg_ref_frame_active: i32, seg_globalmv_active: i32, is_inter: i32, out: *mut u8, out_skip: *mut i32, out_skip_mode: *mut i32, o_predcdf: *mut u16, o_segcdf: *mut u16, o_smcdf: *mut u16, o_skipcdf: *mut u16, o_cdef_trans: *mut i32, o_dqcdf: *mut u16, o_dlfmcdf: *mut u16, o_dlfcdf: *mut u16, o_base: *mut i32, o_xd_dlf: *mut i32, o_xd_dlf_base: *mut i32, o_iicdf: *mut u16) -> u32;
@@ -598,6 +600,25 @@ pub fn ref_is_inter_singleref_mode(mode: i32) -> bool { unsafe { shim_is_inter_s
 pub fn ref_have_nearmv_in_inter_mode(mode: i32) -> bool { unsafe { shim_have_nearmv_in_inter_mode(mode) != 0 } }
 pub fn ref_mode_context_analyzer(rf0: i32, rf1: i32, mc_val: i32) -> i32 {
     unsafe { shim_mode_context_analyzer(rf0, rf1, mc_val) }
+}
+
+/// Reference inter-block MV coding (the mode-dependent av1_encode_mv calls, over pristine
+/// C od_ec). Returns (bytes, joints[5], comp0[69], comp1[69]).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_inter_block_mvs(
+    mode: i32, is_compound: bool, diff_row0: i32, diff_col0: i32, diff_row1: i32, diff_col1: i32,
+    usehp: i32, joints: &[u16; 5], comp0: &[u16; 69], comp1: &[u16; 69],
+) -> (Vec<u8>, [u16; 5], [u16; 69], [u16; 69]) {
+    let (mut jo, mut c0, mut c1) = (*joints, *comp0, *comp1);
+    let mut out = vec![0u8; 64];
+    let (mut ojo, mut oc0, mut oc1) = ([0u16; 5], [0u16; 69], [0u16; 69]);
+    let n = unsafe {
+        shim_write_inter_block_mvs(mode, is_compound as i32, diff_row0, diff_col0, diff_row1,
+            diff_col1, usehp, jo.as_mut_ptr(), c0.as_mut_ptr(), c1.as_mut_ptr(), out.as_mut_ptr(),
+            ojo.as_mut_ptr(), oc0.as_mut_ptr(), oc1.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    (out, ojo, oc0, oc1)
 }
 
 /// Inputs for the `pack_inter_mode_mvs` prefix oracle (inter_segment_id -> skip_mode ->
