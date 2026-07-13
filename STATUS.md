@@ -157,6 +157,11 @@ both tracks, fully bit-exact.**
   rate. `optimize_diff.rs` — 19 sizes x 7 tx_types x 60 self-consistent blocks x
   sharpness 0..7.
 
+- **per-block entropy-context propagation (aom-txb)** — the neighbour-context
+  loop gating every txb (both tracks): get_txb_ctx (above/left -> txb_skip_ctx /
+  dc_sign_ctx; general algorithm verified vs C's size-specialised variants) +
+  av1_get_txb_entropy_context (block -> packed neighbour ctx). `entropy_ctx_diff.rs`.
+
 ## Coverage gate (auto-derived, honest)
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec
