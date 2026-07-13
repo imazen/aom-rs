@@ -2723,3 +2723,50 @@ pub fn write_modes_tile(
     }
     idx
 }
+
+/// `max_txsize_rect_lookup[BLOCK_SIZES_ALL]` (`common_data.h`): the block's max
+/// (rectangular) transform size — the starting size for the inter var-tx loop.
+const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] =
+    [0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18];
+
+/// `get_vartx_max_txsize` (`blockd.h`) for luma, non-lossless: `max_txsize_rect_lookup
+/// [bsize]` (lossless would be `TX_4X4`, but the var-tx tx-size coding is gated off in
+/// lossless).
+pub fn get_vartx_max_txsize_luma(bsize: usize) -> usize {
+    MAX_TXSIZE_RECT_LOOKUP[bsize]
+}
+
+/// The block-level inter transform-size loop of `write_modes_b`
+/// (`av1/encoder/bitstream.c`): drive [`write_tx_size_vartx`] across the block's transform
+/// grid — stepping `blk_row` by the max tx's height in units and `blk_col` by its width
+/// in units — threading the above/left txfm context through the whole block. `max_tx` is
+/// [`get_vartx_max_txsize_luma`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_inter_txfm_size(
+    enc: &mut OdEcEnc,
+    txfm_partition_cdf: &mut [[u16; 3]],
+    bsize: usize,
+    inter_tx_size: &[usize; 16],
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    above_ctx: &mut [u8],
+    left_ctx: &mut [u8],
+    max_tx: usize,
+) {
+    let txbh = TX_SIZE_HIGH_UNIT[max_tx];
+    let txbw = TX_SIZE_WIDE_UNIT[max_tx];
+    let width = MI_SIZE_WIDE[bsize];
+    let height = MI_SIZE_HIGH[bsize];
+    let mut idy = 0;
+    while idy < height {
+        let mut idx = 0;
+        while idx < width {
+            write_tx_size_vartx(
+                enc, txfm_partition_cdf, bsize, inter_tx_size, mb_to_right_edge, mb_to_bottom_edge,
+                above_ctx, left_ctx, max_tx, 0, idy, idx,
+            );
+            idx += txbw;
+        }
+        idy += txbh;
+    }
+}

@@ -2173,3 +2173,43 @@ uint32_t shim_write_modes_tile(int n_sb_rows, int n_sb_cols, int sb_mi, int sb_s
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- block-level inter var-tx-size loop (write_modes_b, av1/encoder/bitstream.c) --- */
+/* Drives write_tx_size_vartx across the block's txb grid (idy/idx step max_tx units),
+ * threading the above/left txfm context through the loop. max_tx = get_vartx_max_txsize
+ * (luma non-lossless = max_txsize_rect_lookup[bsize]). */
+uint32_t shim_write_inter_txfm_size(int bsize, int max_tx, const uint8_t *inter_tx_size,
+                                    int mb_to_right_edge, int mb_to_bottom_edge,
+                                    const uint8_t *above_in, const uint8_t *left_in, uint16_t *cdf,
+                                    uint8_t *out, uint8_t *above_out, uint8_t *left_out,
+                                    uint16_t *cdf_out) {
+  MACROBLOCKD xd;
+  MB_MODE_INFO mbmi;
+  uint8_t above[32], left[32];
+  uint16_t local_cdf[21][3];
+  for (int i = 0; i < 32; i++) { above[i] = above_in[i]; left[i] = left_in[i]; }
+  for (int i = 0; i < 21; i++) for (int j = 0; j < 3; j++) local_cdf[i][j] = cdf[i * 3 + j];
+  mbmi.bsize = (BLOCK_SIZE)bsize;
+  for (int i = 0; i < 16; i++) mbmi.inter_tx_size[i] = (TX_SIZE)inter_tx_size[i];
+  xd.mb_to_right_edge = mb_to_right_edge;
+  xd.mb_to_bottom_edge = mb_to_bottom_edge;
+  xd.plane[0].subsampling_x = 0;
+  xd.plane[0].subsampling_y = 0;
+  xd.above_txfm_context = (TXFM_CONTEXT *)above;
+  xd.left_txfm_context = (TXFM_CONTEXT *)left;
+
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  const int txbh = tx_size_high_unit[max_tx];
+  const int txbw = tx_size_wide_unit[max_tx];
+  const int width = mi_size_wide[bsize];
+  const int height = mi_size_high[bsize];
+  for (int idy = 0; idy < height; idy += txbh)
+    for (int idx = 0; idx < width; idx += txbw)
+      shim_wtsv_rec(&xd, &mbmi, (TX_SIZE)max_tx, 0, idy, idx, &ec, local_cdf);
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 32; i++) { above_out[i] = above[i]; left_out[i] = left[i]; }
+  for (int i = 0; i < 21; i++) for (int j = 0; j < 3; j++) cdf_out[i * 3 + j] = local_cdf[i][j];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

@@ -2980,3 +2980,51 @@ fn write_modes_tile_matches_c() {
         assert_eq!(ar_rs_f, ar_c, "arena");
     }
 }
+
+#[test]
+fn write_inter_txfm_size_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{get_vartx_max_txsize_luma, write_inter_txfm_size};
+    // inter block sizes >= 8x8 (var-tx applies).
+    let bsizes: [usize; 13] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 18, 19];
+    let nbr: [u8; 6] = [0, 4, 8, 16, 32, 64];
+    let mut rng = Rng(0x1e_7f5c_c0de_001cu64);
+    for &bsize in &bsizes {
+        let max_tx = get_vartx_max_txsize_luma(bsize);
+        for _ in 0..6000 {
+            let mut its = [0u8; 16];
+            for v in its.iter_mut() {
+                *v = (rng.next() % 19) as u8;
+            }
+            let its_usize: [usize; 16] = core::array::from_fn(|i| its[i] as usize);
+            let mut above = [0u8; 32];
+            let mut left = [0u8; 32];
+            for i in 0..32 {
+                above[i] = nbr[(rng.next() % 6) as usize];
+                left[i] = nbr[(rng.next() % 6) as usize];
+            }
+            let re = -((rng.next() % 4) as i32) * 32;
+            let be = -((rng.next() % 4) as i32) * 32;
+            let mut cdf = [[0u16; 3]; 21];
+            let mut cflat = [0u16; 63];
+            for c in 0..21 {
+                let p = 1 + (rng.next() % 32766) as u16;
+                cdf[c] = [p, 0, 0];
+                cflat[c * 3] = p;
+            }
+            let mut enc = OdEcEnc::new();
+            let mut a_rs = above;
+            let mut l_rs = left;
+            let mut cdf_rs = cdf;
+            write_inter_txfm_size(&mut enc, &mut cdf_rs, bsize, &its_usize, re, be, &mut a_rs, &mut l_rs, max_tx);
+            let got = enc.done().to_vec();
+            let (want, ao, lo, co) =
+                c::ref_write_inter_txfm_size(bsize as i32, max_tx as i32, &its, re, be, &above, &left, &cflat);
+            assert_eq!(got, want, "bytes bsize={bsize} max_tx={max_tx} re={re} be={be}");
+            assert_eq!(a_rs, ao, "above bsize={bsize}");
+            assert_eq!(l_rs, lo, "left bsize={bsize}");
+            let co_nested: [[u16; 3]; 21] = core::array::from_fn(|c| [co[c * 3], co[c * 3 + 1], co[c * 3 + 2]]);
+            assert_eq!(cdf_rs, co_nested, "cdf bsize={bsize}");
+        }
+    }
+}

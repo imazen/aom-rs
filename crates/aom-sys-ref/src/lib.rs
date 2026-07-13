@@ -269,6 +269,8 @@ extern "C" {
     fn shim_txfm_partition_update(above_ctx: *mut u8, left_ctx: *mut u8, tx_size: i32, txb_size: i32);
     #[allow(clippy::too_many_arguments)]
     fn shim_write_tx_size_vartx(bsize: i32, top_tx_size: i32, inter_tx_size: *const u8, mb_to_right_edge: i32, mb_to_bottom_edge: i32, above_in: *const u8, left_in: *const u8, cdf: *mut u16, out: *mut u8, above_out: *mut u8, left_out: *mut u8, cdf_out: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_inter_txfm_size(bsize: i32, max_tx: i32, inter_tx_size: *const u8, mb_to_right_edge: i32, mb_to_bottom_edge: i32, above_in: *const u8, left_in: *const u8, cdf: *mut u16, out: *mut u8, above_out: *mut u8, left_out: *mut u8, cdf_out: *mut u16) -> u32;
     fn shim_get_palette_bsize_ctx(bsize: i32) -> i32;
     fn shim_get_palette_mode_ctx(ha: i32, a_psize: i32, hl: i32, l_psize: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
@@ -502,6 +504,27 @@ pub fn ref_write_tx_size_vartx(
             above_in.as_ptr(), left_in.as_ptr(), c.as_mut_ptr(), out.as_mut_ptr(),
             ao.as_mut_ptr(), lo.as_mut_ptr(), co.as_mut_ptr(),
         )
+    };
+    out.truncate(n as usize);
+    (out, ao, lo, co)
+}
+
+/// Reference block-level inter var-tx-size loop (write_modes_b portion, over pristine C
+/// od_ec). Returns (bytes, above_ctx[32], left_ctx[32], adapted_cdf[21][3]).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_inter_txfm_size(
+    bsize: i32, max_tx: i32, inter_tx_size: &[u8; 16], mb_to_right_edge: i32, mb_to_bottom_edge: i32,
+    above_in: &[u8; 32], left_in: &[u8; 32], cdf: &[u16; 63],
+) -> (Vec<u8>, [u8; 32], [u8; 32], [u16; 63]) {
+    let mut c = *cdf;
+    let mut out = vec![0u8; 128];
+    let mut ao = [0u8; 32];
+    let mut lo = [0u8; 32];
+    let mut co = [0u16; 63];
+    let n = unsafe {
+        shim_write_inter_txfm_size(bsize, max_tx, inter_tx_size.as_ptr(), mb_to_right_edge,
+            mb_to_bottom_edge, above_in.as_ptr(), left_in.as_ptr(), c.as_mut_ptr(), out.as_mut_ptr(),
+            ao.as_mut_ptr(), lo.as_mut_ptr(), co.as_mut_ptr())
     };
     out.truncate(n as usize);
     (out, ao, lo, co)
