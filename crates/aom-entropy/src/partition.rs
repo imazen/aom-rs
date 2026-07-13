@@ -1690,3 +1690,59 @@ pub fn write_compound_type_info(
         }
     }
 }
+
+/// `get_relative_dist` (`mvref_common.h`): the signed order-hint distance `a - b`
+/// wrapped into `[-2^(bits-1), 2^(bits-1))`, where `bits = order_hint_bits_minus_1 + 1`.
+/// Zero when order hints are disabled.
+pub fn get_relative_dist(enable_order_hint: bool, order_hint_bits_minus_1: i32, a: i32, b: i32) -> i32 {
+    if !enable_order_hint {
+        return 0;
+    }
+    let bits = order_hint_bits_minus_1 + 1;
+    let diff = a - b;
+    let m = 1 << (bits - 1);
+    (diff & (m - 1)) - (diff & m)
+}
+
+/// `get_comp_index_context` (`pred_common.h`): the distance-weighted-compound index CDF
+/// context. `offset = (fwd == bck)` compares the forward/backward order-hint distances
+/// (`fwd_order_hint`/`bck_order_hint` are the ref buffers' order hints, 0 when absent);
+/// each present neighbour adds its `compound_idx` (compound block) or 1 (single-ref
+/// ALTREF). Result is `above + left + 3 * offset`.
+#[allow(clippy::too_many_arguments)]
+pub fn get_comp_index_context(
+    enable_order_hint: bool,
+    order_hint_bits_minus_1: i32,
+    cur_order_hint: i32,
+    fwd_order_hint: i32,
+    bck_order_hint: i32,
+    has_above: bool,
+    a_has_second_ref: bool,
+    a_compound_idx: i32,
+    a_ref_frame0: i32,
+    has_left: bool,
+    l_has_second_ref: bool,
+    l_compound_idx: i32,
+    l_ref_frame0: i32,
+) -> i32 {
+    let fwd = get_relative_dist(enable_order_hint, order_hint_bits_minus_1, fwd_order_hint, cur_order_hint).abs();
+    let bck = get_relative_dist(enable_order_hint, order_hint_bits_minus_1, cur_order_hint, bck_order_hint).abs();
+    let offset = i32::from(fwd == bck);
+    let mut above_ctx = 0;
+    let mut left_ctx = 0;
+    if has_above {
+        if a_has_second_ref {
+            above_ctx = a_compound_idx;
+        } else if a_ref_frame0 == ALTREF_FRAME {
+            above_ctx = 1;
+        }
+    }
+    if has_left {
+        if l_has_second_ref {
+            left_ctx = l_compound_idx;
+        } else if l_ref_frame0 == ALTREF_FRAME {
+            left_ctx = 1;
+        }
+    }
+    above_ctx + left_ctx + 3 * offset
+}

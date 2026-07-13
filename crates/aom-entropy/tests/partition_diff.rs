@@ -1636,3 +1636,51 @@ fn write_compound_type_info_matches_c() {
         assert_eq!(rwix, owix, "wedge_idx_cdf");
     }
 }
+
+#[test]
+fn get_relative_dist_matches_c() {
+    use aom_entropy::partition::get_relative_dist;
+    for enable in [false, true] {
+        for bm1 in 0..8i32 {
+            let bits = bm1 + 1;
+            let n = 1i32 << bits;
+            // enable==false ignores a,b; a,b must be in [0, 2^bits) when enabled (C assert).
+            let hi = if enable { n } else { 1 };
+            for a in 0..hi {
+                for b in 0..hi {
+                    assert_eq!(
+                        get_relative_dist(enable, bm1, a, b),
+                        c::ref_get_relative_dist(enable, bm1, a, b),
+                        "enable={enable} bm1={bm1} a={a} b={b}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn get_comp_index_context_matches_c() {
+    use aom_entropy::partition::get_comp_index_context;
+    let mut rng = Rng(0x0de7_0000_c0de_000a);
+    for _ in 0..400_000 {
+        let enable = rng.next().is_multiple_of(2);
+        let bm1 = (rng.next() % 8) as i32;
+        let bits = bm1 + 1;
+        let n = 1u64 << bits;
+        let cur = (rng.next() % n) as i32;
+        let fwd = (rng.next() % n) as i32;
+        let bck = (rng.next() % n) as i32;
+        let ha = rng.next().is_multiple_of(2);
+        let a_has2 = rng.next().is_multiple_of(2);
+        let a_cidx = (rng.next() % 2) as i32;
+        let a_rf0 = 1 + (rng.next() % 7) as i32; // 1..7 (incl ALTREF=7)
+        let hl = rng.next().is_multiple_of(2);
+        let l_has2 = rng.next().is_multiple_of(2);
+        let l_cidx = (rng.next() % 2) as i32;
+        let l_rf0 = 1 + (rng.next() % 7) as i32;
+        let got = get_comp_index_context(enable, bm1, cur, fwd, bck, ha, a_has2, a_cidx, a_rf0, hl, l_has2, l_cidx, l_rf0);
+        let want = c::ref_get_comp_index_context(enable, bm1, cur, fwd, bck, ha, a_has2, a_cidx, a_rf0, hl, l_has2, l_cidx, l_rf0);
+        assert_eq!(got, want, "enable={enable} bm1={bm1} cur={cur} fwd={fwd} bck={bck}");
+    }
+}

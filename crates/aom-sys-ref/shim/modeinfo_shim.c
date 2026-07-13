@@ -1185,3 +1185,39 @@ uint32_t shim_write_compound_type_info(int masked_used, int comp_group_idx, uint
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- order-hint distance + compound_idx context --- */
+#include "av1/common/mvref_common.h" /* get_relative_dist */
+
+int shim_get_relative_dist(int enable, int bits_minus_1, int a, int b) {
+  OrderHintInfo oh;
+  oh.enable_order_hint = enable;
+  oh.order_hint_bits_minus_1 = bits_minus_1;
+  return get_relative_dist(&oh, a, b);
+}
+
+/* get_comp_index_context body transcribed verbatim, but the two ref-buffer order hints
+ * (normally get_ref_frame_buf(cm, ref)->order_hint, or 0 when the buffer is absent) are
+ * passed directly — the CONTEXT logic (real get_relative_dist + has_second_ref + the ctx
+ * arithmetic) is otherwise identical to libaom. */
+int shim_get_comp_index_context(int enable, int bits_minus_1, int cur_order_hint,
+                                int fwd_order_hint, int bck_order_hint,
+                                int ha, int a_has2, int a_cidx, int a_rf0,
+                                int hl, int l_has2, int l_cidx, int l_rf0) {
+  OrderHintInfo oh;
+  oh.enable_order_hint = enable;
+  oh.order_hint_bits_minus_1 = bits_minus_1;
+  int fwd = abs(get_relative_dist(&oh, fwd_order_hint, cur_order_hint));
+  int bck = abs(get_relative_dist(&oh, cur_order_hint, bck_order_hint));
+  int above_ctx = 0, left_ctx = 0;
+  const int offset = (fwd == bck);
+  if (ha) {
+    if (a_has2) above_ctx = a_cidx;
+    else if (a_rf0 == ALTREF_FRAME) above_ctx = 1;
+  }
+  if (hl) {
+    if (l_has2) left_ctx = l_cidx;
+    else if (l_rf0 == ALTREF_FRAME) left_ctx = 1;
+  }
+  return above_ctx + left_ctx + 3 * offset;
+}
