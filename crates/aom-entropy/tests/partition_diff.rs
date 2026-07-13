@@ -3072,3 +3072,50 @@ fn pack_map_tokens_matches_c() {
         assert_eq!(map_rs_f, mco, "map_cdf n={n} num={num}");
     }
 }
+
+#[test]
+fn read_partition_roundtrips_write_partition() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{read_partition, write_partition};
+    let mut rng = Rng(0x1e_de00_c0de_001eu64);
+    let mk = |rng: &mut Rng, n: usize, out: &mut [u16]| {
+        let mut prev = 32768i32;
+        for e in out.iter_mut().take(n - 1) {
+            let v = (prev - 1 - (rng.next() % 400) as i32).max(n as i32);
+            *e = v as u16;
+            prev = v;
+        }
+        out[n - 1] = 0;
+        out[n] = 0;
+    };
+    // square bsizes >= 8x8 and their cdf_len.
+    let sizes: [(usize, usize); 5] = [(3, 4), (6, 10), (9, 10), (12, 10), (15, 8)];
+    for _ in 0..300_000 {
+        let (bsize, cdf_len) = sizes[(rng.next() % 5) as usize];
+        // scenario: 0 full, 1 !rows, 2 !cols, 3 neither (edges need bsize>8X8).
+        let scenario = if bsize == 3 { 0 } else { (rng.next() % 4) as i32 };
+        let (has_rows, has_cols, p) = match scenario {
+            1 => (false, true, if rng.next().is_multiple_of(2) { 1 } else { 3 }), // HORZ/SPLIT
+            2 => (true, false, if rng.next().is_multiple_of(2) { 2 } else { 3 }), // VERT/SPLIT
+            3 => (false, false, 3),                                              // SPLIT
+            _ => (true, true, (rng.next() % cdf_len as u64) as i32),             // full
+        };
+        let mut cdf0 = [0u16; 11];
+        mk(&mut rng, cdf_len, &mut cdf0);
+
+        // encode
+        let mut enc = OdEcEnc::new();
+        let mut cdf_e = cdf0;
+        write_partition(&mut enc, &mut cdf_e, cdf_len, p, has_rows, has_cols, bsize);
+        let bytes = enc.done().to_vec();
+
+        // decode from the same initial CDF
+        let mut dec = OdEcDec::new(&bytes);
+        let mut cdf_d = cdf0;
+        let p_dec = read_partition(&mut dec, &mut cdf_d, cdf_len, has_rows, has_cols, bsize);
+
+        assert_eq!(p_dec, p, "partition roundtrip bsize={bsize} scen={scenario} p={p}");
+        assert_eq!(cdf_e, cdf_d, "adapted CDF roundtrip bsize={bsize} scen={scenario}");
+    }
+}

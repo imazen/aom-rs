@@ -2803,3 +2803,42 @@ pub fn pack_map_tokens(enc: &mut OdEcEnc, n: i32, tokens: &[i32], color_ctxs: &[
         write_symbol(enc, tokens[i], &mut map_cdf[color_ctxs[i]], n as usize);
     }
 }
+
+use crate::cdf::read_symbol;
+use crate::dec::OdEcDec;
+
+/// `read_partition` (`av1/decoder/decodeframe.c`): the decode-side inverse of
+/// [`write_partition`]. With both rows and columns in-frame it reads the partition symbol
+/// from the (context-selected) partition CDF (adapting it); at a frame edge it reads the
+/// 2-way split-vs-alike bit from the gathered CDF (no adaptation); when neither rows nor
+/// columns remain the partition is the forced `PARTITION_SPLIT`. `partition_cdf` is the
+/// caller's `[ctx]`-selected slice (adapted in place, mirroring the encoder).
+pub fn read_partition(
+    dec: &mut OdEcDec,
+    partition_cdf: &mut [u16],
+    cdf_len: usize,
+    has_rows: bool,
+    has_cols: bool,
+    bsize: usize,
+) -> i32 {
+    if !has_rows && !has_cols {
+        return PARTITION_SPLIT_MODE;
+    }
+    if has_rows && has_cols {
+        read_symbol(dec, partition_cdf, cdf_len)
+    } else if !has_rows && has_cols {
+        let cdf = partition_gather_vert_alike(partition_cdf, bsize);
+        if dec.decode_cdf_q15(&cdf, 2) != 0 {
+            PARTITION_SPLIT_MODE
+        } else {
+            PARTITION_HORZ as i32
+        }
+    } else {
+        let cdf = partition_gather_horz_alike(partition_cdf, bsize);
+        if dec.decode_cdf_q15(&cdf, 2) != 0 {
+            PARTITION_SPLIT_MODE
+        } else {
+            PARTITION_VERT as i32
+        }
+    }
+}
