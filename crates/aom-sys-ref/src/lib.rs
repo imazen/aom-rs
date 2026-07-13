@@ -214,6 +214,45 @@ pub fn ref_quantize_fp(
     (qcoeff, dqcoeff, eob)
 }
 
+// aom_dsp/quantize.c — "b" quantizer helper (dead-zone + quant/quant_shift).
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    pub fn aom_quantize_b_helper_c(
+        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
+        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
+        eob: *mut u16, scan: *const i16, iscan: *const i16, qm: *const u8, iqm: *const u8,
+        log_scale: i32,
+    );
+}
+
+/// Reference `aom_quantize_b_helper_c` with no quant matrix. Returns
+/// (qcoeff, dqcoeff, eob).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_quantize_b(
+    log_scale: i32,
+    coeff: &[i32],
+    zbin: &[i16; 2],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    quant_shift: &[i16; 2],
+    dequant: &[i16; 2],
+    scan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
+    let n = coeff.len();
+    let mut qcoeff = vec![0i32; n];
+    let mut dqcoeff = vec![0i32; n];
+    let mut eob: u16 = 0;
+    let dummy = vec![0i16; n.max(2)];
+    unsafe {
+        aom_quantize_b_helper_c(
+            coeff.as_ptr(), n as isize, zbin.as_ptr(), round.as_ptr(), quant.as_ptr(),
+            quant_shift.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
+            &mut eob, scan.as_ptr(), dummy.as_ptr(), std::ptr::null(), std::ptr::null(), log_scale,
+        )
+    }
+    (qcoeff, dqcoeff, eob)
+}
+
 /// Reference inverse 2-D transform+add for `tx_size` (0..19). `dest` is the
 /// bd-bit pixel buffer to reconstruct onto (modified in place).
 pub fn ref_inv_txfm2d_add(

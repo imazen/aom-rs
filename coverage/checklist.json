@@ -59,6 +59,13 @@
         "av1_quantize_fp_32x32": {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"},
         "av1_quantize_fp_64x64": {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"}
       }
+    },
+    "quant.quantize_b": {
+      "status": "green",
+      "note": "Dead-zone (zbin) quantizer with quant/quant_shift two-step, no quant matrix, log_scale 0/1/2.",
+      "items": {
+        "aom_quantize_b": {"status": "green", "test": "quantize_b_diff::quantize_b_differential_fuzz"}
+      }
     }
   }
 }

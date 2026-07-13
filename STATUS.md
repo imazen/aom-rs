@@ -36,6 +36,13 @@ Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
 **→ The transform subsystem is now complete: forward 1-D/2-D + inverse 1-D/2-D,
 both tracks, fully bit-exact.**
 
+- **Quantization** (`av1_quantize.c`, `aom_dsp/quantize.c`), encoder track:
+  `av1_quantize_fp` family (no-qmatrix fast path, log_scale 0/1/2) and
+  `aom_quantize_b` (dead-zone + quant/quant_shift). Harnesses:
+  `aom-quant/tests/quantize_{fp,b}_diff.rs`, ~480k differential comparisons
+  (qcoeff + dqcoeff + eob) + edge cases, byte-identical to C.
+  (Quant-matrix path + adaptive/highbd variants: TODO.)
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.
