@@ -854,3 +854,77 @@ fn read_tile_info_inverts_write() {
         }
     }
 }
+
+#[test]
+fn read_frame_size_with_refs_inverts_write() {
+    use aom_entropy::header::{
+        read_frame_size_with_refs, write_frame_size_with_refs, FrameSizeHeader, FrameSizeWithRefs,
+    };
+    let dummy_fs = FrameSizeHeader {
+        frame_size_override: true, num_bits_width: 16, num_bits_height: 16,
+        superres_upscaled_width: 1, superres_upscaled_height: 1, enable_superres: false,
+        scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0,
+    };
+    let mut rng = Rng(0x1e_f52e_c0de_01c0);
+    for _ in 0..100_000 {
+        let en_sr = rng.next() & 1 == 1;
+        let denom = if en_sr && rng.next() & 1 == 1 { 9 + (rng.next() % 8) as i32 } else { 8 };
+        if rng.next() & 1 == 1 {
+            // matched-ref path
+            let fi = (rng.next() % 7) as usize;
+            let (w, h) = (1 + (rng.next() % 4096) as i32, 1 + (rng.next() % 4096) as i32);
+            let (rw, rh) = (1 + (rng.next() % 4096) as i32, 1 + (rng.next() % 4096) as i32);
+            let mut rcw = [0i32; 7];
+            let mut rch = [0i32; 7];
+            let mut rrw = [0i32; 7];
+            let mut rrh = [0i32; 7];
+            rcw[fi] = w;
+            rch[fi] = h;
+            rrw[fi] = rw;
+            rrh[fi] = rh;
+            let mut valid = [false; 7];
+            valid[fi] = true;
+            let fx = FrameSizeWithRefs {
+                superres_upscaled_width: w, superres_upscaled_height: h,
+                render_width: rw, render_height: rh, ref_cfg_valid: valid,
+                ref_y_crop_width: rcw, ref_y_crop_height: rch,
+                ref_render_width: rrw, ref_render_height: rrh,
+                enable_superres: en_sr, scale_denominator: denom, frame_size: dummy_fs,
+            };
+            let mut wb = WriteBitBuffer::new();
+            write_frame_size_with_refs(&mut wb, &fx);
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let g = read_frame_size_with_refs(&mut rb, &rcw, &rch, &rrw, &rrh, en_sr, 16, 16);
+            assert_eq!(g, (w, h, rw, rh, denom, fi as i32), "matched ref fi={fi}");
+        } else {
+            // fallback path (no ref matches)
+            let (w, h) = (1 + (rng.next() % 65536) as i32, 1 + (rng.next() % 65536) as i32);
+            let scaling = rng.next() & 1 == 1;
+            let (rw, rh) = if scaling {
+                (1 + (rng.next() % 65536) as i32, 1 + (rng.next() % 65536) as i32)
+            } else {
+                (w, h)
+            };
+            let fs = FrameSizeHeader {
+                frame_size_override: true, num_bits_width: 16, num_bits_height: 16,
+                superres_upscaled_width: w, superres_upscaled_height: h, enable_superres: en_sr,
+                scale_denominator: denom, scaling_active: scaling, render_width: rw, render_height: rh,
+            };
+            let fx = FrameSizeWithRefs {
+                superres_upscaled_width: w, superres_upscaled_height: h,
+                render_width: rw, render_height: rh, ref_cfg_valid: [false; 7],
+                ref_y_crop_width: [0; 7], ref_y_crop_height: [0; 7],
+                ref_render_width: [0; 7], ref_render_height: [0; 7],
+                enable_superres: en_sr, scale_denominator: denom, frame_size: fs,
+            };
+            let mut wb = WriteBitBuffer::new();
+            write_frame_size_with_refs(&mut wb, &fx);
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let z = [0i32; 7];
+            let g = read_frame_size_with_refs(&mut rb, &z, &z, &z, &z, en_sr, 16, 16);
+            assert_eq!(g, (w, h, rw, rh, denom, -1), "fallback scaling={scaling}");
+        }
+    }
+}

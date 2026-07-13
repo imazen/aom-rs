@@ -2202,3 +2202,50 @@ pub fn read_tile_info(
     }
     (t, ctx_update_id, tile_size_bytes)
 }
+
+/// `read_frame_size_with_refs` (setup_frame_size_with_refs, `av1/decoder/decodeframe.c`)
+/// — inverse of [`write_frame_size_with_refs`]: read a per-reference "found" bit; the
+/// first set bit takes that reference's crop + render dimensions and then the superres
+/// scale, otherwise the full frame size is read. Returns
+/// `(width, height, render_width, render_height, scale_denominator, found_ref_index)`
+/// (`found_ref_index = -1` when no reference matched). The reference dimension arrays
+/// come from the decoded reference frame buffers.
+#[allow(clippy::too_many_arguments)]
+pub fn read_frame_size_with_refs(
+    rb: &mut ReadBitBuffer,
+    ref_y_crop_width: &[i32; 7],
+    ref_y_crop_height: &[i32; 7],
+    ref_render_width: &[i32; 7],
+    ref_render_height: &[i32; 7],
+    enable_superres: bool,
+    num_bits_width: u32,
+    num_bits_height: u32,
+) -> (i32, i32, i32, i32, i32, i32) {
+    let mut found = -1i32;
+    for r in 0..7 {
+        if rb.read_bit() != 0 {
+            found = r;
+            break;
+        }
+    }
+    if found >= 0 {
+        let fi = found as usize;
+        let scale_denominator = read_superres_scale(rb, enable_superres);
+        (
+            ref_y_crop_width[fi],
+            ref_y_crop_height[fi],
+            ref_render_width[fi],
+            ref_render_height[fi],
+            scale_denominator,
+            found,
+        )
+    } else {
+        let fs = read_frame_size(rb, true, num_bits_width, num_bits_height, enable_superres, 0, 0);
+        let (rw, rh) = if fs.scaling_active {
+            (fs.render_width, fs.render_height)
+        } else {
+            (fs.superres_upscaled_width, fs.superres_upscaled_height)
+        };
+        (fs.superres_upscaled_width, fs.superres_upscaled_height, rw, rh, fs.scale_denominator, -1)
+    }
+}
