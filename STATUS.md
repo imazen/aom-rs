@@ -104,6 +104,12 @@ state. Kernel-level differential coverage is tracked separately in
   filter table + FIR math, byte-identical to C. (2D_sr, dist_wtd, smooth/sharp/
   4-tap filters, highbd: TODO.)
 
+- **CDEF filter block** (`av1/common/cdef_block.c`), both tracks: all 4
+  `cdef_filter_8_{0,1,2,3}` variants (primary/secondary enable combos),
+  `constrain` + directional primary/secondary taps + CDEF_VERY_LARGE clipping.
+  Harness: `aom-cdef/tests/cdef_filter_diff.rs` — 320k comparisons,
+  byte-identical to C. CDEF (direction search + filter) now complete lowbd.
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.

@@ -91,9 +91,31 @@ pub fn ref_satd(coeff: &[i32]) -> i32 {
     unsafe { aom_satd_c(coeff.as_ptr(), coeff.len() as i32) }
 }
 
-// av1/common/cdef_block.c — CDEF direction search.
+// av1/common/cdef_block.c — CDEF direction search + filter block.
 extern "C" {
     pub fn cdef_find_dir_c(img: *const u16, stride: i32, var: *mut i32, coeff_shift: i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_cdef_filter8(
+        variant: i32, dst: *mut u8, dstride: i32, in_: *const u16, pri: i32, sec: i32, dir: i32,
+        prid: i32, secd: i32, cshift: i32, bw: i32, bh: i32,
+    );
+}
+
+/// Reference `cdef_filter_8_<variant>_c`. `in_buf` is u16 with stride
+/// CDEF_BSTRIDE; `in_off` is the block origin. Returns the `bw*bh` result.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_cdef_filter8(
+    variant: i32, in_buf: &[u16], in_off: usize, pri: i32, sec: i32, dir: i32, prid: i32,
+    secd: i32, cshift: i32, bw: usize, bh: usize,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; bw * bh];
+    unsafe {
+        shim_cdef_filter8(
+            variant, dst.as_mut_ptr(), bw as i32, in_buf.as_ptr().add(in_off), pri, sec, dir,
+            prid, secd, cshift, bw as i32, bh as i32,
+        )
+    }
+    dst
 }
 
 /// Reference `cdef_find_dir_c`; returns (best_dir, var).

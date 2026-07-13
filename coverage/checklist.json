@@ -384,6 +384,28 @@
           "test": "hadamard_diff::hadamard_satd_byte_identical"
         }
       }
+    },
+    "cdef.filter_block": {
+      "status": "green",
+      "note": "CDEF filter block lowbd, all 4 variants (primary/secondary enable combos), constrain + directional pri/sec taps + CDEF_VERY_LARGE clipping. Highbd (cdef_filter_16_*): TODO.",
+      "items": {
+        "cdef_filter_8_0": {
+          "status": "green",
+          "test": "cdef_filter_diff::cdef_filter8_byte_identical"
+        },
+        "cdef_filter_8_1": {
+          "status": "green",
+          "test": "cdef_filter_diff::cdef_filter8_byte_identical"
+        },
+        "cdef_filter_8_2": {
+          "status": "green",
+          "test": "cdef_filter_diff::cdef_filter8_byte_identical"
+        },
+        "cdef_filter_8_3": {
+          "status": "green",
+          "test": "cdef_filter_diff::cdef_filter8_byte_identical"
+        }
+      }
     }
   }
 }
