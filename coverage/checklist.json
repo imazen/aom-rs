@@ -18,6 +18,13 @@
         "av1_fidentity16": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
         "av1_fidentity32": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"}
       }
+    },
+    "transform.fwd_txfm2d": {
+      "status": "green",
+      "note": "All 19 tx_size entry points, all valid tx_type combos (193 total), incl. 64-point coeff repacking, flips, rectangular Sqrt2 scaling.",
+      "items": {
+        "av1_fwd_txfm2d_all_sizes": {"status": "green", "test": "txfm2d_diff::txfm2d_differential_fuzz"}
+      }
     }
   }
 }

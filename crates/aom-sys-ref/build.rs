@@ -16,5 +16,6 @@ fn main() {
     // in case any TU needs them.
     println!("cargo:rustc-link-lib=dylib=stdc++");
     println!("cargo:rustc-link-lib=dylib=m");
+    println!("cargo:rustc-link-lib=dylib=pthread");
     println!("cargo:rerun-if-changed={}", lib.display());
 }

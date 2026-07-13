@@ -8,6 +8,7 @@ pub mod cospi;
 pub mod fdct;
 pub mod special;
 pub mod txfm1d_gen;
+pub mod txfm2d;
 
 pub use fdct::{av1_fdct4, half_btf, round_shift};
 pub use special::{

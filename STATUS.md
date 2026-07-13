@@ -11,6 +11,15 @@ Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
   differential comparisons (100k random inputs × 4 cos_bit × 12 kernels) +
   edge cases, all byte-identical to C.
 
+- **Forward 2-D transform** (`av1_fwd_txfm2d.c`), all 19 tx sizes: config tables
+  (flip/vtx/htx/cos_bit/txfm_type/shift), `av1_round_shift_array`, the row/col
+  composition with flips + rectangular Sqrt2 scaling + transpose, and the
+  64-point coefficient repacking. Harness: `tests/txfm2d_diff.rs`. Coverage: all
+  193 valid (tx_type × tx_size) combos, ~386k full-transform differential
+  comparisons + edge cases, byte-identical to C.
+  Oracle needs `av1_rtcd()` init (some `_c` entry points call SIMD-dispatched
+  helpers); handled once in `aom-sys-ref::ref_init`.
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.
