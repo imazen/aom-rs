@@ -90,11 +90,10 @@ pub fn filter_intra_edge(p: &mut [u8], sz: usize, strength: i32) {
     let filt = (strength - 1) as usize;
     let edge: [i32; 129] = {
         let mut e = [0i32; 129];
-        for i in 0..sz {
-            e[i] = p[i] as i32;
-        }
+        e[..sz].iter_mut().zip(p.iter().take(sz)).for_each(|(d, &s)| *d = s as i32);
         e
     };
+    #[allow(clippy::needless_range_loop)]
     for i in 1..sz {
         let mut s = 0i32;
         for j in 0..5 {
