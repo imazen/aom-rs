@@ -144,3 +144,43 @@ unsigned int aom_sad64x64_avx2(const uint8_t*,int,const uint8_t*,int);
 unsigned int aom_sad128x128_avx2(const uint8_t*,int,const uint8_t*,int);
 unsigned int shim_sad_prod64(const uint8_t*s,int ss,const uint8_t*r,int rs){return aom_sad64x64_avx2(s,ss,r,rs);}
 unsigned int shim_sad_prod128(const uint8_t*s,int ss,const uint8_t*r,int rs){return aom_sad128x128_avx2(s,ss,r,rs);}
+
+/* avg SAD (compound prediction motion search); libaom compiles only the
+   17 non-4-side sizes in this config */
+unsigned int aom_sad8x8_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad8x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad8x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad16x8_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad16x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad16x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad16x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad32x8_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad32x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad32x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad32x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad64x16_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad64x32_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad64x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad64x128_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad128x64_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int aom_sad128x128_avg_c(const uint8_t*,int,const uint8_t*,int,const uint8_t*);
+unsigned int shim_sad_avg(int i,const uint8_t*s,int ss,const uint8_t*r,int rs,const uint8_t*sp){
+  switch(i){
+  case 4: return aom_sad8x8_avg_c(s,ss,r,rs,sp);
+  case 5: return aom_sad8x16_avg_c(s,ss,r,rs,sp);
+  case 6: return aom_sad8x32_avg_c(s,ss,r,rs,sp);
+  case 8: return aom_sad16x8_avg_c(s,ss,r,rs,sp);
+  case 9: return aom_sad16x16_avg_c(s,ss,r,rs,sp);
+  case 10: return aom_sad16x32_avg_c(s,ss,r,rs,sp);
+  case 11: return aom_sad16x64_avg_c(s,ss,r,rs,sp);
+  case 12: return aom_sad32x8_avg_c(s,ss,r,rs,sp);
+  case 13: return aom_sad32x16_avg_c(s,ss,r,rs,sp);
+  case 14: return aom_sad32x32_avg_c(s,ss,r,rs,sp);
+  case 15: return aom_sad32x64_avg_c(s,ss,r,rs,sp);
+  case 16: return aom_sad64x16_avg_c(s,ss,r,rs,sp);
+  case 17: return aom_sad64x32_avg_c(s,ss,r,rs,sp);
+  case 18: return aom_sad64x64_avg_c(s,ss,r,rs,sp);
+  case 19: return aom_sad64x128_avg_c(s,ss,r,rs,sp);
+  case 20: return aom_sad128x64_avg_c(s,ss,r,rs,sp);
+  case 21: return aom_sad128x128_avg_c(s,ss,r,rs,sp);
+  default: return 0;}}

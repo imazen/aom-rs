@@ -27,6 +27,24 @@ pub fn sad(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: usize, h: us
     s
 }
 
+/// `aom_sad<W>x<H>_avg_c`: SAD of `src` against the rounded average of `ref` and
+/// a contiguous `second_pred` (compound-prediction motion search). Matches
+/// `aom_comp_avg_pred` (comp = ROUND_POWER_OF_TWO(ref+second_pred, 1)) followed
+/// by `sad`.
+pub fn sad_avg(
+    src: &[u8], src_stride: usize, ref_: &[u8], ref_stride: usize, second_pred: &[u8],
+    w: usize, h: usize,
+) -> u32 {
+    let mut s: u32 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let comp = (ref_[y * ref_stride + x] as u32 + second_pred[y * w + x] as u32 + 1) >> 1;
+            s += (src[y * src_stride + x] as i32 - comp as i32).unsigned_abs();
+        }
+    }
+    s
+}
+
 /// `aom_highbd_sad<W>x<H>_c`: SAD over 16-bit (10/12-bit) samples.
 pub fn highbd_sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
     let mut s: u32 = 0;

@@ -138,6 +138,19 @@ pub fn ref_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize) -> u32 {
 }
 
 extern "C" {
+    fn shim_sad_avg(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8) -> u32;
+}
+
+/// Reference `aom_sad<W>x<H>_avg_c` (compound-prediction SAD) for size index `idx`.
+///
+/// `aom_sad*_avg_c` internally calls the RTCD-dispatched `aom_comp_avg_pred`
+/// (a null fn-pointer until `aom_dsp_rtcd()` runs), so init RTCD first.
+pub fn ref_sad_avg(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize, sp: &[u8]) -> u32 {
+    ref_init();
+    unsafe { shim_sad_avg(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32, sp.as_ptr()) }
+}
+
+extern "C" {
     fn shim_sad_prod64(s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
     fn shim_sad_prod128(s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
 }

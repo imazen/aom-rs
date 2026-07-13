@@ -1,7 +1,7 @@
 //! Differential harness for SAD / variance / sub-pixel variance vs C libaom
 //! v3.14.1 across all 22 block sizes.
 
-use aom_dist::{sad, sub_pixel_variance, variance};
+use aom_dist::{sad, sad_avg, sub_pixel_variance, variance};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 22] = [
@@ -45,6 +45,16 @@ fn sad_variance_subpel_byte_identical() {
             let got = sad(&a, a_stride, &b, b_stride, w, h);
             let want = c::ref_sad(idx, &a, a_stride, &b, b_stride);
             assert_eq!(got, want, "sad {w}x{h}");
+
+            // avg SAD (compound prediction): second_pred is contiguous w*h.
+            // libaom only compiles avg-SAD for the 17 non-4-side sizes in this
+            // config (compound isn't used for 4-wide/4-tall sub-blocks).
+            if !matches!((w, h), (4, 4) | (4, 8) | (4, 16) | (8, 4) | (16, 4)) {
+                let sp: Vec<u8> = (0..w * h).map(|_| rng.u8()).collect();
+                let got_avg = sad_avg(&a, a_stride, &b, b_stride, &sp, w, h);
+                let want_avg = c::ref_sad_avg(idx, &a, a_stride, &b, b_stride, &sp);
+                assert_eq!(got_avg, want_avg, "sad_avg {w}x{h}");
+            }
 
             // variance
             let (gv, gs) = variance(&a, a_stride, &b, b_stride, w, h);
