@@ -3880,3 +3880,102 @@ fn read_composite_leaf_symbols_roundtrip() {
         }
     }
 }
+
+#[test]
+fn read_inter_leaf_symbols_roundtrip() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        read_compound_type_info, read_interintra_info, read_palette_mode_info_flags,
+        write_compound_type_info, write_interintra_info, write_palette_mode_info_flags,
+    };
+    let mut rng = Rng(0x1e_1eaf_2c0d_e0c0u64);
+    for _ in 0..80_000 {
+        // interintra (allowed path)
+        {
+            let interintra = (rng.next() & 1) as i32;
+            let wedge_used = rng.next() & 1 == 1;
+            let mode = if interintra != 0 { (rng.next() % 4) as i32 } else { 0 };
+            let use_wedge = if interintra != 0 && wedge_used { (rng.next() & 1) as i32 } else { 0 };
+            let widx = if use_wedge != 0 { (rng.next() % 16) as i32 } else { 0 };
+            let mut ii = [0u16; 3];
+            let mut im = [0u16; 5];
+            let mut wi = [0u16; 3];
+            let mut wx = [0u16; 17];
+            mk_ns_cdf(&mut rng, 2, &mut ii);
+            mk_ns_cdf(&mut rng, 4, &mut im);
+            mk_ns_cdf(&mut rng, 2, &mut wi);
+            mk_ns_cdf(&mut rng, 16, &mut wx);
+            let mut enc = OdEcEnc::new();
+            let (mut e0, mut e1, mut e2, mut e3) = (ii, im, wi, wx);
+            write_interintra_info(&mut enc, true, interintra, &mut e0, mode, &mut e1, wedge_used, use_wedge, &mut e2, widx, &mut e3);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut d0, mut d1, mut d2, mut d3) = (ii, im, wi, wx);
+            let got = read_interintra_info(&mut dec, true, &mut d0, &mut d1, wedge_used, &mut d2, &mut d3);
+            assert_eq!(got, (interintra, mode, use_wedge, widx), "interintra");
+            assert_eq!((e0, e1, e2, e3), (d0, d1, d2, d3), "interintra cdf");
+        }
+        // compound_type
+        {
+            let masked = rng.next() & 1 == 1;
+            let dist_wtd = rng.next() & 1 == 1;
+            let wedge_used = rng.next() & 1 == 1;
+            let cgi = if masked { (rng.next() & 1) as i32 } else { 0 };
+            let (mut cidx, mut ctype) = (1i32, 0i32);
+            let (mut widx, mut wsign, mut mask) = (0i32, 0i32, 0i32);
+            if cgi == 0 {
+                if dist_wtd { cidx = (rng.next() & 1) as i32; }
+            } else {
+                ctype = if wedge_used { 2 + (rng.next() & 1) as i32 } else { 3 };
+                if ctype == 2 {
+                    widx = (rng.next() % 16) as i32;
+                    wsign = (rng.next() & 1) as i32;
+                } else {
+                    mask = (rng.next() & 1) as i32;
+                }
+            }
+            let mut cg = [0u16; 3];
+            let mut ci = [0u16; 3];
+            let mut ct = [0u16; 3];
+            let mut wx = [0u16; 17];
+            mk_ns_cdf(&mut rng, 2, &mut cg);
+            mk_ns_cdf(&mut rng, 2, &mut ci);
+            mk_ns_cdf(&mut rng, 2, &mut ct);
+            mk_ns_cdf(&mut rng, 16, &mut wx);
+            let mut enc = OdEcEnc::new();
+            let (mut cge, mut cie, mut cte, mut wxe) = (cg, ci, ct, wx);
+            write_compound_type_info(&mut enc, masked, cgi, &mut cge, dist_wtd, cidx, &mut cie, wedge_used, ctype, &mut cte, widx, &mut wxe, wsign, mask);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut cgd, mut cid, mut ctd, mut wxd) = (cg, ci, ct, wx);
+            let got = read_compound_type_info(&mut dec, masked, &mut cgd, dist_wtd, &mut cid, wedge_used, &mut ctd, &mut wxd);
+            assert_eq!(got, (cgi, cidx, ctype, widx, wsign, mask), "compound_type");
+            assert_eq!((cge, cie, cte, wxe), (cgd, cid, ctd, wxd), "compound cdf");
+        }
+        // palette flags
+        {
+            let dc_y = rng.next() & 1 == 1;
+            let dc_uv = rng.next() & 1 == 1;
+            let n_y = if dc_y && rng.next() & 1 == 1 { 2 + (rng.next() % 7) as i32 } else { 0 };
+            let n_uv = if dc_uv && rng.next() & 1 == 1 { 2 + (rng.next() % 7) as i32 } else { 0 };
+            let mut ym = [0u16; 3];
+            let mut ys = [0u16; 8];
+            let mut um = [0u16; 3];
+            let mut us = [0u16; 8];
+            mk_ns_cdf(&mut rng, 2, &mut ym);
+            mk_ns_cdf(&mut rng, 7, &mut ys);
+            mk_ns_cdf(&mut rng, 2, &mut um);
+            mk_ns_cdf(&mut rng, 7, &mut us);
+            let mut enc = OdEcEnc::new();
+            let (mut yme, mut yse, mut ume, mut use_) = (ym, ys, um, us);
+            write_palette_mode_info_flags(&mut enc, dc_y, n_y, &mut yme, &mut yse, dc_uv, n_uv, &mut ume, &mut use_);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut ymd, mut ysd, mut umd, mut usd) = (ym, ys, um, us);
+            let got = read_palette_mode_info_flags(&mut dec, dc_y, &mut ymd, &mut ysd, dc_uv, &mut umd, &mut usd);
+            assert_eq!(got, (n_y, n_uv), "palette flags");
+            assert_eq!((yme, yse, ume, use_), (ymd, ysd, umd, usd), "palette cdf");
+        }
+    }
+}

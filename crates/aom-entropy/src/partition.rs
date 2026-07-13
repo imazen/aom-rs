@@ -3500,3 +3500,103 @@ pub fn read_cdef(
         -1
     }
 }
+
+/// `read_interintra_info` — inverse of [`write_interintra_info`]: the inter-intra flag,
+/// then (if set) the inter-intra mode and the optional wedge flag + index. Returns
+/// `(interintra, mode, use_wedge, wedge_index)`.
+#[allow(clippy::too_many_arguments)]
+pub fn read_interintra_info(
+    dec: &mut OdEcDec,
+    allowed: bool,
+    interintra_cdf: &mut [u16],
+    interintra_mode_cdf: &mut [u16],
+    wedge_used: bool,
+    wedge_interintra_cdf: &mut [u16],
+    wedge_idx_cdf: &mut [u16],
+) -> (i32, i32, i32, i32) {
+    if !allowed {
+        return (0, 0, 0, 0);
+    }
+    let interintra = read_symbol(dec, interintra_cdf, 2);
+    let (mut mode, mut use_wedge, mut widx) = (0, 0, 0);
+    if interintra != 0 {
+        mode = read_symbol(dec, interintra_mode_cdf, INTERINTRA_MODES);
+        if wedge_used {
+            use_wedge = read_symbol(dec, wedge_interintra_cdf, 2);
+            if use_wedge != 0 {
+                widx = read_symbol(dec, wedge_idx_cdf, MAX_WEDGE_TYPES);
+            }
+        }
+    }
+    (interintra, mode, use_wedge, widx)
+}
+
+/// `read_compound_type_info` — inverse of [`write_compound_type_info`]: the compound
+/// group idx, then either the dist-wtd compound idx (average group) or the masked
+/// compound type + wedge index/sign or diffwtd mask type. Returns
+/// `(comp_group_idx, compound_idx, comp_type, wedge_index, wedge_sign, mask_type)`.
+/// Non-coded fields take their inferred values (compound_idx=1, COMPOUND_AVERAGE=0 /
+/// COMPOUND_DIFFWTD=3).
+#[allow(clippy::too_many_arguments)]
+pub fn read_compound_type_info(
+    dec: &mut OdEcDec,
+    masked_compound_used: bool,
+    comp_group_idx_cdf: &mut [u16],
+    enable_dist_wtd_comp: bool,
+    compound_index_cdf: &mut [u16],
+    wedge_used: bool,
+    compound_type_cdf: &mut [u16],
+    wedge_idx_cdf: &mut [u16],
+) -> (i32, i32, i32, i32, i32, i32) {
+    let comp_group_idx = if masked_compound_used {
+        read_symbol(dec, comp_group_idx_cdf, 2)
+    } else {
+        0
+    };
+    let (mut compound_idx, mut comp_type) = (1, 0); // COMPOUND_AVERAGE
+    let (mut wedge_index, mut wedge_sign, mut mask_type) = (0, 0, 0);
+    if comp_group_idx == 0 {
+        if enable_dist_wtd_comp {
+            compound_idx = read_symbol(dec, compound_index_cdf, 2);
+        }
+    } else {
+        comp_type = if wedge_used {
+            read_symbol(dec, compound_type_cdf, MASKED_COMPOUND_TYPES) + COMPOUND_WEDGE
+        } else {
+            COMPOUND_WEDGE + 1 // COMPOUND_DIFFWTD
+        };
+        if comp_type == COMPOUND_WEDGE {
+            wedge_index = read_symbol(dec, wedge_idx_cdf, MAX_WEDGE_TYPES);
+            wedge_sign = read_bit(dec);
+        } else {
+            mask_type = read_literal(dec, MAX_DIFFWTD_MASK_BITS);
+        }
+    }
+    (comp_group_idx, compound_idx, comp_type, wedge_index, wedge_sign, mask_type)
+}
+
+/// `read_palette_mode_info_flags` — inverse of [`write_palette_mode_info_flags`]: the
+/// Y (DC-pred) and UV (chroma-ref DC-pred) palette on/off flags + sizes. Returns
+/// `(n_y, n_uv)` (0 when the plane has no palette).
+#[allow(clippy::too_many_arguments)]
+pub fn read_palette_mode_info_flags(
+    dec: &mut OdEcDec,
+    mode_is_dc_pred: bool,
+    palette_y_mode_cdf: &mut [u16],
+    palette_y_size_cdf: &mut [u16],
+    uv_dc_pred: bool,
+    palette_uv_mode_cdf: &mut [u16],
+    palette_uv_size_cdf: &mut [u16],
+) -> (i32, i32) {
+    let n_y = if mode_is_dc_pred && read_symbol(dec, palette_y_mode_cdf, 2) != 0 {
+        read_symbol(dec, palette_y_size_cdf, PALETTE_SIZES) + PALETTE_MIN_SIZE
+    } else {
+        0
+    };
+    let n_uv = if uv_dc_pred && read_symbol(dec, palette_uv_mode_cdf, 2) != 0 {
+        read_symbol(dec, palette_uv_size_cdf, PALETTE_SIZES) + PALETTE_MIN_SIZE
+    } else {
+        0
+    };
+    (n_y, n_uv)
+}
