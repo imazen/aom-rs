@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aom-convolve"
+version = "0.0.1"
+dependencies = [
+ "aom-sys-ref",
+]
+
+[[package]]
 name = "aom-dist"
 version = "0.0.1"
 dependencies = [

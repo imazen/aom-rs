@@ -97,6 +97,13 @@ state. Kernel-level differential coverage is tracked separately in
   Harness: `aom-cdef/tests/cdef_diff.rs` — 600k comparisons (dir+var),
   byte-identical to C. (cdef_filter_block + full CDEF path: TODO.)
 
+- **Inter-pred convolution (SR, EIGHTTAP_REGULAR)** (`av1/common/convolve.c`),
+  both tracks / encoder critical path: `av1_convolve_x_sr` + `av1_convolve_y_sr`
+  (separable 8-tap FIR + subpel kernel table). Harness:
+  `aom-convolve/tests/convolve_diff.rs` — 80k comparisons validating ported
+  filter table + FIR math, byte-identical to C. (2D_sr, dist_wtd, smooth/sharp/
+  4-tap filters, highbd: TODO.)
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.

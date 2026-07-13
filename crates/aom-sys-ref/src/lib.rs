@@ -36,6 +36,26 @@ extern "C" {
     );
 }
 
+// convolve_shim.c — av1_convolve_{x,y}_sr (EIGHTTAP_REGULAR).
+extern "C" {
+    fn shim_convolve_x_sr(src: *const u8, ss: i32, dst: *mut u8, ds: i32, w: i32, h: i32, subpel: i32);
+    fn shim_convolve_y_sr(src: *const u8, ss: i32, dst: *mut u8, ds: i32, w: i32, h: i32, subpel: i32);
+}
+
+/// Reference `av1_convolve_x_sr_c`. `src` points at the interior origin.
+pub fn ref_convolve_x_sr(src: &[u8], src_off: usize, ss: usize, w: usize, h: usize, subpel: usize) -> Vec<u8> {
+    let mut dst = vec![0u8; w * h];
+    unsafe { shim_convolve_x_sr(src.as_ptr().add(src_off), ss as i32, dst.as_mut_ptr(), w as i32, w as i32, h as i32, subpel as i32) }
+    dst
+}
+
+/// Reference `av1_convolve_y_sr_c`.
+pub fn ref_convolve_y_sr(src: &[u8], src_off: usize, ss: usize, w: usize, h: usize, subpel: usize) -> Vec<u8> {
+    let mut dst = vec![0u8; w * h];
+    unsafe { shim_convolve_y_sr(src.as_ptr().add(src_off), ss as i32, dst.as_mut_ptr(), w as i32, w as i32, h as i32, subpel as i32) }
+    dst
+}
+
 // av1/common/cdef_block.c — CDEF direction search.
 extern "C" {
     pub fn cdef_find_dir_c(img: *const u16, stride: i32, var: *mut i32, coeff_shift: i32) -> i32;

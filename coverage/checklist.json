@@ -344,6 +344,20 @@
           "test": "cdef_diff::cdef_find_dir_matches_c"
         }
       }
+    },
+    "convolve.sr": {
+      "status": "green",
+      "note": "Inter-pred separable convolution (encoder critical path / motion comp), EIGHTTAP_REGULAR: av1_convolve_x_sr + av1_convolve_y_sr, lowbd. 2D_sr, dist_wtd, other filter types (smooth/sharp/4tap), highbd: TODO.",
+      "items": {
+        "av1_convolve_x_sr": {
+          "status": "green",
+          "test": "convolve_diff::convolve_x_y_sr_byte_identical"
+        },
+        "av1_convolve_y_sr": {
+          "status": "green",
+          "test": "convolve_diff::convolve_x_y_sr_byte_identical"
+        }
+      }
     }
   }
 }

@@ -1,0 +1,10 @@
+[package]
+name = "aom-convolve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+aom-sys-ref = { path = "../aom-sys-ref" }
