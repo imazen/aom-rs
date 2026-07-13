@@ -151,7 +151,7 @@ pub fn write_skip(enc: &mut OdEcEnc, skip_cdf: &mut [u16], seg_skip_active: bool
     skip_txfm
 }
 
-use crate::cdf::{write_bit, write_literal};
+use crate::cdf::{read_bit, read_literal, write_bit, write_literal};
 
 const DELTA_Q_SMALL: i32 = 3;
 const DELTA_Q_PROBS: usize = 3;
@@ -3181,4 +3181,106 @@ pub fn read_tx_size_vartx(
             row += bsh;
         }
     }
+}
+
+/// `read_uniform` (`av1/decoder/decodemv.c`) on the arithmetic coder — inverse of
+/// [`write_uniform_arith`]: a near-uniform value in `[0, n)`. Reads `l-1` MSB-first bits;
+/// values below `m = (1<<l) - n` use those bits directly, otherwise one extra bit
+/// disambiguates the doubled range.
+fn read_uniform_arith(dec: &mut OdEcDec, n: i32) -> i32 {
+    let l = get_unsigned_bits(n as u32) as i32;
+    let m = (1 << l) - n;
+    if l == 0 {
+        return 0;
+    }
+    let v = read_literal(dec, (l - 1) as u32);
+    if v < m {
+        v
+    } else {
+        (v << 1) - m + read_bit(dec)
+    }
+}
+
+/// `read_map_tokens` — inverse of [`pack_map_tokens`] (`av1/decoder/decodemv.c` palette
+/// colour-index map). The first index is read uniformly; each subsequent index is read on
+/// the `n`-symbol `color_map_cdf[color_ctxs[i]]`. `out.len()` is the map size; the caller
+/// supplies the running colour contexts (computed incrementally from the decoded map in a
+/// full decode, precomputed here to mirror the encoder's token/context layout).
+pub fn read_map_tokens(
+    dec: &mut OdEcDec,
+    n: i32,
+    color_ctxs: &[usize],
+    map_cdf: &mut [[u16; 9]; 5],
+    out: &mut [i32],
+) {
+    if out.is_empty() {
+        return;
+    }
+    out[0] = read_uniform_arith(dec, n);
+    for i in 1..out.len() {
+        out[i] = read_symbol(dec, &mut map_cdf[color_ctxs[i]], n as usize);
+    }
+}
+
+/// `read_delta_palette_colors` — inverse of [`delta_encode_palette_colors`]
+/// (`av1/decoder/decodemv.c`): the ascending non-cached palette colours. The first is a
+/// raw `bit_depth`-bit literal; the excess bit-width over `bit_depth - 3` is read in 2
+/// bits; each subsequent colour is `prev + (delta_raw + min_val)` with the same
+/// range-driven bit-width shrink as the encoder. `min_val` is 1 for luma, 0 for chroma-U.
+pub fn read_delta_palette_colors(dec: &mut OdEcDec, num: usize, bit_depth: i32, min_val: i32) -> Vec<i32> {
+    let mut colors = vec![0i32; num];
+    if num == 0 {
+        return colors;
+    }
+    colors[0] = read_literal(dec, bit_depth as u32);
+    if num == 1 {
+        return colors;
+    }
+    let min_bits = bit_depth - 3;
+    let mut bits = read_literal(dec, 2) + min_bits;
+    let mut range = (1 << bit_depth) - colors[0] - min_val;
+    for i in 1..num {
+        let delta = read_literal(dec, bits as u32) + min_val;
+        colors[i] = colors[i - 1] + delta;
+        range -= delta;
+        bits = bits.min(aom_ceil_log2(range));
+    }
+    colors
+}
+
+/// `read_palette_colors_v` — inverse of [`write_palette_colors_v`]
+/// (`av1/decoder/decodemv.c`): the V palette plane. A leading flag selects delta vs raw
+/// coding. Delta mode reads the `bits_v - (bit_depth-4)` excess in 2 bits, the first
+/// colour raw, then each `|Δ|` (or its `2^bd` complement) plus a sign bit, reconstructing
+/// `colors[i] = wrap(colors[i-1] ± Δ)` modulo `2^bit_depth` (a zero literal repeats the
+/// previous colour, no sign). Raw mode reads `n` raw `bit_depth`-bit literals.
+pub fn read_palette_colors_v(dec: &mut OdEcDec, n: usize, bit_depth: i32) -> Vec<u16> {
+    let max_val = 1i32 << bit_depth;
+    let mut colors = vec![0u16; n];
+    if read_bit(dec) != 0 {
+        let min_bits_v = bit_depth - 4;
+        let bits_v = read_literal(dec, 2) + min_bits_v;
+        colors[0] = read_literal(dec, bit_depth as u32) as u16;
+        for i in 1..n {
+            let d = read_literal(dec, bits_v as u32);
+            if d == 0 {
+                colors[i] = colors[i - 1];
+                continue;
+            }
+            let delta = if read_bit(dec) != 0 { -d } else { d };
+            let mut val = colors[i - 1] as i32 + delta;
+            if val < 0 {
+                val += max_val;
+            }
+            if val >= max_val {
+                val -= max_val;
+            }
+            colors[i] = val as u16;
+        }
+    } else {
+        for c in colors.iter_mut() {
+            *c = read_literal(dec, bit_depth as u32) as u16;
+        }
+    }
+    colors
 }

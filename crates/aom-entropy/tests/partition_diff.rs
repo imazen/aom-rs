@@ -3547,3 +3547,95 @@ fn read_tx_size_vartx_roundtrips_write() {
         }
     }
 }
+
+#[test]
+fn read_map_tokens_roundtrips_pack() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{pack_map_tokens, read_map_tokens};
+    let mut rng = Rng(0x1eba_15c0_de00_7000u64);
+    // n-symbol icdf into a [u16;9]: out[0..n-1] descending in (0,32768), out[n-1]=0, out[n]=count=0.
+    let mk = |rng: &mut Rng, n: usize, out: &mut [u16; 9]| {
+        *out = [0u16; 9];
+        let mut vals = [0i32; 8];
+        for v in vals.iter_mut().take(n - 1) { *v = 1 + (rng.next() % 32766) as i32; }
+        vals[..n - 1].sort_unstable();
+        vals[..n - 1].reverse();
+        let mut prev = 32768i32;
+        for k in 0..n - 1 {
+            let v = vals[k].min(prev - 1).max((n - 1 - k) as i32);
+            out[k] = v as u16;
+            prev = v;
+        }
+        out[n - 1] = 0;
+        out[n] = 0;
+    };
+    for _ in 0..200_000 {
+        let n = 2 + (rng.next() % 7) as i32; // palette size 2..=8
+        let len = 1 + (rng.next() % 64) as usize; // map size 1..=64
+        let mut tokens = vec![0i32; len];
+        let mut color_ctxs = vec![0usize; len];
+        tokens[0] = (rng.next() % n as u64) as i32;
+        for i in 1..len {
+            tokens[i] = (rng.next() % n as u64) as i32;
+            color_ctxs[i] = (rng.next() % 5) as usize;
+        }
+        let mut map_cdf = [[0u16; 9]; 5];
+        for c in map_cdf.iter_mut() { mk(&mut rng, n as usize, c); }
+        let mut enc = OdEcEnc::new();
+        let mut ce = map_cdf;
+        pack_map_tokens(&mut enc, n, &tokens, &color_ctxs, &mut ce);
+        let bytes = enc.done().to_vec();
+        let mut dec = OdEcDec::new(&bytes);
+        let mut cd = map_cdf;
+        let mut got = vec![0i32; len];
+        read_map_tokens(&mut dec, n, &color_ctxs, &mut cd, &mut got);
+        assert_eq!(got, tokens, "tokens n={n} len={len}");
+        assert_eq!(ce, cd, "map cdf n={n} len={len}");
+    }
+}
+
+#[test]
+fn read_delta_palette_colors_roundtrips() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{delta_encode_palette_colors, read_delta_palette_colors};
+    let mut rng = Rng(0x1e_de17_a000_0080u64);
+    for _ in 0..200_000 {
+        let bit_depth = [8i32, 10, 12][(rng.next() % 3) as usize];
+        let max_val = 1i32 << bit_depth;
+        let min_val = (rng.next() % 2) as i32; // 1 luma, 0 chroma-U
+        let num = 1 + (rng.next() % 8) as usize; // 1..=8
+        // strictly-ascending colours in [0, max_val): sorted base + index.
+        let mut base = vec![0i32; num];
+        for b in base.iter_mut() { *b = (rng.next() % (max_val - num as i32) as u64) as i32; }
+        base.sort_unstable();
+        let colors: Vec<i32> = (0..num).map(|i| base[i] + i as i32).collect();
+        let mut enc = OdEcEnc::new();
+        delta_encode_palette_colors(&mut enc, &colors, bit_depth, min_val);
+        let bytes = enc.done().to_vec();
+        let mut dec = OdEcDec::new(&bytes);
+        let got = read_delta_palette_colors(&mut dec, num, bit_depth, min_val);
+        assert_eq!(got, colors, "bd={bit_depth} min={min_val} num={num}");
+    }
+}
+
+#[test]
+fn read_palette_colors_v_roundtrips() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{read_palette_colors_v, write_palette_colors_v};
+    let mut rng = Rng(0x1e_c010_5f00_0081u64);
+    for _ in 0..200_000 {
+        let bit_depth = [8i32, 10, 12][(rng.next() % 3) as usize];
+        let max_val = 1u64 << bit_depth;
+        let n = 2 + (rng.next() % 7) as usize; // 2..=8
+        let colors: Vec<u16> = (0..n).map(|_| (rng.next() % max_val) as u16).collect();
+        let mut enc = OdEcEnc::new();
+        write_palette_colors_v(&mut enc, &colors, bit_depth);
+        let bytes = enc.done().to_vec();
+        let mut dec = OdEcDec::new(&bytes);
+        let got = read_palette_colors_v(&mut dec, n, bit_depth);
+        assert_eq!(got, colors, "bd={bit_depth} n={n} colors={colors:?}");
+    }
+}

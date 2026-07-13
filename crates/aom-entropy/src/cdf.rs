@@ -56,3 +56,20 @@ pub fn write_literal(enc: &mut OdEcEnc, data: i32, bits: u32) {
         write_bit(enc, (data >> bit) & 1);
     }
 }
+
+/// `aom_read_bit` = `aom_read(r, 128)` — inverse of [`write_bit`]: one bit at
+/// probability 1/2 on the od_ec coder.
+pub fn read_bit(dec: &mut OdEcDec) -> i32 {
+    let p = ((0x7F_FFFF - (128 << 15) + 128) >> 8) as u32;
+    dec.decode_bool_q15(p)
+}
+
+/// `aom_read_literal`: inverse of [`write_literal`] — `bits` MSB-first bits via
+/// [`read_bit`].
+pub fn read_literal(dec: &mut OdEcDec, bits: u32) -> i32 {
+    let mut data = 0;
+    for _ in 0..bits {
+        data = (data << 1) | read_bit(dec);
+    }
+    data
+}
