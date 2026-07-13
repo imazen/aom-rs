@@ -1430,3 +1430,108 @@ uint32_t shim_write_intra_pred_modes(
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- write_delta_q_params driver (av1/encoder/bitstream.c) --- */
+/* Extracted delta_qindex / delta_lflevel bodies writing into an existing od_ec. */
+static void dq_body(od_ec_enc *ec, uint16_t *cdf, int delta) {
+  int sign = delta < 0, a = sign ? -delta : delta;
+  int sym = a < DELTA_Q_SMALL ? a : DELTA_Q_SMALL;
+  od_ec_encode_cdf_q15(ec, sym, cdf, DELTA_Q_PROBS + 1);
+  update_cdf(cdf, sym, DELTA_Q_PROBS + 1);
+  if (a >= DELTA_Q_SMALL) {
+    int rem_bits = get_msb(a - 1), thr = (1 << rem_bits) + 1;
+    mi_literal(ec, rem_bits - 1, 3);
+    mi_literal(ec, a - thr, rem_bits);
+  }
+  if (a > 0) mi_bit(ec, sign);
+}
+static void dlf_body(od_ec_enc *ec, uint16_t *cdf, int delta) {
+  int sign = delta < 0, a = sign ? -delta : delta;
+  int sym = a < DELTA_LF_SMALL ? a : DELTA_LF_SMALL;
+  od_ec_encode_cdf_q15(ec, sym, cdf, DELTA_LF_PROBS + 1);
+  update_cdf(cdf, sym, DELTA_LF_PROBS + 1);
+  if (a >= DELTA_LF_SMALL) {
+    int rem_bits = get_msb(a - 1), thr = (1 << rem_bits) + 1;
+    mi_literal(ec, rem_bits - 1, 3);
+    mi_literal(ec, a - thr, rem_bits);
+  }
+  if (a > 0) mi_bit(ec, sign);
+}
+
+/* write_delta_q_params transcribed verbatim. Reduced deltas + gating + xd state update
+ * (current_base_qindex / delta_lf[] / delta_lf_from_base) all mirrored; state returned. */
+uint32_t shim_write_delta_q_params_sb(int dq_present, int dlf_present, int dlf_multi, int num_planes,
+    int bsize, int sb_size, int skip, int sbul, int cur_qindex, int cur_base_qindex, int dq_res,
+    const int *mbmi_dlf, const int *xd_dlf_in, int mbmi_dlf_base, int xd_dlf_base_in, int dlf_res,
+    uint16_t *dq_cdf, uint16_t *dlf_multi_cdf, uint16_t *dlf_cdf, uint8_t *out, uint16_t *o_dqcdf,
+    uint16_t *o_dlfmcdf, uint16_t *o_dlfcdf, int *o_base, int *o_xd_dlf, int *o_xd_dlf_base) {
+  int xd_dlf[FRAME_LF_COUNT];
+  for (int i = 0; i < FRAME_LF_COUNT; i++) xd_dlf[i] = xd_dlf_in[i];
+  int base = cur_base_qindex, xd_dlf_base = xd_dlf_base_in;
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (dq_present) {
+    if ((bsize != sb_size || skip == 0) && sbul) {
+      int reduced_dq = (cur_qindex - base) / dq_res;
+      dq_body(&ec, dq_cdf, reduced_dq);
+      base = cur_qindex;
+      if (dlf_present) {
+        if (dlf_multi) {
+          int flc = num_planes > 1 ? FRAME_LF_COUNT : FRAME_LF_COUNT - 2;
+          for (int lf = 0; lf < flc; ++lf) {
+            int r = (mbmi_dlf[lf] - xd_dlf[lf]) / dlf_res;
+            dlf_body(&ec, dlf_multi_cdf + lf * (DELTA_LF_PROBS + 2), r);
+            xd_dlf[lf] = mbmi_dlf[lf];
+          }
+        } else {
+          int r = (mbmi_dlf_base - xd_dlf_base) / dlf_res;
+          dlf_body(&ec, dlf_cdf, r);
+          xd_dlf_base = mbmi_dlf_base;
+        }
+      }
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < DELTA_Q_PROBS + 2; i++) o_dqcdf[i] = dq_cdf[i];
+  for (int i = 0; i < FRAME_LF_COUNT * (DELTA_LF_PROBS + 2); i++) o_dlfmcdf[i] = dlf_multi_cdf[i];
+  for (int i = 0; i < DELTA_LF_PROBS + 2; i++) o_dlfcdf[i] = dlf_cdf[i];
+  *o_base = base; *o_xd_dlf_base = xd_dlf_base;
+  for (int i = 0; i < FRAME_LF_COUNT; i++) o_xd_dlf[i] = xd_dlf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
+
+/* --- write_cdef (av1/encoder/bitstream.c) --- */
+/* Transcribed verbatim. The per-CDEF-unit first-block grid lookup just fetches
+ * cdef_strength, so it is passed directly. cdef_transmitted[4] is the per-SB state
+ * (reset at the SB upper-left block); it is threaded in/out. MI_SIZE_LOG2=2 ->
+ * cdef_size=16; BLOCK_128X128=15. */
+uint32_t shim_write_cdef(int coded_lossless, int allow_intrabc, int mi_row, int mi_col,
+                         int mib_size, int sb_size, int skip, const int *transmitted_in,
+                         int cdef_bits, int cdef_strength, uint8_t *out, int *transmitted_out) {
+  int transmitted[4];
+  for (int i = 0; i < 4; i++) transmitted[i] = transmitted_in[i];
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (!(coded_lossless || allow_intrabc)) {
+    const int sb_mask = mib_size - 1;
+    const int mi_row_in_sb = mi_row & sb_mask;
+    const int mi_col_in_sb = mi_col & sb_mask;
+    if (mi_row_in_sb == 0 && mi_col_in_sb == 0)
+      transmitted[0] = transmitted[1] = transmitted[2] = transmitted[3] = 0;
+    const int cdef_size = 1 << (6 - MI_SIZE_LOG2);
+    const int index_mask = cdef_size;
+    const int cdef_unit_row_in_sb = ((mi_row & index_mask) != 0);
+    const int cdef_unit_col_in_sb = ((mi_col & index_mask) != 0);
+    const int index =
+        (sb_size == BLOCK_128X128) ? cdef_unit_col_in_sb + 2 * cdef_unit_row_in_sb : 0;
+    if (!transmitted[index] && !skip) {
+      mi_literal(&ec, cdef_strength, cdef_bits);
+      transmitted[index] = 1;
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 4; i++) transmitted_out[i] = transmitted[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

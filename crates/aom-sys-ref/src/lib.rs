@@ -288,10 +288,14 @@ extern "C" {
     fn shim_write_compound_type_info(masked_used: i32, comp_group_idx: i32, cgi_cdf: *mut u16, dist_wtd: i32, compound_idx: i32, cidx_cdf: *mut u16, wedge_used: i32, comp_type: i32, ctype_cdf: *mut u16, wedge_index: i32, wedge_idx_cdf: *mut u16, wedge_sign: i32, mask_type: i32, out: *mut u8, o_cgi: *mut u16, o_cidx: *mut u16, o_ctype: *mut u16, o_wix: *mut u16) -> u32;
     fn shim_get_relative_dist(enable: i32, bits_minus_1: i32, a: i32, b: i32) -> i32;
     fn shim_use_angle_delta(bsize: i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_delta_q_params_sb(dq_present: i32, dlf_present: i32, dlf_multi: i32, num_planes: i32, bsize: i32, sb_size: i32, skip: i32, sbul: i32, cur_qindex: i32, cur_base_qindex: i32, dq_res: i32, mbmi_dlf: *const i32, xd_dlf_in: *const i32, mbmi_dlf_base: i32, xd_dlf_base_in: i32, dlf_res: i32, dq_cdf: *mut u16, dlf_multi_cdf: *mut u16, dlf_cdf: *mut u16, out: *mut u8, o_dqcdf: *mut u16, o_dlfmcdf: *mut u16, o_dlfcdf: *mut u16, o_base: *mut i32, o_xd_dlf: *mut i32, o_xd_dlf_base: *mut i32) -> u32;
     fn shim_is_directional_mode(mode: i32) -> i32;
     fn shim_get_uv_mode(uv_mode: i32) -> i32;
     fn shim_allow_palette(allow_sct: i32, bsize: i32) -> i32;
     fn shim_is_cfl_allowed(bsize: i32, seg_id: i32, lossless: i32, ssx: i32, ssy: i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_cdef(coded_lossless: i32, allow_intrabc: i32, mi_row: i32, mi_col: i32, mib_size: i32, sb_size: i32, skip: i32, transmitted_in: *const i32, cdef_bits: i32, cdef_strength: i32, out: *mut u8, transmitted_out: *mut i32) -> u32;
     fn shim_write_intra_y_and_angle(mode: i32, bsize: i32, y_cdf: *mut u16, angle_delta_y: i32, y_angle_cdf: *mut u16, out: *mut u8, o_ycdf: *mut u16, o_acdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_intra_uv_and_angle(monochrome: i32, is_chroma_ref: i32, uv_mode: i32, cfl_allowed: i32, bsize: i32, cfl_idx: i32, cfl_joint_sign: i32, angle_delta_uv: i32, uv_mode_cdf: *mut u16, cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, uv_angle_cdf: *mut u16, out: *mut u8, o_uvcdf: *mut u16, o_signcdf: *mut u16, o_alphacdf: *mut u16, o_uvacdf: *mut u16) -> u32;
@@ -567,6 +571,53 @@ pub fn ref_get_comp_group_idx_context(
 /// Reference `get_relative_dist` (static inline, mvref_common.h).
 pub fn ref_get_relative_dist(enable: bool, bits_minus_1: i32, a: i32, b: i32) -> i32 {
     unsafe { shim_get_relative_dist(enable as i32, bits_minus_1, a, b) }
+}
+
+/// Reference per-superblock `write_delta_q_params` (bitstream.c:960, the mode-info
+/// driver — distinct from the header delta-q-config writer). Over pristine C od_ec.
+/// Returns (bytes, dq_cdf[5], dlf_multi_cdf[20], dlf_cdf[5], new_base_qindex,
+/// new_xd_delta_lf[4], new_xd_delta_lf_from_base).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn ref_write_delta_q_params_sb(
+    dq_present: bool, dlf_present: bool, dlf_multi: bool, num_planes: i32,
+    bsize: i32, sb_size: i32, skip: i32, sbul: bool, cur_qindex: i32, cur_base_qindex: i32,
+    dq_res: i32, mbmi_dlf: &[i32; 4], xd_dlf: &[i32; 4], mbmi_dlf_base: i32, xd_dlf_base: i32,
+    dlf_res: i32, dq_cdf: &[u16; 5], dlf_multi_cdf: &[u16; 20], dlf_cdf: &[u16; 5],
+) -> (Vec<u8>, [u16; 5], [u16; 20], [u16; 5], i32, [i32; 4], i32) {
+    let (mut dqc, mut dlmc, mut dlc) = (*dq_cdf, *dlf_multi_cdf, *dlf_cdf);
+    let mut out = vec![0u8; 64];
+    let (mut odqc, mut odlmc, mut odlc) = ([0u16; 5], [0u16; 20], [0u16; 5]);
+    let (mut o_base, mut o_xd_dlf, mut o_xd_dlf_base) = (0i32, [0i32; 4], 0i32);
+    let n = unsafe {
+        shim_write_delta_q_params_sb(
+            dq_present as i32, dlf_present as i32, dlf_multi as i32, num_planes, bsize, sb_size,
+            skip, sbul as i32, cur_qindex, cur_base_qindex, dq_res, mbmi_dlf.as_ptr(),
+            xd_dlf.as_ptr(), mbmi_dlf_base, xd_dlf_base, dlf_res, dqc.as_mut_ptr(),
+            dlmc.as_mut_ptr(), dlc.as_mut_ptr(), out.as_mut_ptr(), odqc.as_mut_ptr(),
+            odlmc.as_mut_ptr(), odlc.as_mut_ptr(), &mut o_base, o_xd_dlf.as_mut_ptr(),
+            &mut o_xd_dlf_base,
+        )
+    };
+    out.truncate(n as usize);
+    (out, odqc, odlmc, odlc, o_base, o_xd_dlf, o_xd_dlf_base)
+}
+
+/// Reference `write_cdef` (mode-info driver, over pristine C od_ec). Returns (bytes,
+/// updated cdef_transmitted[4]).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_cdef(
+    coded_lossless: bool, allow_intrabc: bool, mi_row: i32, mi_col: i32, mib_size: i32,
+    sb_size: i32, skip: i32, transmitted: &[i32; 4], cdef_bits: i32, cdef_strength: i32,
+) -> (Vec<u8>, [i32; 4]) {
+    let mut out = vec![0u8; 8];
+    let mut tout = [0i32; 4];
+    let n = unsafe {
+        shim_write_cdef(coded_lossless as i32, allow_intrabc as i32, mi_row, mi_col, mib_size,
+            sb_size, skip, transmitted.as_ptr(), cdef_bits, cdef_strength, out.as_mut_ptr(),
+            tout.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    (out, tout)
 }
 
 /// Reference `av1_use_angle_delta` / `av1_is_directional_mode` / `get_uv_mode` /

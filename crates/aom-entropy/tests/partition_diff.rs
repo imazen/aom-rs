@@ -1944,3 +1944,110 @@ fn write_intra_prediction_modes_matches_c() {
         assert_eq!(all.as_slice(), &o_all[..], "adapted CDFs mode={mode} uv={uv_mode} pal={allow_palette}");
     }
 }
+
+#[test]
+fn write_delta_q_params_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_delta_q_params_sb;
+    let mut rng = Rng(0xde17_a0de_0000_000e);
+    fn mk(rng: &mut Rng, nsyms: usize) -> Vec<u16> {
+        let mut c = vec![0u16; nsyms + 1];
+        let mut prev = 32768i32;
+        for e in c.iter_mut().take(nsyms - 1) {
+            let v = (prev - 1 - (rng.next() % 400) as i32).max(1);
+            *e = v as u16;
+            prev = v;
+        }
+        c
+    }
+    for _ in 0..200_000 {
+        let dq_present = !rng.next().is_multiple_of(4);
+        let dlf_present = rng.next().is_multiple_of(2);
+        let dlf_multi = rng.next().is_multiple_of(2);
+        let num_planes = if rng.next().is_multiple_of(2) { 3 } else { 1 };
+        let bsize = (rng.next() % 22) as usize;
+        let sb_size = if rng.next().is_multiple_of(2) { 12 } else { 15 }; // 64x64 / 128x128
+        let skip = (rng.next() % 2) as i32;
+        let sbul = rng.next().is_multiple_of(2);
+        let cur_qindex = 1 + (rng.next() % 255) as i32;
+        let cur_base = (rng.next() % 256) as i32;
+        let dq_res = [1i32, 2, 4][(rng.next() % 3) as usize];
+        let mut mbmi_dlf = [0i32; 4];
+        let mut xd_dlf = [0i32; 4];
+        for k in 0..4 {
+            mbmi_dlf[k] = (rng.next() % 129) as i32 - 64;
+            xd_dlf[k] = (rng.next() % 129) as i32 - 64;
+        }
+        let mbmi_dlf_base = (rng.next() % 129) as i32 - 64;
+        let xd_dlf_base = (rng.next() % 129) as i32 - 64;
+        let dlf_res = [1i32, 2, 4][(rng.next() % 3) as usize];
+        let dq_cdf: [u16; 5] = mk(&mut rng, 4).try_into().unwrap();
+        let mut dlmc_n = [[0u16; 5]; 4];
+        let mut dlmc_f = [0u16; 20];
+        for id in 0..4 {
+            let row = mk(&mut rng, 4);
+            for j in 0..5 {
+                dlmc_n[id][j] = row[j];
+                dlmc_f[id * 5 + j] = row[j];
+            }
+        }
+        let dlf_cdf: [u16; 5] = mk(&mut rng, 4).try_into().unwrap();
+
+        let mut enc = OdEcEnc::new();
+        let (mut rdqc, mut rdlmc, mut rdlc) = (dq_cdf, dlmc_n, dlf_cdf);
+        let mut r_base = cur_base;
+        let mut r_xd_dlf = xd_dlf;
+        let mut r_xd_dlf_base = xd_dlf_base;
+        write_delta_q_params_sb(
+            &mut enc, dq_present, dlf_present, dlf_multi, num_planes, bsize, sb_size, skip, sbul,
+            cur_qindex, &mut r_base, dq_res, &mbmi_dlf, &mut r_xd_dlf, mbmi_dlf_base,
+            &mut r_xd_dlf_base, dlf_res, &mut rdqc, &mut rdlmc, &mut rdlc,
+        );
+        let got = enc.done().to_vec();
+        let (want, odqc, odlmc, odlc, ob, oxd, oxdb) = c::ref_write_delta_q_params_sb(
+            dq_present, dlf_present, dlf_multi, num_planes, bsize as i32, sb_size as i32, skip, sbul,
+            cur_qindex, cur_base, dq_res, &mbmi_dlf, &xd_dlf, mbmi_dlf_base, xd_dlf_base, dlf_res,
+            &dq_cdf, &dlmc_f, &dlf_cdf,
+        );
+        assert_eq!(got, want, "bytes dq={dq_present} dlf={dlf_present} multi={dlf_multi} np={num_planes} bsize={bsize} sb={sb_size} skip={skip} sbul={sbul}");
+        assert_eq!(rdqc, odqc, "dq_cdf");
+        let rdlmc_f: [u16; 20] = core::array::from_fn(|i| rdlmc[i / 5][i % 5]);
+        assert_eq!(rdlmc_f, odlmc, "dlf_multi_cdf");
+        assert_eq!(rdlc, odlc, "dlf_cdf");
+        assert_eq!(r_base, ob, "base_qindex");
+        assert_eq!(r_xd_dlf, oxd, "xd_delta_lf");
+        assert_eq!(r_xd_dlf_base, oxdb, "xd_delta_lf_from_base");
+    }
+}
+
+#[test]
+fn write_cdef_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_cdef;
+    let mut rng = Rng(0xcde_f000_c0de_000f);
+    for _ in 0..300_000 {
+        let coded_lossless = rng.next().is_multiple_of(6);
+        let allow_intrabc = rng.next().is_multiple_of(6);
+        // mi_row/col within a couple of SBs; mib_size 16 (64) or 32 (128).
+        let mib_size = if rng.next().is_multiple_of(2) { 16 } else { 32 };
+        let sb_size = if mib_size == 32 { 15usize } else { 12 }; // 128x128 / 64x64
+        let mi_row = (rng.next() % 64) as i32;
+        let mi_col = (rng.next() % 64) as i32;
+        let skip = (rng.next() % 2) as i32;
+        let mut trans = [0i32; 4];
+        for t in trans.iter_mut() {
+            *t = (rng.next() % 2) as i32;
+        }
+        let cdef_bits = (rng.next() % 4) as i32; // 0..3
+        let cdef_strength = if cdef_bits == 0 { 0 } else { (rng.next() % (1u64 << cdef_bits)) as i32 };
+
+        let mut enc = OdEcEnc::new();
+        let mut r_trans = [trans[0] != 0, trans[1] != 0, trans[2] != 0, trans[3] != 0];
+        write_cdef(&mut enc, coded_lossless, allow_intrabc, mi_row, mi_col, mib_size, sb_size, skip, &mut r_trans, cdef_bits as u32, cdef_strength);
+        let got = enc.done().to_vec();
+        let (want, otrans) = c::ref_write_cdef(coded_lossless, allow_intrabc, mi_row, mi_col, mib_size, sb_size as i32, skip, &trans, cdef_bits, cdef_strength);
+        assert_eq!(got, want, "bytes cl={coded_lossless} ib={allow_intrabc} r={mi_row} c={mi_col} mib={mib_size} skip={skip} bits={cdef_bits}");
+        let r_trans_i: [i32; 4] = core::array::from_fn(|i| r_trans[i] as i32);
+        assert_eq!(r_trans_i, otrans, "cdef_transmitted r={mi_row} c={mi_col}");
+    }
+}

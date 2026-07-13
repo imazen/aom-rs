@@ -1933,3 +1933,105 @@ pub fn write_intra_prediction_modes(
     }
     write_filter_intra_mode_info(enc, fi_use_cdf, fi_mode_cdf, filter_allowed, use_filter_intra, filter_intra_mode);
 }
+
+const FRAME_LF_COUNT: usize = 4;
+
+/// `write_delta_q_params` (`av1/encoder/bitstream.c`): the per-superblock delta-Q (and
+/// optional delta-loop-filter) driver. When delta-Q is present and this is the
+/// superblock's upper-left block (and either the block is smaller than the SB or it is
+/// not skipped), code the reduced delta-qindex on `delta_q_cdf` and advance
+/// `current_base_qindex`. When delta-LF is present, code either per-plane multi deltas
+/// (`FRAME_LF_COUNT` or `FRAME_LF_COUNT - 2` ids on `delta_lf_multi_cdf[id]`) or a single
+/// delta (`delta_lf_cdf`), each advancing the corresponding `xd` running value. The
+/// reduced values are `(target - running) / res`. State is updated in place.
+#[allow(clippy::too_many_arguments)]
+pub fn write_delta_q_params_sb(
+    enc: &mut OdEcEnc,
+    delta_q_present: bool,
+    delta_lf_present: bool,
+    delta_lf_multi: bool,
+    num_planes: i32,
+    bsize: usize,
+    sb_size: usize,
+    skip: i32,
+    super_block_upper_left: bool,
+    current_qindex: i32,
+    current_base_qindex: &mut i32,
+    delta_q_res: i32,
+    mbmi_delta_lf: &[i32; FRAME_LF_COUNT],
+    xd_delta_lf: &mut [i32; FRAME_LF_COUNT],
+    mbmi_delta_lf_from_base: i32,
+    xd_delta_lf_from_base: &mut i32,
+    delta_lf_res: i32,
+    delta_q_cdf: &mut [u16],
+    delta_lf_multi_cdf: &mut [[u16; 5]; FRAME_LF_COUNT],
+    delta_lf_cdf: &mut [u16],
+) {
+    if !delta_q_present {
+        return;
+    }
+    if (bsize != sb_size || skip == 0) && super_block_upper_left {
+        let reduced_delta_qindex = (current_qindex - *current_base_qindex) / delta_q_res;
+        write_delta_qindex(enc, delta_q_cdf, reduced_delta_qindex);
+        *current_base_qindex = current_qindex;
+        if delta_lf_present {
+            if delta_lf_multi {
+                let frame_lf_count =
+                    if num_planes > 1 { FRAME_LF_COUNT } else { FRAME_LF_COUNT - 2 };
+                for lf_id in 0..frame_lf_count {
+                    let reduced = (mbmi_delta_lf[lf_id] - xd_delta_lf[lf_id]) / delta_lf_res;
+                    write_delta_lflevel(enc, &mut delta_lf_multi_cdf[lf_id], reduced);
+                    xd_delta_lf[lf_id] = mbmi_delta_lf[lf_id];
+                }
+            } else {
+                let reduced = (mbmi_delta_lf_from_base - *xd_delta_lf_from_base) / delta_lf_res;
+                write_delta_lflevel(enc, delta_lf_cdf, reduced);
+                *xd_delta_lf_from_base = mbmi_delta_lf_from_base;
+            }
+        }
+    }
+}
+
+const MI_SIZE_LOG2: i32 = 2;
+
+/// `write_cdef` (`av1/encoder/bitstream.c`): the per-CDEF-unit strength. Skipped for
+/// coded-lossless / intrabc frames. CDEF units are 64x64 (16 mi units); at the
+/// superblock's upper-left block the per-unit `cdef_transmitted` flags reset. The unit
+/// index within a 128x128 SB is `col + 2*row` (else 0). On the first non-skip block of
+/// an untransmitted unit, a `cdef_bits`-bit strength literal is written and the unit is
+/// marked transmitted. `cdef_transmitted` is threaded across blocks (updated in place).
+#[allow(clippy::too_many_arguments)]
+pub fn write_cdef(
+    enc: &mut OdEcEnc,
+    coded_lossless: bool,
+    allow_intrabc: bool,
+    mi_row: i32,
+    mi_col: i32,
+    mib_size: i32,
+    sb_size: usize,
+    skip: i32,
+    cdef_transmitted: &mut [bool; 4],
+    cdef_bits: u32,
+    cdef_strength: i32,
+) {
+    if coded_lossless || allow_intrabc {
+        return;
+    }
+    let sb_mask = mib_size - 1;
+    if (mi_row & sb_mask) == 0 && (mi_col & sb_mask) == 0 {
+        *cdef_transmitted = [false; 4];
+    }
+    let cdef_size = 1 << (6 - MI_SIZE_LOG2); // 64x64 CDEF unit => 16 mi units
+    let index_mask = cdef_size;
+    let cdef_unit_row = i32::from((mi_row & index_mask) != 0);
+    let cdef_unit_col = i32::from((mi_col & index_mask) != 0);
+    let index = if sb_size == BLOCK_128X128 {
+        (cdef_unit_col + 2 * cdef_unit_row) as usize
+    } else {
+        0
+    };
+    if !cdef_transmitted[index] && skip == 0 {
+        write_literal(enc, cdef_strength, cdef_bits);
+        cdef_transmitted[index] = true;
+    }
+}
