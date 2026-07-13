@@ -1312,3 +1312,64 @@ pub fn delta_encode_palette_colors(enc: &mut OdEcEnc, colors: &[i32], bit_depth:
         bits = bits.min(aom_ceil_log2(range));
     }
 }
+
+/// `av1_get_palette_delta_bits_v` (`av1/encoder/palette.c`): the per-delta bit-width
+/// for the V palette plane and `zero_count` / `min_bits`. Unlike Y/U, the V colours are
+/// not sorted, so the "delta" wraps modulo `2^bit_depth` (`d = min(|Δ|, 2^bd - |Δ|)`).
+pub fn palette_delta_bits_v(colors_v: &[u16], bit_depth: i32) -> (i32, i32, i32) {
+    let n = colors_v.len();
+    let max_val = 1 << bit_depth;
+    let mut max_d = 0;
+    let min_bits = bit_depth - 4;
+    let mut zero_count = 0;
+    for i in 1..n {
+        let delta = colors_v[i] as i32 - colors_v[i - 1] as i32;
+        let v = delta.abs();
+        let d = v.min(max_val - v);
+        if d > max_d {
+            max_d = d;
+        }
+        if d == 0 {
+            zero_count += 1;
+        }
+    }
+    (aom_ceil_log2(max_d + 1).max(min_bits), zero_count, min_bits)
+}
+
+/// `write_palette_colors_uv` V-plane portion (`av1/encoder/bitstream.c`): the V palette
+/// colours, coded either as wrap-around deltas (a 1 flag, the `bits_v - min_bits_v`
+/// excess in 2 bits, the first colour raw, then each `|Δ|` — or `2^bd - |Δ|`, whichever
+/// is smaller — in `bits_v` bits plus a sign bit) or as raw `bit_depth`-bit literals
+/// (a 0 flag), whichever the rate estimate prefers. No colour cache (V is unsorted).
+pub fn write_palette_colors_v(enc: &mut OdEcEnc, colors_v: &[u16], bit_depth: i32) {
+    let n = colors_v.len() as i32;
+    let max_val = 1 << bit_depth;
+    let (bits_v, zero_count, min_bits_v) = palette_delta_bits_v(colors_v, bit_depth);
+    let rate_using_delta = 2 + bit_depth + (bits_v + 1) * (n - 1) - zero_count;
+    let rate_using_raw = bit_depth * n;
+    if rate_using_delta < rate_using_raw {
+        write_bit(enc, 1);
+        write_literal(enc, bits_v - min_bits_v, 2);
+        write_literal(enc, colors_v[0] as i32, bit_depth as u32);
+        for i in 1..n as usize {
+            if colors_v[i] == colors_v[i - 1] {
+                write_literal(enc, 0, bits_v as u32);
+                continue;
+            }
+            let delta = (colors_v[i] as i32 - colors_v[i - 1] as i32).abs();
+            let sign_bit = i32::from(colors_v[i] < colors_v[i - 1]);
+            if delta <= max_val - delta {
+                write_literal(enc, delta, bits_v as u32);
+                write_bit(enc, sign_bit);
+            } else {
+                write_literal(enc, max_val - delta, bits_v as u32);
+                write_bit(enc, (sign_bit == 0) as i32);
+            }
+        }
+    } else {
+        write_bit(enc, 0);
+        for &c in colors_v.iter() {
+            write_literal(enc, c as i32, bit_depth as u32);
+        }
+    }
+}

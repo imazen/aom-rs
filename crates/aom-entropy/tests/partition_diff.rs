@@ -1346,3 +1346,24 @@ fn delta_encode_palette_colors_matches_c() {
         }
     }
 }
+
+#[test]
+fn write_palette_colors_v_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_palette_colors_v;
+    let mut rng = Rng(0x0c01_0f5f_c0de_0004);
+    for &bit_depth in &[8i32, 10, 12] {
+        let maxv = 1u64 << bit_depth;
+        for n in 1..=8usize {
+            for _ in 0..60_000 {
+                // V colours are unsorted; any values in [0, 2^bd).
+                let colors: Vec<u16> = (0..n).map(|_| (rng.next() % maxv) as u16).collect();
+                let mut enc = OdEcEnc::new();
+                write_palette_colors_v(&mut enc, &colors, bit_depth);
+                let got = enc.done().to_vec();
+                let want = c::ref_write_palette_colors_v(&colors, bit_depth);
+                assert_eq!(got, want, "bd={bit_depth} n={n} colors={colors:?}");
+            }
+        }
+    }
+}

@@ -884,3 +884,50 @@ uint32_t shim_delta_encode_palette_colors(const int *colors, int num, int bit_de
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- palette V-channel colours (av1/encoder/bitstream.c, write_palette_colors_uv) --- */
+#include "av1/encoder/palette.h" /* av1_get_palette_delta_bits_v (exported) */
+
+/* The V-plane portion of write_palette_colors_uv copied verbatim; aom_write_bit/
+ * literal -> mi_bit/mi_literal; bits_v/zero_count/min_bits_v come from the real
+ * av1_get_palette_delta_bits_v. colors_v need not be sorted. */
+uint32_t shim_write_palette_colors_v(const uint16_t *colors_v, int n, int bit_depth,
+                                     uint8_t *out) {
+  PALETTE_MODE_INFO pmi;
+  pmi.palette_size[1] = (uint8_t)n;
+  for (int i = 0; i < n; i++) pmi.palette_colors[2 * PALETTE_MAX_SIZE + i] = colors_v[i];
+
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  const int max_val = 1 << bit_depth;
+  int zero_count = 0, min_bits_v = 0;
+  int bits_v = av1_get_palette_delta_bits_v(&pmi, bit_depth, &zero_count, &min_bits_v);
+  const int rate_using_delta = 2 + bit_depth + (bits_v + 1) * (n - 1) - zero_count;
+  const int rate_using_raw = bit_depth * n;
+  if (rate_using_delta < rate_using_raw) {
+    mi_bit(&ec, 1);
+    mi_literal(&ec, bits_v - min_bits_v, 2);
+    mi_literal(&ec, colors_v[0], bit_depth);
+    for (int i = 1; i < n; ++i) {
+      if (colors_v[i] == colors_v[i - 1]) {
+        mi_literal(&ec, 0, bits_v);
+        continue;
+      }
+      const int delta = abs((int)colors_v[i] - colors_v[i - 1]);
+      const int sign_bit = colors_v[i] < colors_v[i - 1];
+      if (delta <= max_val - delta) {
+        mi_literal(&ec, delta, bits_v);
+        mi_bit(&ec, sign_bit);
+      } else {
+        mi_literal(&ec, max_val - delta, bits_v);
+        mi_bit(&ec, !sign_bit);
+      }
+    }
+  } else {
+    mi_bit(&ec, 0);
+    for (int i = 0; i < n; ++i) mi_literal(&ec, colors_v[i], bit_depth);
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
