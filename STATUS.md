@@ -191,6 +191,16 @@ both tracks, fully bit-exact.**
   `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
   rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
+- **RD-search primitives (aom-encode `rd` module + aom-dist)** — the estimator set the
+  mode search composes, all bit-exact: `model_rd_from_var_lapndz` (the fixed-point
+  Laplacian rate/dist model from variance+qstep, 3 q10 tables extracted from rd.c;
+  exported oracle, 720k cases), `pixel_distortion` (reconstruction-domain SSE:
+  `pred + inv_txfm(dqcoeff)` clamped vs source — composes the validated inverse
+  transform + SSE), and `sum_squares_i16` / `sum_squares_2d_i16` (the residual energy
+  feeding the model). With the trellis rate + block_error, the RD-cost inputs are all
+  in place; the remaining RDO piece is libaom's search *control flow* (candidate order,
+  early-termination, hashing).
+
 - **RD + front-end primitives (aom-dist)** — `block_error` / `highbd_block_error`
   (av1_[highbd_]block_error_c): transform-domain distortion, `error=sum((coeff-dqcoeff)^2)`
   + `ssz=sum(coeff^2)` (lowbd 32-bit products; highbd 64-bit + rounded-shift 2*(bd-8)) —
