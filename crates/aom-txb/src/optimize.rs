@@ -29,11 +29,31 @@ fn rdcost(rdmult: i64, rate: i64, dist: i64) -> i64 {
     ((rate * rdmult + (1 << (AV1_PROB_COST_SHIFT - 1))) >> AV1_PROB_COST_SHIFT) + (dist << RDDIV_BITS)
 }
 
-/// `get_coeff_dist` (non-QM): `((t - dq) << shift)^2`.
+const AOM_QM_BITS: i32 = 5;
+
+/// `get_dqv`: per-position dequant step. With `iqmatrix`, folds the inverse
+/// quant-matrix weight `(iqm[ci]*dqv + 16) >> 5`; otherwise `dequant[ci!=0]`.
 #[inline]
-fn coeff_dist(tcoeff: i32, dqcoeff: i32, shift: i32) -> i64 {
+pub(crate) fn get_dqv(dequant: [i16; 2], coeff_idx: usize, iqmatrix: Option<&[u8]>) -> i32 {
+    let dqv = dequant[(coeff_idx != 0) as usize] as i32;
+    match iqmatrix {
+        Some(iqm) => (iqm[coeff_idx] as i32 * dqv + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS,
+        None => dqv,
+    }
+}
+
+/// `get_coeff_dist`: squared-error distortion `((t - dq) << shift)^2`. With
+/// `qmatrix`, weights the diff by `qm[ci]` then rounds `>> (2*AOM_QM_BITS)`.
+#[inline]
+pub(crate) fn get_coeff_dist(tcoeff: i32, dqcoeff: i32, shift: i32, qmatrix: Option<&[u8]>, coeff_idx: usize) -> i64 {
     let diff = (tcoeff as i64 - dqcoeff as i64) * (1i64 << shift);
-    diff * diff
+    match qmatrix {
+        None => diff * diff,
+        Some(qm) => {
+            let diff = diff * qm[coeff_idx] as i64;
+            (diff * diff + (1 << (2 * AOM_QM_BITS - 1))) >> (2 * AOM_QM_BITS)
+        }
+    }
 }
 
 /// `get_qc_dqc_low`: the "coded one lower" candidate.
@@ -52,8 +72,8 @@ pub struct OptimizeResult {
     pub rate: i32,
 }
 
-/// `av1_optimize_txb`: optimize `qcoeff`/`dqcoeff` in place. `dequant[0]` is the
-/// DC step, `dequant[1]` the AC step. Returns the new eob + rate.
+/// `av1_optimize_txb` (non-QM): optimize `qcoeff`/`dqcoeff` in place. `dequant[0]`
+/// is the DC step, `dequant[1]` the AC step. Returns the new eob + rate.
 #[allow(clippy::too_many_arguments)]
 pub fn optimize_txb(
     tx_size: usize,
@@ -70,6 +90,57 @@ pub fn optimize_txb(
     scan: &[i16],
     t: &CoeffCostTables,
 ) -> OptimizeResult {
+    optimize_txb_core(
+        tx_size, tx_type, qcoeff, dqcoeff, tcoeff, eob_in, dequant, rdmult, dc_sign_ctx,
+        txb_skip_ctx, sharpness, scan, t, None, None,
+    )
+}
+
+/// `av1_optimize_txb` *with* a quant matrix: `iqmatrix` folds into the
+/// per-position dequant (`get_dqv`), `qmatrix` into the distortion
+/// (`get_coeff_dist`). Both are indexed by raster position (length = block area).
+#[allow(clippy::too_many_arguments)]
+pub fn optimize_txb_qm(
+    tx_size: usize,
+    tx_type: usize,
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+    tcoeff: &[i32],
+    eob_in: usize,
+    dequant: [i16; 2],
+    rdmult: i64,
+    dc_sign_ctx: usize,
+    txb_skip_ctx: usize,
+    sharpness: i32,
+    scan: &[i16],
+    t: &CoeffCostTables,
+    iqmatrix: &[u8],
+    qmatrix: &[u8],
+) -> OptimizeResult {
+    optimize_txb_core(
+        tx_size, tx_type, qcoeff, dqcoeff, tcoeff, eob_in, dequant, rdmult, dc_sign_ctx,
+        txb_skip_ctx, sharpness, scan, t, Some(iqmatrix), Some(qmatrix),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn optimize_txb_core(
+    tx_size: usize,
+    tx_type: usize,
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+    tcoeff: &[i32],
+    eob_in: usize,
+    dequant: [i16; 2],
+    rdmult: i64,
+    dc_sign_ctx: usize,
+    txb_skip_ctx: usize,
+    sharpness: i32,
+    scan: &[i16],
+    t: &CoeffCostTables,
+    iqmatrix: Option<&[u8]>,
+    qmatrix: Option<&[u8]>,
+) -> OptimizeResult {
     let tx_class = TX_TYPE_TO_CLASS[tx_type];
     let bhl = txb_bhl(tx_size);
     let width = txb_wide(tx_size);
@@ -82,7 +153,8 @@ pub fn optimize_txb(
     if eob > 1 {
         txb_init_levels(qcoeff, width, height, &mut levels);
     }
-    let dqv = |ci: usize| -> i32 { dequant[(ci != 0) as usize] as i32 };
+    let dqv = |ci: usize| -> i32 { get_dqv(dequant, ci, iqmatrix) };
+    let cdist = |tqc: i32, dqc: i32, ci: usize| -> i64 { get_coeff_dist(tqc, dqc, shift, qmatrix, ci) };
     let base0 = |ctx: usize| -> i32 { t.base[ctx * 8] };
 
     let non_skip_cost = t.txb_skip[txb_skip_ctx * 2];
@@ -102,14 +174,14 @@ pub fn optimize_txb(
     if abs_qc0 >= 2 {
         update_coeff_general(
             &mut accu_rate, &mut accu_dist, si as usize, true, tx_size, tx_class, bhl, width, shift,
-            rdmult, dc_sign_ctx, &dqv, scan, t, tcoeff, qcoeff, dqcoeff, &mut levels,
+            rdmult, dc_sign_ctx, &dqv, scan, t, tcoeff, qcoeff, dqcoeff, &mut levels, qmatrix,
         );
         si -= 1;
     } else {
         let coeff_ctx = get_lower_levels_ctx_eob(bhl, width, si as usize) as usize;
         accu_rate += coeff_cost_eob(ci0, abs_qc0, sign0 as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class);
         let (tqc, dqc) = (tcoeff[ci0], dqcoeff[ci0]);
-        accu_dist += coeff_dist(tqc, dqc, shift) - coeff_dist(tqc, 0, shift);
+        accu_dist += cdist(tqc, dqc, ci0) - cdist(tqc, 0, ci0);
         si -= 1;
     }
 
@@ -129,8 +201,8 @@ pub fn optimize_txb(
         let abs_qc = qc.abs();
         let (tqc, dqc) = (tcoeff[ci], dqcoeff[ci]);
         let sign = (qc < 0) as i32;
-        let dist0 = coeff_dist(tqc, 0, shift);
-        let mut dist = coeff_dist(tqc, dqc, shift) - dist0;
+        let dist0 = cdist(tqc, 0, ci);
+        let mut dist = cdist(tqc, dqc, ci) - dist0;
         let mut rate = coeff_cost_general(false, ci, abs_qc, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, &levels);
         let mut rd = rdcost(rdmult, (accu_rate + rate) as i64, accu_dist + dist);
 
@@ -147,7 +219,7 @@ pub fn optimize_txb(
             qc_low = ql;
             dqc_low = dql;
             abs_qc_low = abs_qc - 1;
-            dist_low = coeff_dist(tqc, dqc_low, shift) - dist0;
+            dist_low = cdist(tqc, dqc_low, ci) - dist0;
             rate_low = coeff_cost_general(false, ci, abs_qc_low, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, &levels);
             rd_low = rdcost(rdmult, (accu_rate + rate_low) as i64, accu_dist + dist_low);
         }
@@ -241,11 +313,11 @@ pub fn optimize_txb(
             continue;
         }
         let v = dqv(scan[s] as usize);
-        let dist = coeff_dist(abs_tqc, abs_dqc, shift);
+        let dist = cdist(abs_tqc, abs_dqc, ci);
         let rd = rdcost(rdmult, rate as i64, dist);
         let abs_qc_low = abs_qc - 1;
         let abs_dqc_low = (abs_qc_low * v) >> shift;
-        let dist_low = coeff_dist(abs_tqc, abs_dqc_low, shift);
+        let dist_low = cdist(abs_tqc, abs_dqc_low, ci);
         let rd_low = rdcost(rdmult, rate_low as i64, dist_low);
         let allow_lower_qc = if sharpness != 0 { abs_qc > 1 } else { true };
         if rd_low < rd && allow_lower_qc {
@@ -265,7 +337,7 @@ pub fn optimize_txb(
         let mut dummy = 0i64;
         update_coeff_general(
             &mut accu_rate, &mut dummy, 0, false, tx_size, tx_class, bhl, width, shift, rdmult,
-            dc_sign_ctx, &dqv, scan, t, tcoeff, qcoeff, dqcoeff, &mut levels,
+            dc_sign_ctx, &dqv, scan, t, tcoeff, qcoeff, dqcoeff, &mut levels, qmatrix,
         );
     }
 
@@ -298,6 +370,7 @@ fn update_coeff_general(
     qcoeff: &mut [i32],
     dqcoeff: &mut [i32],
     levels: &mut [u8],
+    qmatrix: Option<&[u8]>,
 ) {
     let ci = scan[si] as usize;
     let qc = qcoeff[ci];
@@ -311,8 +384,8 @@ fn update_coeff_general(
     let sign = (qc < 0) as i32;
     let abs_qc = qc.abs();
     let (tqc, dqc) = (tcoeff[ci], dqcoeff[ci]);
-    let dist = coeff_dist(tqc, dqc, shift);
-    let dist0 = coeff_dist(tqc, 0, shift);
+    let dist = get_coeff_dist(tqc, dqc, shift, qmatrix, ci);
+    let dist0 = get_coeff_dist(tqc, 0, shift, qmatrix, ci);
     let rate = coeff_cost_general(is_last, ci, abs_qc, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, levels);
     let rd = rdcost(rdmult, rate as i64, dist);
 
@@ -328,7 +401,7 @@ fn update_coeff_general(
         qc_low = ql;
         dqc_low = dql;
         abs_qc_low = abs_qc - 1;
-        dist_low = coeff_dist(tqc, dqc_low, shift);
+        dist_low = get_coeff_dist(tqc, dqc_low, shift, qmatrix, ci);
         rate_low = coeff_cost_general(is_last, ci, abs_qc_low, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, levels);
     }
     let rd_low = rdcost(rdmult, rate_low as i64, dist_low);
@@ -341,5 +414,71 @@ fn update_coeff_general(
     } else {
         *accu_rate += rate;
         *accu_dist += dist - dist0;
+    }
+}
+
+#[cfg(test)]
+mod qm_primitive_tests {
+    //! Focused differential for the two QM primitives against the real C static
+    //! inlines (`get_dqv` / `get_coeff_dist` via the shim). Inputs are bounded to
+    //! the non-overflow regime real encoder coefficients live in (the squared
+    //! `diff*qm` must stay within i64), matching C's own assumption.
+    use super::{get_coeff_dist, get_dqv};
+    use aom_sys_ref as c;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn range(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % (hi - lo) as u64) as i64
+        }
+    }
+
+    #[test]
+    fn get_dqv_matches_c() {
+        let mut rng = Rng(0xd90c_0de0_0000_0001);
+        for _ in 0..200_000 {
+            let dequant = [rng.range(1, 8000) as i16, rng.range(1, 8000) as i16];
+            let ci = rng.range(0, 1024) as usize;
+            let iqm: Vec<u8> = (0..1024).map(|_| rng.range(1, 243) as u8).collect();
+            // None (flat) and Some (weighted).
+            assert_eq!(get_dqv(dequant, ci, None), c::ref_get_dqv(&dequant, ci, None));
+            assert_eq!(
+                get_dqv(dequant, ci, Some(&iqm)),
+                c::ref_get_dqv(&dequant, ci, Some(&iqm)),
+                "get_dqv qm dequant={dequant:?} ci={ci} iqm[ci]={}",
+                iqm[ci]
+            );
+        }
+    }
+
+    #[test]
+    fn get_coeff_dist_matches_c() {
+        let mut rng = Rng(0xd90c_0de0_0000_0002);
+        for _ in 0..200_000 {
+            // Bound |tcoeff-dqcoeff| so (diff<<shift)*qm stays < 2^31 => diff^2 < 2^62.
+            let tcoeff = rng.range(-(1 << 19), 1 << 19) as i32;
+            let dqcoeff = rng.range(-(1 << 19), 1 << 19) as i32;
+            let shift = rng.range(0, 3) as i32;
+            let ci = rng.range(0, 1024) as usize;
+            let qm: Vec<u8> = (0..1024).map(|_| rng.range(1, 243) as u8).collect();
+            assert_eq!(
+                get_coeff_dist(tcoeff, dqcoeff, shift, None, ci),
+                c::ref_get_coeff_dist(tcoeff, dqcoeff, shift, None, ci)
+            );
+            assert_eq!(
+                get_coeff_dist(tcoeff, dqcoeff, shift, Some(&qm), ci),
+                c::ref_get_coeff_dist(tcoeff, dqcoeff, shift, Some(&qm), ci),
+                "coeff_dist qm t={tcoeff} dq={dqcoeff} shift={shift} qm[ci]={}",
+                qm[ci]
+            );
+        }
     }
 }

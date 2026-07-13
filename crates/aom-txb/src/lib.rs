@@ -31,7 +31,7 @@ pub use ext_tx::{ext_tx_derive, ext_tx_set, ext_tx_set_type, write_tx_type, ExtT
 mod trellis_cost;
 pub use trellis_cost::{br_cost_with_diff, coeff_cost_eob, coeff_cost_general, two_coeff_cost_simple};
 mod optimize;
-pub use optimize::{optimize_txb, OptimizeResult};
+pub use optimize::{optimize_txb, optimize_txb_qm, OptimizeResult};
 mod entropy_ctx;
 pub use entropy_ctx::{get_txb_ctx, txb_entropy_context};
 
