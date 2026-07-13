@@ -19,7 +19,7 @@ fn main() {
     let shim_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shim");
     let lib = out_dir.join("libaom_shim.a");
     let mut objs = Vec::new();
-    for name in ["entropy_shim", "intra_shim", "sadvar_shim", "convolve_shim", "cdef_shim", "highbd_intra_shim", "hbd_lpf_shim", "hbd_sadvar_shim", "txb_shim"] {
+    for name in ["entropy_shim", "intra_shim", "sadvar_shim", "convolve_shim", "cdef_shim", "highbd_intra_shim", "hbd_lpf_shim", "hbd_sadvar_shim", "txb_shim", "intra_edge_shim"] {
         let shim_c = shim_dir.join(format!("{name}.c"));
         let obj = out_dir.join(format!("{name}.o"));
         let status = std::process::Command::new("clang")

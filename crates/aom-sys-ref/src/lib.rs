@@ -912,3 +912,32 @@ pub fn ref_get_txb_ctx(plane_bsize: usize, tx_size: usize, plane: usize, a: &[i8
 pub fn ref_txb_entropy_context(qcoeff: &[i32], tx_size: usize, tx_type: usize, eob: usize) -> u8 {
     unsafe { shim_txb_entropy_context(qcoeff.as_ptr(), tx_size as i32, tx_type as i32, eob as i32) as u8 }
 }
+
+// intra_edge_shim.c — intra edge filter / upsample DSP + strength decisions.
+extern "C" {
+    fn shim_intra_edge_strength(bs0: i32, bs1: i32, delta: i32, ty: i32) -> i32;
+    fn shim_use_intra_edge_upsample(bs0: i32, bs1: i32, delta: i32, ty: i32) -> i32;
+    fn shim_filter_intra_edge(p: *mut u8, sz: i32, strength: i32);
+    fn shim_upsample_intra_edge(p: *mut u8, sz: i32);
+}
+
+/// Reference `intra_edge_filter_strength`.
+pub fn ref_intra_edge_strength(bs0: i32, bs1: i32, delta: i32, ty: i32) -> i32 {
+    unsafe { shim_intra_edge_strength(bs0, bs1, delta, ty) }
+}
+
+/// Reference `av1_use_intra_edge_upsample`.
+pub fn ref_use_intra_edge_upsample(bs0: i32, bs1: i32, delta: i32, ty: i32) -> i32 {
+    unsafe { shim_use_intra_edge_upsample(bs0, bs1, delta, ty) }
+}
+
+/// Reference `av1_filter_intra_edge_c`: filters `buf[off..off+sz]` in place.
+pub fn ref_filter_intra_edge(buf: &mut [u8], off: usize, sz: usize, strength: i32) {
+    unsafe { shim_filter_intra_edge(buf.as_mut_ptr().add(off), sz as i32, strength) }
+}
+
+/// Reference `av1_upsample_intra_edge_c`: `buf[off..]` is logical index 0; the
+/// kernel reads `[-1..]` and writes `[-2 .. 2*sz-2]`.
+pub fn ref_upsample_intra_edge(buf: &mut [u8], off: usize, sz: usize) {
+    unsafe { shim_upsample_intra_edge(buf.as_mut_ptr().add(off), sz as i32) }
+}
