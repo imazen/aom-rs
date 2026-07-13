@@ -655,3 +655,51 @@ fn write_angle_delta_matches_c() {
         assert_eq!(my_cdf, want_cdf, "angle_delta cdf ad={angle_delta}");
     }
 }
+
+#[test]
+fn tx_size_depth_cat_matches_c() {
+    use aom_entropy::partition::{bsize_to_max_depth, bsize_to_tx_size_cat};
+    for bsize in 0..22 {
+        assert_eq!(bsize_to_max_depth(bsize as usize), c::ref_bsize_to_max_depth(bsize), "max_depth {bsize}");
+        // cat only meaningful for bsize > BLOCK_4X4
+        if bsize > 0 {
+            assert_eq!(bsize_to_tx_size_cat(bsize as usize), c::ref_bsize_to_tx_size_cat(bsize), "cat {bsize}");
+        }
+    }
+}
+
+#[test]
+fn write_selected_tx_size_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_selected_tx_size;
+    let mut rng = Rng(0x7a51_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        // MAX_TX_DEPTH=2 => max_depths in {1,2}, cdf has max_depths+1 symbols (<=3), 4-entry buf
+        let max_depths = 1 + (rng.next() % 2) as usize;
+        let ns = max_depths + 1;
+        let mut vals = [0i32; 3];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut cdf = [0u16; 4];
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            cdf[i] = v as u16;
+            prev = v;
+        }
+        cdf[ns - 1] = 0;
+        cdf[ns] = 0;
+        let bsize = (rng.next() % 22) as i32;
+        let depth = (rng.next() % ns as u64) as i32;
+        let mut my_cdf = cdf;
+        let mut enc = OdEcEnc::new();
+        write_selected_tx_size(&mut enc, &mut my_cdf, bsize as usize, depth, max_depths);
+        let got = enc.done().to_vec();
+        let (want, want_cdf) = c::ref_write_selected_tx_size(&cdf, bsize, depth, max_depths as i32);
+        assert_eq!(got, want, "tx_size bytes bsize={bsize} depth={depth} md={max_depths}");
+        assert_eq!(&my_cdf[..ns + 1], &want_cdf[..ns + 1], "tx_size cdf bsize={bsize} depth={depth}");
+    }
+}

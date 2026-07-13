@@ -492,3 +492,39 @@ const MAX_ANGLE_DELTA: i32 = 3;
 pub fn write_angle_delta(enc: &mut OdEcEnc, cdf: &mut [u16], angle_delta: i32) {
     write_symbol(enc, angle_delta + MAX_ANGLE_DELTA, cdf, (2 * MAX_ANGLE_DELTA + 1) as usize);
 }
+
+/// `bsize_to_max_depth` (`blockd.h`): the max TX-split depth signalled for a block size.
+const BSIZE_TO_MAX_DEPTH: [usize; 22] =
+    [0, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2];
+/// `bsize_to_tx_size_cat` table (`blockd.h`) before the `-1`.
+const BSIZE_TO_TX_SIZE_DEPTH: [i32; 22] =
+    [0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 4, 4, 4, 2, 2, 3, 3, 4, 4];
+
+/// `bsize_to_max_depth`.
+pub fn bsize_to_max_depth(bsize: usize) -> usize {
+    BSIZE_TO_MAX_DEPTH[bsize]
+}
+
+/// `bsize_to_tx_size_cat` (`blockd.h`): `bsize_to_tx_size_depth_table[bsize] - 1` — the
+/// TX-size CDF category (only meaningful for `bsize > BLOCK_4X4`).
+pub fn bsize_to_tx_size_cat(bsize: usize) -> i32 {
+    BSIZE_TO_TX_SIZE_DEPTH[bsize] - 1
+}
+
+/// `write_selected_tx_size` (`av1/encoder/bitstream.c`): for a block that signals its
+/// TX size (`bsize > BLOCK_4X4`), the split `depth` on the (category, context)-selected
+/// `tx_size_cdf` at `max_depths + 1` symbols. `depth` / the CDF selection
+/// (`tx_size_to_depth` + `get_tx_size_context` + `bsize_to_tx_size_cat`) are resolved by
+/// the caller.
+pub fn write_selected_tx_size(
+    enc: &mut OdEcEnc,
+    tx_size_cdf: &mut [u16],
+    bsize: usize,
+    depth: i32,
+    max_depths: usize,
+) {
+    if bsize > 0 {
+        // block_signals_txsize: bsize > BLOCK_4X4
+        write_symbol(enc, depth, tx_size_cdf, max_depths + 1);
+    }
+}

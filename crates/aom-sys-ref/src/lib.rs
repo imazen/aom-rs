@@ -243,6 +243,9 @@ extern "C" {
     fn shim_size_group_lookup(bsize: i32) -> i32;
     fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_angle_delta(cdf: *mut u16, angle_delta: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_bsize_to_max_depth(bsize: i32) -> i32;
+    fn shim_bsize_to_tx_size_cat(bsize: i32) -> i32;
+    fn shim_write_selected_tx_size(cdf: *mut u16, bsize: i32, depth: i32, max_depths: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_get_mv_joint(row: i32, col: i32) -> i32;
     fn shim_get_mv_class(z: i32) -> i32;
     fn shim_encode_mv_component(cdf: *mut u16, comp: i32, precision: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
@@ -277,6 +280,20 @@ pub fn ref_encode_mv_component(cdf: &[u16; 69], comp: i32, precision: i32) -> (V
     let mut out = vec![0u8; 32];
     let mut out_cdf = [0u16; 69];
     let n = unsafe { shim_encode_mv_component(c.as_mut_ptr(), comp, precision, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    out.truncate(n as usize);
+    (out, out_cdf)
+}
+
+/// Reference `bsize_to_max_depth` / `bsize_to_tx_size_cat`.
+pub fn ref_bsize_to_max_depth(bsize: i32) -> usize { unsafe { shim_bsize_to_max_depth(bsize) as usize } }
+pub fn ref_bsize_to_tx_size_cat(bsize: i32) -> i32 { unsafe { shim_bsize_to_tx_size_cat(bsize) } }
+
+/// Reference `write_selected_tx_size` (over the pristine C od_ec + update_cdf).
+pub fn ref_write_selected_tx_size(cdf: &[u16; 4], bsize: i32, depth: i32, max_depths: i32) -> (Vec<u8>, [u16; 4]) {
+    let mut c = *cdf;
+    let mut out = vec![0u8; 16];
+    let mut out_cdf = [0u16; 4];
+    let n = unsafe { shim_write_selected_tx_size(c.as_mut_ptr(), bsize, depth, max_depths, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
     out.truncate(n as usize);
     (out, out_cdf)
 }

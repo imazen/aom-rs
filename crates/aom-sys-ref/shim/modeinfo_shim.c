@@ -401,3 +401,23 @@ uint32_t shim_write_angle_delta(uint16_t *cdf, int angle_delta, uint8_t *out,
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+int shim_bsize_to_max_depth(int bsize) { return bsize_to_max_depth(bsize); }
+int shim_bsize_to_tx_size_cat(int bsize) { return bsize_to_tx_size_cat(bsize); }
+
+/* write_selected_tx_size symbol (max_depths+1) over pristine C od_ec. */
+uint32_t shim_write_selected_tx_size(uint16_t *cdf, int bsize, int depth, int max_depths,
+                                     uint8_t *out, uint16_t *out_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  if (bsize > BLOCK_4X4) {
+    od_ec_encode_cdf_q15(&ec, depth, cdf, max_depths + 1);
+    update_cdf(cdf, depth, max_depths + 1);
+  }
+  uint32_t nb = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < max_depths + 2; i++) out_cdf[i] = cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
