@@ -185,17 +185,19 @@ both tracks, fully bit-exact.**
   `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
   rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
-- **av1_xform_quant + full speed-0 block coefficient pipeline (aom-encode)** — the
-  new composition crate wiring the per-block encoder workhorse from the already
-  bit-exact sub-modules. `xform_quant` = av1_xform (av1_fwd_txfm2d) + av1_quant
-  (quantizer dispatch FP/B x flat/QM + entropy-ctx), with av1_get_tx_scale log_scale,
-  av1_get_max_eob n_coeffs, and use_optimize_b deferral. `xform_quant_optimize` adds
+- **Full speed-0 block coefficient pipeline, residual -> bitstream bytes (aom-encode)**
+  — the new composition crate wiring the per-block encoder from the already bit-exact
+  sub-modules. `xform_quant` = av1_xform (av1_fwd_txfm2d) + av1_quant (quantizer
+  dispatch FP/B x flat/QM + entropy-ctx), with av1_get_tx_scale log_scale,
+  av1_get_max_eob n_coeffs, use_optimize_b deferral. `xform_quant_optimize` adds
   get_txb_ctx + av1_optimize_b (trellis, or av1_cost_skip_txb at eob 0) + the final
-  entropy-ctx write. Oracles chain the C reference steps (fwd -> quant -> ctx ->
-  optimize -> entropy_ctx); both harnesses cover all 19 tx sizes x 7 tx types x FP/B
-  x QM/flat, byte-identical coeff/qcoeff/dqcoeff/eob/ctx/rate, with coverage guards
-  (nonzero-eob fraction + trellis-actually-reduced-eob). bd=8 (lowbd); highbd follows
-  the highbd forward transform.
+  entropy-ctx write. `encode_block_coeffs` adds av1_write_coeffs_txb on the od_ec range
+  coder, so a residual becomes **byte-identical entropy-coded coefficient bytes** with
+  identical CDF adaptation. Three harnesses (coeff / optimized-coeff / bytes+CDF) each
+  chain the C reference steps as oracle and cover all 19 tx sizes x 7 tx types x FP/B x
+  QM/flat (x update on/off for the writer), with coverage guards (nonzero-eob fraction,
+  trellis-reduced-eob, byte-producing fraction). av1_write_tx_type (plane-0 tx_type) out
+  of scope on both sides. bd=8 (lowbd); highbd follows the highbd forward transform.
 
 - **per-block entropy-context propagation (aom-txb)** — the neighbour-context
   loop gating every txb (both tracks): get_txb_ctx (above/left -> txb_skip_ctx /
@@ -246,15 +248,17 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **Block coefficients -> bitstream bytes** (capstone): tie xform_quant_optimize
-   into av1_write_coeffs_txb (already bit-exact) so a residual becomes entropy-coded
-   coefficient bytes. Needs the FRAME_CONTEXT coeff-CDF state threaded: derive the
-   trellis cost tables from the CDFs (av1_fill_coeff_costs, ported) -> optimize ->
-   write_coeffs_txb (adapts the same CDFs). Differential on the produced bytes +
-   adapted CDFs. This is the "residual -> real encoder output" milestone.
+1. **highbd forward transform** (`av1_fwd_txfm2d` bd=10/12): the one missing piece
+   before the entire block-encode pipeline works for highbd (all highbd quantizers +
+   the trellis QM/flat are already bit-exact). Port the highbd fwd stages, then
+   parameterize aom-encode by bd.
 2. **DC-only quantizer** (`av1_quantize_dc`): the third quant_func_list entry
    (QuantKind::Dc) — small, completes the quant dispatch, facade oracle pattern.
-3. **highbd forward transform** — unblocks the highbd xform_quant composition.
+3. **av1_write_tx_type into the block bitstream**: write_tx_type is ported (aom-txb);
+   wire it ahead of the coefficients in encode_block_coeffs for the complete plane-0
+   per-block signaling (needs the tx_type CDFs + intra-dir/ext-tx-set context).
+4. **Mode & partition search (RDO)** — the hardest bit-identity target; the layer that
+   drives xform_quant_optimize per candidate.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
    per-mode bit-exact, differential per predictor.
 3. **Loop filters**: deblock, CDEF, loop-restoration (decoder + encoder search).
