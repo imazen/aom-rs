@@ -52,6 +52,17 @@ impl WriteBitBuffer {
         self.write_literal(data, bits + 1);
     }
 
+    /// `add_trailing_bits` (`av1/encoder/bitstream.c`): the byte-alignment stop
+    /// bit that closes an uncompressed header — `0x80` when already aligned, else
+    /// a single `1` bit (the remaining bits of the byte are already 0).
+    pub fn add_trailing_bits(&mut self) {
+        if self.is_byte_aligned() {
+            self.write_literal(0x80, 8);
+        } else {
+            self.write_bit(1);
+        }
+    }
+
     /// `aom_wb_is_byte_aligned`.
     pub fn is_byte_aligned(&self) -> bool {
         self.bit_offset.is_multiple_of(8)

@@ -31,7 +31,7 @@ fn wb_write_sequence_identical() {
         let mut kind = Vec::with_capacity(nops);
         let mut wb = WriteBitBuffer::new();
         for _ in 0..nops {
-            let k = rng.range(0, 3) as i32;
+            let k = rng.range(0, 4) as i32; // 3 = add_trailing_bits
             // signed / inv-signed literals use bits <= 31; unsigned <= 32.
             let b = if k == 1 { rng.range(1, 33) } else { rng.range(1, 32) };
             // data must fit the field so both sides interpret it identically.
@@ -43,6 +43,7 @@ fn wb_write_sequence_identical() {
             match k {
                 1 => wb.write_unsigned_literal(d, b),
                 2 => wb.write_inv_signed_literal(d as i32, b),
+                3 => wb.add_trailing_bits(),
                 _ => wb.write_literal(d as i32, b),
             }
         }

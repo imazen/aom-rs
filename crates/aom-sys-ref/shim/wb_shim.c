@@ -12,6 +12,10 @@ uint32_t shim_wb_apply(const uint32_t *data, const int *bits, const int *kind,
     switch (kind[i]) {
       case 1: aom_wb_write_unsigned_literal(&wb, data[i], bits[i]); break;
       case 2: aom_wb_write_inv_signed_literal(&wb, (int)data[i], bits[i]); break;
+      case 3: /* add_trailing_bits, via the real aom_wb primitives */
+        if (aom_wb_is_byte_aligned(&wb)) aom_wb_write_literal(&wb, 0x80, 8);
+        else aom_wb_write_bit(&wb, 1);
+        break;
       default: aom_wb_write_literal(&wb, (int)data[i], bits[i]); break;
     }
   }
