@@ -120,6 +120,13 @@ state. Kernel-level differential coverage is tracked separately in
 4. AVX2/NEON SIMD specializations (perf gate), each diffed lane-level vs scalar.
 5. Encoder RDO + rate control (hardest bit-identity target).
 
+## Perf gate honest number
+
+Like-for-like vs C's production AVX2 (`aom_sad64x64_avx2`): Rust AVX2 SAD is
+**~2.2x** (direct kernel) / ~2.5x (with runtime dispatch) — gate is <=1.20x, so
+NOT met. The gap is the kernel (libaom hand-tuned asm ~2x faster), not dispatch
+(~0.15x). The earlier 1.42x figure was vs C *scalar* and was replaced.
+
 ## Gate posture (honest)
 
 Real, verified, ratcheting progress across BOTH tracks — but still a fraction of

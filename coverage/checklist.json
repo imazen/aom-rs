@@ -323,7 +323,7 @@
     },
     "dist.sad_avx2": {
       "status": "green",
-      "note": "AVX2 SAD specialization; lane-level differential vs scalar+C green (40k). Perf: coarse probe ~1.42x vs C-scalar _c (OVER 1.20x gate; not yet vs C AVX2 production dispatch, not pinned-HW CI). Perf gate NOT met; methodology demonstrated.",
+      "note": "AVX2 SAD; lane-level differential vs scalar+C green (40k). Perf (like-for-like vs C production AVX2 aom_sad64x64_avx2): rust-avx2-direct ~2.20x, rust-dispatch ~2.53x (gate <=1.20x). Gap is the kernel itself (libaom hand-tuned asm ~2x faster); dispatch adds only ~0.15x. Perf gate NOT met; measured honestly.",
       "items": {
         "sad_avx2_correctness": {
           "status": "green",
@@ -331,7 +331,7 @@
         },
         "sad_avx2_perf": {
           "status": "red",
-          "test": "avx2_sad::avx2_sad_perf_ratio (1.42x > 1.20x)"
+          "test": "avx2_sad::avx2_sad_perf_ratio (2.20x direct > 1.20x vs C AVX2)"
         }
       }
     },

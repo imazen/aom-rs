@@ -64,16 +64,36 @@ fn avx2_sad_perf_ratio() {
     }
     let rust = t0.elapsed().as_secs_f64();
 
+    // Direct AVX2 kernel (no per-call feature detection) — isolates kernel cost.
+    let mut accd = 0u64;
+    let t0d = Instant::now();
+    for _ in 0..iters {
+        accd += unsafe { aom_dist::avx2::sad_avx2(&a, stride, &b, stride, w, h) } as u64;
+    }
+    let rust_direct = t0d.elapsed().as_secs_f64();
+    assert_eq!(acc, accd);
+
+    // Like-for-like: C's PRODUCTION dispatch (AVX2), the real perf-gate baseline.
     let t1 = Instant::now();
     let mut acc2 = 0u64;
     for _ in 0..iters {
-        acc2 += c::ref_sad(idx, &a, stride, &b, stride) as u64;
+        acc2 += c::prod_sad(w, &a, stride, &b, stride) as u64;
     }
     let cc = t1.elapsed().as_secs_f64();
 
+    // Also the scalar _c for reference.
+    let t2 = Instant::now();
+    let mut acc3 = 0u64;
+    for _ in 0..iters {
+        acc3 += c::ref_sad(idx, &a, stride, &b, stride) as u64;
+    }
+    let cscalar = t2.elapsed().as_secs_f64();
+
     assert_eq!(acc, acc2);
+    assert_eq!(acc, acc3);
     eprintln!(
-        "SAD {w}x{h}: rust-avx2 {rust:.3}s, c {cc:.3}s, ratio {:.3}x (gate <=1.20x)",
-        rust / cc
+        "SAD {w}x{h}: rust-dispatch {rust:.3}s ({:.2}x) | rust-avx2-direct {rust_direct:.3}s ({:.2}x) | C-avx2(prod) {cc:.3}s (1.00x, gate<=1.20x) | C-scalar {cscalar:.3}s",
+        rust / cc,
+        rust_direct / cc
     );
 }

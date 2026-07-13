@@ -138,3 +138,9 @@ case 19:return aom_sub_pixel_variance64x128_c(a,as,xo,yo,b,bs,sse);
 case 20:return aom_sub_pixel_variance128x64_c(a,as,xo,yo,b,bs,sse);
 case 21:return aom_sub_pixel_variance128x128_c(a,as,xo,yo,b,bs,sse);
 default:return 0;}}
+
+/* Production dispatch (post-rtcd -> AVX2/etc.), NOT the _c reference. */
+unsigned int aom_sad64x64_avx2(const uint8_t*,int,const uint8_t*,int);
+unsigned int aom_sad128x128_avx2(const uint8_t*,int,const uint8_t*,int);
+unsigned int shim_sad_prod64(const uint8_t*s,int ss,const uint8_t*r,int rs){return aom_sad64x64_avx2(s,ss,r,rs);}
+unsigned int shim_sad_prod128(const uint8_t*s,int ss,const uint8_t*r,int rs){return aom_sad128x128_avx2(s,ss,r,rs);}

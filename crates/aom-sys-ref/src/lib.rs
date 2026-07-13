@@ -115,6 +115,24 @@ pub fn ref_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize) -> u32 {
     unsafe { shim_sad(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32) }
 }
 
+extern "C" {
+    fn shim_sad_prod64(s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
+    fn shim_sad_prod128(s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
+}
+
+/// Production-dispatch SAD (post-RTCD → C's AVX2 path) — the true perf-gate
+/// baseline. `w` must be 64 or 128.
+pub fn prod_sad(w: usize, s: &[u8], ss: usize, r: &[u8], rs: usize) -> u32 {
+    ref_init();
+    unsafe {
+        match w {
+            64 => shim_sad_prod64(s.as_ptr(), ss as i32, r.as_ptr(), rs as i32),
+            128 => shim_sad_prod128(s.as_ptr(), ss as i32, r.as_ptr(), rs as i32),
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// Reference `aom_variance<W>x<H>_c`; returns (variance, sse).
 pub fn ref_variance(idx: usize, a: &[u8], as_: usize, b: &[u8], bs: usize) -> (u32, u32) {
     let mut sse = 0u32;
