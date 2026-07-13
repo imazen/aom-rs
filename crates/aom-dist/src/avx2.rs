@@ -33,7 +33,6 @@ pub unsafe fn sad_avx2(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: 
             x += 16;
         }
     }
-    // Horizontal reduction.
     let lo = _mm256_castsi256_si128(acc);
     let hi = _mm256_extracti128_si256::<1>(acc);
     let s = _mm_add_epi64(_mm_add_epi64(lo, hi), acc16);
