@@ -457,3 +457,29 @@ pub fn encode_mv_component(enc: &mut OdEcEnc, cdf: &mut [u16; 69], comp: i32, pr
         }
     }
 }
+
+/// `av1_encode_mv` (`av1/encoder/encodemv.c`): a motion-vector difference — the MV
+/// joint symbol on `joints_cdf` (MV_JOINTS=4), then the vertical component (when the
+/// joint has a nonzero row) and the horizontal component (nonzero col), each via
+/// [`encode_mv_component`] at precision `usehp` (the caller forces `MV_SUBPEL_NONE`
+/// under integer-mv). `diff_*` are the already-computed mv-minus-ref components.
+pub fn encode_mv(
+    enc: &mut OdEcEnc,
+    joints_cdf: &mut [u16],
+    comp0: &mut [u16; 69],
+    comp1: &mut [u16; 69],
+    diff_row: i32,
+    diff_col: i32,
+    usehp: i32,
+) {
+    let j = get_mv_joint(diff_row, diff_col);
+    write_symbol(enc, j, joints_cdf, 4); // MV_JOINTS
+    if j == 2 || j == 3 {
+        // mv_joint_vertical
+        encode_mv_component(enc, comp0, diff_row, usehp);
+    }
+    if j == 1 || j == 3 {
+        // mv_joint_horizontal
+        encode_mv_component(enc, comp1, diff_col, usehp);
+    }
+}

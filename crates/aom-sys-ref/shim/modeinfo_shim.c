@@ -347,3 +347,41 @@ uint32_t shim_encode_mv_component(uint16_t *cdf, int comp, int precision, uint8_
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* av1_encode_mv transcribed over pristine C od_ec: joint symbol + the two components,
+ * using the REAL av1_get_mv_joint / mv_joint_vertical|horizontal / av1_get_mv_class. */
+static void mv_comp_wb(od_ec_enc *ec, uint16_t *cdf, int comp, int precision) {
+  int sign = comp < 0;
+  int mag = sign ? -comp : comp;
+  int offset;
+  int mv_class = av1_get_mv_class(mag - 1, &offset);
+  int d = offset >> 3, fr = (offset >> 1) & 3, hp = offset & 1;
+#define S(base, sy, n) do { od_ec_encode_cdf_q15(ec, sy, cdf + (base), n); update_cdf(cdf + (base), sy, n); } while (0)
+  S(0, sign, 2);
+  S(3, mv_class, 11);
+  if (mv_class == 0) S(15, d, 2);
+  else { for (int i = 0; i < mv_class; ++i) S(18 + i * 3, (d >> i) & 1, 2); }
+  if (precision > MV_SUBPEL_NONE) { if (mv_class == 0) S(48 + d * 5, fr, 4); else S(58, fr, 4); }
+  if (precision > MV_SUBPEL_LOW_PRECISION) { if (mv_class == 0) S(63, hp, 2); else S(66, hp, 2); }
+#undef S
+}
+uint32_t shim_encode_mv(uint16_t *joints_cdf, uint16_t *comp0, uint16_t *comp1,
+                        int diff_row, int diff_col, int usehp, uint8_t *out,
+                        uint16_t *out_joints, uint16_t *out_comp0, uint16_t *out_comp1) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  MV diff = { (int16_t)diff_row, (int16_t)diff_col };
+  int j = av1_get_mv_joint(&diff);
+  od_ec_encode_cdf_q15(&ec, j, joints_cdf, 4);
+  update_cdf(joints_cdf, j, 4);
+  if (mv_joint_vertical(j)) mv_comp_wb(&ec, comp0, diff.row, usehp);
+  if (mv_joint_horizontal(j)) mv_comp_wb(&ec, comp1, diff.col, usehp);
+  uint32_t nb = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 5; i++) out_joints[i] = joints_cdf[i];
+  for (int i = 0; i < 69; i++) out_comp0[i] = comp0[i];
+  for (int i = 0; i < 69; i++) out_comp1[i] = comp1[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

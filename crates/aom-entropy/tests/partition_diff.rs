@@ -557,3 +557,68 @@ fn encode_mv_component_matches_c() {
         assert_eq!(my_cdf, want_cdf, "mv_comp cdf comp={comp} prec={precision}");
     }
 }
+
+#[test]
+fn encode_mv_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::encode_mv;
+    let mut rng = Rng(0x0acf_c0de_a11a_0009);
+    let mk = |rng: &mut Rng, ns: usize, out: &mut [u16]| {
+        let mut vals = [0i32; 11];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            out[i] = v as u16;
+            prev = v;
+        }
+        out[ns - 1] = 0;
+        out[ns] = 0;
+    };
+    let mk_comp = |rng: &mut Rng| -> [u16; 69] {
+        let mut cdf = [0u16; 69];
+        mk(rng, 2, &mut cdf[0..3]);
+        mk(rng, 11, &mut cdf[3..15]);
+        mk(rng, 2, &mut cdf[15..18]);
+        for i in 0..10 {
+            let off = 18 + i * 3;
+            mk(rng, 2, &mut cdf[off..off + 3]);
+        }
+        for i in 0..2 {
+            let off = 48 + i * 5;
+            mk(rng, 4, &mut cdf[off..off + 5]);
+        }
+        mk(rng, 4, &mut cdf[58..63]);
+        mk(rng, 2, &mut cdf[63..66]);
+        mk(rng, 2, &mut cdf[66..69]);
+        cdf
+    };
+    for _ in 0..300_000 {
+        let mut joints = [0u16; 5];
+        mk(&mut rng, 4, &mut joints);
+        let comp0 = mk_comp(&mut rng);
+        let comp1 = mk_comp(&mut rng);
+        // diff not both-zero (assert j != ZERO); components in valid class range
+        let dr = (rng.next() % 32769) as i32 - 16384;
+        let dc = (rng.next() % 32769) as i32 - 16384;
+        let (dr, dc) = if dr == 0 && dc == 0 { (1, 0) } else { (dr, dc) };
+        let usehp = [-1i32, 0, 1][(rng.next() % 3) as usize];
+
+        let mut my_j = joints;
+        let mut my_c0 = comp0;
+        let mut my_c1 = comp1;
+        let mut enc = OdEcEnc::new();
+        encode_mv(&mut enc, &mut my_j, &mut my_c0, &mut my_c1, dr, dc, usehp);
+        let got = enc.done().to_vec();
+
+        let (want, oj, o0, o1) = c::ref_encode_mv(&joints, &comp0, &comp1, dr, dc, usehp);
+        assert_eq!(got, want, "encode_mv bytes dr={dr} dc={dc} hp={usehp}");
+        assert_eq!(my_j, oj, "encode_mv joints cdf");
+        assert_eq!(my_c0, o0, "encode_mv comp0 cdf");
+        assert_eq!(my_c1, o1, "encode_mv comp1 cdf");
+    }
+}
