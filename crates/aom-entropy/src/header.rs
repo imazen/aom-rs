@@ -2062,3 +2062,143 @@ pub fn read_decoder_model_info(rb: &mut ReadBitBuffer) -> DecoderModelInfo {
         frame_presentation_time_length,
     }
 }
+
+/// Inverse of [`wb_write_uniform`]: a truncated-uniform value in `[0, n)`.
+fn read_uniform(rb: &mut ReadBitBuffer, n: i32) -> i32 {
+    let l = get_unsigned_bits(n as u32);
+    if l == 0 {
+        return 0;
+    }
+    let m = (1i32 << l) - n;
+    let v = rb.read_literal(l - 1);
+    if v < m {
+        v
+    } else {
+        (v << 1) - m + rb.read_literal(1)
+    }
+}
+
+/// `tile_log2(blk_size, target)`: smallest `k` with `blk_size << k >= target`.
+fn tile_log2(blk_size: i32, target: i32) -> i32 {
+    let mut k = 0;
+    while (blk_size << k) < target {
+        k += 1;
+    }
+    k
+}
+
+/// `read_tile_info_max_tile` (`av1/decoder/decodeframe.c`) — inverse of
+/// [`write_tile_info_max_tile`]: the uniform/non-uniform tile-spacing flag, then either
+/// the log2 column/row counts (uniform, via increment bits) or the explicit per-tile
+/// `col/row_start_sb` (non-uniform, via `read_uniform`). Fills the geometry fields of a
+/// [`TileInfoHeader`]; the min/max log2 bounds + `max_*_sb` come from `av1_get_tile_limits`.
+#[allow(clippy::too_many_arguments)]
+pub fn read_tile_info_max_tile(
+    rb: &mut ReadBitBuffer,
+    mi_cols: i32,
+    mi_rows: i32,
+    mib_size_log2: u32,
+    min_log2_cols: i32,
+    max_log2_cols: i32,
+    min_log2_rows: i32,
+    max_log2_rows: i32,
+    max_width_sb: i32,
+    max_height_sb: i32,
+) -> TileInfoHeader {
+    let mut t = TileInfoHeader {
+        mi_cols,
+        mi_rows,
+        mib_size_log2,
+        uniform_spacing: true,
+        log2_cols: min_log2_cols,
+        min_log2_cols,
+        max_log2_cols,
+        log2_rows: min_log2_rows,
+        min_log2_rows,
+        max_log2_rows,
+        cols: 1,
+        rows: 1,
+        col_start_sb: [0; MAX_TILE_COLS + 1],
+        row_start_sb: [0; MAX_TILE_ROWS + 1],
+        max_width_sb,
+        max_height_sb,
+    };
+    let sb_cols = ceil_power_of_two(mi_cols, mib_size_log2);
+    let sb_rows = ceil_power_of_two(mi_rows, mib_size_log2);
+    t.uniform_spacing = rb.read_bit() != 0;
+    if t.uniform_spacing {
+        t.log2_cols = min_log2_cols;
+        while t.log2_cols < max_log2_cols {
+            if rb.read_bit() == 0 {
+                break;
+            }
+            t.log2_cols += 1;
+        }
+        t.log2_rows = min_log2_rows;
+        while t.log2_rows < max_log2_rows {
+            if rb.read_bit() == 0 {
+                break;
+            }
+            t.log2_rows += 1;
+        }
+        t.cols = 1usize << t.log2_cols;
+        t.rows = 1usize << t.log2_rows;
+    } else {
+        let mut width_sb = sb_cols;
+        let mut start_sb = 0;
+        let mut i = 0;
+        while width_sb > 0 && i < MAX_TILE_COLS {
+            let size_sb = 1 + read_uniform(rb, width_sb.min(max_width_sb));
+            t.col_start_sb[i] = start_sb;
+            start_sb += size_sb;
+            width_sb -= size_sb;
+            i += 1;
+        }
+        t.cols = i;
+        t.col_start_sb[i] = start_sb + width_sb;
+        t.log2_cols = tile_log2(1, i as i32);
+
+        let mut height_sb = sb_rows;
+        let mut start_sb = 0;
+        let mut j = 0;
+        while height_sb > 0 && j < MAX_TILE_ROWS {
+            let size_sb = 1 + read_uniform(rb, height_sb.min(max_height_sb));
+            t.row_start_sb[j] = start_sb;
+            start_sb += size_sb;
+            height_sb -= size_sb;
+            j += 1;
+        }
+        t.rows = j;
+        t.row_start_sb[j] = start_sb + height_sb;
+        t.log2_rows = tile_log2(1, j as i32);
+    }
+    t
+}
+
+/// `read_tile_info` — inverse of [`write_tile_info`]: the max-tile geometry, then (when
+/// more than one tile) the `context_update_tile_id` + `tile_size_bytes` fields. Returns
+/// `(tile_info, context_update_tile_id, tile_size_bytes)`.
+#[allow(clippy::too_many_arguments)]
+pub fn read_tile_info(
+    rb: &mut ReadBitBuffer,
+    mi_cols: i32,
+    mi_rows: i32,
+    mib_size_log2: u32,
+    min_log2_cols: i32,
+    max_log2_cols: i32,
+    min_log2_rows: i32,
+    max_log2_rows: i32,
+    max_width_sb: i32,
+    max_height_sb: i32,
+) -> (TileInfoHeader, i32, i32) {
+    let t = read_tile_info_max_tile(
+        rb, mi_cols, mi_rows, mib_size_log2, min_log2_cols, max_log2_cols, min_log2_rows,
+        max_log2_rows, max_width_sb, max_height_sb,
+    );
+    let (mut ctx_update_id, mut tile_size_bytes) = (0, 1);
+    if t.rows * t.cols > 1 {
+        ctx_update_id = rb.read_literal((t.log2_cols + t.log2_rows) as u32);
+        tile_size_bytes = rb.read_literal(2) + 1;
+    }
+    (t, ctx_update_id, tile_size_bytes)
+}

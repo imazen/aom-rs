@@ -763,3 +763,94 @@ fn read_timing_and_decoder_model_invert_write() {
         }
     }
 }
+
+#[test]
+fn read_tile_info_inverts_write() {
+    use aom_entropy::header::{read_tile_info, write_tile_info, TileInfoHeader};
+    fn tlog2(blk: i32, target: i32) -> i32 {
+        let mut k = 0;
+        while (blk << k) < target {
+            k += 1;
+        }
+        k
+    }
+    let mut rng = Rng(0x1e_71ce_c0de_01b0);
+    for _ in 0..100_000 {
+        let mib = [4u32, 5][(rng.next() % 2) as usize];
+        let uniform = rng.next() & 1 == 1;
+        if uniform {
+            let min_c = (rng.next() % 3) as i32;
+            let max_c = min_c + (rng.next() % 3) as i32;
+            let log2_c = min_c + (rng.next() % (max_c - min_c + 1) as u64) as i32;
+            let min_r = (rng.next() % 3) as i32;
+            let max_r = min_r + (rng.next() % 3) as i32;
+            let log2_r = min_r + (rng.next() % (max_r - min_r + 1) as u64) as i32;
+            let (mi_cols, mi_rows) = (1 + (rng.next() % 4096) as i32, 1 + (rng.next() % 4096) as i32);
+            let (cols, rows) = (1usize << log2_c, 1usize << log2_r);
+            let t = TileInfoHeader {
+                mi_cols, mi_rows, mib_size_log2: mib, uniform_spacing: true,
+                log2_cols: log2_c, min_log2_cols: min_c, max_log2_cols: max_c,
+                log2_rows: log2_r, min_log2_rows: min_r, max_log2_rows: max_r,
+                cols, rows, col_start_sb: [0; 65], row_start_sb: [0; 65],
+                max_width_sb: 64, max_height_sb: 64,
+            };
+            let mut wb = WriteBitBuffer::new();
+            write_tile_info(&mut wb, &t);
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let (g, ctx, tsb) = read_tile_info(&mut rb, mi_cols, mi_rows, mib, min_c, max_c, min_r, max_r, 64, 64);
+            assert!(g.uniform_spacing, "uniform flag");
+            assert_eq!((g.log2_cols, g.log2_rows), (log2_c, log2_r), "uniform log2");
+            assert_eq!((g.cols, g.rows), (cols, rows), "uniform cols/rows");
+            if rows * cols > 1 {
+                assert_eq!((ctx, tsb), (0, 4), "ctx/tile_size_bytes");
+            }
+        } else {
+            let sb_cols = 1 + (rng.next() % 24) as i32;
+            let sb_rows = 1 + (rng.next() % 24) as i32;
+            let mi_cols = sb_cols << mib; // ceil_power_of_two -> exactly sb_cols
+            let mi_rows = sb_rows << mib;
+            let max_w = 1 + (rng.next() % sb_cols as u64) as i32;
+            let max_h = 1 + (rng.next() % sb_rows as u64) as i32;
+            let partition = |rng: &mut Rng, total: i32, cap_max: i32| -> Vec<i32> {
+                let mut starts = vec![0i32];
+                let mut rem = total;
+                while rem > 0 {
+                    let cap = rem.min(cap_max);
+                    let size = 1 + (rng.next() % cap as u64) as i32;
+                    let last = *starts.last().unwrap();
+                    starts.push(last + size);
+                    rem -= size;
+                }
+                starts
+            };
+            let cs = partition(&mut rng, sb_cols, max_w);
+            let rs = partition(&mut rng, sb_rows, max_h);
+            let (cols, rows) = (cs.len() - 1, rs.len() - 1);
+            let mut col_start_sb = [0i32; 65];
+            let mut row_start_sb = [0i32; 65];
+            col_start_sb[..cs.len()].copy_from_slice(&cs);
+            row_start_sb[..rs.len()].copy_from_slice(&rs);
+            let t = TileInfoHeader {
+                mi_cols, mi_rows, mib_size_log2: mib, uniform_spacing: false,
+                log2_cols: tlog2(1, cols as i32), min_log2_cols: 0, max_log2_cols: 6,
+                log2_rows: tlog2(1, rows as i32), min_log2_rows: 0, max_log2_rows: 6,
+                cols, rows, col_start_sb, row_start_sb,
+                max_width_sb: max_w, max_height_sb: max_h,
+            };
+            let mut wb = WriteBitBuffer::new();
+            write_tile_info(&mut wb, &t);
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let (g, ctx, tsb) = read_tile_info(&mut rb, mi_cols, mi_rows, mib, 0, 6, 0, 6, max_w, max_h);
+            assert!(!g.uniform_spacing, "non-uniform flag");
+            assert_eq!((g.cols, g.rows), (cols, rows), "nonuniform cols/rows sb=({sb_cols},{sb_rows})");
+            assert_eq!(g.col_start_sb, col_start_sb, "col_start_sb");
+            assert_eq!(g.row_start_sb, row_start_sb, "row_start_sb");
+            assert_eq!((g.log2_cols, g.log2_rows), (tlog2(1, cols as i32), tlog2(1, rows as i32)), "nonuniform log2");
+            if rows * cols > 1 {
+                assert_eq!((ctx, tsb), (0, 4), "ctx/tile_size_bytes");
+            }
+        }
+    }
+}
