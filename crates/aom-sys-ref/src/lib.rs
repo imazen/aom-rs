@@ -16,6 +16,62 @@ extern "C" {
     fn aom_scale_rtcd();
 }
 
+// Entropy-coder shim (shim/entropy_shim.c) — opaque od_ec_enc / od_ec_dec.
+extern "C" {
+    fn shim_enc_new(size: u32) -> *mut core::ffi::c_void;
+    fn shim_enc_bool(e: *mut core::ffi::c_void, val: i32, f: u32);
+    fn shim_enc_cdf(e: *mut core::ffi::c_void, s: i32, icdf: *const u16, nsyms: i32);
+    fn shim_enc_done(e: *mut core::ffi::c_void, nbytes: *mut u32) -> *const u8;
+    fn shim_enc_free(e: *mut core::ffi::c_void);
+    fn shim_dec_new(buf: *const u8, sz: u32) -> *mut core::ffi::c_void;
+    fn shim_dec_bool(d: *mut core::ffi::c_void, f: u32) -> i32;
+    fn shim_dec_cdf(d: *mut core::ffi::c_void, icdf: *const u16, nsyms: i32) -> i32;
+    fn shim_dec_free(d: *mut core::ffi::c_void);
+}
+
+/// One entropy-coder op for the reference encoder/decoder.
+#[derive(Clone)]
+pub enum EcOp {
+    Bool { val: i32, f: u32 },
+    Cdf { s: i32, icdf: Vec<u16> },
+}
+
+/// Reference-encode a sequence of ops; return the finalized byte buffer.
+pub fn ref_ec_encode(ops: &[EcOp]) -> Vec<u8> {
+    unsafe {
+        let e = shim_enc_new(1024);
+        for op in ops {
+            match op {
+                EcOp::Bool { val, f } => shim_enc_bool(e, *val, *f),
+                EcOp::Cdf { s, icdf } => shim_enc_cdf(e, *s, icdf.as_ptr(), icdf.len() as i32),
+            }
+        }
+        let mut n: u32 = 0;
+        let p = shim_enc_done(e, &mut n);
+        let out = std::slice::from_raw_parts(p, n as usize).to_vec();
+        shim_enc_free(e);
+        out
+    }
+}
+
+/// Reference-decode `ops` (using each op's `f`/`icdf`) from `buf`; return the
+/// decoded symbol/bit for each op.
+pub fn ref_ec_decode(buf: &[u8], ops: &[EcOp]) -> Vec<i32> {
+    unsafe {
+        let d = shim_dec_new(buf.as_ptr(), buf.len() as u32);
+        let mut out = Vec::with_capacity(ops.len());
+        for op in ops {
+            let r = match op {
+                EcOp::Bool { f, .. } => shim_dec_bool(d, *f),
+                EcOp::Cdf { icdf, .. } => shim_dec_cdf(d, icdf.as_ptr(), icdf.len() as i32),
+            };
+            out.push(r);
+        }
+        shim_dec_free(d);
+        out
+    }
+}
+
 /// Initialize the reference library's dispatch tables exactly once.
 pub fn ref_init() {
     use std::sync::Once;

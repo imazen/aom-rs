@@ -66,6 +66,17 @@
       "items": {
         "aom_quantize_b": {"status": "green", "test": "quantize_b_diff::quantize_b_differential_fuzz"}
       }
+    },
+    "entropy.od_ec": {
+      "status": "green",
+      "note": "Daala range coder core (both tracks). Encoder byte-identical, decoder symbol-identical + roundtrip. TODO: od_ec_enc_bits (raw bits), aom_writer/reader CDF adaptation layer.",
+      "items": {
+        "od_ec_encode_bool_q15": {"status": "green", "test": "entropy_diff::entropy_encode_byte_identical"},
+        "od_ec_encode_cdf_q15":  {"status": "green", "test": "entropy_diff::entropy_encode_byte_identical"},
+        "od_ec_enc_done":        {"status": "green", "test": "entropy_diff::entropy_encode_byte_identical"},
+        "od_ec_decode_bool_q15": {"status": "green", "test": "entropy_diff::entropy_decode_matches_and_roundtrips"},
+        "od_ec_decode_cdf_q15":  {"status": "green", "test": "entropy_diff::entropy_decode_matches_and_roundtrips"}
+      }
     }
   }
 }

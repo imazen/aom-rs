@@ -43,6 +43,16 @@ both tracks, fully bit-exact.**
   (qcoeff + dqcoeff + eob) + edge cases, byte-identical to C.
   (Quant-matrix path + adaptive/highbd variants: TODO.)
 
+- **Entropy coder** (`aom_dsp/entenc.c`, `entdec.c`), both tracks: the Daala
+  `od_ec` range coder. Encoder (`od_ec_enc`) produces byte-identical output to C
+  (uint64 low + backward carry propagation + flush); decoder (`od_ec_dec`,
+  uint32 dif window + refill) recovers identical symbols. Harness:
+  `aom-entropy/tests/entropy_diff.rs` — ~40k random op sequences, encode
+  byte-exact + decode symbol-exact + pure-Rust round trip. Oracle via a C shim
+  (`aom-sys-ref/shim/entropy_shim.c`) exposing opaque handles. TODO:
+  `od_ec_enc_bits` (raw literals) + the `aom_writer`/`aom_reader` CDF-adaptation
+  layer on top.
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.
