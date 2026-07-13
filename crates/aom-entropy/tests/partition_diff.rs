@@ -4035,3 +4035,78 @@ fn read_modes_tile_roundtrips_write() {
         assert_eq!(arena_e, arena_d, "adapted arena");
     }
 }
+
+#[test]
+fn read_intra_pred_mode_pieces_roundtrip() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        is_directional_mode, read_intra_uv_and_angle_delta, read_intra_y_and_angle_delta,
+        use_angle_delta, write_intra_y_and_angle_delta, write_intra_uv_and_angle_delta,
+    };
+    let mut rng = Rng(0x1e_147a_c0de_00d0u64);
+    // block sizes >= 8x8 (use_angle_delta true) + some 4x4 (false).
+    let bsizes = [0usize, 3, 6, 9, 12, 15];
+    for _ in 0..200_000 {
+        let bsize = bsizes[(rng.next() % bsizes.len() as u64) as usize];
+        // --- Y mode + angle ---
+        {
+            let mode = (rng.next() % 13) as i32;
+            let ang_coded = use_angle_delta(bsize) && is_directional_mode(mode);
+            let angle = if ang_coded { (rng.next() % 7) as i32 - 3 } else { 0 };
+            let mut yc = [0u16; 14];
+            let mut yac = [0u16; 8];
+            mk_ns_cdf(&mut rng, 13, &mut yc);
+            mk_ns_cdf(&mut rng, 7, &mut yac);
+            let mut enc = OdEcEnc::new();
+            let (mut yce, mut yace) = (yc, yac);
+            write_intra_y_and_angle_delta(&mut enc, &mut yce, mode, bsize, angle, &mut yace);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut ycd, mut yacd) = (yc, yac);
+            let (gm, ga) = read_intra_y_and_angle_delta(&mut dec, &mut ycd, bsize, &mut yacd);
+            assert_eq!(gm, mode, "y mode");
+            if ang_coded {
+                assert_eq!(ga, angle, "y angle");
+            }
+            assert_eq!((yce, yace), (ycd, yacd), "y cdf");
+        }
+        // --- UV mode + cfl + angle ---
+        {
+            let mono = rng.next() & 1 == 1;
+            let chroma_ref = rng.next() & 1 == 1;
+            let cfl_allowed = rng.next() & 1 == 1;
+            let uv_n = if cfl_allowed { 14 } else { 13 };
+            let uv_mode = (rng.next() % uv_n as u64) as i32;
+            let js = if uv_mode == 13 { (rng.next() % 8) as i32 } else { 0 };
+            let (su, sv) = ((js + 1) / 3, (js + 1) % 3);
+            let u = if uv_mode == 13 && su != 0 { (rng.next() % 16) as i32 } else { 0 };
+            let v = if uv_mode == 13 && sv != 0 { (rng.next() % 16) as i32 } else { 0 };
+            let idx = (u << 4) | v;
+            let intra_mode = aom_entropy::partition::get_uv_mode(uv_mode as usize);
+            let uv_ang_coded = !mono && chroma_ref && use_angle_delta(bsize) && is_directional_mode(intra_mode);
+            let angle_uv = if uv_ang_coded { (rng.next() % 7) as i32 - 3 } else { 0 };
+            let mut uc = [0u16; 15];
+            let mut sc = [0u16; 9];
+            let mut ac = [[0u16; 17]; 6];
+            let mut uac = [0u16; 8];
+            mk_ns_cdf(&mut rng, uv_n, &mut uc);
+            mk_ns_cdf(&mut rng, 8, &mut sc);
+            for c in ac.iter_mut() { mk_ns_cdf(&mut rng, 16, c); }
+            mk_ns_cdf(&mut rng, 7, &mut uac);
+            let mut enc = OdEcEnc::new();
+            let (mut uce, mut sce, mut ace, mut uace) = (uc, sc, ac, uac);
+            write_intra_uv_and_angle_delta(&mut enc, mono, chroma_ref, uv_mode, cfl_allowed, bsize, idx, js, angle_uv, &mut uce, &mut sce, &mut ace, &mut uace);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut ucd, mut scd, mut acd, mut uacd) = (uc, sc, ac, uac);
+            let (guv, gidx, gjs, gang) = read_intra_uv_and_angle_delta(&mut dec, mono, chroma_ref, cfl_allowed, bsize, &mut ucd, &mut scd, &mut acd, &mut uacd);
+            if !mono && chroma_ref {
+                assert_eq!(guv, uv_mode, "uv mode");
+                if uv_mode == 13 { assert_eq!((gidx, gjs), (idx, js), "cfl"); }
+                if uv_ang_coded { assert_eq!(gang, angle_uv, "uv angle"); }
+            }
+            assert_eq!((uce, sce, ace, uace), (ucd, scd, acd, uacd), "uv cdf");
+        }
+    }
+}

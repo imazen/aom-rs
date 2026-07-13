@@ -3702,3 +3702,56 @@ pub fn read_modes_tile(
     }
     out
 }
+
+/// `read_intra_y_and_angle_delta` — inverse of [`write_intra_y_and_angle_delta`]: the
+/// nonkf luma intra mode, then the luma angle delta when the block uses angle deltas and
+/// the mode is directional. Returns `(mode, angle_delta_y)`.
+pub fn read_intra_y_and_angle_delta(
+    dec: &mut OdEcDec,
+    y_cdf: &mut [u16],
+    bsize: usize,
+    y_angle_cdf: &mut [u16],
+) -> (i32, i32) {
+    let mode = read_intra_y_mode(dec, y_cdf);
+    let angle_delta_y = if use_angle_delta(bsize) && is_directional_mode(mode) {
+        read_angle_delta(dec, y_angle_cdf)
+    } else {
+        0
+    };
+    (mode, angle_delta_y)
+}
+
+/// `read_intra_uv_and_angle_delta` — inverse of [`write_intra_uv_and_angle_delta`]: for a
+/// chroma-reference non-monochrome block, the UV intra mode, then the CfL alphas (when
+/// UV_CFL_PRED) and the UV angle delta (when the mapped UV mode is directional). Returns
+/// `(uv_mode, cfl_alpha_idx, cfl_joint_sign, angle_delta_uv)`.
+#[allow(clippy::too_many_arguments)]
+pub fn read_intra_uv_and_angle_delta(
+    dec: &mut OdEcDec,
+    monochrome: bool,
+    is_chroma_ref: bool,
+    cfl_allowed: bool,
+    bsize: usize,
+    uv_mode_cdf: &mut [u16],
+    cfl_sign_cdf: &mut [u16],
+    cfl_alpha_cdf: &mut [[u16; 17]; 6],
+    uv_angle_cdf: &mut [u16],
+) -> (i32, i32, i32, i32) {
+    if !monochrome && is_chroma_ref {
+        let uv_mode = read_intra_uv_mode(dec, uv_mode_cdf, cfl_allowed);
+        let (cfl_joint_sign, cfl_alpha_idx) = if uv_mode == UV_CFL_PRED {
+            read_cfl_alphas(dec, cfl_sign_cdf, cfl_alpha_cdf)
+        } else {
+            (0, 0)
+        };
+        let intra_mode = get_uv_mode(uv_mode as usize);
+        let angle_delta_uv = if use_angle_delta(bsize) && is_directional_mode(intra_mode) {
+            read_angle_delta(dec, uv_angle_cdf)
+        } else {
+            0
+        };
+        (uv_mode, cfl_alpha_idx, cfl_joint_sign, angle_delta_uv)
+    } else {
+        (0, 0, 0, 0)
+    }
+}
