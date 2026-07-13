@@ -2720,3 +2720,26 @@ fn write_inter_mode_tail_matches_c() {
         assert_eq!(all.as_slice(), &o_all[..], "adapted CDFs");
     }
 }
+
+#[test]
+fn collect_neighbors_ref_counts_matches_c() {
+    use aom_entropy::partition::collect_neighbors_ref_counts;
+    // A neighbour is: absent, intra (rf0=0,intrabc=0), intrabc (intrabc=1,rf0=0),
+    // single-ref (rf0 1..7, rf1=-1), or compound (rf0 1..7, rf1 1..7).
+    // Enumerate representative neighbour states.
+    let states: [(bool, bool, i32, i32); 6] = [
+        (false, false, 0, -1),  // absent
+        (true, false, 0, -1),   // intra (not inter)
+        (true, true, 0, -1),    // intrabc
+        (true, false, 3, -1),   // single-ref LAST3
+        (true, false, 1, 7),    // compound LAST + ALTREF
+        (true, false, 4, 5),    // compound GOLDEN + BWDREF
+    ];
+    for &(ha, aib, arf0, arf1) in &states {
+        for &(hl, lib, lrf0, lrf1) in &states {
+            let got = collect_neighbors_ref_counts(ha, aib, arf0, arf1, hl, lib, lrf0, lrf1);
+            let want = c::ref_collect_neighbors_ref_counts(ha, aib, arf0, arf1, hl, lib, lrf0, lrf1);
+            assert_eq!(got, want, "a=({ha},{aib},{arf0},{arf1}) l=({hl},{lib},{lrf0},{lrf1})");
+        }
+    }
+}

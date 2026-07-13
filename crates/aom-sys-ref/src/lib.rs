@@ -293,6 +293,8 @@ extern "C" {
     fn shim_have_nearmv_in_inter_mode(mode: i32) -> i32;
     fn shim_mode_context_analyzer(rf0: i32, rf1: i32, mc_val: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_collect_neighbors_ref_counts(ha: i32, a_intrabc: i32, a_rf0: i32, a_rf1: i32, hl: i32, l_intrabc: i32, l_rf0: i32, l_rf1: i32, out_counts: *mut u8);
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_block_mvs(mode: i32, is_compound: i32, diff_row0: i32, diff_col0: i32, diff_row1: i32, diff_col1: i32, usehp: i32, joints: *mut u16, comp0: *mut u16, comp1: *mut u16, out: *mut u8, o_joints: *mut u16, o_c0: *mut u16, o_c1: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_mode_drl(seg_skip: i32, mode: i32, mode_ctx: i32, inter_compound_mode_cdf: *mut u16, newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, drl_cdf: *mut u16, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, o_icm: *mut u16, o_newmv: *mut u16, o_zeromv: *mut u16, o_refmv: *mut u16, o_drl: *mut u16) -> u32;
@@ -604,6 +606,21 @@ pub fn ref_is_inter_singleref_mode(mode: i32) -> bool { unsafe { shim_is_inter_s
 pub fn ref_have_nearmv_in_inter_mode(mode: i32) -> bool { unsafe { shim_have_nearmv_in_inter_mode(mode) != 0 } }
 pub fn ref_mode_context_analyzer(rf0: i32, rf1: i32, mc_val: i32) -> i32 {
     unsafe { shim_mode_context_analyzer(rf0, rf1, mc_val) }
+}
+
+/// Reference `av1_collect_neighbors_ref_counts` (facade): the 8-entry ref-frame tally
+/// from the above/left inter neighbours.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_collect_neighbors_ref_counts(
+    ha: bool, a_intrabc: bool, a_rf0: i32, a_rf1: i32,
+    hl: bool, l_intrabc: bool, l_rf0: i32, l_rf1: i32,
+) -> [u8; 8] {
+    let mut counts = [0u8; 8];
+    unsafe {
+        shim_collect_neighbors_ref_counts(ha as i32, a_intrabc as i32, a_rf0, a_rf1, hl as i32,
+            l_intrabc as i32, l_rf0, l_rf1, counts.as_mut_ptr())
+    };
+    counts
 }
 
 /// Reference inter-block MV coding (the mode-dependent av1_encode_mv calls, over pristine

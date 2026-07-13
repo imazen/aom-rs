@@ -2002,3 +2002,23 @@ uint32_t shim_write_inter_mode_tail(
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- av1_collect_neighbors_ref_counts (mvref_common.h) --- */
+/* Facade: tally the above/left inter neighbours' ref frames into neighbors_ref_counts[8]. */
+void shim_collect_neighbors_ref_counts(int ha, int a_intrabc, int a_rf0, int a_rf1,
+    int hl, int l_intrabc, int l_rf0, int l_rf1, unsigned char *out_counts) {
+  MB_MODE_INFO ami, lmi;
+  MACROBLOCKD xd;
+  ami.use_intrabc = (uint8_t)a_intrabc;
+  ami.ref_frame[0] = (MV_REFERENCE_FRAME)a_rf0;
+  ami.ref_frame[1] = (MV_REFERENCE_FRAME)a_rf1;
+  lmi.use_intrabc = (uint8_t)l_intrabc;
+  lmi.ref_frame[0] = (MV_REFERENCE_FRAME)l_rf0;
+  lmi.ref_frame[1] = (MV_REFERENCE_FRAME)l_rf1;
+  xd.above_mbmi = &ami;
+  xd.left_mbmi = &lmi;
+  xd.up_available = ha;
+  xd.left_available = hl;
+  av1_collect_neighbors_ref_counts(&xd);
+  for (int i = 0; i < REF_FRAMES; i++) out_counts[i] = xd.neighbors_ref_counts[i];
+}

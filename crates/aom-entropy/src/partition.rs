@@ -2464,3 +2464,35 @@ pub fn write_inter_mode_tail(
     }
     write_mb_interp_filter(enc, interp_cdf0, interp_cdf1, interp_needed, is_switchable, enable_dual, f0, f1);
 }
+
+/// `av1_collect_neighbors_ref_counts` (`mvref_common.h`): tally the above and left
+/// inter neighbours' reference frames into an 8-entry count array (used by the
+/// reference-frame prediction contexts). A neighbour contributes when it is present and
+/// an inter block (`use_intrabc` or `ref_frame[0] > INTRA_FRAME`): its `ref_frame[0]`,
+/// and `ref_frame[1]` when it has a second reference (`ref_frame[1] > INTRA_FRAME`).
+#[allow(clippy::too_many_arguments)]
+pub fn collect_neighbors_ref_counts(
+    has_above: bool,
+    a_use_intrabc: bool,
+    a_ref_frame0: i32,
+    a_ref_frame1: i32,
+    has_left: bool,
+    l_use_intrabc: bool,
+    l_ref_frame0: i32,
+    l_ref_frame1: i32,
+) -> [u8; 8] {
+    let mut counts = [0u8; 8];
+    if has_above && (a_use_intrabc || a_ref_frame0 > 0) {
+        counts[a_ref_frame0 as usize] += 1;
+        if a_ref_frame1 > 0 {
+            counts[a_ref_frame1 as usize] += 1;
+        }
+    }
+    if has_left && (l_use_intrabc || l_ref_frame0 > 0) {
+        counts[l_ref_frame0 as usize] += 1;
+        if l_ref_frame1 > 0 {
+            counts[l_ref_frame1 as usize] += 1;
+        }
+    }
+    counts
+}
