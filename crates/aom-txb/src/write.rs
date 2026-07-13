@@ -16,7 +16,7 @@ use aom_entropy::cdf::write_symbol;
 use aom_entropy::enc::OdEcEnc;
 
 // Header-static index tables (common_data.h / entropy.h).
-const TXSIZE_LOG2_MINUS4: [i32; 19] = [0, 2, 4, 6, 6, 1, 1, 3, 3, 5, 5, 6, 6, 2, 2, 4, 4, 5, 5];
+pub(crate) const TXSIZE_LOG2_MINUS4: [i32; 19] = [0, 2, 4, 6, 6, 1, 1, 3, 3, 5, 5, 6, 6, 2, 2, 4, 4, 5, 5];
 const TXS_SQR: [usize; 19] = [0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2];
 const TXS_SQR_UP: [usize; 19] = [0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4];
 
@@ -27,7 +27,7 @@ pub fn txsize_entropy_ctx(tx_size: usize) -> usize {
 }
 
 // --- CDF arena: one flat u16 buffer; offsets/strides match the shim exactly ---
-const A_TXB_SKIP: usize = 0; // [5][13] n2  s3
+pub(crate) const A_TXB_SKIP: usize = 0; // [5][13] n2  s3
 const A_EOB16: usize = 195; // [2][2] n5  s6
 const A_EOB32: usize = 219; // [2][2] n6  s7
 const A_EOB64: usize = 247; // [2][2] n7  s8
@@ -35,15 +35,15 @@ const A_EOB128: usize = 279; // [2][2] n8  s9
 const A_EOB256: usize = 315; // [2][2] n9  s10
 const A_EOB512: usize = 355; // [2][2] n10 s11
 const A_EOB1024: usize = 399; // [2][2] n11 s12
-const A_EOB_EXTRA: usize = 447; // [5][2][9] n2 s3
-const A_BASE_EOB: usize = 717; // [5][2][4] n3 s4
-const A_BASE: usize = 877; // [5][2][42] n4 s5
-const A_BR: usize = 2977; // [5][2][21] n4 s5
-const A_DC_SIGN: usize = 4027; // [2][3] n2 s3
+pub(crate) const A_EOB_EXTRA: usize = 447; // [5][2][9] n2 s3
+pub(crate) const A_BASE_EOB: usize = 717; // [5][2][4] n3 s4
+pub(crate) const A_BASE: usize = 877; // [5][2][42] n4 s5
+pub(crate) const A_BR: usize = 2977; // [5][2][21] n4 s5
+pub(crate) const A_DC_SIGN: usize = 4027; // [2][3] n2 s3
 /// Total u16 length of the coefficient-coding CDF arena.
 pub const CDF_ARENA_LEN: usize = 4045;
 
-const EOB_OFF: [usize; 7] = [A_EOB16, A_EOB32, A_EOB64, A_EOB128, A_EOB256, A_EOB512, A_EOB1024];
+pub(crate) const EOB_OFF: [usize; 7] = [A_EOB16, A_EOB32, A_EOB64, A_EOB128, A_EOB256, A_EOB512, A_EOB1024];
 
 /// Pack one transform block. Appends symbols to `enc`; mutates the adaptive
 /// CDFs in `cdfs` in place when `allow_update_cdf`.
