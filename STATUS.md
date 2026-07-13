@@ -145,6 +145,11 @@ both tracks, fully bit-exact.**
   EXHAUSTIVE over the full (tx_size x is_inter x reduced x tx_type x
   filter-intra) space; composed write byte-identical.
 
+- **trellis per-coefficient cost helpers (aom-txb)** — the per-candidate-level
+  building blocks of av1_optimize_txb: get_br_cost_with_diff (golomb tables +
+  level-1-vs-level `diff`), get_two_coeff_cost_simple (cost + cost_low),
+  get_coeff_cost_eob/general. Integer-identical to C (`trellis_cost_diff.rs`).
+
 ## Coverage gate (auto-derived, honest)
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec

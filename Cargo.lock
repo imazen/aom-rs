@@ -64,6 +64,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aom-txb"
+version = "0.0.1"
+dependencies = [
+ "aom-entropy",
+ "aom-sys-ref",
+]
+
+[[package]]
 name = "archmage"
 version = "0.9.27"
 dependencies = [
