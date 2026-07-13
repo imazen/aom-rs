@@ -391,3 +391,21 @@ void shim_fill_lv_map(const uint16_t *txb_skip_cdf, const uint16_t *base_eob_cdf
       lps[i + COEFF_BASE_RANGE + 1] = lps[i] - lps[i - 1];
   }
 }
+
+/* ---- ext-tx derivation for av1_write_tx_type (real functions/tables) ------- */
+#include "av1/common/blockd.h"
+#include "av1/common/entropymode.h"
+
+/* out[0]=set_type out[1]=num out[2]=eset out[3]=square_tx_size
+ * out[4]=symb(av1_ext_tx_ind) out[5]=used(av1_ext_tx_used) out[6]=intra_dir */
+void shim_ext_tx_derive(int tx_size, int is_inter, int reduced, int tx_type,
+                        int use_fi, int fi_mode, int mode, int *out) {
+  const TxSetType st = av1_get_ext_tx_set_type(tx_size, is_inter, reduced);
+  out[0] = (int)st;
+  out[1] = av1_num_ext_tx_set[st];
+  out[2] = get_ext_tx_set(tx_size, is_inter, reduced);
+  out[3] = txsize_sqr_map[tx_size];
+  out[4] = av1_ext_tx_ind[st][tx_type];
+  out[5] = av1_ext_tx_used[st][tx_type];
+  out[6] = use_fi ? fimode_to_intradir[fi_mode] : mode;
+}

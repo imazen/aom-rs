@@ -761,6 +761,8 @@ extern "C" {
     fn shim_iscan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_cost_tokens_from_cdf(costs: *mut i32, cdf: *const u16, inv_map: *const i32);
     #[allow(clippy::too_many_arguments)]
+    fn shim_ext_tx_derive(tx_size: i32, is_inter: i32, reduced: i32, tx_type: i32, use_fi: i32, fi_mode: i32, mode: i32, out: *mut i32);
+    #[allow(clippy::too_many_arguments)]
     fn shim_fill_lv_map(txb_skip_cdf: *const u16, base_eob_cdf: *const u16, base_cdf: *const u16, eob_extra_cdf: *const u16, dc_sign_cdf: *const u16, br_cdf: *const u16, o_txb_skip: *mut i32, o_base_eob: *mut i32, o_base: *mut i32, o_eob_extra: *mut i32, o_dc_sign: *mut i32, o_lps: *mut i32);
     #[allow(clippy::too_many_arguments)]
     fn shim_cost_coeffs_txb(qcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32) -> i32;
@@ -849,4 +851,13 @@ pub fn ref_fill_lv_map(txb_skip_cdf: &[u16], base_eob_cdf: &[u16], base_cdf: &[u
         shim_fill_lv_map(txb_skip_cdf.as_ptr(), base_eob_cdf.as_ptr(), base_cdf.as_ptr(), eob_extra_cdf.as_ptr(), dc_sign_cdf.as_ptr(), br_cdf.as_ptr(), txb_skip.as_mut_ptr(), base_eob.as_mut_ptr(), base.as_mut_ptr(), eob_extra.as_mut_ptr(), dc_sign.as_mut_ptr(), lps.as_mut_ptr());
     }
     (txb_skip, base_eob, base, eob_extra, dc_sign, lps)
+}
+
+/// Reference ext-tx derivation for `av1_write_tx_type`. Returns
+/// (set_type, num, eset, square_tx_size, symb, used, intra_dir).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_ext_tx_derive(tx_size: usize, is_inter: bool, reduced: bool, tx_type: usize, use_fi: bool, fi_mode: usize, mode: usize) -> [i32; 7] {
+    let mut out = [0i32; 7];
+    unsafe { shim_ext_tx_derive(tx_size as i32, is_inter as i32, reduced as i32, tx_type as i32, use_fi as i32, fi_mode as i32, mode as i32, out.as_mut_ptr()) }
+    out
 }

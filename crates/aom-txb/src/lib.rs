@@ -26,6 +26,8 @@ mod prob_cost;
 pub use prob_cost::{cost_symbol, cost_tokens_from_cdf};
 mod fill;
 pub use fill::{fill_lv_map_coeff_cost, LvMapCoeffCost};
+mod ext_tx;
+pub use ext_tx::{ext_tx_derive, ext_tx_set, ext_tx_set_type, write_tx_type, ExtTxDeriv};
 
 /// `TX_PAD_HOR` (enums.h): horizontal padding of the levels buffer.
 pub const TX_PAD_HOR: usize = 4;
