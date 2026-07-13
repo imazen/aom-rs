@@ -2168,3 +2168,61 @@ pub fn write_kf_tail(
         use_filter_intra, filter_intra_mode, fi_use_cdf, fi_mode_cdf,
     );
 }
+
+/// `av1_get_pred_context_seg_id` (`pred_common.h`): the segment-id-predicted CDF context
+/// — the sum of the above and left neighbours' `seg_id_predicted` flags (0 when absent).
+pub fn get_pred_context_seg_id(has_above: bool, above_sip: i32, has_left: bool, left_sip: i32) -> i32 {
+    let a = if has_above { above_sip } else { 0 };
+    let l = if has_left { left_sip } else { 0 };
+    a + l
+}
+
+/// `write_inter_segment_id` (`av1/encoder/bitstream.c:920`): the inter-frame per-block
+/// segment id. `preskip` selects the before-skip call (coded only when `segid_preskip`)
+/// vs the after-skip call (coded only when `!segid_preskip`; a skipped block codes
+/// nothing). When coded and `temporal_update` is on, a `seg_id_predicted` flag is coded
+/// on the (caller-selected) prediction CDF, and the spatial segment id follows only when
+/// the flag is 0; otherwise the spatial id is coded directly (via [`write_segment_id`]).
+#[allow(clippy::too_many_arguments)]
+pub fn write_inter_segment_id(
+    enc: &mut OdEcEnc,
+    update_map: bool,
+    preskip: bool,
+    segid_preskip: bool,
+    skip: bool,
+    temporal_update: bool,
+    seg_id_predicted: i32,
+    pred_cdf: &mut [u16],
+    seg_cdf: &mut [u16],
+    seg_enabled: bool,
+    segment_id: i32,
+    seg_pred: i32,
+    last_active_segid: i32,
+) {
+    if !update_map {
+        return;
+    }
+    let mut do_seg_block = false;
+    if preskip {
+        if segid_preskip {
+            do_seg_block = true;
+        }
+    } else if !segid_preskip {
+        if skip {
+            // write_segment_id(skip_txfm=true): sets the seg id, codes nothing.
+            write_segment_id(enc, seg_cdf, seg_enabled, update_map, true, segment_id, seg_pred, last_active_segid);
+        } else {
+            do_seg_block = true;
+        }
+    }
+    if do_seg_block {
+        if temporal_update {
+            write_symbol(enc, seg_id_predicted, pred_cdf, 2);
+            if seg_id_predicted == 0 {
+                write_segment_id(enc, seg_cdf, seg_enabled, update_map, false, segment_id, seg_pred, last_active_segid);
+            }
+        } else {
+            write_segment_id(enc, seg_cdf, seg_enabled, update_map, false, segment_id, seg_pred, last_active_segid);
+        }
+    }
+}

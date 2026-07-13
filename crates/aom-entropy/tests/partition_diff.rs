@@ -2324,3 +2324,53 @@ fn write_kf_tail_matches_c() {
         assert_eq!(all.as_slice(), &o_all[..], "intra CDFs");
     }
 }
+
+#[test]
+fn write_inter_segment_id_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{get_pred_context_seg_id, write_inter_segment_id};
+    // context (exhaustive)
+    for ha in [false, true] {
+        for a in 0..2 {
+            for hl in [false, true] {
+                for l in 0..2 {
+                    assert_eq!(get_pred_context_seg_id(ha, a, hl, l), c::ref_get_pred_context_seg_id(ha, a, hl, l), "seg_id_pred_ctx");
+                }
+            }
+        }
+    }
+    let mut rng = Rng(0x1e5_e610_c0de_0012);
+    fn mk(rng: &mut Rng, nsyms: usize) -> Vec<u16> {
+        let mut c = vec![0u16; nsyms + 1];
+        let mut prev = 32768i32;
+        for e in c.iter_mut().take(nsyms - 1) {
+            let v = (prev - 1 - (rng.next() % 400) as i32).max(1);
+            *e = v as u16;
+            prev = v;
+        }
+        c
+    }
+    for _ in 0..300_000 {
+        let update_map = !rng.next().is_multiple_of(4);
+        let preskip = rng.next().is_multiple_of(2);
+        let segid_preskip = rng.next().is_multiple_of(2);
+        let skip = rng.next().is_multiple_of(2);
+        let temporal_update = rng.next().is_multiple_of(2);
+        let seg_id_predicted = (rng.next() % 2) as i32;
+        let seg_enabled = update_map; // enabled whenever the map updates (realistic)
+        let last_active_segid = (rng.next() % 8) as i32;
+        let segment_id = (rng.next() % (last_active_segid as u64 + 1)) as i32;
+        let seg_pred = (rng.next() % (last_active_segid as u64 + 1)) as i32;
+        let pred_cdf: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let seg_cdf: [u16; 9] = mk(&mut rng, 8).try_into().unwrap();
+
+        let mut enc = OdEcEnc::new();
+        let (mut rpc, mut rsc) = (pred_cdf, seg_cdf);
+        write_inter_segment_id(&mut enc, update_map, preskip, segid_preskip, skip, temporal_update, seg_id_predicted, &mut rpc, &mut rsc, seg_enabled, segment_id, seg_pred, last_active_segid);
+        let got = enc.done().to_vec();
+        let (want, opc, osc) = c::ref_write_inter_segment_id(update_map, preskip, segid_preskip, skip, temporal_update, seg_id_predicted, &pred_cdf, &seg_cdf, seg_enabled, segment_id, seg_pred, last_active_segid);
+        assert_eq!(got, want, "bytes um={update_map} pre={preskip} sps={segid_preskip} skip={skip} tu={temporal_update} sip={seg_id_predicted}");
+        assert_eq!(rpc, opc, "pred_cdf");
+        assert_eq!(rsc, osc, "seg_cdf");
+    }
+}

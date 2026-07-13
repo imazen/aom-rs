@@ -1718,3 +1718,57 @@ uint32_t shim_kf_tail(
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- write_inter_segment_id (av1/encoder/bitstream.c:920) — inter-driver seg id --- */
+/* av1_get_pred_context_seg_id facade: above+left neighbours' seg_id_predicted. */
+int shim_get_pred_context_seg_id(int ha, int a_sip, int hl, int l_sip) {
+  MB_MODE_INFO ami, lmi;
+  MACROBLOCKD xd;
+  ami.seg_id_predicted = (uint8_t)a_sip;
+  lmi.seg_id_predicted = (uint8_t)l_sip;
+  xd.above_mbmi = ha ? &ami : (MB_MODE_INFO *)0;
+  xd.left_mbmi = hl ? &lmi : (MB_MODE_INFO *)0;
+  return av1_get_pred_context_seg_id(&xd);
+}
+
+/* write_inter_segment_id transcribed over od_ec. pred_cdf is the seg-id-predicted CDF
+ * (segp->pred_cdf[ctx], caller-selected); seg_cdf is the spatial_pred_seg_cdf[cdf_num]
+ * for the actual seg id (via seg_body). Only the CODED output is reproduced (the
+ * set_spatial_segment_id side effects have no byte effect). */
+uint32_t shim_write_inter_segment_id(int update_map, int preskip, int segid_preskip, int skip,
+    int temporal_update, int seg_id_predicted, uint16_t *pred_cdf, uint16_t *seg_cdf,
+    int seg_enabled, int segment_id, int seg_pred, int last_active_segid, uint8_t *out,
+    uint16_t *o_predcdf, uint16_t *o_segcdf) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (update_map) {
+    int do_seg_block = 0;
+    if (preskip) {
+      if (segid_preskip) do_seg_block = 1;
+    } else {
+      if (!segid_preskip) {
+        if (skip) {
+          /* write_segment_id(skip_txfm=1): sets seg id, codes nothing. */
+          seg_body(&ec, seg_cdf, seg_enabled, update_map, 1, segment_id, seg_pred, last_active_segid);
+        } else {
+          do_seg_block = 1;
+        }
+      }
+    }
+    if (do_seg_block) {
+      if (temporal_update) {
+        od_ec_encode_cdf_q15(&ec, seg_id_predicted, pred_cdf, 2);
+        update_cdf(pred_cdf, seg_id_predicted, 2);
+        if (!seg_id_predicted)
+          seg_body(&ec, seg_cdf, seg_enabled, update_map, 0, segment_id, seg_pred, last_active_segid);
+      } else {
+        seg_body(&ec, seg_cdf, seg_enabled, update_map, 0, segment_id, seg_pred, last_active_segid);
+      }
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 3; i++) o_predcdf[i] = pred_cdf[i];
+  for (int i = 0; i < 9; i++) o_segcdf[i] = seg_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

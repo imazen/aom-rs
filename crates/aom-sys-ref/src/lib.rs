@@ -287,6 +287,9 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_write_compound_type_info(masked_used: i32, comp_group_idx: i32, cgi_cdf: *mut u16, dist_wtd: i32, compound_idx: i32, cidx_cdf: *mut u16, wedge_used: i32, comp_type: i32, ctype_cdf: *mut u16, wedge_index: i32, wedge_idx_cdf: *mut u16, wedge_sign: i32, mask_type: i32, out: *mut u8, o_cgi: *mut u16, o_cidx: *mut u16, o_ctype: *mut u16, o_wix: *mut u16) -> u32;
     fn shim_get_relative_dist(enable: i32, bits_minus_1: i32, a: i32, b: i32) -> i32;
+    fn shim_get_pred_context_seg_id(ha: i32, a_sip: i32, hl: i32, l_sip: i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_inter_segment_id(update_map: i32, preskip: i32, segid_preskip: i32, skip: i32, temporal_update: i32, seg_id_predicted: i32, pred_cdf: *mut u16, seg_cdf: *mut u16, seg_enabled: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, out: *mut u8, o_predcdf: *mut u16, o_segcdf: *mut u16) -> u32;
     fn shim_use_angle_delta(bsize: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_delta_q_params_sb(dq_present: i32, dlf_present: i32, dlf_multi: i32, num_planes: i32, bsize: i32, sb_size: i32, skip: i32, sbul: i32, cur_qindex: i32, cur_base_qindex: i32, dq_res: i32, mbmi_dlf: *const i32, xd_dlf_in: *const i32, mbmi_dlf_base: i32, xd_dlf_base_in: i32, dlf_res: i32, dq_cdf: *mut u16, dlf_multi_cdf: *mut u16, dlf_cdf: *mut u16, out: *mut u8, o_dqcdf: *mut u16, o_dlfmcdf: *mut u16, o_dlfcdf: *mut u16, o_base: *mut i32, o_xd_dlf: *mut i32, o_xd_dlf_base: *mut i32) -> u32;
@@ -575,6 +578,32 @@ pub fn ref_get_comp_group_idx_context(
 /// Reference `get_relative_dist` (static inline, mvref_common.h).
 pub fn ref_get_relative_dist(enable: bool, bits_minus_1: i32, a: i32, b: i32) -> i32 {
     unsafe { shim_get_relative_dist(enable as i32, bits_minus_1, a, b) }
+}
+
+/// Reference `av1_get_pred_context_seg_id` (facade): above+left seg_id_predicted -> {0,1,2}.
+pub fn ref_get_pred_context_seg_id(ha: bool, a_sip: i32, hl: bool, l_sip: i32) -> i32 {
+    unsafe { shim_get_pred_context_seg_id(ha as i32, a_sip, hl as i32, l_sip) }
+}
+
+/// Reference `write_inter_segment_id` (bitstream.c:920, over pristine C od_ec). Returns
+/// (bytes, pred_cdf[3], seg_cdf[9]).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_inter_segment_id(
+    update_map: bool, preskip: bool, segid_preskip: bool, skip: bool, temporal_update: bool,
+    seg_id_predicted: i32, pred_cdf: &[u16; 3], seg_cdf: &[u16; 9], seg_enabled: bool,
+    segment_id: i32, seg_pred: i32, last_active_segid: i32,
+) -> (Vec<u8>, [u16; 3], [u16; 9]) {
+    let (mut pc, mut sc) = (*pred_cdf, *seg_cdf);
+    let mut out = vec![0u8; 16];
+    let (mut opc, mut osc) = ([0u16; 3], [0u16; 9]);
+    let n = unsafe {
+        shim_write_inter_segment_id(update_map as i32, preskip as i32, segid_preskip as i32,
+            skip as i32, temporal_update as i32, seg_id_predicted, pc.as_mut_ptr(), sc.as_mut_ptr(),
+            seg_enabled as i32, segment_id, seg_pred, last_active_segid, out.as_mut_ptr(),
+            opc.as_mut_ptr(), osc.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    (out, opc, osc)
 }
 
 /// Reference per-superblock `write_delta_q_params` (bitstream.c:960, the mode-info
