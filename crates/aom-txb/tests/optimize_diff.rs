@@ -43,6 +43,7 @@ fn gen_block(
     let mut dqcoeff = vec![0i32; area];
     let mut tcoeff = vec![0i32; area];
     let eob = rng.range(1, area as u32 + 1) as usize;
+    #[allow(clippy::needless_range_loop)]
     for i in 0..eob {
         let pos = sc[i] as usize;
         let nz = i == eob - 1 || rng.range(0, 10) >= 4;
