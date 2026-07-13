@@ -467,3 +467,24 @@ uint32_t shim_write_is_inter(uint16_t *cdf, int seg_ref, int seg_gmv, int is_int
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+uint32_t shim_write_motion_mode(uint16_t *obmc_cdf, uint16_t *mm_cdf, int last_allowed,
+                                int mm, uint8_t *out, uint16_t *out_obmc, uint16_t *out_mm) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  switch (last_allowed) {
+    case 0: break; /* SIMPLE_TRANSLATION */
+    case 1: /* OBMC_CAUSAL */
+      od_ec_encode_cdf_q15(&ec, mm == 1, obmc_cdf, 2);
+      update_cdf(obmc_cdf, mm == 1, 2);
+      break;
+    default:
+      od_ec_encode_cdf_q15(&ec, mm, mm_cdf, MOTION_MODES);
+      update_cdf(mm_cdf, mm, MOTION_MODES);
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 3; i++) out_obmc[i] = obmc_cdf[i];
+  for (int i = 0; i < 4; i++) out_mm[i] = mm_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

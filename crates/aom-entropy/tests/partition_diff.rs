@@ -795,3 +795,44 @@ fn write_inter_compound_mode_and_is_inter_match_c() {
         assert_eq!(mi, oi, "is_inter cdf");
     }
 }
+
+#[test]
+fn write_motion_mode_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_motion_mode;
+    let mut rng = Rng(0x3070_c0de_a11a_0009);
+    let mk = |rng: &mut Rng, ns: usize, out: &mut [u16]| {
+        let mut vals = [0i32; 3];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            out[i] = v as u16;
+            prev = v;
+        }
+        out[ns - 1] = 0;
+        out[ns] = 0;
+    };
+    for _ in 0..200_000 {
+        let mut obmc = [0u16; 3];
+        mk(&mut rng, 2, &mut obmc);
+        let mut mm_cdf = [0u16; 4];
+        mk(&mut rng, 3, &mut mm_cdf);
+        let last_allowed = (rng.next() % 3) as i32; // 0/1/2
+        // motion_mode <= last_allowed
+        let mm = (rng.next() % (last_allowed as u64 + 1)) as i32;
+        let mut mo = obmc;
+        let mut mmc = mm_cdf;
+        let mut enc = OdEcEnc::new();
+        write_motion_mode(&mut enc, &mut mo, &mut mmc, last_allowed, mm);
+        let got = enc.done().to_vec();
+        let (want, oo, om) = c::ref_write_motion_mode(&obmc, &mm_cdf, last_allowed, mm);
+        assert_eq!(got, want, "motion_mode bytes la={last_allowed} mm={mm}");
+        assert_eq!(mo, oo, "motion_mode obmc cdf");
+        assert_eq!(mmc, om, "motion_mode mm cdf");
+    }
+}

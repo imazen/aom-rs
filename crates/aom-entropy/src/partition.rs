@@ -579,3 +579,23 @@ pub fn write_is_inter(
         write_symbol(enc, is_inter, intra_inter_cdf, 2);
     }
 }
+
+const MOTION_MODES: usize = 3;
+
+/// `write_motion_mode` (`av1/encoder/bitstream.c`): the block motion mode, gated by the
+/// caller-resolved `last_motion_mode_allowed` — nothing for SIMPLE_TRANSLATION(0), a
+/// 2-symbol OBMC flag on `obmc_cdf[bsize]` when OBMC_CAUSAL(1) is the ceiling, else the
+/// full mode on `motion_mode_cdf[bsize]` (MOTION_MODES=3).
+pub fn write_motion_mode(
+    enc: &mut OdEcEnc,
+    obmc_cdf: &mut [u16],
+    motion_mode_cdf: &mut [u16],
+    last_motion_mode_allowed: i32,
+    motion_mode: i32,
+) {
+    match last_motion_mode_allowed {
+        0 => {}
+        1 => write_symbol(enc, (motion_mode == 1) as i32, obmc_cdf, 2),
+        _ => write_symbol(enc, motion_mode, motion_mode_cdf, MOTION_MODES),
+    }
+}
