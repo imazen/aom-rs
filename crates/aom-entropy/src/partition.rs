@@ -4112,3 +4112,170 @@ pub fn read_mb_modes_kf_prefix(
     );
     (skip, segment_id, cdef_strength, current_qindex)
 }
+
+// ===================== KEY-frame block struct model =====================
+// Bundles the ~70 flat args of the KF block driver into typed structs so
+// read_modes_b / write_modes_b can dispatch through one interface. The CDFs are
+// pre-selected per context by the caller (read_modes_b computes the neighbour
+// contexts); this struct model owns the MB_MODE_INFO output + the block state carry.
+
+/// A KEY-frame block's decoded/decided mode info (`MB_MODE_INFO`, intra subset).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MbModeInfoKf {
+    pub segment_id: i32,
+    pub skip: i32,
+    pub cdef_strength: i32,
+    pub current_qindex: i32,
+    /// Per-plane loop-filter deltas after this block (the updated carry).
+    pub delta_lf: [i32; FRAME_LF_COUNT],
+    pub delta_lf_from_base: i32,
+    pub use_intrabc: i32,
+    pub dv_row: i32,
+    pub dv_col: i32,
+    pub y_mode: i32,
+    pub angle_delta_y: i32,
+    pub uv_mode: i32,
+    pub cfl_alpha_idx: i32,
+    pub cfl_joint_sign: i32,
+    pub angle_delta_uv: i32,
+    pub palette_size: [i32; 2],
+    pub use_filter_intra: i32,
+    pub filter_intra_mode: i32,
+}
+
+/// The (context-pre-selected) CDFs a KEY-frame block touches. Adapted in place.
+#[derive(Debug, Clone)]
+pub struct KfCdfs {
+    pub seg: [u16; 9],
+    pub skip: [u16; 3],
+    pub delta_q: [u16; 5],
+    pub delta_lf_multi: [[u16; 5]; FRAME_LF_COUNT],
+    pub delta_lf: [u16; 5],
+    pub intrabc: [u16; 3],
+    pub ndvc_joints: [u16; 5],
+    pub ndvc_comp0: [u16; 69],
+    pub ndvc_comp1: [u16; 69],
+    pub y_mode: [u16; 14],
+    pub y_angle: [u16; 8],
+    pub uv_mode: [u16; 15],
+    pub cfl_sign: [u16; 9],
+    pub cfl_alpha: [[u16; 17]; 6],
+    pub uv_angle: [u16; 8],
+    pub pal_y_mode: [u16; 3],
+    pub pal_y_size: [u16; 8],
+    pub pal_uv_mode: [u16; 3],
+    pub pal_uv_size: [u16; 8],
+    pub fi_use: [u16; 3],
+    pub fi_mode: [u16; 6],
+}
+
+/// Per-block + per-frame state for the KEY-frame driver: the coding gates/config
+/// plus the mutable carries (cdef-transmitted mask, running base qindex, delta-lf).
+#[derive(Debug, Clone)]
+pub struct KfBlockState {
+    // segmentation
+    pub segid_preskip: bool,
+    pub seg_enabled: bool,
+    pub update_map: bool,
+    pub seg_pred: i32,
+    pub last_active_segid: i32,
+    pub seg_skip_active: bool,
+    // block position / sb
+    pub mi_row: i32,
+    pub mi_col: i32,
+    pub mib_size: i32,
+    pub sb_size: usize,
+    pub bsize: usize,
+    // cdef / delta gates
+    pub coded_lossless: bool,
+    pub allow_intrabc: bool,
+    pub cdef_bits: u32,
+    pub dq_present: bool,
+    pub dlf_present: bool,
+    pub dlf_multi: bool,
+    pub num_planes: i32,
+    pub dq_res: i32,
+    pub dlf_res: i32,
+    // intra / palette / filter gates
+    pub monochrome: bool,
+    pub is_chroma_ref: bool,
+    pub cfl_allowed: bool,
+    pub allow_palette: bool,
+    pub bit_depth: i32,
+    pub filter_allowed: bool,
+    pub mb_to_top_edge: i32,
+    pub has_above: bool,
+    pub has_left: bool,
+    // mutable carries
+    pub cdef_transmitted: [bool; 4],
+    pub current_base_qindex: i32,
+    pub xd_delta_lf: [i32; FRAME_LF_COUNT],
+    pub xd_delta_lf_from_base: i32,
+}
+
+/// `read_mb_modes_kf` — the KEY-frame per-block decode driver, bundling
+/// [`read_mb_modes_kf_prefix`] + [`read_kf_tail`] over the [`KfCdfs`] + [`KfBlockState`]
+/// structs (palette colours not modelled in this cut: `allow_palette` must be false).
+/// Mutates the CDFs + the state carries in place; returns the decoded [`MbModeInfoKf`].
+pub fn read_mb_modes_kf(dec: &mut OdEcDec, c: &mut KfCdfs, s: &mut KfBlockState) -> MbModeInfoKf {
+    let (skip, segment_id, cdef_strength, current_qindex) = read_mb_modes_kf_prefix(
+        dec, s.segid_preskip, s.seg_enabled, s.update_map, s.seg_pred, s.last_active_segid, &mut c.seg, s.seg_skip_active, &mut c.skip, s.coded_lossless, s.allow_intrabc, s.mi_row,
+        s.mi_col, s.mib_size, s.sb_size, &mut s.cdef_transmitted, s.cdef_bits, s.dq_present,
+        s.dlf_present, s.dlf_multi, s.num_planes, s.bsize, &mut s.current_base_qindex, s.dq_res,
+        &mut s.xd_delta_lf, &mut s.xd_delta_lf_from_base, s.dlf_res, &mut c.delta_q,
+        &mut c.delta_lf_multi, &mut c.delta_lf,
+    );
+    let tail = read_kf_tail(
+        dec, s.allow_intrabc, &mut c.intrabc, &mut c.ndvc_joints, &mut c.ndvc_comp0,
+        &mut c.ndvc_comp1, s.bsize, &mut c.y_mode, &mut c.y_angle, s.monochrome, s.is_chroma_ref,
+        s.cfl_allowed, &mut c.uv_mode, &mut c.cfl_sign, &mut c.cfl_alpha, &mut c.uv_angle,
+        s.allow_palette, s.bit_depth, &mut c.pal_y_mode, &mut c.pal_y_size, &mut c.pal_uv_mode,
+        &mut c.pal_uv_size, s.mb_to_top_edge, s.has_above, &[], [0, 0], s.has_left, &[], [0, 0],
+        s.filter_allowed, &mut c.fi_use, &mut c.fi_mode,
+    );
+    MbModeInfoKf {
+        segment_id,
+        skip,
+        cdef_strength,
+        current_qindex,
+        delta_lf: s.xd_delta_lf,
+        delta_lf_from_base: s.xd_delta_lf_from_base,
+        use_intrabc: tail.use_intrabc,
+        dv_row: tail.diff_row,
+        dv_col: tail.diff_col,
+        y_mode: tail.mode,
+        angle_delta_y: tail.angle_delta_y,
+        uv_mode: tail.uv_mode,
+        cfl_alpha_idx: tail.cfl_alpha_idx,
+        cfl_joint_sign: tail.cfl_joint_sign,
+        angle_delta_uv: tail.angle_delta_uv,
+        palette_size: tail.palette_size,
+        use_filter_intra: tail.use_filter_intra,
+        filter_intra_mode: tail.filter_intra_mode,
+    }
+}
+
+/// `write_mb_modes_kf` — the encode-side counterpart to [`read_mb_modes_kf`]: encode a
+/// KEY-frame block's [`MbModeInfoKf`] via the [`KfCdfs`] + [`KfBlockState`] structs.
+/// `seg_skip_active`'s skip and the delta targets come from `info` / `state`.
+pub fn write_mb_modes_kf(enc: &mut OdEcEnc, info: &MbModeInfoKf, c: &mut KfCdfs, s: &mut KfBlockState) {
+    write_mb_modes_kf_prefix(
+        enc, s.segid_preskip, s.seg_enabled, s.update_map, info.segment_id, s.seg_pred,
+        s.last_active_segid, &mut c.seg, s.seg_skip_active, info.skip, &mut c.skip, s.coded_lossless,
+        s.allow_intrabc, s.mi_row, s.mi_col, s.mib_size, s.sb_size, &mut s.cdef_transmitted,
+        s.cdef_bits, info.cdef_strength, s.dq_present, s.dlf_present, s.dlf_multi, s.num_planes,
+        s.bsize, info.current_qindex, &mut s.current_base_qindex, s.dq_res, &info.delta_lf,
+        &mut s.xd_delta_lf, info.delta_lf_from_base, &mut s.xd_delta_lf_from_base, s.dlf_res,
+        &mut c.delta_q, &mut c.delta_lf_multi, &mut c.delta_lf,
+    );
+    write_kf_tail(
+        enc, s.allow_intrabc, &mut c.intrabc, &mut c.ndvc_joints, &mut c.ndvc_comp0,
+        &mut c.ndvc_comp1, info.use_intrabc, info.dv_row, info.dv_col, info.y_mode, s.bsize,
+        &mut c.y_mode, info.angle_delta_y, &mut c.y_angle, s.monochrome, s.is_chroma_ref,
+        info.uv_mode, s.cfl_allowed, info.cfl_alpha_idx, info.cfl_joint_sign, info.angle_delta_uv,
+        &mut c.uv_mode, &mut c.cfl_sign, &mut c.cfl_alpha, &mut c.uv_angle, s.allow_palette,
+        s.bit_depth, info.palette_size, &[], s.mb_to_top_edge, s.has_above, &[], [0, 0], s.has_left,
+        &[], [0, 0], &mut c.pal_y_mode, &mut c.pal_y_size, &mut c.pal_uv_mode, &mut c.pal_uv_size,
+        s.filter_allowed, info.use_filter_intra, info.filter_intra_mode, &mut c.fi_use, &mut c.fi_mode,
+    );
+}

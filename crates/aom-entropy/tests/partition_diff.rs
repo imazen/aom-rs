@@ -4396,3 +4396,119 @@ fn read_mb_modes_kf_prefix_roundtrips_write() {
         assert_eq!((scd, kcd, dqcd, dlmcd, dlcd), (sce, kce, dqce, dlmce, dlce), "cdf adapt");
     }
 }
+
+#[test]
+fn read_mb_modes_kf_struct_driver_roundtrips() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        get_uv_mode, is_directional_mode, read_mb_modes_kf, use_angle_delta, write_mb_modes_kf,
+        KfBlockState, KfCdfs, MbModeInfoKf,
+    };
+    let mut rng = Rng(0x1e_c0de_57c7_00c0u64);
+    let mk_comp = |rng: &mut Rng| -> [u16; 69] {
+        let mut c = [0u16; 69];
+        mk_ns_cdf(rng, 2, &mut c[0..3]);
+        mk_ns_cdf(rng, 11, &mut c[3..15]);
+        mk_ns_cdf(rng, 2, &mut c[15..18]);
+        for i in 0..10 { let o = 18 + i * 3; mk_ns_cdf(rng, 2, &mut c[o..o + 3]); }
+        for i in 0..2 { let o = 48 + i * 5; mk_ns_cdf(rng, 4, &mut c[o..o + 5]); }
+        mk_ns_cdf(rng, 4, &mut c[58..63]);
+        mk_ns_cdf(rng, 2, &mut c[63..66]);
+        mk_ns_cdf(rng, 2, &mut c[66..69]);
+        c
+    };
+    let gen_cdfs = |rng: &mut Rng, cfl_allowed: bool| -> KfCdfs {
+        let mut c = KfCdfs {
+            seg: [0; 9], skip: [0; 3], delta_q: [0; 5], delta_lf_multi: [[0; 5]; 4], delta_lf: [0; 5],
+            intrabc: [0; 3], ndvc_joints: [0; 5], ndvc_comp0: mk_comp(rng), ndvc_comp1: mk_comp(rng),
+            y_mode: [0; 14], y_angle: [0; 8], uv_mode: [0; 15], cfl_sign: [0; 9], cfl_alpha: [[0; 17]; 6],
+            uv_angle: [0; 8], pal_y_mode: [0; 3], pal_y_size: [0; 8], pal_uv_mode: [0; 3],
+            pal_uv_size: [0; 8], fi_use: [0; 3], fi_mode: [0; 6],
+        };
+        mk_ns_cdf(rng, 8, &mut c.seg); mk_ns_cdf(rng, 2, &mut c.skip); mk_ns_cdf(rng, 4, &mut c.delta_q);
+        for m in c.delta_lf_multi.iter_mut() { mk_ns_cdf(rng, 4, m); }
+        mk_ns_cdf(rng, 4, &mut c.delta_lf); mk_ns_cdf(rng, 2, &mut c.intrabc);
+        mk_ns_cdf(rng, 4, &mut c.ndvc_joints); mk_ns_cdf(rng, 13, &mut c.y_mode);
+        mk_ns_cdf(rng, 7, &mut c.y_angle); mk_ns_cdf(rng, if cfl_allowed { 14 } else { 13 }, &mut c.uv_mode);
+        mk_ns_cdf(rng, 8, &mut c.cfl_sign); for a in c.cfl_alpha.iter_mut() { mk_ns_cdf(rng, 16, a); }
+        mk_ns_cdf(rng, 7, &mut c.uv_angle); mk_ns_cdf(rng, 2, &mut c.pal_y_mode);
+        mk_ns_cdf(rng, 7, &mut c.pal_y_size); mk_ns_cdf(rng, 2, &mut c.pal_uv_mode);
+        mk_ns_cdf(rng, 7, &mut c.pal_uv_size); mk_ns_cdf(rng, 2, &mut c.fi_use); mk_ns_cdf(rng, 5, &mut c.fi_mode);
+        c
+    };
+    for _ in 0..100_000 {
+        let seg_enabled = rng.next() & 1 == 1;
+        let update_map = seg_enabled && rng.next() & 1 == 1;
+        let last = (rng.next() % 8) as i32;
+        let bsize = [3usize, 12, 15][(rng.next() % 3) as usize];
+        let cfl_allowed = rng.next() & 1 == 1;
+        let mono = rng.next() & 1 == 1;
+        let chroma_ref = rng.next() & 1 == 1;
+        let allow_intrabc = rng.next() & 1 == 1;
+        let dq_res = 1 << (rng.next() % 4);
+        let dlf_res = 1 << (rng.next() % 4);
+        let mut st = KfBlockState {
+            segid_preskip: rng.next() & 1 == 1, seg_enabled, update_map,
+            seg_pred: (rng.next() % (last as u64 + 1)) as i32, last_active_segid: last,
+            seg_skip_active: false, mi_row: 0, mi_col: 0, mib_size: 16, sb_size: 12, bsize,
+            coded_lossless: false, allow_intrabc, cdef_bits: (rng.next() % 4) as u32,
+            dq_present: rng.next() & 1 == 1, dlf_present: rng.next() & 1 == 1, dlf_multi: rng.next() & 1 == 1,
+            num_planes: if rng.next() & 1 == 1 { 3 } else { 1 }, dq_res, dlf_res, monochrome: mono,
+            is_chroma_ref: chroma_ref, cfl_allowed, allow_palette: false, bit_depth: 8,
+            filter_allowed: rng.next() & 1 == 1, mb_to_top_edge: 0, has_above: false, has_left: false,
+            cdef_transmitted: [false; 4], current_base_qindex: 100,
+            xd_delta_lf: [(rng.next() % 11) as i32, (rng.next() % 11) as i32, (rng.next() % 11) as i32, (rng.next() % 11) as i32],
+            xd_delta_lf_from_base: (rng.next() % 11) as i32,
+        };
+        st.dlf_present = st.dq_present && st.dlf_present;
+        let skip = (rng.next() & 1) as i32;
+        let use_intrabc = if allow_intrabc { (rng.next() & 1) as i32 } else { 0 };
+        let (dr, dc) = if use_intrabc != 0 { (((rng.next() % 51) as i32 - 25) * 8, ((rng.next() % 51) as i32 - 25) * 8) } else { (0, 0) };
+        let y_mode = (rng.next() % 13) as i32;
+        let y_ang = if use_angle_delta(bsize) && is_directional_mode(y_mode) { (rng.next() % 7) as i32 - 3 } else { 0 };
+        let uv_n = if cfl_allowed { 14 } else { 13 };
+        let uv_mode = if !mono && chroma_ref { (rng.next() % uv_n as u64) as i32 } else { 0 };
+        let js = if uv_mode == 13 { (rng.next() % 8) as i32 } else { 0 };
+        let (su, sv) = ((js + 1) / 3, (js + 1) % 3);
+        let u = if uv_mode == 13 && su != 0 { (rng.next() % 16) as i32 } else { 0 };
+        let v = if uv_mode == 13 && sv != 0 { (rng.next() % 16) as i32 } else { 0 };
+        let cfl_idx = (u << 4) | v;
+        let uv_intra = get_uv_mode(uv_mode as usize);
+        let uv_ang = if !mono && chroma_ref && use_angle_delta(bsize) && is_directional_mode(uv_intra) { (rng.next() % 7) as i32 - 3 } else { 0 };
+        let use_fi = if st.filter_allowed { (rng.next() & 1) as i32 } else { 0 };
+        let fi_mode = if use_fi != 0 { (rng.next() % 5) as i32 } else { 0 };
+        let cur_q = 100 + ((rng.next() % 41) as i32 - 20) * dq_res;
+        let dlf = [st.xd_delta_lf[0] + ((rng.next() % 11) as i32 - 5) * dlf_res, st.xd_delta_lf[1] + ((rng.next() % 11) as i32 - 5) * dlf_res, st.xd_delta_lf[2] + ((rng.next() % 11) as i32 - 5) * dlf_res, st.xd_delta_lf[3] + ((rng.next() % 11) as i32 - 5) * dlf_res];
+        let dlfb = st.xd_delta_lf_from_base + ((rng.next() % 11) as i32 - 5) * dlf_res;
+        let info = MbModeInfoKf {
+            segment_id: (rng.next() % (last as u64 + 1)) as i32, skip, cdef_strength: if st.cdef_bits > 0 { (rng.next() % (1u64 << st.cdef_bits)) as i32 } else { 0 },
+            current_qindex: cur_q, delta_lf: dlf, delta_lf_from_base: dlfb, use_intrabc, dv_row: dr, dv_col: dc,
+            y_mode, angle_delta_y: y_ang, uv_mode, cfl_alpha_idx: cfl_idx, cfl_joint_sign: js, angle_delta_uv: uv_ang,
+            palette_size: [0, 0], use_filter_intra: use_fi, filter_intra_mode: fi_mode,
+        };
+        let cdfs0 = gen_cdfs(&mut rng, cfl_allowed);
+        let mut enc = OdEcEnc::new();
+        let mut ce = cdfs0.clone();
+        let mut se = st.clone();
+        write_mb_modes_kf(&mut enc, &info, &mut ce, &mut se);
+        let b = enc.done().to_vec();
+        let mut dec = OdEcDec::new(&b);
+        let mut cd = cdfs0.clone();
+        let mut sd = st.clone();
+        let g = read_mb_modes_kf(&mut dec, &mut cd, &mut sd);
+        assert_eq!(g.skip, info.skip, "skip");
+        assert_eq!(g.use_intrabc, info.use_intrabc, "use_intrabc");
+        if use_intrabc != 0 {
+            assert_eq!((g.dv_row, g.dv_col), (dr, dc), "dv");
+        } else {
+            assert_eq!(g.y_mode, info.y_mode, "y_mode");
+        }
+        // CDF adaptation + state carries lockstep = the field threading is correct.
+        assert_eq!(ce.skip, cd.skip, "skip cdf");
+        assert_eq!(ce.y_mode, cd.y_mode, "y_mode cdf");
+        assert_eq!(ce.delta_q, cd.delta_q, "delta_q cdf");
+        assert_eq!(ce.cfl_alpha, cd.cfl_alpha, "cfl cdf");
+        assert_eq!((se.current_base_qindex, se.xd_delta_lf, se.cdef_transmitted), (sd.current_base_qindex, sd.xd_delta_lf, sd.cdef_transmitted), "state carries");
+    }
+}
