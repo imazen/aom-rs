@@ -853,3 +853,23 @@ uint32_t shim_write_inter_ref_signaling(int enable_order_hint, int short_sig,
   }
   return aom_wb_bytes_written(&wb);
 }
+
+/* refresh-frame-context bit + frame-header trailing flags, over the real aom_wb. */
+uint32_t shim_write_refresh_frame_context(int reduced, int disable_cdf, int rfc_disabled, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  int might_bwd_adapt = !reduced && !disable_cdf;
+  if (might_bwd_adapt) aom_wb_write_bit(&wb, rfc_disabled);
+  return aom_wb_bytes_written(&wb);
+}
+
+uint32_t shim_write_frame_header_trailing_flags(int intra_only, int ref_mode_select,
+                                                int skip_allowed, int skip_flag,
+                                                int might_warp, int allow_warp,
+                                                int reduced_tx_set, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  if (!intra_only) aom_wb_write_bit(&wb, ref_mode_select);
+  if (skip_allowed) aom_wb_write_bit(&wb, skip_flag);
+  if (might_warp) aom_wb_write_bit(&wb, allow_warp);
+  aom_wb_write_bit(&wb, reduced_tx_set);
+  return aom_wb_bytes_written(&wb);
+}

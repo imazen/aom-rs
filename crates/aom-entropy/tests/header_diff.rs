@@ -1076,3 +1076,28 @@ fn write_inter_ref_signaling_matches_c() {
         assert_eq!(got, want, "inter_ref_signaling");
     }
 }
+
+#[test]
+fn frame_header_connective_flags_match_c() {
+    use aom_entropy::header::{write_frame_header_trailing_flags, write_refresh_frame_context};
+    let mut rng = Rng(0xf1a6_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let reduced = rng.next().is_multiple_of(2);
+        let disable_cdf = rng.next().is_multiple_of(2);
+        let rfc_disabled = rng.next().is_multiple_of(2);
+        let mut wb = WriteBitBuffer::new();
+        write_refresh_frame_context(&mut wb, reduced, disable_cdf, rfc_disabled);
+        assert_eq!(wb.bytes(), &c::ref_write_refresh_frame_context(reduced, disable_cdf, rfc_disabled)[..], "refresh_frame_context");
+
+        let intra_only = rng.next().is_multiple_of(2);
+        let ref_mode_select = rng.next().is_multiple_of(2);
+        let skip_allowed = rng.next().is_multiple_of(2);
+        let skip_flag = rng.next().is_multiple_of(2);
+        let might_warp = rng.next().is_multiple_of(2);
+        let allow_warp = rng.next().is_multiple_of(2);
+        let reduced_tx_set = rng.next().is_multiple_of(2);
+        let mut wb = WriteBitBuffer::new();
+        write_frame_header_trailing_flags(&mut wb, intra_only, ref_mode_select, skip_allowed, skip_flag, might_warp, allow_warp, reduced_tx_set);
+        assert_eq!(wb.bytes(), &c::ref_write_frame_header_trailing_flags(intra_only, ref_mode_select, skip_allowed, skip_flag, might_warp, allow_warp, reduced_tx_set)[..], "trailing_flags");
+    }
+}

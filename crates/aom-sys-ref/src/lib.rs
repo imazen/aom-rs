@@ -227,6 +227,26 @@ extern "C" {
     fn shim_write_frame_size_with_refs(up_w: i32, up_h: i32, rw: i32, rh: i32, valid: *const i32, ycw: *const i32, ych: *const i32, rrw: *const i32, rrh: *const i32, enable_superres: i32, denom: i32, fs_num_bits_w: i32, fs_num_bits_h: i32, fs_up_w: i32, fs_up_h: i32, fs_scaling_active: i32, fs_rw: i32, fs_rh: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_ref_signaling(enable_order_hint: i32, short_sig: i32, ref_map_idx: *const i32, set_rfc: i32, rtc_reference: *const i32, rtc_ref_idx: *const i32, num_spatial_layers: i32, frame_id_present: i32, frame_id_len: i32, current_frame_id: i32, ref_frame_id: *const i32, diff_len: i32, out: *mut u8) -> u32;
+    fn shim_write_refresh_frame_context(reduced: i32, disable_cdf: i32, rfc_disabled: i32, out: *mut u8) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
+}
+
+/// Reference refresh-frame-context bit.
+pub fn ref_write_refresh_frame_context(reduced: bool, disable_cdf: bool, rfc_disabled: bool) -> Vec<u8> {
+    let mut out = vec![0u8; 4];
+    let n = unsafe { shim_write_refresh_frame_context(reduced as i32, disable_cdf as i32, rfc_disabled as i32, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference frame-header trailing flags.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_frame_header_trailing_flags(intra_only: bool, ref_mode_select: bool, skip_allowed: bool, skip_flag: bool, might_warp: bool, allow_warp: bool, reduced_tx_set: bool) -> Vec<u8> {
+    let mut out = vec![0u8; 4];
+    let n = unsafe { shim_write_frame_header_trailing_flags(intra_only as i32, ref_mode_select as i32, skip_allowed as i32, skip_flag as i32, might_warp as i32, allow_warp as i32, reduced_tx_set as i32, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference INTER/S-frame ref signaling (transcribed over the real aom_wb).

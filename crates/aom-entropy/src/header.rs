@@ -1305,3 +1305,48 @@ pub fn write_inter_ref_signaling(wb: &mut WriteBitBuffer, s: &InterRefSignaling)
         }
     }
 }
+
+// ---- frame-header OBU: connective flags -----------------------------------
+
+/// The refresh-frame-context bit (`write_uncompressed_header_obu`, just before
+/// `write_tile_info`): written only when back-adaptation might apply (not reduced
+/// still picture and CDF update not disabled). `refresh_frame_context_disabled` is
+/// `features->refresh_frame_context == REFRESH_FRAME_CONTEXT_DISABLED`.
+pub fn write_refresh_frame_context(
+    wb: &mut WriteBitBuffer,
+    reduced_still_picture_hdr: bool,
+    disable_cdf_update: bool,
+    refresh_frame_context_disabled: bool,
+) {
+    let might_bwd_adapt = !reduced_still_picture_hdr && !disable_cdf_update;
+    if might_bwd_adapt {
+        wb.write_bit(refresh_frame_context_disabled as u32);
+    }
+}
+
+/// The frame-header trailing flags (`write_uncompressed_header_obu`, after the TX
+/// mode): the reference-mode SELECT bit (non-intra only), the skip-mode flag (when
+/// allowed), the warped-motion flag (when the frame might allow it), and the
+/// reduced-tx-set flag. `intra_only` = `frame_is_intra_only(cm)`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_frame_header_trailing_flags(
+    wb: &mut WriteBitBuffer,
+    intra_only: bool,
+    reference_mode_select: bool,
+    skip_mode_allowed: bool,
+    skip_mode_flag: bool,
+    might_allow_warped_motion: bool,
+    allow_warped_motion: bool,
+    reduced_tx_set_used: bool,
+) {
+    if !intra_only {
+        wb.write_bit(reference_mode_select as u32);
+    }
+    if skip_mode_allowed {
+        wb.write_bit(skip_mode_flag as u32);
+    }
+    if might_allow_warped_motion {
+        wb.write_bit(allow_warped_motion as u32);
+    }
+    wb.write_bit(reduced_tx_set_used as u32);
+}
