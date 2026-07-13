@@ -228,8 +228,30 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_ref_signaling(enable_order_hint: i32, short_sig: i32, ref_map_idx: *const i32, set_rfc: i32, rtc_reference: *const i32, rtc_ref_idx: *const i32, num_spatial_layers: i32, frame_id_present: i32, frame_id_len: i32, current_frame_id: i32, ref_frame_id: *const i32, diff_len: i32, out: *mut u8) -> u32;
     fn shim_write_refresh_frame_context(reduced: i32, disable_cdf: i32, rfc_disabled: i32, out: *mut u8) -> u32;
+    fn shim_partition_cdf_length(bsize: i32) -> i32;
+    fn shim_partition_gather_vert(out: *mut u16, cdf_in: *const u16, bsize: i32);
+    fn shim_partition_gather_horz(out: *mut u16, cdf_in: *const u16, bsize: i32);
     #[allow(clippy::too_many_arguments)]
     fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
+}
+
+/// Reference `partition_cdf_length`.
+pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
+    unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `partition_gather_vert_alike`.
+pub fn ref_partition_gather_vert(cdf_in: &[u16; 11], bsize: i32) -> [u16; 2] {
+    let mut out = [0u16; 2];
+    unsafe { shim_partition_gather_vert(out.as_mut_ptr(), cdf_in.as_ptr(), bsize) };
+    out
+}
+
+/// Reference `partition_gather_horz_alike`.
+pub fn ref_partition_gather_horz(cdf_in: &[u16; 11], bsize: i32) -> [u16; 2] {
+    let mut out = [0u16; 2];
+    unsafe { shim_partition_gather_horz(out.as_mut_ptr(), cdf_in.as_ptr(), bsize) };
+    out
 }
 
 /// Reference refresh-frame-context bit.

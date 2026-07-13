@@ -11,6 +11,7 @@ pub mod enc;
 pub mod header;
 pub mod leb128;
 pub mod obu;
+pub mod partition;
 pub mod wb;
 
 pub use cdf::{read_symbol, update_cdf, write_symbol};
