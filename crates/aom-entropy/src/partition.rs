@@ -403,3 +403,57 @@ pub fn get_mv_class(z: i32) -> (i32, i32) {
     let c = if zz == 0 { 0 } else { 31 - zz.leading_zeros() as i32 };
     (c, z - mv_class_base(c))
 }
+
+const MV_CLASSES: usize = 11;
+const MV_FP_SIZE: usize = 4;
+const MV_SUBPEL_NONE: i32 = -1;
+const MV_SUBPEL_LOW: i32 = 0;
+
+// nmv_component CDFs packed in one 69-u16 blob:
+//   sign     0..3    (2-sym)
+//   classes  3..15   (11-sym)
+//   class0   15..18  (2-sym)
+//   bits[10] 18..48  (2-sym each, 10 CDFs)
+//   class0_fp[2] 48..58 (4-sym each)
+//   fp       58..63  (4-sym)
+//   class0_hp 63..66 (2-sym)
+//   hp       66..69  (2-sym)
+/// `encode_mv_component` (`av1/encoder/encodemv.c`): one MV-difference component —
+/// sign, magnitude class, then the class-0 integer symbol or the per-class integer
+/// bits, then (precision-gated) the fractional bits and the high-precision bit, all on
+/// the component's adapted nmv CDFs.
+pub fn encode_mv_component(enc: &mut OdEcEnc, cdf: &mut [u16; 69], comp: i32, precision: i32) {
+    let sign = (comp < 0) as i32;
+    let mag = comp.abs();
+    let (mv_class, offset) = get_mv_class(mag - 1);
+    let d = offset >> 3;
+    let fr = (offset >> 1) & 3;
+    let hp = offset & 1;
+
+    write_symbol(enc, sign, &mut cdf[0..3], 2);
+    write_symbol(enc, mv_class, &mut cdf[3..15], MV_CLASSES);
+    if mv_class == 0 {
+        write_symbol(enc, d, &mut cdf[15..18], 2);
+    } else {
+        let n = mv_class; // mv_class + CLASS0_BITS(1) - 1
+        for i in 0..n {
+            let off = 18 + (i as usize) * 3;
+            write_symbol(enc, (d >> i) & 1, &mut cdf[off..off + 3], 2);
+        }
+    }
+    if precision > MV_SUBPEL_NONE {
+        if mv_class == 0 {
+            let off = 48 + (d as usize) * 5;
+            write_symbol(enc, fr, &mut cdf[off..off + 5], MV_FP_SIZE);
+        } else {
+            write_symbol(enc, fr, &mut cdf[58..63], MV_FP_SIZE);
+        }
+    }
+    if precision > MV_SUBPEL_LOW {
+        if mv_class == 0 {
+            write_symbol(enc, hp, &mut cdf[63..66], 2);
+        } else {
+            write_symbol(enc, hp, &mut cdf[66..69], 2);
+        }
+    }
+}

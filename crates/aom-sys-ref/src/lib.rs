@@ -244,6 +244,7 @@ extern "C" {
     fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_get_mv_joint(row: i32, col: i32) -> i32;
     fn shim_get_mv_class(z: i32) -> i32;
+    fn shim_encode_mv_component(cdf: *mut u16, comp: i32, precision: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_drl_idx(drl_cdf: *mut u16, mode: i32, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, out_cdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_mode(newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, mode: i32, mode_ctx: i32, out: *mut u8, out_newmv: *mut u16, out_zeromv: *mut u16, out_refmv: *mut u16) -> u32;
@@ -254,6 +255,16 @@ extern "C" {
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `encode_mv_component` (over the pristine C od_ec + the real av1_get_mv_class).
+pub fn ref_encode_mv_component(cdf: &[u16; 69], comp: i32, precision: i32) -> (Vec<u8>, [u16; 69]) {
+    let mut c = *cdf;
+    let mut out = vec![0u8; 32];
+    let mut out_cdf = [0u16; 69];
+    let n = unsafe { shim_encode_mv_component(c.as_mut_ptr(), comp, precision, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    out.truncate(n as usize);
+    (out, out_cdf)
 }
 
 /// Reference `av1_get_mv_joint`.

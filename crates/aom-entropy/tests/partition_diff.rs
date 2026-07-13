@@ -503,3 +503,57 @@ fn mv_class_joint_math_matches_c() {
         assert_eq!(get_mv_class(z), c::ref_get_mv_class(z), "mv_class z={z}");
     }
 }
+
+#[test]
+fn encode_mv_component_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::encode_mv_component;
+    let mut rng = Rng(0x0ace_c0de_a11a_0009);
+    // fill cdf[off..off+ns] as a valid ns-symbol CDF (count at [off+ns-1..? no: ns-sym => ns entries + count)
+    let mk = |rng: &mut Rng, ns: usize, out: &mut [u16]| {
+        let mut vals = [0i32; 11];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            out[i] = v as u16;
+            prev = v;
+        }
+        out[ns - 1] = 0;
+        out[ns] = 0;
+    };
+    for _ in 0..300_000 {
+        let mut cdf = [0u16; 69];
+        mk(&mut rng, 2, &mut cdf[0..3]); // sign
+        mk(&mut rng, 11, &mut cdf[3..15]); // classes
+        mk(&mut rng, 2, &mut cdf[15..18]); // class0
+        for i in 0..10 {
+            let off = 18 + i * 3;
+            mk(&mut rng, 2, &mut cdf[off..off + 3]);
+        }
+        for i in 0..2 {
+            let off = 48 + i * 5;
+            mk(&mut rng, 4, &mut cdf[off..off + 5]);
+        }
+        mk(&mut rng, 4, &mut cdf[58..63]); // fp
+        mk(&mut rng, 2, &mut cdf[63..66]); // class0_hp
+        mk(&mut rng, 2, &mut cdf[66..69]); // hp
+
+        // comp != 0, |comp| <= 16384 so class <= MV_CLASS_10
+        let mag = 1 + (rng.next() % 16384) as i32;
+        let comp = if rng.next().is_multiple_of(2) { mag } else { -mag };
+        let precision = [-1i32, 0, 1][(rng.next() % 3) as usize];
+
+        let mut my_cdf = cdf;
+        let mut enc = OdEcEnc::new();
+        encode_mv_component(&mut enc, &mut my_cdf, comp, precision);
+        let got = enc.done().to_vec();
+        let (want, want_cdf) = c::ref_encode_mv_component(&cdf, comp, precision);
+        assert_eq!(got, want, "mv_comp bytes comp={comp} prec={precision}");
+        assert_eq!(my_cdf, want_cdf, "mv_comp cdf comp={comp} prec={precision}");
+    }
+}

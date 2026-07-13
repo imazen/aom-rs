@@ -309,3 +309,41 @@ int shim_get_mv_class(int z) {
   int c = av1_get_mv_class(z, &offset);
   return (c << 20) | (offset & 0xFFFFF);
 }
+
+/* encode_mv_component over pristine C od_ec + update_cdf. CDF blob layout matches the
+ * Rust: sign(3)/classes(12)/class0(3)/bits[10](30)/class0_fp[2](10)/fp(5)/class0_hp(3)/
+ * hp(3) = 69. Uses the real av1_get_mv_class. */
+uint32_t shim_encode_mv_component(uint16_t *cdf, int comp, int precision, uint8_t *out,
+                                  uint16_t *out_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  int sign = comp < 0;
+  int mag = sign ? -comp : comp;
+  int offset;
+  int mv_class = av1_get_mv_class(mag - 1, &offset);
+  int d = offset >> 3, fr = (offset >> 1) & 3, hp = offset & 1;
+#define SYM(base, sy, n) do { od_ec_encode_cdf_q15(&ec, sy, cdf + (base), n); update_cdf(cdf + (base), sy, n); } while (0)
+  SYM(0, sign, 2);
+  SYM(3, mv_class, 11);
+  if (mv_class == 0) {
+    SYM(15, d, 2);
+  } else {
+    int n = mv_class;
+    for (int i = 0; i < n; ++i) SYM(18 + i * 3, (d >> i) & 1, 2);
+  }
+  if (precision > MV_SUBPEL_NONE) {
+    if (mv_class == 0) SYM(48 + d * 5, fr, 4);
+    else SYM(58, fr, 4);
+  }
+  if (precision > MV_SUBPEL_LOW_PRECISION) {
+    if (mv_class == 0) SYM(63, hp, 2);
+    else SYM(66, hp, 2);
+  }
+#undef SYM
+  uint32_t nb = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 69; i++) out_cdf[i] = cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
