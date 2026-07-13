@@ -110,6 +110,14 @@ both tracks, fully bit-exact.**
   1024 eob tokens, kernels byte-identical over 19 sizes x 7 tx_types x 300
   iters (~160k context-array comparisons).
 
+- **av1_write_coeffs_txb (aom-txb)** — the first module that emits real encoder
+  **bitstream bytes**, byte-identical to C. Full symbol chain on aom-entropy's
+  bit-exact od_ec (txb_skip, EOB token 16..1024 + extra bits, coeff_base_eob /
+  coeff_base, coeff_br range loop, DC-sign + raw signs, golomb) with in-lockstep
+  update_cdf. Harness: `write_coeffs_diff.rs` — bytes AND adapted CDF arena
+  identical over 19 sizes x 7 tx_types x plane{0,1} x update{on,off} x 40 blocks.
+  (av1_write_tx_type / plane-0 tx_type signaling: next.)
+
 ## Coverage gate (auto-derived, honest)
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec
