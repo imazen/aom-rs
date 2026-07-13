@@ -292,6 +292,7 @@ extern "C" {
     fn shim_get_uv_mode(uv_mode: i32) -> i32;
     fn shim_allow_palette(allow_sct: i32, bsize: i32) -> i32;
     fn shim_is_cfl_allowed(bsize: i32, seg_id: i32, lossless: i32, ssx: i32, ssy: i32) -> i32;
+    fn shim_write_intra_y_and_angle(mode: i32, bsize: i32, y_cdf: *mut u16, angle_delta_y: i32, y_angle_cdf: *mut u16, out: *mut u8, o_ycdf: *mut u16, o_acdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_get_comp_index_context(enable: i32, bits_minus_1: i32, cur_order_hint: i32, fwd_order_hint: i32, bck_order_hint: i32, ha: i32, a_has2: i32, a_cidx: i32, a_rf0: i32, hl: i32, l_has2: i32, l_cidx: i32, l_rf0: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
@@ -574,6 +575,22 @@ pub fn ref_allow_palette(allow_sct: bool, bsize: i32) -> bool {
 }
 pub fn ref_is_cfl_allowed(bsize: i32, seg_id: i32, lossless: bool, ssx: i32, ssy: i32) -> bool {
     unsafe { shim_is_cfl_allowed(bsize, seg_id, lossless as i32, ssx, ssy) != 0 }
+}
+
+/// Reference write_intra_prediction_modes piece 1 (Y mode + gated Y angle delta, over
+/// pristine C od_ec + real gates). Returns (bytes, y_cdf[14], y_angle_cdf[8]).
+pub fn ref_write_intra_y_and_angle(
+    mode: i32, bsize: i32, y_cdf: &[u16; 14], angle_delta_y: i32, y_angle_cdf: &[u16; 8],
+) -> (Vec<u8>, [u16; 14], [u16; 8]) {
+    let (mut yc, mut ac) = (*y_cdf, *y_angle_cdf);
+    let mut out = vec![0u8; 16];
+    let (mut oyc, mut oac) = ([0u16; 14], [0u16; 8]);
+    let n = unsafe {
+        shim_write_intra_y_and_angle(mode, bsize, yc.as_mut_ptr(), angle_delta_y, ac.as_mut_ptr(),
+            out.as_mut_ptr(), oyc.as_mut_ptr(), oac.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    (out, oyc, oac)
 }
 
 /// Reference `get_comp_index_context` (body transcribed; ref-buffer order hints passed

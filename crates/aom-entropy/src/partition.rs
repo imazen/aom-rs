@@ -1806,3 +1806,23 @@ pub fn is_cfl_allowed(bsize: usize, lossless: bool, ssx: usize, ssy: usize) -> b
         BLOCK_SIZE_WIDE[bsize] <= 32 && BLOCK_SIZE_HIGH[bsize] <= 32
     }
 }
+
+/// `write_intra_prediction_modes` piece 1 (`av1/encoder/bitstream.c`): the intra luma
+/// mode followed by its angle delta. The Y mode is a plain `INTRA_MODES` symbol on the
+/// caller-selected CDF (`kf_y_cdf[above_ctx][left_ctx]` for a keyframe, else
+/// `y_mode_cdf[size_group]` — identical write, different CDF). The angle delta is coded
+/// only for a directional mode on a `>= BLOCK_8X8` block, on the caller-selected
+/// per-mode `angle_delta_cdf[mode - V_PRED]`. First composition of the mode-info driver.
+pub fn write_intra_y_and_angle_delta(
+    enc: &mut OdEcEnc,
+    y_cdf: &mut [u16],
+    mode: i32,
+    bsize: usize,
+    angle_delta_y: i32,
+    y_angle_cdf: &mut [u16],
+) {
+    write_symbol(enc, mode, y_cdf, INTRA_MODES);
+    if use_angle_delta(bsize) && is_directional_mode(mode) {
+        write_angle_delta(enc, y_angle_cdf, angle_delta_y);
+    }
+}

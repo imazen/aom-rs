@@ -1720,3 +1720,35 @@ fn intra_prediction_mode_gates_match_c() {
         }
     }
 }
+
+#[test]
+fn write_intra_y_and_angle_delta_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_intra_y_and_angle_delta;
+    let mut rng = Rng(0x1a7a_c0de_0000_000b);
+    fn mk(rng: &mut Rng, nsyms: usize) -> Vec<u16> {
+        let mut c = vec![0u16; nsyms + 1];
+        let mut prev = 32768i32;
+        for e in c.iter_mut().take(nsyms - 1) {
+            let v = (prev - 1 - (rng.next() % 300) as i32).max(1);
+            *e = v as u16;
+            prev = v;
+        }
+        c
+    }
+    for _ in 0..300_000 {
+        let mode = (rng.next() % 13) as i32; // INTRA_MODES
+        let bsize = (rng.next() % 22) as usize;
+        let angle_delta_y = (rng.next() % 7) as i32 - 3; // [-3,3]
+        let yc: [u16; 14] = mk(&mut rng, 13).try_into().unwrap();
+        let ac: [u16; 8] = mk(&mut rng, 7).try_into().unwrap();
+        let mut enc = OdEcEnc::new();
+        let (mut ryc, mut rac) = (yc, ac);
+        write_intra_y_and_angle_delta(&mut enc, &mut ryc, mode, bsize, angle_delta_y, &mut rac);
+        let got = enc.done().to_vec();
+        let (want, oyc, oac) = c::ref_write_intra_y_and_angle(mode, bsize as i32, &yc, angle_delta_y, &ac);
+        assert_eq!(got, want, "bytes mode={mode} bsize={bsize} ad={angle_delta_y}");
+        assert_eq!(ryc, oyc, "y_cdf");
+        assert_eq!(rac, oac, "y_angle_cdf");
+    }
+}

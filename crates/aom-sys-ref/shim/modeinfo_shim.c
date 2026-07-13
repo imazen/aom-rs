@@ -1244,3 +1244,28 @@ int shim_is_cfl_allowed(int bsize, int seg_id, int lossless, int ssx, int ssy) {
   xd.plane[AOM_PLANE_U].subsampling_y = ssy;
   return (int)is_cfl_allowed(&xd);
 }
+
+/* --- write_intra_prediction_modes composition, piece 1: Y mode + Y angle delta --- */
+/* The first two steps of write_intra_prediction_modes (av1/encoder/bitstream.c),
+ * transcribed over od_ec. is_keyframe only picks the Y CDF upstream (kf_y_cdf[a][l] vs
+ * y_mode_cdf[sg]) so it is pre-selected here. The angle delta is gated on the REAL
+ * av1_use_angle_delta + av1_is_directional_mode. INTRA_MODES=13, MAX_ANGLE_DELTA=3. */
+uint32_t shim_write_intra_y_and_angle(int mode, int bsize, uint16_t *y_cdf,
+                                      int angle_delta_y, uint16_t *y_angle_cdf,
+                                      uint8_t *out, uint16_t *o_ycdf, uint16_t *o_acdf) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  od_ec_encode_cdf_q15(&ec, mode, y_cdf, INTRA_MODES);
+  update_cdf(y_cdf, mode, INTRA_MODES);
+  if (av1_use_angle_delta((BLOCK_SIZE)bsize) && av1_is_directional_mode((PREDICTION_MODE)mode)) {
+    const int sym = angle_delta_y + MAX_ANGLE_DELTA;
+    const int n = 2 * MAX_ANGLE_DELTA + 1;
+    od_ec_encode_cdf_q15(&ec, sym, y_angle_cdf, n);
+    update_cdf(y_angle_cdf, sym, n);
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 14; i++) o_ycdf[i] = y_cdf[i];
+  for (int i = 0; i < 8; i++) o_acdf[i] = y_angle_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
