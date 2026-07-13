@@ -524,3 +524,18 @@ uint32_t shim_write_sequence_header(const int *s, uint8_t *out) {
   aom_wb_write_bit(&wb, en_restoration);
   return aom_wb_bytes_written(&wb);
 }
+
+/* write_ext_tile_info, transcribed control flow over the real aom_wb. pre_bits
+ * zero bits are written first so the byte-alignment padding is exercised from an
+ * arbitrary starting offset (the saved_wb snapshot has no byte effect). */
+uint32_t shim_write_ext_tile_info(int pre_bits, int rows, int cols, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  for (int i = 0; i < pre_bits; i++) aom_wb_write_bit(&wb, 0);
+  int mod = wb.bit_offset % 8;
+  if (mod > 0) aom_wb_write_literal(&wb, 0, 8 - mod);
+  if (rows * cols > 1) {
+    aom_wb_write_literal(&wb, 0, 2);
+    aom_wb_write_literal(&wb, 0, 2);
+  }
+  return aom_wb_bytes_written(&wb);
+}

@@ -68,6 +68,16 @@ impl WriteBitBuffer {
         self.bit_offset.is_multiple_of(8)
     }
 
+    /// Pad with zero bits to the next byte boundary (the `mod > 0 =>
+    /// write_literal(0, CHAR_BIT - mod)` idiom in `write_ext_tile_info`). No-op
+    /// when already aligned.
+    pub fn byte_align_zeros(&mut self) {
+        let m = self.bit_offset % 8;
+        if m > 0 {
+            self.write_literal(0, 8 - m as u32);
+        }
+    }
+
     /// `aom_wb_bytes_written` (rounds up to whole bytes).
     pub fn bytes_written(&self) -> usize {
         self.bit_offset / 8 + usize::from(!self.bit_offset.is_multiple_of(8))

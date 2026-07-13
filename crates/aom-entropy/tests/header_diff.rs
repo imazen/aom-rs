@@ -560,3 +560,22 @@ fn write_sequence_header_matches_c() {
         assert_eq!(got, want, "write_sequence_header {s:?}");
     }
 }
+
+#[test]
+fn write_ext_tile_info_matches_c() {
+    use aom_entropy::header::write_ext_tile_info;
+    let mut rng = Rng(0xe471_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let pre_bits = rng.range(0, 40); // arbitrary starting offset
+        let rows = rng.range(1, 9) as usize;
+        let cols = rng.range(1, 9) as usize;
+        let mut wb = WriteBitBuffer::new();
+        for _ in 0..pre_bits {
+            wb.write_bit(0);
+        }
+        write_ext_tile_info(&mut wb, rows, cols);
+        let got = wb.bytes().to_vec();
+        let want = c::ref_write_ext_tile_info(pre_bits, rows, cols);
+        assert_eq!(got, want, "write_ext_tile_info pre={pre_bits} {rows}x{cols}");
+    }
+}

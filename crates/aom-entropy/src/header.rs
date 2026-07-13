@@ -818,3 +818,17 @@ pub fn write_sequence_header(wb: &mut WriteBitBuffer, s: &SequenceHeaderParams) 
     wb.write_bit(s.enable_cdef as u32);
     wb.write_bit(s.enable_restoration as u32);
 }
+
+// ---- ext tile info --------------------------------------------------------
+
+/// `write_ext_tile_info` (`av1/encoder/bitstream.c`, large-scale-tile path):
+/// byte-align (padding governed by the writer's current bit position), then (for >1
+/// tile) the tile-column-size-bytes and tile-size-bytes fields (both written as
+/// 0 = 1 byte here). The `saved_wb` snapshot has no byte effect.
+pub fn write_ext_tile_info(wb: &mut WriteBitBuffer, rows: usize, cols: usize) {
+    wb.byte_align_zeros();
+    if rows * cols > 1 {
+        wb.write_literal(0, 2);
+        wb.write_literal(0, 2);
+    }
+}
