@@ -488,3 +488,22 @@ uint32_t shim_write_motion_mode(uint16_t *obmc_cdf, uint16_t *mm_cdf, int last_a
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+uint32_t shim_write_mb_interp_filter(uint16_t *cdf0, uint16_t *cdf1, int interp_needed,
+                                     int is_switchable, int enable_dual, int f0, int f1,
+                                     uint8_t *out, uint16_t *out0, uint16_t *out1) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (interp_needed && is_switchable) {
+    od_ec_encode_cdf_q15(&ec, f0, cdf0, SWITCHABLE_FILTERS);
+    update_cdf(cdf0, f0, SWITCHABLE_FILTERS);
+    if (enable_dual) {
+      od_ec_encode_cdf_q15(&ec, f1, cdf1, SWITCHABLE_FILTERS);
+      update_cdf(cdf1, f1, SWITCHABLE_FILTERS);
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 4; i++) { out0[i] = cdf0[i]; out1[i] = cdf1[i]; }
+  od_ec_enc_clear(&ec);
+  return nb;
+}

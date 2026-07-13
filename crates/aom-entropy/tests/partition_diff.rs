@@ -836,3 +836,40 @@ fn write_motion_mode_matches_c() {
         assert_eq!(mmc, om, "motion_mode mm cdf");
     }
 }
+
+#[test]
+fn write_mb_interp_filter_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_mb_interp_filter;
+    let mut rng = Rng(0x14f0_c0de_a11a_0009);
+    let mk = |rng: &mut Rng, out: &mut [u16; 4]| {
+        // 3-symbol CDF
+        let mut vals = [1 + (rng.next() % 32766) as i32, 1 + (rng.next() % 32766) as i32];
+        vals.sort_unstable();
+        vals.reverse();
+        out[0] = vals[0].max(2) as u16;
+        out[1] = vals[1].min(out[0] as i32 - 1).max(1) as u16;
+        out[2] = 0;
+        out[3] = 0;
+    };
+    for _ in 0..200_000 {
+        let mut cdf0 = [0u16; 4];
+        let mut cdf1 = [0u16; 4];
+        mk(&mut rng, &mut cdf0);
+        mk(&mut rng, &mut cdf1);
+        let interp_needed = rng.next().is_multiple_of(2);
+        let is_switchable = rng.next().is_multiple_of(2);
+        let enable_dual = rng.next().is_multiple_of(2);
+        let f0 = (rng.next() % 3) as i32;
+        let f1 = (rng.next() % 3) as i32;
+        let mut m0 = cdf0;
+        let mut m1 = cdf1;
+        let mut enc = OdEcEnc::new();
+        write_mb_interp_filter(&mut enc, &mut m0, &mut m1, interp_needed, is_switchable, enable_dual, f0, f1);
+        let got = enc.done().to_vec();
+        let (want, o0, o1) = c::ref_write_mb_interp_filter(&cdf0, &cdf1, interp_needed, is_switchable, enable_dual, f0, f1);
+        assert_eq!(got, want, "interp bytes n={interp_needed} sw={is_switchable} dual={enable_dual}");
+        assert_eq!(m0, o0, "interp cdf0");
+        assert_eq!(m1, o1, "interp cdf1");
+    }
+}

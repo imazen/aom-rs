@@ -599,3 +599,32 @@ pub fn write_motion_mode(
         _ => write_symbol(enc, motion_mode, motion_mode_cdf, MOTION_MODES),
     }
 }
+
+const SWITCHABLE_FILTERS: usize = 3;
+
+/// `write_mb_interp_filter` (`av1/encoder/bitstream.c`): the per-block interpolation
+/// filter. Nothing is coded when interp isn't needed or the frame filter isn't
+/// SWITCHABLE; otherwise the horizontal filter on the ctx-selected
+/// `switchable_interp_cdf` and, when dual-filter is enabled, the vertical filter on its
+/// own ctx-selected CDF (`SWITCHABLE_FILTERS`=3 each). Contexts + gates are the caller's.
+pub fn write_mb_interp_filter(
+    enc: &mut OdEcEnc,
+    cdf0: &mut [u16],
+    cdf1: &mut [u16],
+    interp_needed: bool,
+    is_switchable: bool,
+    enable_dual_filter: bool,
+    filter0: i32,
+    filter1: i32,
+) {
+    if !interp_needed {
+        return;
+    }
+    if is_switchable {
+        write_symbol(enc, filter0, cdf0, SWITCHABLE_FILTERS);
+        if !enable_dual_filter {
+            return;
+        }
+        write_symbol(enc, filter1, cdf1, SWITCHABLE_FILTERS);
+    }
+}

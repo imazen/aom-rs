@@ -243,6 +243,8 @@ extern "C" {
     fn shim_size_group_lookup(bsize: i32) -> i32;
     fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_angle_delta(cdf: *mut u16, angle_delta: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_mb_interp_filter(cdf0: *mut u16, cdf1: *mut u16, interp_needed: i32, is_switchable: i32, enable_dual: i32, f0: i32, f1: i32, out: *mut u8, out0: *mut u16, out1: *mut u16) -> u32;
     fn shim_write_motion_mode(obmc_cdf: *mut u16, mm_cdf: *mut u16, last_allowed: i32, mm: i32, out: *mut u8, out_obmc: *mut u16, out_mm: *mut u16) -> u32;
     fn shim_write_inter_compound_mode(cdf: *mut u16, mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_is_inter(cdf: *mut u16, seg_ref: i32, seg_gmv: i32, is_inter: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
@@ -286,6 +288,14 @@ pub fn ref_encode_mv_component(cdf: &[u16; 69], comp: i32, precision: i32) -> (V
     let n = unsafe { shim_encode_mv_component(c.as_mut_ptr(), comp, precision, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
     out.truncate(n as usize);
     (out, out_cdf)
+}
+
+/// Reference `write_mb_interp_filter`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_mb_interp_filter(cdf0: &[u16; 4], cdf1: &[u16; 4], interp_needed: bool, is_switchable: bool, enable_dual: bool, f0: i32, f1: i32) -> (Vec<u8>, [u16; 4], [u16; 4]) {
+    let mut c0 = *cdf0; let mut c1 = *cdf1; let mut out = vec![0u8; 16]; let mut o0 = [0u16; 4]; let mut o1 = [0u16; 4];
+    let n = unsafe { shim_write_mb_interp_filter(c0.as_mut_ptr(), c1.as_mut_ptr(), interp_needed as i32, is_switchable as i32, enable_dual as i32, f0, f1, out.as_mut_ptr(), o0.as_mut_ptr(), o1.as_mut_ptr()) };
+    out.truncate(n as usize); (out, o0, o1)
 }
 
 /// Reference `write_motion_mode`.
