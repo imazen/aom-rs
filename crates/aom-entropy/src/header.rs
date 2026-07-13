@@ -832,3 +832,69 @@ pub fn write_ext_tile_info(wb: &mut WriteBitBuffer, rows: usize, cols: usize) {
         wb.write_literal(0, 2);
     }
 }
+
+// ---- color config ---------------------------------------------------------
+
+/// The `SequenceHeader` color fields written by `write_color_config`.
+#[derive(Clone, Copy, Debug)]
+pub struct ColorConfigParams {
+    pub bit_depth: i32, // 8, 10, 12
+    pub profile: i32,   // 0, 1, 2
+    pub monochrome: bool,
+    pub color_primaries: i32,
+    pub transfer_characteristics: i32,
+    pub matrix_coefficients: i32,
+    pub color_range: bool,
+    pub subsampling_x: i32,
+    pub subsampling_y: i32,
+    pub chroma_sample_position: i32,
+    pub separate_uv_delta_q: bool,
+}
+
+/// `write_bitdepth` (`av1/encoder/bitstream.c`): the high-bitdepth flag, plus (for
+/// PROFILE_2 above 8-bit) the 10-vs-12-bit selector.
+fn write_bitdepth(wb: &mut WriteBitBuffer, bit_depth: i32, profile: i32) {
+    wb.write_bit((bit_depth != 8) as u32); // AOM_BITS_8 ? 0 : 1
+    if profile == 2 && bit_depth != 8 {
+        wb.write_bit((bit_depth == 12) as u32); // AOM_BITS_10 ? 0 : 1
+    }
+}
+
+/// `write_color_config` (`av1/encoder/bitstream.c`): bit depth, the monochrome flag
+/// (except PROFILE_1), the CICP color description (present flag + primaries/transfer/
+/// matrix), the color range, the profile/bit-depth-gated subsampling, the chroma
+/// sample position (for 4:2:0), and the separate-uv-delta-q flag. The many spec
+/// asserts have no byte effect and are omitted.
+pub fn write_color_config(wb: &mut WriteBitBuffer, c: &ColorConfigParams) {
+    write_bitdepth(wb, c.bit_depth, c.profile);
+    let is_monochrome = c.monochrome;
+    if c.profile != 1 {
+        wb.write_bit(is_monochrome as u32);
+    }
+    if c.color_primaries == 2 && c.transfer_characteristics == 2 && c.matrix_coefficients == 2 {
+        wb.write_bit(0); // no color description
+    } else {
+        wb.write_bit(1); // color description present
+        wb.write_literal(c.color_primaries, 8);
+        wb.write_literal(c.transfer_characteristics, 8);
+        wb.write_literal(c.matrix_coefficients, 8);
+    }
+    if is_monochrome {
+        wb.write_bit(c.color_range as u32);
+        return;
+    }
+    let is_srgb = c.color_primaries == 1 && c.transfer_characteristics == 13 && c.matrix_coefficients == 0;
+    if !is_srgb {
+        wb.write_bit(c.color_range as u32);
+        if c.profile == 2 && c.bit_depth == 12 {
+            wb.write_bit(c.subsampling_x as u32);
+            if c.subsampling_x != 0 {
+                wb.write_bit(c.subsampling_y as u32);
+            }
+        }
+        if c.subsampling_x == 1 && c.subsampling_y == 1 {
+            wb.write_literal(c.chroma_sample_position, 2);
+        }
+    }
+    wb.write_bit(c.separate_uv_delta_q as u32);
+}

@@ -539,3 +539,41 @@ uint32_t shim_write_ext_tile_info(int pre_bits, int rows, int cols, uint8_t *out
   }
   return aom_wb_bytes_written(&wb);
 }
+
+/* write_color_config (+ write_bitdepth), transcribed control flow over the real
+ * aom_wb (spec asserts omitted — no byte effect). Scalars packed in c[]. */
+uint32_t shim_write_color_config(const int *c, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  const int bit_depth = c[0], profile = c[1], monochrome = c[2];
+  const int cp = c[3], tc = c[4], mc = c[5], color_range = c[6];
+  const int ssx = c[7], ssy = c[8], chroma_pos = c[9], sep_uv = c[10];
+
+  /* write_bitdepth */
+  aom_wb_write_bit(&wb, bit_depth != 8);
+  if (profile == 2 && bit_depth != 8) aom_wb_write_bit(&wb, bit_depth == 12);
+
+  if (profile != 1) aom_wb_write_bit(&wb, monochrome);
+  if (cp == 2 && tc == 2 && mc == 2) {
+    aom_wb_write_bit(&wb, 0);
+  } else {
+    aom_wb_write_bit(&wb, 1);
+    aom_wb_write_literal(&wb, cp, 8);
+    aom_wb_write_literal(&wb, tc, 8);
+    aom_wb_write_literal(&wb, mc, 8);
+  }
+  if (monochrome) {
+    aom_wb_write_bit(&wb, color_range);
+    return aom_wb_bytes_written(&wb);
+  }
+  int is_srgb = (cp == 1 && tc == 13 && mc == 0);
+  if (!is_srgb) {
+    aom_wb_write_bit(&wb, color_range);
+    if (profile == 2 && bit_depth == 12) {
+      aom_wb_write_bit(&wb, ssx);
+      if (ssx != 0) aom_wb_write_bit(&wb, ssy);
+    }
+    if (ssx == 1 && ssy == 1) aom_wb_write_literal(&wb, chroma_pos, 2);
+  }
+  aom_wb_write_bit(&wb, sep_uv);
+  return aom_wb_bytes_written(&wb);
+}

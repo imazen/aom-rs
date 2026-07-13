@@ -579,3 +579,48 @@ fn write_ext_tile_info_matches_c() {
         assert_eq!(got, want, "write_ext_tile_info pre={pre_bits} {rows}x{cols}");
     }
 }
+
+#[test]
+fn write_color_config_matches_c() {
+    use aom_entropy::header::{write_color_config, ColorConfigParams};
+    let mut rng = Rng(0xc010_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let profile = rng.range(0, 3); // 0,1,2
+        let bit_depth = if profile == 2 {
+            [8, 10, 12][rng.range(0, 3) as usize]
+        } else {
+            [8, 10][rng.range(0, 2) as usize]
+        };
+        // profile 1 forbids monochrome (asserted); keep it spec-valid.
+        let monochrome = profile != 1 && rng.next().is_multiple_of(3);
+        // color description: unspecified triple, the sRGB triple, or random CICP.
+        let (cp, tc, mc) = match rng.range(0, 3) {
+            0 => (2, 2, 2),   // all unspecified -> no description
+            1 => (1, 13, 0),  // sRGB special case
+            _ => (rng.range(0, 256), rng.range(0, 256), rng.range(0, 256)),
+        };
+        let c = ColorConfigParams {
+            bit_depth,
+            profile,
+            monochrome,
+            color_primaries: cp,
+            transfer_characteristics: tc,
+            matrix_coefficients: mc,
+            color_range: rng.next().is_multiple_of(2),
+            subsampling_x: rng.range(0, 2),
+            subsampling_y: rng.range(0, 2),
+            chroma_sample_position: rng.range(0, 4),
+            separate_uv_delta_q: rng.next().is_multiple_of(2),
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_color_config(&mut wb, &c);
+        let got = wb.bytes().to_vec();
+        let packed = [
+            c.bit_depth, c.profile, c.monochrome as i32, c.color_primaries,
+            c.transfer_characteristics, c.matrix_coefficients, c.color_range as i32,
+            c.subsampling_x, c.subsampling_y, c.chroma_sample_position, c.separate_uv_delta_q as i32,
+        ];
+        let want = c::ref_write_color_config(&packed);
+        assert_eq!(got, want, "write_color_config {c:?}");
+    }
+}

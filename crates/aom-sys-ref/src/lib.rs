@@ -215,6 +215,16 @@ extern "C" {
     fn shim_write_global_motion(wmtype: *const i32, wmmat: *const i32, refmat: *const i32, allow_hp: i32, out: *mut u8) -> u32;
     fn shim_write_sequence_header(s: *const i32, out: *mut u8) -> u32;
     fn shim_write_ext_tile_info(pre_bits: i32, rows: i32, cols: i32, out: *mut u8) -> u32;
+    fn shim_write_color_config(c: *const i32, out: *mut u8) -> u32;
+}
+
+/// Reference `write_color_config` (transcribed control flow over the real aom_wb).
+/// `c` packs the 11 scalars in the order the shim reads them.
+pub fn ref_write_color_config(c: &[i32; 11]) -> Vec<u8> {
+    let mut out = vec![0u8; 16];
+    let n = unsafe { shim_write_color_config(c.as_ptr(), out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `write_ext_tile_info` after `pre_bits` zero bits (transcribed over the real aom_wb).
