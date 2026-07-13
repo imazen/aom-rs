@@ -2755,3 +2755,38 @@ fn get_partition_subsize_matches_c() {
         assert_eq!(get_partition_subsize(bsize, 255), c::ref_get_partition_subsize(bsize as i32, 255), "bsize={bsize} part=INVALID");
     }
 }
+
+#[test]
+fn update_ext_partition_context_matches_c() {
+    use aom_entropy::partition::{get_partition_subsize, update_ext_partition_context};
+    let mut rng = Rng(0x1e_c07e_c0de_0018u64);
+    // square bsizes >= BLOCK_8X8 and their width in mi units.
+    let sizes = [(3usize, 2i32), (6, 4), (9, 8), (12, 16), (15, 32)];
+    for _ in 0..200_000 {
+        let (bsize, mi_sz) = sizes[(rng.next() % 5) as usize];
+        let partition = (rng.next() % 10) as i32;
+        let subsize = get_partition_subsize(bsize, partition);
+        if subsize == 255 {
+            continue; // partition illegal for this size; write_modes_sb never emits it
+        }
+        // Aligned position so every stamp stays within above[64] / left[32].
+        let rows = 32 / mi_sz;
+        let cols = (64 / mi_sz).min(32 / mi_sz.max(1)); // keep col stamps < 32 too for the extended cases
+        let mi_row = ((rng.next() % rows.max(1) as u64) as i32) * mi_sz;
+        let mi_col = ((rng.next() % cols.max(1) as u64) as i32) * mi_sz;
+        let mut above_in = [0i8; 64];
+        let mut left_in = [0i8; 32];
+        for a in above_in.iter_mut() {
+            *a = (rng.next() % 32) as i8;
+        }
+        for l in left_in.iter_mut() {
+            *l = (rng.next() % 32) as i8;
+        }
+        let mut a_rs = above_in;
+        let mut l_rs = left_in;
+        update_ext_partition_context(&mut a_rs, &mut l_rs, mi_row, mi_col, subsize as usize, bsize, partition);
+        let (a_c, l_c) = c::ref_update_ext_partition_context(mi_row, mi_col, subsize, bsize as i32, partition, &above_in, &left_in);
+        assert_eq!(a_rs, a_c, "above bsize={bsize} part={partition} r={mi_row} c={mi_col}");
+        assert_eq!(l_rs, l_c, "left bsize={bsize} part={partition} r={mi_row} c={mi_col}");
+    }
+}

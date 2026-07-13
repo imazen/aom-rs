@@ -296,6 +296,8 @@ extern "C" {
     fn shim_collect_neighbors_ref_counts(ha: i32, a_intrabc: i32, a_rf0: i32, a_rf1: i32, hl: i32, l_intrabc: i32, l_rf0: i32, l_rf1: i32, out_counts: *mut u8);
     fn shim_get_partition_subsize(bsize: i32, partition: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_update_ext_partition_context(mi_row: i32, mi_col: i32, subsize: i32, bsize: i32, partition: i32, above_in: *const i8, left_in: *const i8, above_out: *mut i8, left_out: *mut i8);
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_block_mvs(mode: i32, is_compound: i32, diff_row0: i32, diff_col0: i32, diff_row1: i32, diff_col1: i32, usehp: i32, joints: *mut u16, comp0: *mut u16, comp1: *mut u16, out: *mut u8, o_joints: *mut u16, o_c0: *mut u16, o_c1: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_mode_drl(seg_skip: i32, mode: i32, mode_ctx: i32, inter_compound_mode_cdf: *mut u16, newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, drl_cdf: *mut u16, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, o_icm: *mut u16, o_newmv: *mut u16, o_zeromv: *mut u16, o_refmv: *mut u16, o_drl: *mut u16) -> u32;
@@ -627,6 +629,21 @@ pub fn ref_collect_neighbors_ref_counts(
 /// Reference `get_partition_subsize` (static inline, common_data.h).
 pub fn ref_get_partition_subsize(bsize: i32, partition: i32) -> i32 {
     unsafe { shim_get_partition_subsize(bsize, partition) }
+}
+
+/// Reference `update_ext_partition_context` (facade). above is a 64-slot buffer, left a
+/// 32-slot (MAX_MIB_SIZE) buffer. Returns the updated (above[64], left[32]).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_update_ext_partition_context(
+    mi_row: i32, mi_col: i32, subsize: i32, bsize: i32, partition: i32,
+    above_in: &[i8; 64], left_in: &[i8; 32],
+) -> ([i8; 64], [i8; 32]) {
+    let (mut ao, mut lo) = ([0i8; 64], [0i8; 32]);
+    unsafe {
+        shim_update_ext_partition_context(mi_row, mi_col, subsize, bsize, partition,
+            above_in.as_ptr(), left_in.as_ptr(), ao.as_mut_ptr(), lo.as_mut_ptr())
+    };
+    (ao, lo)
 }
 
 /// Reference inter-block MV coding (the mode-dependent av1_encode_mv calls, over pristine

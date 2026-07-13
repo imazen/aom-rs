@@ -2027,3 +2027,20 @@ void shim_collect_neighbors_ref_counts(int ha, int a_intrabc, int a_rf0, int a_r
 int shim_get_partition_subsize(int bsize, int partition) {
   return get_partition_subsize((BLOCK_SIZE)bsize, (PARTITION_TYPE)partition);
 }
+
+/* --- update_ext_partition_context (av1_common_int.h) --- */
+/* Facade over the real fn: above_partition_context is a pointer (64-slot buffer here),
+ * left_partition_context is inline char[MAX_MIB_SIZE=32]. Threads both in/out. */
+void shim_update_ext_partition_context(int mi_row, int mi_col, int subsize, int bsize,
+    int partition, const signed char *above_in, const signed char *left_in,
+    signed char *above_out, signed char *left_out) {
+  MACROBLOCKD xd;
+  static signed char above[64];
+  for (int i = 0; i < 64; i++) above[i] = above_in[i];
+  for (int i = 0; i < 32; i++) xd.left_partition_context[i] = left_in[i];
+  xd.above_partition_context = (PARTITION_CONTEXT *)above;
+  update_ext_partition_context(&xd, mi_row, mi_col, (BLOCK_SIZE)subsize, (BLOCK_SIZE)bsize,
+                               (PARTITION_TYPE)partition);
+  for (int i = 0; i < 64; i++) above_out[i] = above[i];
+  for (int i = 0; i < 32; i++) left_out[i] = xd.left_partition_context[i];
+}

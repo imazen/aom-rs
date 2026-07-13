@@ -2540,3 +2540,71 @@ pub fn get_partition_subsize(bsize: usize, partition: i32) -> i32 {
     }
     SUBSIZE_LOOKUP[partition as usize][idx] as i32
 }
+
+/// `partition_context_lookup[BLOCK_SIZES_ALL]` (`common_data.h`): the (above, left)
+/// partition-context bytes a block of each size stamps into the neighbour context.
+const PARTITION_CONTEXT_LOOKUP: [(i8, i8); 22] = [
+    (31, 31), (31, 30), (30, 31), (30, 30), (30, 28), (28, 30), (28, 28), (28, 24),
+    (24, 28), (24, 24), (24, 16), (16, 24), (16, 16), (16, 0), (0, 16), (0, 0),
+    (31, 28), (28, 31), (30, 24), (24, 30), (28, 16), (16, 28),
+];
+
+/// `update_partition_context` (`av1_common_int.h`): stamp `subsize`'s context bytes over
+/// `above[mi_col..+bw]` and `left[(mi_row & MAX_MIB_MASK)..+bh]` (bw/bh from `bsize`).
+fn update_partition_context(above: &mut [i8], left: &mut [i8], mi_row: i32, mi_col: i32, subsize: usize, bsize: usize) {
+    let (a, l) = PARTITION_CONTEXT_LOOKUP[subsize];
+    let bw = MI_SIZE_WIDE[bsize] as usize;
+    let bh = MI_SIZE_HIGH[bsize] as usize;
+    let ac = mi_col as usize;
+    let lc = (mi_row & MAX_MIB_MASK as i32) as usize;
+    for x in above[ac..ac + bw].iter_mut() {
+        *x = a;
+    }
+    for x in left[lc..lc + bh].iter_mut() {
+        *x = l;
+    }
+}
+
+/// `update_ext_partition_context` (`av1_common_int.h`): after coding a partition, update
+/// the neighbour partition context for the sub-blocks it created — one stamp for the
+/// simple splits, two for the extended (HORZ_A/B, VERT_A/B) types.
+pub fn update_ext_partition_context(above: &mut [i8], left: &mut [i8], mi_row: i32, mi_col: i32, subsize: usize, bsize: usize, partition: i32) {
+    if bsize < BLOCK_8X8 {
+        return;
+    }
+    let hbs = MI_SIZE_WIDE[bsize] / 2;
+    let bsize2 = get_partition_subsize(bsize, PARTITION_SPLIT as i32) as usize;
+    match partition {
+        3 => {
+            // PARTITION_SPLIT: only BLOCK_8X8 falls through to the stamp.
+            if bsize == BLOCK_8X8 {
+                update_partition_context(above, left, mi_row, mi_col, subsize, bsize);
+            }
+        }
+        0 | 1 | 2 | 8 | 9 => {
+            // NONE / HORZ / VERT / HORZ_4 / VERT_4
+            update_partition_context(above, left, mi_row, mi_col, subsize, bsize);
+        }
+        4 => {
+            // HORZ_A
+            update_partition_context(above, left, mi_row, mi_col, bsize2, subsize);
+            update_partition_context(above, left, mi_row + hbs, mi_col, subsize, subsize);
+        }
+        5 => {
+            // HORZ_B
+            update_partition_context(above, left, mi_row, mi_col, subsize, subsize);
+            update_partition_context(above, left, mi_row + hbs, mi_col, bsize2, subsize);
+        }
+        6 => {
+            // VERT_A
+            update_partition_context(above, left, mi_row, mi_col, bsize2, subsize);
+            update_partition_context(above, left, mi_row, mi_col + hbs, subsize, subsize);
+        }
+        7 => {
+            // VERT_B
+            update_partition_context(above, left, mi_row, mi_col, subsize, subsize);
+            update_partition_context(above, left, mi_row, mi_col + hbs, bsize2, subsize);
+        }
+        _ => {}
+    }
+}
