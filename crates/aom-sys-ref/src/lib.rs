@@ -715,6 +715,66 @@ pub fn ref_quantize_b(
     (qcoeff, dqcoeff, eob)
 }
 
+/// Reference `aom_quantize_b_helper_c` *with* a quant matrix (`qm`/`iqm` indexed
+/// by raster position). Returns (qcoeff, dqcoeff, eob).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_quantize_b_qm(
+    log_scale: i32,
+    coeff: &[i32],
+    zbin: &[i16; 2],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    quant_shift: &[i16; 2],
+    dequant: &[i16; 2],
+    qm: &[u8],
+    iqm: &[u8],
+    scan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
+    let n = coeff.len();
+    let mut qcoeff = vec![0i32; n];
+    let mut dqcoeff = vec![0i32; n];
+    let mut eob: u16 = 0;
+    let dummy = vec![0i16; n.max(2)];
+    unsafe {
+        aom_quantize_b_helper_c(
+            coeff.as_ptr(), n as isize, zbin.as_ptr(), round.as_ptr(), quant.as_ptr(),
+            quant_shift.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
+            &mut eob, scan.as_ptr(), dummy.as_ptr(), qm.as_ptr(), iqm.as_ptr(), log_scale,
+        )
+    }
+    (qcoeff, dqcoeff, eob)
+}
+
+/// Reference `aom_highbd_quantize_b_helper_c` *with* a quant matrix. Returns
+/// (qcoeff, dqcoeff, eob).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_highbd_quantize_b_qm(
+    log_scale: i32,
+    coeff: &[i32],
+    zbin: &[i16; 2],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    quant_shift: &[i16; 2],
+    dequant: &[i16; 2],
+    qm: &[u8],
+    iqm: &[u8],
+    scan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
+    let n = coeff.len();
+    let mut qcoeff = vec![0i32; n];
+    let mut dqcoeff = vec![0i32; n];
+    let mut eob: u16 = 0;
+    let dummy = vec![0i16; n.max(2)];
+    unsafe {
+        aom_highbd_quantize_b_helper_c(
+            coeff.as_ptr(), n as isize, zbin.as_ptr(), round.as_ptr(), quant.as_ptr(),
+            quant_shift.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
+            &mut eob, scan.as_ptr(), dummy.as_ptr(), qm.as_ptr(), iqm.as_ptr(), log_scale,
+        )
+    }
+    (qcoeff, dqcoeff, eob)
+}
+
 /// Reference inverse 2-D transform+add for `tx_size` (0..19). `dest` is the
 /// bd-bit pixel buffer to reconstruct onto (modified in place).
 pub fn ref_inv_txfm2d_add(

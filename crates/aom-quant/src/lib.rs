@@ -143,6 +143,80 @@ pub fn aom_quantize_b_no_qmatrix(
     (eob + 1) as u16
 }
 
+/// Bit-exact port of `aom_quantize_b_helper_c` (`aom_dsp/quantize.c`) *with* a
+/// quant matrix: `qm[rc]` weights the coefficient (`wt`), `iqm[rc]` weights the
+/// dequant (`iwt`). This is the general form of [`aom_quantize_b_no_qmatrix`]
+/// (`wt = iwt = 1<<AOM_QM_BITS`). `qm`/`iqm` are indexed by raster position `rc`
+/// (same length as `coeff`). Integer widths mirror the C exactly (`coeff*wt`,
+/// `abs_coeff*wt`, `dequant` are 32-bit; the round/quant chain is 64-bit).
+// Scan/eob indexing (reverse-break pre-scan + `eob = i` forward pass) mirrors the
+// C `for` loops 1:1, so the index is load-bearing — keep the explicit `scan[i]`.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn aom_quantize_b_qm(
+    zbin: &[i16; 2],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    quant_shift: &[i16; 2],
+    dequant: &[i16; 2],
+    log_scale: i32,
+    qm: &[u8],
+    iqm: &[u8],
+    scan: &[i16],
+    coeff: &[i32],
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+) -> u16 {
+    let n = coeff.len();
+    let zbins = [
+        round_power_of_two(zbin[0] as i32, log_scale),
+        round_power_of_two(zbin[1] as i32, log_scale),
+    ];
+    let nzbins = [-zbins[0], -zbins[1]];
+    qcoeff[..n].fill(0);
+    dqcoeff[..n].fill(0);
+
+    // Pre-scan pass (from the end): trim trailing dead-zone coefficients.
+    let mut non_zero_count = n as i32;
+    for i in (0..n).rev() {
+        let rc = scan[i] as usize;
+        let ac = (rc != 0) as usize;
+        let wt = qm[rc] as i32;
+        let c = coeff[rc].wrapping_mul(wt);
+        if c < zbins[ac].wrapping_mul(1 << AOM_QM_BITS) && c > nzbins[ac].wrapping_mul(1 << AOM_QM_BITS) {
+            non_zero_count -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut eob: i32 = -1;
+    for i in 0..non_zero_count as usize {
+        let rc = scan[i] as usize;
+        let ac = (rc != 0) as usize;
+        let coeff_v = coeff[rc];
+        let coeff_sign = aomsign(coeff_v);
+        let abs_coeff = (coeff_v ^ coeff_sign).wrapping_sub(coeff_sign);
+        let wt = qm[rc] as i32;
+        if abs_coeff.wrapping_mul(wt) >= (zbins[ac] << AOM_QM_BITS) {
+            let clamped = (abs_coeff.wrapping_add(round_power_of_two(round[ac] as i32, log_scale)))
+                .clamp(i16::MIN as i32, i16::MAX as i32);
+            let mut tmp = clamped as i64;
+            tmp *= wt as i64;
+            let tmp32 = (((((tmp * quant[ac] as i64) >> 16) + tmp) * quant_shift[ac] as i64)
+                >> (16 - log_scale + AOM_QM_BITS)) as i32;
+            qcoeff[rc] = (tmp32 ^ coeff_sign).wrapping_sub(coeff_sign);
+            let iwt = iqm[rc] as i32;
+            let dequant_v = (dequant[ac] as i32 * iwt + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS;
+            let abs_dqcoeff = tmp32.wrapping_mul(dequant_v) >> log_scale;
+            dqcoeff[rc] = (abs_dqcoeff ^ coeff_sign).wrapping_sub(coeff_sign);
+            if tmp32 != 0 {
+                eob = i as i32;
+            }
+        }
+    }
+    (eob + 1) as u16
+}
+
 /// `av1_quantize_fp` (log_scale 0). Signature mirrors the C entry (unused
 /// `zbin`/`quant_shift`/`iscan` args omitted).
 #[allow(clippy::too_many_arguments)]
@@ -282,6 +356,73 @@ pub fn aom_highbd_quantize_b_no_qmatrix(
         qcoeff[rc] = (abs_qcoeff ^ sign).wrapping_sub(sign);
         // iwt = 32: dequant = (dequant*32 + 16) >> 5 == dequant.
         let dq = ((dequant[rc01] as i32 * (1 << AOM_QM_BITS)) + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS;
+        let abs_dqcoeff = abs_qcoeff.wrapping_mul(dq) >> log_scale;
+        dqcoeff[rc] = (abs_dqcoeff ^ sign).wrapping_sub(sign);
+        if abs_qcoeff != 0 {
+            eob = ii as i32;
+        }
+    }
+    (eob + 1) as u16
+}
+
+/// Bit-exact port of `aom_highbd_quantize_b_helper_c` (`aom_dsp/quantize.c`)
+/// *with* a quant matrix: general form of [`aom_highbd_quantize_b_no_qmatrix`]
+/// with per-position `wt = qm[rc]` / `iwt = iqm[rc]`. Integer widths mirror the
+/// C exactly (`coeff*wt` and `dequant` are 32-bit; the quant chain is 64-bit).
+#[allow(clippy::too_many_arguments)]
+pub fn aom_highbd_quantize_b_qm(
+    zbin: &[i16; 2],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    quant_shift: &[i16; 2],
+    dequant: &[i16; 2],
+    log_scale: i32,
+    qm: &[u8],
+    iqm: &[u8],
+    scan: &[i16],
+    coeff: &[i32],
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+) -> u16 {
+    let n = coeff.len();
+    qcoeff[..n].fill(0);
+    dqcoeff[..n].fill(0);
+    let zbins = [
+        round_power_of_two(zbin[0] as i32, log_scale),
+        round_power_of_two(zbin[1] as i32, log_scale),
+    ];
+    let nzbins = [-zbins[0], -zbins[1]];
+
+    // Pre-scan pass (forward): keep coeffs outside the ZBIN dead-zone. `coeff*wt`
+    // is 32-bit in C.
+    let mut idx_arr = Vec::with_capacity(n);
+    for (i, &sc) in scan[..n].iter().enumerate() {
+        let rc = sc as usize;
+        let ac = (rc != 0) as usize;
+        let wt = qm[rc] as i32;
+        let coeff_w = coeff[rc].wrapping_mul(wt);
+        if coeff_w >= zbins[ac].wrapping_mul(1 << AOM_QM_BITS)
+            || coeff_w <= nzbins[ac].wrapping_mul(1 << AOM_QM_BITS)
+        {
+            idx_arr.push(i);
+        }
+    }
+
+    let mut eob: i32 = -1;
+    for &ii in &idx_arr {
+        let rc = scan[ii] as usize;
+        let rc01 = (rc != 0) as usize;
+        let coeff_v = coeff[rc];
+        let sign = aomsign(coeff_v);
+        let wt = qm[rc] as i64;
+        let iwt = iqm[rc] as i32;
+        let abs_coeff = ((coeff_v ^ sign).wrapping_sub(sign)) as i64;
+        let tmp1 = abs_coeff + round_power_of_two(round[rc01] as i32, log_scale) as i64;
+        let tmpw = tmp1 * wt;
+        let tmp2 = ((tmpw * quant[rc01] as i64) >> 16) + tmpw;
+        let abs_qcoeff = ((tmp2 * quant_shift[rc01] as i64) >> (16 - log_scale + AOM_QM_BITS)) as i32;
+        qcoeff[rc] = (abs_qcoeff ^ sign).wrapping_sub(sign);
+        let dq = (dequant[rc01] as i32 * iwt + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS;
         let abs_dqcoeff = abs_qcoeff.wrapping_mul(dq) >> log_scale;
         dqcoeff[rc] = (abs_dqcoeff ^ sign).wrapping_sub(sign);
         if abs_qcoeff != 0 {
