@@ -89,3 +89,38 @@ uint32_t shim_write_skip(uint16_t *skip_cdf, int seg_skip_active, int skip_txfm,
   od_ec_enc_clear(&ec);
   return n;
 }
+
+/* Transcribed write_delta_qindex over pristine C od_ec: symbol + exp-Golomb literals
+ * + sign, matching aom_write_symbol / aom_write_literal / aom_write_bit. */
+#include "aom_ports/bitops.h" /* get_msb */
+static void mi_bit(od_ec_enc *ec, int bit) {
+  int p = (0x7FFFFF - (128 << 15) + 128) >> 8;
+  od_ec_encode_bool_q15(ec, bit, p);
+}
+static void mi_literal(od_ec_enc *ec, int data, int bits) {
+  for (int b = bits - 1; b >= 0; b--) mi_bit(ec, (data >> b) & 1);
+}
+uint32_t shim_write_delta_qindex(uint16_t *delta_q_cdf, int delta_qindex, uint8_t *out,
+                                 uint16_t *out_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  int sign = delta_qindex < 0;
+  int a = sign ? -delta_qindex : delta_qindex;
+  int smallval = a < DELTA_Q_SMALL;
+  int sym = a < DELTA_Q_SMALL ? a : DELTA_Q_SMALL;
+  od_ec_encode_cdf_q15(&ec, sym, delta_q_cdf, DELTA_Q_PROBS + 1);
+  update_cdf(delta_q_cdf, sym, DELTA_Q_PROBS + 1);
+  if (!smallval) {
+    int rem_bits = get_msb(a - 1);
+    int thr = (1 << rem_bits) + 1;
+    mi_literal(&ec, rem_bits - 1, 3);
+    mi_literal(&ec, a - thr, rem_bits);
+  }
+  if (a > 0) mi_bit(&ec, sign);
+  uint32_t n = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &n);
+  for (uint32_t i = 0; i < n; i++) out[i] = buf[i];
+  for (int i = 0; i < DELTA_Q_PROBS + 2; i++) out_cdf[i] = delta_q_cdf[i];
+  od_ec_enc_clear(&ec);
+  return n;
+}

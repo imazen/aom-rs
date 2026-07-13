@@ -235,6 +235,7 @@ extern "C" {
     fn shim_write_partition(partition_cdf: *mut u16, cdf_len: i32, p: i32, has_rows: i32, has_cols: i32, bsize: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_skip_txfm_context(above_present: i32, above_skip: i32, left_present: i32, left_skip: i32) -> i32;
     fn shim_write_skip(skip_cdf: *mut u16, seg_skip_active: i32, skip_txfm: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_delta_qindex(delta_q_cdf: *mut u16, delta_qindex: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
 }
@@ -242,6 +243,16 @@ extern "C" {
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `write_delta_qindex` (transcribed over the pristine C od_ec + update_cdf).
+pub fn ref_write_delta_qindex(delta_q_cdf: &[u16; 5], delta_qindex: i32) -> (Vec<u8>, [u16; 5]) {
+    let mut cdf = *delta_q_cdf;
+    let mut out = vec![0u8; 16];
+    let mut out_cdf = [0u16; 5];
+    let n = unsafe { shim_write_delta_qindex(cdf.as_mut_ptr(), delta_qindex, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    out.truncate(n as usize);
+    (out, out_cdf)
 }
 
 /// Reference `av1_get_skip_txfm_context` (facade over the real static inline).

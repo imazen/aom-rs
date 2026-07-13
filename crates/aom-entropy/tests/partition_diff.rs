@@ -192,3 +192,39 @@ fn write_skip_matches_c() {
         assert_eq!(r, want_ret, "write_skip return seg={seg_skip} s={skip_txfm}");
     }
 }
+
+#[test]
+fn write_delta_qindex_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_delta_qindex;
+    let mut rng = Rng(0xd17a_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        // valid 4-symbol CDF (DELTA_Q_PROBS+1): cdf[0..2] descending, cdf[3]=0, cdf[4]=count=0
+        let mut vals = [0i32; 3];
+        for v in &mut vals {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals.sort_unstable();
+        vals.reverse();
+        let mut cdf = [0u16; 5];
+        let mut prev = 32768i32;
+        for i in 0..3 {
+            let v = vals[i].min(prev - 1).max((3 - i) as i32);
+            cdf[i] = v as u16;
+            prev = v;
+        }
+        cdf[3] = 0;
+        cdf[4] = 0;
+        // delta in [-255, 255] exercises smallval + exp-Golomb remainder + sign
+        let delta_qindex = (rng.next() % 511) as i32 - 255;
+
+        let mut my_cdf = cdf;
+        let mut enc = OdEcEnc::new();
+        write_delta_qindex(&mut enc, &mut my_cdf, delta_qindex);
+        let got = enc.done().to_vec();
+
+        let (want, want_cdf) = c::ref_write_delta_qindex(&cdf, delta_qindex);
+        assert_eq!(got, want, "write_delta_qindex bytes dq={delta_qindex}");
+        assert_eq!(my_cdf, want_cdf, "write_delta_qindex cdf dq={delta_qindex}");
+    }
+}

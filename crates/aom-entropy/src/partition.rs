@@ -150,3 +150,33 @@ pub fn write_skip(enc: &mut OdEcEnc, skip_cdf: &mut [u16], seg_skip_active: bool
     write_symbol(enc, skip_txfm, skip_cdf, 2);
     skip_txfm
 }
+
+use crate::cdf::{write_bit, write_literal};
+
+const DELTA_Q_SMALL: i32 = 3;
+const DELTA_Q_PROBS: usize = 3;
+
+/// `get_msb`: index of the most-significant set bit (`floor(log2(n))`), `n > 0`.
+fn get_msb(n: u32) -> u32 {
+    31 - n.leading_zeros()
+}
+
+/// `write_delta_qindex` (`av1/encoder/bitstream.c`): the per-superblock delta-q — the
+/// clamped magnitude symbol `min(|dq|, DELTA_Q_SMALL)` on the 4-symbol delta-q CDF
+/// (adapted), then for large magnitudes the exp-Golomb remainder (`rem_bits-1` in 3
+/// bits + `|dq|-thr` in `rem_bits`), and the sign bit when nonzero.
+pub fn write_delta_qindex(enc: &mut OdEcEnc, delta_q_cdf: &mut [u16], delta_qindex: i32) {
+    let sign = delta_qindex < 0;
+    let abs = delta_qindex.abs();
+    let smallval = abs < DELTA_Q_SMALL;
+    write_symbol(enc, abs.min(DELTA_Q_SMALL), delta_q_cdf, DELTA_Q_PROBS + 1);
+    if !smallval {
+        let rem_bits = get_msb((abs - 1) as u32) as i32;
+        let thr = (1 << rem_bits) + 1;
+        write_literal(enc, rem_bits - 1, 3);
+        write_literal(enc, abs - thr, rem_bits as u32);
+    }
+    if abs > 0 {
+        write_bit(enc, sign as i32);
+    }
+}

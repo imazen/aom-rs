@@ -42,3 +42,17 @@ pub fn read_symbol(dec: &mut OdEcDec, cdf: &mut [u16], nsymbs: usize) -> i32 {
     update_cdf(cdf, ret, nsymbs);
     ret
 }
+
+/// `aom_write_bit` = `aom_write(w, bit, 128)` — a single bit at probability 1/2 on
+/// the od_ec coder.
+pub fn write_bit(enc: &mut OdEcEnc, bit: i32) {
+    let p = ((0x7F_FFFF - (128 << 15) + 128) >> 8) as u32;
+    enc.encode_bool_q15(bit, p);
+}
+
+/// `aom_write_literal`: the low `bits` of `data`, MSB-first, each via [`write_bit`].
+pub fn write_literal(enc: &mut OdEcEnc, data: i32, bits: u32) {
+    for bit in (0..bits).rev() {
+        write_bit(enc, (data >> bit) & 1);
+    }
+}
