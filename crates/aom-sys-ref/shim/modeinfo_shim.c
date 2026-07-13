@@ -204,3 +204,21 @@ uint32_t shim_write_intra_y_mode_kf(uint16_t *kf_y_cdf, int mode, uint8_t *out,
   od_ec_enc_clear(&ec);
   return n;
 }
+
+int shim_size_group_lookup(int bsize) { return size_group_lookup[bsize]; }
+
+/* write_intra_uv_mode symbol (UV_INTRA_MODES - !cfl_allowed) over pristine C od_ec. */
+uint32_t shim_write_intra_uv_mode(uint16_t *uv_mode_cdf, int uv_mode, int cfl_allowed,
+                                  uint8_t *out, uint16_t *out_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  int n = UV_INTRA_MODES - !cfl_allowed;
+  od_ec_encode_cdf_q15(&ec, uv_mode, uv_mode_cdf, n);
+  update_cdf(uv_mode_cdf, uv_mode, n);
+  uint32_t nb = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < UV_INTRA_MODES + 1; i++) out_cdf[i] = uv_mode_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

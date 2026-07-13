@@ -363,3 +363,46 @@ fn write_intra_y_mode_kf_matches_c() {
         assert_eq!(my_cdf, want_cdf, "intra_y_kf cdf mode={mode}");
     }
 }
+
+#[test]
+fn size_group_lookup_matches_c() {
+    use aom_entropy::partition::y_mode_size_group;
+    for bsize in 0..22 {
+        assert_eq!(y_mode_size_group(bsize as usize), c::ref_size_group_lookup(bsize) as usize, "size_group {bsize}");
+    }
+}
+
+#[test]
+fn write_intra_uv_mode_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_intra_uv_mode;
+    let mut rng = Rng(0x00e5_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let cfl_allowed = rng.next().is_multiple_of(2);
+        let ns = if cfl_allowed { 14 } else { 13 };
+        // valid ns-symbol CDF in a 15-entry buffer (UV_INTRA_MODES+1)
+        let mut vals = [0i32; 14];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut cdf = [0u16; 15];
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            cdf[i] = v as u16;
+            prev = v;
+        }
+        cdf[ns - 1] = 0;
+        cdf[ns] = 0;
+        let uv_mode = (rng.next() % ns as u64) as i32;
+        let mut my_cdf = cdf;
+        let mut enc = OdEcEnc::new();
+        write_intra_uv_mode(&mut enc, &mut my_cdf, uv_mode, cfl_allowed);
+        let got = enc.done().to_vec();
+        let (want, want_cdf) = c::ref_write_intra_uv_mode(&cdf, uv_mode, cfl_allowed);
+        assert_eq!(got, want, "uv_mode bytes cfl={cfl_allowed} m={uv_mode}");
+        assert_eq!(&my_cdf[..ns + 1], &want_cdf[..ns + 1], "uv_mode cdf cfl={cfl_allowed} m={uv_mode}");
+    }
+}

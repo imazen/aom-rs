@@ -264,3 +264,29 @@ pub fn get_y_mode_ctx(above_mode: Option<i32>, left_mode: Option<i32>) -> (usize
 pub fn write_intra_y_mode_kf(enc: &mut OdEcEnc, kf_y_cdf: &mut [u16], mode: i32) {
     write_symbol(enc, mode, kf_y_cdf, INTRA_MODES);
 }
+
+const UV_INTRA_MODES: usize = 14;
+/// `size_group_lookup[BLOCK_SIZES_ALL]` (`common_data.h`): the non-keyframe Y-mode CDF
+/// context (one of 4 size groups) for a block size.
+const SIZE_GROUP_LOOKUP: [usize; 22] =
+    [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 0, 0, 1, 1, 2, 2];
+
+/// `size_group_lookup[bsize]` — selects `y_mode_cdf[size_group]` for non-keyframe intra.
+pub fn y_mode_size_group(bsize: usize) -> usize {
+    SIZE_GROUP_LOOKUP[bsize]
+}
+
+/// `write_intra_y_mode_nonkf` (`av1/encoder/bitstream.c`): the non-keyframe intra luma
+/// mode — `aom_write_symbol(mode, y_mode_cdf[size_group_lookup[bsize]], INTRA_MODES)`
+/// (adapted). Same symbol write as the keyframe variant on a size-group-selected CDF.
+pub fn write_intra_y_mode_nonkf(enc: &mut OdEcEnc, y_mode_cdf: &mut [u16], mode: i32) {
+    write_symbol(enc, mode, y_mode_cdf, INTRA_MODES);
+}
+
+/// `write_intra_uv_mode` (`av1/encoder/bitstream.c`): the intra chroma mode on the
+/// (cfl-allowed, y-mode)-selected CDF — `UV_INTRA_MODES` symbols when CFL is allowed,
+/// one fewer (no CFL_PRED) when not.
+pub fn write_intra_uv_mode(enc: &mut OdEcEnc, uv_mode_cdf: &mut [u16], uv_mode: i32, cfl_allowed: bool) {
+    let n = UV_INTRA_MODES - (!cfl_allowed) as usize;
+    write_symbol(enc, uv_mode, uv_mode_cdf, n);
+}
