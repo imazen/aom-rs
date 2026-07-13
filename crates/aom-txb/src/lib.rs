@@ -22,6 +22,8 @@ mod write;
 pub use write::{txsize_entropy_ctx, write_coeffs_txb, CDF_ARENA_LEN};
 mod cost;
 pub use cost::{cost_coeffs_txb, CoeffCostTables};
+mod prob_cost;
+pub use prob_cost::{cost_symbol, cost_tokens_from_cdf};
 
 /// `TX_PAD_HOR` (enums.h): horizontal padding of the levels buffer.
 pub const TX_PAD_HOR: usize = 4;

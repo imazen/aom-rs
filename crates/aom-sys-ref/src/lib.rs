@@ -759,6 +759,7 @@ extern "C" {
     fn shim_nz_ctx_offset(tx_size: i32) -> *const i8;
     fn shim_scan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_iscan(tx_size: i32, tx_type: i32) -> *const i16;
+    fn shim_cost_tokens_from_cdf(costs: *mut i32, cdf: *const u16, inv_map: *const i32);
     #[allow(clippy::too_many_arguments)]
     fn shim_cost_coeffs_txb(qcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32) -> i32;
     #[allow(clippy::too_many_arguments)]
@@ -820,4 +821,13 @@ pub fn ref_cost_coeffs_txb(qcoeff: &[i32], eob: usize, tx_size: usize, tx_type: 
     unsafe {
         shim_cost_coeffs_txb(qcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, txb_skip_cost.as_ptr(), base_eob_cost.as_ptr(), base_cost.as_ptr(), eob_extra_cost.as_ptr(), dc_sign_cost.as_ptr(), lps_cost.as_ptr(), eob_cost.as_ptr())
     }
+}
+
+/// Reference `av1_cost_tokens_from_cdf`: derive per-symbol costs from an
+/// `nsymbs`-symbol inverse-CDF. `inv_map` (or None) permutes the output.
+pub fn ref_cost_tokens_from_cdf(nsymbs: usize, cdf: &[u16], inv_map: Option<&[i32]>) -> Vec<i32> {
+    let mut costs = vec![0i32; nsymbs];
+    let im = inv_map.map_or(core::ptr::null(), |m| m.as_ptr());
+    unsafe { shim_cost_tokens_from_cdf(costs.as_mut_ptr(), cdf.as_ptr(), im) }
+    costs
 }

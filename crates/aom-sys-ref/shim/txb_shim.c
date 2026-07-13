@@ -337,3 +337,12 @@ int shim_cost_coeffs_txb(const int32_t *qcoeff, int eob, int tx_size,
   }
   return cost;
 }
+
+/* ---- av1_cost_tokens_from_cdf (CDF -> per-symbol cost table) --------------- */
+void av1_cost_tokens_from_cdf(int *costs, const uint16_t *cdf,
+                              const int *inv_map);
+
+void shim_cost_tokens_from_cdf(int *costs, const uint16_t *cdf,
+                               const int *inv_map) {
+  av1_cost_tokens_from_cdf(costs, cdf, inv_map);
+}
