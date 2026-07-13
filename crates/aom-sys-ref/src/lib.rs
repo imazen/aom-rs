@@ -243,6 +243,8 @@ extern "C" {
     fn shim_size_group_lookup(bsize: i32) -> i32;
     fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_angle_delta(cdf: *mut u16, angle_delta: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_inter_compound_mode(cdf: *mut u16, mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_is_inter(cdf: *mut u16, seg_ref: i32, seg_gmv: i32, is_inter: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_filter_intra(use_cdf: *mut u16, mode_cdf: *mut u16, allowed: i32, use_fi: i32, mode: i32, out: *mut u8, out_use: *mut u16, out_mode: *mut u16) -> u32;
     fn shim_bsize_to_max_depth(bsize: i32) -> i32;
     fn shim_bsize_to_tx_size_cat(bsize: i32) -> i32;
@@ -283,6 +285,20 @@ pub fn ref_encode_mv_component(cdf: &[u16; 69], comp: i32, precision: i32) -> (V
     let n = unsafe { shim_encode_mv_component(c.as_mut_ptr(), comp, precision, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
     out.truncate(n as usize);
     (out, out_cdf)
+}
+
+/// Reference `write_inter_compound_mode`.
+pub fn ref_write_inter_compound_mode(cdf: &[u16; 9], mode: i32) -> (Vec<u8>, [u16; 9]) {
+    let mut c = *cdf; let mut out = vec![0u8; 16]; let mut oc = [0u16; 9];
+    let n = unsafe { shim_write_inter_compound_mode(c.as_mut_ptr(), mode, out.as_mut_ptr(), oc.as_mut_ptr()) };
+    out.truncate(n as usize); (out, oc)
+}
+
+/// Reference `write_is_inter`.
+pub fn ref_write_is_inter(cdf: &[u16; 3], seg_ref: bool, seg_gmv: bool, is_inter: i32) -> (Vec<u8>, [u16; 3]) {
+    let mut c = *cdf; let mut out = vec![0u8; 16]; let mut oc = [0u16; 3];
+    let n = unsafe { shim_write_is_inter(c.as_mut_ptr(), seg_ref as i32, seg_gmv as i32, is_inter, out.as_mut_ptr(), oc.as_mut_ptr()) };
+    out.truncate(n as usize); (out, oc)
 }
 
 /// Reference `write_filter_intra_mode_info` (over the pristine C od_ec + update_cdf).

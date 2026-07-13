@@ -551,3 +551,31 @@ pub fn write_filter_intra_mode_info(
         }
     }
 }
+
+const NEAREST_NEARESTMV: i32 = 17;
+const INTER_COMPOUND_MODES: usize = 8;
+
+/// `write_inter_compound_mode` (`av1/encoder/bitstream.c`): the compound inter mode —
+/// `aom_write_symbol(mode - NEAREST_NEARESTMV, inter_compound_mode_cdf[mode_ctx],
+/// INTER_COMPOUND_MODES=8)` (adapted) on the caller-selected CDF.
+pub fn write_inter_compound_mode(enc: &mut OdEcEnc, cdf: &mut [u16], mode: i32) {
+    write_symbol(enc, mode - NEAREST_NEARESTMV, cdf, INTER_COMPOUND_MODES);
+}
+
+/// `write_is_inter` (`av1/encoder/bitstream.c`): the intra/inter flag — coded on the
+/// context-selected `intra_inter_cdf` (2 symbols) unless the segment fixes the
+/// reference frame (nothing coded) or forces global-mv (implied inter, nothing coded).
+pub fn write_is_inter(
+    enc: &mut OdEcEnc,
+    intra_inter_cdf: &mut [u16],
+    seg_ref_frame_active: bool,
+    seg_globalmv_active: bool,
+    is_inter: i32,
+) {
+    if !seg_ref_frame_active {
+        if seg_globalmv_active {
+            return;
+        }
+        write_symbol(enc, is_inter, intra_inter_cdf, 2);
+    }
+}

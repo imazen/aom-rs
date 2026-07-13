@@ -745,3 +745,53 @@ fn write_filter_intra_matches_c() {
         assert_eq!(mm, om, "filter_intra mode cdf");
     }
 }
+
+#[test]
+fn write_inter_compound_mode_and_is_inter_match_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{write_inter_compound_mode, write_is_inter};
+    let mut rng = Rng(0x1c0e_c0de_a11a_0009);
+    let mk = |rng: &mut Rng, ns: usize, out: &mut [u16]| {
+        let mut vals = [0i32; 8];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            out[i] = v as u16;
+            prev = v;
+        }
+        out[ns - 1] = 0;
+        out[ns] = 0;
+    };
+    for _ in 0..200_000 {
+        // inter_compound_mode: 8-symbol, mode in [17,24]
+        let mut cdf = [0u16; 9];
+        mk(&mut rng, 8, &mut cdf);
+        let mode = 17 + (rng.next() % 8) as i32;
+        let mut mc = cdf;
+        let mut enc = OdEcEnc::new();
+        write_inter_compound_mode(&mut enc, &mut mc, mode);
+        let got = enc.done().to_vec();
+        let (want, oc) = c::ref_write_inter_compound_mode(&cdf, mode);
+        assert_eq!(got, want, "inter_compound bytes mode={mode}");
+        assert_eq!(mc, oc, "inter_compound cdf mode={mode}");
+
+        // is_inter: 2-symbol with seg gates
+        let mut icdf = [0u16; 3];
+        mk(&mut rng, 2, &mut icdf);
+        let seg_ref = rng.next().is_multiple_of(3);
+        let seg_gmv = rng.next().is_multiple_of(3);
+        let is_inter = (rng.next() % 2) as i32;
+        let mut mi = icdf;
+        let mut enc = OdEcEnc::new();
+        write_is_inter(&mut enc, &mut mi, seg_ref, seg_gmv, is_inter);
+        let got = enc.done().to_vec();
+        let (want, oi) = c::ref_write_is_inter(&icdf, seg_ref, seg_gmv, is_inter);
+        assert_eq!(got, want, "is_inter bytes sr={seg_ref} sg={seg_gmv} ii={is_inter}");
+        assert_eq!(mi, oi, "is_inter cdf");
+    }
+}

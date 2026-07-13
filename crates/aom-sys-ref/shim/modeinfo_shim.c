@@ -444,3 +444,26 @@ uint32_t shim_write_filter_intra(uint16_t *use_cdf, uint16_t *mode_cdf, int allo
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+uint32_t shim_write_inter_compound_mode(uint16_t *cdf, int mode, uint8_t *out, uint16_t *out_cdf) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  od_ec_encode_cdf_q15(&ec, mode - NEAREST_NEARESTMV, cdf, INTER_COMPOUND_MODES);
+  update_cdf(cdf, mode - NEAREST_NEARESTMV, INTER_COMPOUND_MODES);
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < INTER_COMPOUND_MODES + 1; i++) out_cdf[i] = cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
+
+uint32_t shim_write_is_inter(uint16_t *cdf, int seg_ref, int seg_gmv, int is_inter, uint8_t *out, uint16_t *out_cdf) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (!seg_ref) {
+    if (!seg_gmv) { od_ec_encode_cdf_q15(&ec, is_inter, cdf, 2); update_cdf(cdf, is_inter, 2); }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 3; i++) out_cdf[i] = cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
