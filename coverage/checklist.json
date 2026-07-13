@@ -1,0 +1,23 @@
+{
+  "reference": "libaom v3.14.1 (03087864cf4bea6abb0d28f95cf7843511413d8f)",
+  "note": "Manually seeded; xtask coverage will auto-derive the full CLI/control surface. Each item's `test` must be a passing differential harness for it to count green.",
+  "modules": {
+    "transform.fwd_txfm1d": {
+      "status": "green",
+      "items": {
+        "av1_fdct4":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fdct8":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fdct16": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fdct32": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fdct64": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fadst4":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fadst8":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fadst16": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fidentity4":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fidentity8":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fidentity16": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
+        "av1_fidentity32": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"}
+      }
+    }
+  }
+}

@@ -1,0 +1,36 @@
+# aom-rs status
+
+Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
+(single-thread deterministic config, `reference/BUILD_CONFIG.md`).
+
+## Done (bit-exact vs C oracle, differential-fuzz verified)
+
+- **Forward 1-D transforms** (`av1_fwd_txfm1d.c`), all 12 kernels:
+  `fdct{4,8,16,32,64}`, `fadst{4,8,16}`, `fidentity{4,8,16,32}`.
+  Harness: `crates/aom-transform/tests/txfm1d_diff.rs`. Coverage: 4.8M
+  differential comparisons (100k random inputs × 4 cos_bit × 12 kernels) +
+  edge cases, all byte-identical to C.
+
+## Infrastructure standing
+
+- Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.
+- Transpiler `xtask/transpile_txfm1d.py` for the regular ping-pong butterflies.
+- Coverage ledger `coverage/checklist.json`.
+
+## Next (critical path — speed-0 encoder)
+
+1. **Forward 2-D transform** (`av1_fwd_txfm2d.c`): row/col config, transpose,
+   rounding/shift stages, `av1_transform_config`. Composes the 1-D kernels above.
+2. **Quantization / dequant** (`av1_quantize.c`) — next bit-exact encoder stage.
+3. AVX2/NEON SIMD specializations of the 2-D transform, each diffed against the
+   scalar port (lane-level), matching libaom's own C-vs-SIMD contract.
+4. Begin the decoder track's inverse transforms in parallel (`av1_inv_txfm1d.c`)
+   — same methodology, mirror harness.
+
+## Gate posture (honest)
+
+Two gates are *mechanized but far from satisfied*: correctness (only the txfm1d
+module is green so far) and coverage (12 items green of the full surface). Perf,
+full encoder/decoder bitstream, and zenavif gates are not yet exercised. The
+value delivered so far is the verified methodology + first module, not a
+finished codec.

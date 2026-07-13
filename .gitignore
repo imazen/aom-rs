@@ -1,0 +1,4 @@
+/target
+/reference/libaom
+/reference/extracted
+/reference/*.log

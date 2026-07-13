@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aom-transform",
+    "crates/aom-sys-ref",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "BSD-2-Clause-Patent"
+repository = "local"
+
+# Reference target: libaom v3.14.1 (git 03087864cf4bea6abb0d28f95cf7843511413d8f)
+# Oracle build config: CONFIG_MULTITHREAD=0, Release, SIMD on. See reference/BUILD_CONFIG.md

@@ -1,0 +1,9 @@
+[package]
+name = "aom-sys-ref"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FFI bindings to the pinned C libaom v3.14.1 — ORACLE ONLY (test/bench use)."
+
+[lib]
+# Links the reference static archive; used only to diff against the pure-Rust port.
