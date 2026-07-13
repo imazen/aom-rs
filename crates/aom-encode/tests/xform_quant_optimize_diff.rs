@@ -117,7 +117,7 @@ fn xform_quant_optimize_end_to_end_identical() {
                 };
                 let qp = QuantParams {
                     zbin: &zbin, round: &round, quant: &quant, quant_shift: &quant_shift,
-                    dequant: &dequant, qm, iqm,
+                    dequant: &dequant, qm, iqm, bd: 8,
                 };
                 let bctx = BlockContext { above: &above, left: &left, plane, plane_bsize };
                 let opt = OptimizeInputs { cost: &cost, rdmult, sharpness };

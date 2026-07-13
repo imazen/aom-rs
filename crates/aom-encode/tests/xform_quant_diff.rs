@@ -1,4 +1,4 @@
-//! End-to-end differential for `av1_xform_quant` (bd=8) vs C libaom: a random
+//! End-to-end differential for `av1_xform_quant` (bd 8 + highbd 12) vs C libaom: a random
 //! residual block, run through the Rust composition (av1_fwd_txfm2d -> quantize
 //! -> txb_entropy_context), must produce byte-identical coeff / qcoeff / dqcoeff
 //! / eob / txb_entropy_ctx to the same three C reference steps chained. This
@@ -56,9 +56,12 @@ fn xform_quant_end_to_end_identical() {
             if !fwd_txfm_valid(tx_type, tx_size) {
                 continue;
             }
-            for iter in 0..40 {
-                // 8-bit residual: src_diff in [-255, 255].
-                let residual: Vec<i16> = (0..full).map(|_| rng.range(-255, 256) as i16).collect();
+            for iter in 0..48 {
+                // bd 8 (residual +-255) vs highbd 12 (residual +-4095, 64-bit
+                // quantizers). The forward transform is bd-independent.
+                let bd: u8 = if iter % 3 == 2 { 12 } else { 8 };
+                let rmax = if bd > 8 { 4096 } else { 256 };
+                let residual: Vec<i16> = (0..full).map(|_| rng.range(-(rmax - 1), rmax) as i16).collect();
                 // Quant tables. Small dequant + large quant => plenty of nonzero
                 // coefficients survive so the eob / entropy-ctx paths are exercised.
                 let zbin = [rng.range(1, 400) as i16, rng.range(1, 400) as i16];
@@ -82,28 +85,40 @@ fn xform_quant_end_to_end_identical() {
                     dequant: &dequant,
                     qm,
                     iqm,
+                    bd,
                 };
                 let got = xform_quant(&residual, tx_size, tx_type, kind, &qp, use_optimize_b);
 
-                // Oracle: the same three C steps chained.
+                // Oracle: the same three C steps chained (highbd quantizer at bd>8).
                 let coeff_c = c::ref_fwd_txfm2d(tx_size, &residual, TX_W[tx_size], tx_type);
                 let src = &coeff_c[..n_coeffs];
                 let iscan: Vec<i16> = vec![0; n_coeffs];
-                let (qc, dqc, eob) = match (kind, use_qm) {
-                    (QuantKind::Fp, true) => c::ref_quantize_fp_qm(
+                let hbd = bd > 8;
+                let (qc, dqc, eob) = match (kind, use_qm, hbd) {
+                    (QuantKind::Fp, true, false) => c::ref_quantize_fp_qm(
                         ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type), &iscan,
                     ),
-                    (QuantKind::Fp, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc(tx_size, tx_type)),
-                    (QuantKind::B, true) => c::ref_quantize_b_qm(
+                    (QuantKind::Fp, true, true) => c::ref_highbd_quantize_fp_qm(
+                        ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type), &iscan,
+                    ),
+                    (QuantKind::Fp, false, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc(tx_size, tx_type)),
+                    (QuantKind::Fp, false, true) => c::ref_highbd_quantize_fp(ls, src, &round, &quant, &dequant, sc(tx_size, tx_type)),
+                    (QuantKind::B, true, false) => c::ref_quantize_b_qm(
                         ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type),
                     ),
-                    (QuantKind::B, false) => c::ref_quantize_b(
+                    (QuantKind::B, true, true) => c::ref_highbd_quantize_b_qm(
+                        ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type),
+                    ),
+                    (QuantKind::B, false, false) => c::ref_quantize_b(
+                        ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc(tx_size, tx_type),
+                    ),
+                    (QuantKind::B, false, true) => c::ref_highbd_quantize_b(
                         ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc(tx_size, tx_type),
                     ),
                 };
                 let ctx_c = if use_optimize_b { 0 } else { c::ref_txb_entropy_context(&qc, tx_size, tx_type, eob as usize) };
 
-                let m = format!("ts={tx_size} tt={tx_type} kind={kind:?} qm={use_qm} optb={use_optimize_b}");
+                let m = format!("ts={tx_size} tt={tx_type} kind={kind:?} qm={use_qm} bd={bd} optb={use_optimize_b}");
                 assert_eq!(&got.coeff[..n_coeffs], src, "coeff {m}");
                 assert_eq!(got.qcoeff, qc, "qcoeff {m}");
                 assert_eq!(got.dqcoeff, dqc, "dqcoeff {m}");

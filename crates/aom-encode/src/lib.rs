@@ -15,7 +15,9 @@
 
 use aom_entropy::enc::OdEcEnc;
 use aom_quant::{
-    aom_quantize_b_no_qmatrix, aom_quantize_b_qm, av1_quantize_fp_no_qmatrix, av1_quantize_fp_qm,
+    aom_highbd_quantize_b_no_qmatrix, aom_highbd_quantize_b_qm, aom_quantize_b_no_qmatrix,
+    aom_quantize_b_qm, av1_highbd_quantize_fp_no_qmatrix, av1_highbd_quantize_fp_qm,
+    av1_quantize_fp_no_qmatrix, av1_quantize_fp_qm,
 };
 use aom_transform::txfm2d::av1_fwd_txfm2d;
 use aom_txb::{
@@ -62,6 +64,10 @@ pub struct QuantParams<'a> {
     /// raster position (length = block area). `None` = flat (no quant matrix).
     pub qm: Option<&'a [u8]>,
     pub iqm: Option<&'a [u8]>,
+    /// Bit depth (8/10/12). `> 8` selects the highbd (64-bit) quantizer variants;
+    /// the forward transform, trellis, entropy context, and writer are all
+    /// bd-independent (verified: forward output is identical for bd 8/10/12).
+    pub bd: u8,
 }
 
 /// Output of [`xform_quant`]: the quantized block plus the propagated context.
@@ -102,18 +108,33 @@ pub fn xform_quant(
     let mut qcoeff = vec![0i32; n_coeffs];
     let mut dqcoeff = vec![0i32; n_coeffs];
     let src = &coeff[..n_coeffs];
-    let eob = match (kind, qp.qm, qp.iqm) {
-        (QuantKind::Fp, Some(qm), Some(iqm)) => av1_quantize_fp_qm(
+    let hbd = qp.bd > 8;
+    let eob = match (kind, qp.qm, qp.iqm, hbd) {
+        (QuantKind::Fp, Some(qm), Some(iqm), false) => av1_quantize_fp_qm(
             qp.round, qp.quant, qp.dequant, log_scale, qm, iqm, sc, src, &mut qcoeff, &mut dqcoeff,
         ),
-        (QuantKind::Fp, _, _) => av1_quantize_fp_no_qmatrix(
+        (QuantKind::Fp, Some(qm), Some(iqm), true) => av1_highbd_quantize_fp_qm(
+            qp.round, qp.quant, qp.dequant, log_scale, qm, iqm, sc, src, &mut qcoeff, &mut dqcoeff,
+        ),
+        (QuantKind::Fp, _, _, false) => av1_quantize_fp_no_qmatrix(
             qp.quant, qp.dequant, qp.round, log_scale, sc, src, &mut qcoeff, &mut dqcoeff,
         ),
-        (QuantKind::B, Some(qm), Some(iqm)) => aom_quantize_b_qm(
+        (QuantKind::Fp, _, _, true) => av1_highbd_quantize_fp_no_qmatrix(
+            qp.quant, qp.dequant, qp.round, log_scale, sc, src, &mut qcoeff, &mut dqcoeff,
+        ),
+        (QuantKind::B, Some(qm), Some(iqm), false) => aom_quantize_b_qm(
             qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, qm, iqm, sc, src,
             &mut qcoeff, &mut dqcoeff,
         ),
-        (QuantKind::B, _, _) => aom_quantize_b_no_qmatrix(
+        (QuantKind::B, Some(qm), Some(iqm), true) => aom_highbd_quantize_b_qm(
+            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, qm, iqm, sc, src,
+            &mut qcoeff, &mut dqcoeff,
+        ),
+        (QuantKind::B, _, _, false) => aom_quantize_b_no_qmatrix(
+            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, sc, src,
+            &mut qcoeff, &mut dqcoeff,
+        ),
+        (QuantKind::B, _, _, true) => aom_highbd_quantize_b_no_qmatrix(
             qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, sc, src,
             &mut qcoeff, &mut dqcoeff,
         ),

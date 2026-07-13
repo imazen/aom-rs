@@ -97,8 +97,13 @@ fn encode_block_coeffs_end_to_end_identical() {
             if !fwd_txfm_valid(tx_type, tx_size) {
                 continue;
             }
-            for iter in 0..40 {
-                let residual: Vec<i16> = (0..full).map(|_| rng.range(-255, 256) as i16).collect();
+            for iter in 0..48 {
+                // bd 8 (residual +-255) vs highbd 12 (residual +-4095, 64-bit
+                // quantizers). Fwd transform / trellis / entropy ctx / writer are
+                // all bd-independent, so highbd differs only in the quantizer.
+                let bd: u8 = if iter % 3 == 1 { 12 } else { 8 };
+                let rmax = if bd > 8 { 4096 } else { 256 };
+                let residual: Vec<i16> = (0..full).map(|_| rng.range(-(rmax - 1), rmax) as i16).collect();
                 // Reciprocal quant/dequant + reciprocal qm/iqm (real-encoder-like),
                 // keeping the QM trellis' squared get_coeff_dist inside i64.
                 let dq = [rng.range(16, 800), rng.range(16, 800)];
@@ -144,7 +149,7 @@ fn encode_block_coeffs_end_to_end_identical() {
                 };
                 let qp = QuantParams {
                     zbin: &zbin, round: &round, quant: &quant, quant_shift: &quant_shift,
-                    dequant: &dequant, qm, iqm,
+                    dequant: &dequant, qm, iqm, bd,
                 };
                 let bctx = BlockContext { above: &above, left: &left, plane, plane_bsize };
                 let opt = OptimizeInputs { cost: &cost, rdmult, sharpness };
@@ -159,11 +164,16 @@ fn encode_block_coeffs_end_to_end_identical() {
                 let src = &coeff_c[..n_coeffs];
                 let sc = scan(tx_size, tx_type);
                 let iscan = vec![0i16; n_coeffs];
-                let (mut qc, mut dqc, eob0) = match (kind, use_qm) {
-                    (QuantKind::Fp, true) => c::ref_quantize_fp_qm(ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan),
-                    (QuantKind::Fp, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc),
-                    (QuantKind::B, true) => c::ref_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
-                    (QuantKind::B, false) => c::ref_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
+                let hbd = bd > 8;
+                let (mut qc, mut dqc, eob0) = match (kind, use_qm, hbd) {
+                    (QuantKind::Fp, true, false) => c::ref_quantize_fp_qm(ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan),
+                    (QuantKind::Fp, true, true) => c::ref_highbd_quantize_fp_qm(ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan),
+                    (QuantKind::Fp, false, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc),
+                    (QuantKind::Fp, false, true) => c::ref_highbd_quantize_fp(ls, src, &round, &quant, &dequant, sc),
+                    (QuantKind::B, true, false) => c::ref_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
+                    (QuantKind::B, true, true) => c::ref_highbd_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
+                    (QuantKind::B, false, false) => c::ref_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
+                    (QuantKind::B, false, true) => c::ref_highbd_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
                 };
                 let (skip_ctx, dc_sign_ctx) = c::ref_get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
                 let eob_w = if eob0 == 0 {
@@ -185,7 +195,7 @@ fn encode_block_coeffs_end_to_end_identical() {
                     &qc, eob_w, tx_size, tx_type, plane_type, skip_ctx as usize, dc_sign_ctx as usize, upd, &mut arena_c,
                 );
 
-                let m = format!("ts={tx_size} tt={tx_type} kind={kind:?} qm={use_qm} upd={upd} eob0={eob0}");
+                let m = format!("ts={tx_size} tt={tx_type} kind={kind:?} qm={use_qm} bd={bd} upd={upd} eob0={eob0}");
                 assert_eq!(r.eob as usize, eob_w, "opt eob {m}");
                 assert_eq!(r.qcoeff, qc, "qcoeff {m}");
                 assert_eq!(got, want, "bytes {m}");
