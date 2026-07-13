@@ -16,8 +16,8 @@
 use aom_entropy::enc::OdEcEnc;
 use aom_quant::{
     aom_highbd_quantize_b_no_qmatrix, aom_highbd_quantize_b_qm, aom_quantize_b_no_qmatrix,
-    aom_quantize_b_qm, av1_highbd_quantize_fp_no_qmatrix, av1_highbd_quantize_fp_qm,
-    av1_quantize_fp_no_qmatrix, av1_quantize_fp_qm,
+    aom_quantize_b_qm, av1_highbd_quantize_dc, av1_highbd_quantize_fp_no_qmatrix,
+    av1_highbd_quantize_fp_qm, av1_quantize_dc, av1_quantize_fp_no_qmatrix, av1_quantize_fp_qm,
 };
 use aom_transform::txfm2d::av1_fwd_txfm2d;
 use aom_txb::{
@@ -48,6 +48,8 @@ pub enum QuantKind {
     Fp,
     /// `AV1_XFORM_QUANT_B` — the dead-zone (`zbin` + `quant`/`quant_shift`) quantizer.
     B,
+    /// `AV1_XFORM_QUANT_DC` — DC-only (quantizes coefficient 0, zeroes the rest).
+    Dc,
 }
 
 /// The `[dc, ac]` quantizer parameter tables (the `*_QTX` fields libaom's
@@ -137,6 +139,15 @@ pub fn xform_quant(
         (QuantKind::B, _, _, true) => aom_highbd_quantize_b_no_qmatrix(
             qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, sc, src,
             &mut qcoeff, &mut dqcoeff,
+        ),
+        // DC-only: the DC scalars (quant[0]/dequant[0]); qm/iqm handled internally.
+        (QuantKind::Dc, _, _, false) => av1_quantize_dc(
+            qp.round, qp.quant[0], qp.dequant[0], log_scale, qp.qm, qp.iqm, src, &mut qcoeff,
+            &mut dqcoeff,
+        ),
+        (QuantKind::Dc, _, _, true) => av1_highbd_quantize_dc(
+            qp.round, qp.quant[0], qp.dequant[0], log_scale, qp.qm, qp.iqm, src, &mut qcoeff,
+            &mut dqcoeff,
         ),
     };
 

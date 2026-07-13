@@ -103,7 +103,11 @@ fn xform_quant_optimize_end_to_end_identical() {
                 let sharpness = rng.range(0, 8);
 
                 let use_qm = iter % 2 == 0;
-                let kind = if iter % 4 < 2 { QuantKind::Fp } else { QuantKind::B };
+                let kind = match iter % 5 {
+                    0 | 1 => QuantKind::Fp,
+                    2 | 3 => QuantKind::B,
+                    _ => QuantKind::Dc,
+                };
                 let (qm, iqm) = if use_qm { (Some(&qm_v[..]), Some(&iqm_v[..])) } else { (None, None) };
 
                 let cost = CoeffCostTables {
@@ -133,6 +137,7 @@ fn xform_quant_optimize_end_to_end_identical() {
                     (QuantKind::Fp, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc),
                     (QuantKind::B, true) => c::ref_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
                     (QuantKind::B, false) => c::ref_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
+                    (QuantKind::Dc, _) => c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
                 };
                 let (skip_ctx, dc_sign_ctx) = c::ref_get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
 

@@ -73,7 +73,11 @@ fn xform_quant_end_to_end_identical() {
                 let iqm_v: Vec<u8> = (0..n_coeffs).map(|_| rng.qm()).collect();
 
                 let use_qm = iter % 2 == 0;
-                let kind = if iter % 4 < 2 { QuantKind::Fp } else { QuantKind::B };
+                let kind = match iter % 5 {
+                    0 | 1 => QuantKind::Fp,
+                    2 | 3 => QuantKind::B,
+                    _ => QuantKind::Dc,
+                };
                 let use_optimize_b = iter % 3 == 0;
                 let (qm, iqm) = if use_qm { (Some(&qm_v[..]), Some(&iqm_v[..])) } else { (None, None) };
 
@@ -115,6 +119,9 @@ fn xform_quant_end_to_end_identical() {
                     (QuantKind::B, false, true) => c::ref_highbd_quantize_b(
                         ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc(tx_size, tx_type),
                     ),
+                    // DC-only: qm handled via Option; DC scalars quant[0]/dequant[0].
+                    (QuantKind::Dc, _, false) => c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
+                    (QuantKind::Dc, _, true) => c::ref_highbd_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
                 };
                 let ctx_c = if use_optimize_b { 0 } else { c::ref_txb_entropy_context(&qc, tx_size, tx_type, eob as usize) };
 

@@ -136,7 +136,11 @@ fn encode_block_coeffs_end_to_end_identical() {
                 let upd = iter % 2 == 0;
 
                 let use_qm = iter % 3 == 0;
-                let kind = if iter % 4 < 2 { QuantKind::Fp } else { QuantKind::B };
+                let kind = match iter % 5 {
+                    0 | 1 => QuantKind::Fp,
+                    2 | 3 => QuantKind::B,
+                    _ => QuantKind::Dc,
+                };
                 let (qm, iqm) = if use_qm { (Some(&qm_v[..]), Some(&iqm_v[..])) } else { (None, None) };
 
                 let arena0 = gen_arena(&mut rng);
@@ -174,6 +178,8 @@ fn encode_block_coeffs_end_to_end_identical() {
                     (QuantKind::B, true, true) => c::ref_highbd_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
                     (QuantKind::B, false, false) => c::ref_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
                     (QuantKind::B, false, true) => c::ref_highbd_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
+                    (QuantKind::Dc, _, false) => c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
+                    (QuantKind::Dc, _, true) => c::ref_highbd_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
                 };
                 let (skip_ctx, dc_sign_ctx) = c::ref_get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
                 let eob_w = if eob0 == 0 {
