@@ -952,3 +952,95 @@ pub fn write_dec_model_op_parameters(
     wb.write_unsigned_literal(encoder_buffer_delay, buffer_delay_length);
     wb.write_bit(low_delay_mode_flag as u32);
 }
+
+// ---- sequence-header OBU (top-level assembly) -----------------------------
+
+const MAX_NUM_OPERATING_POINTS: usize = 32;
+
+/// The full sequence-header OBU state (`av1_write_sequence_header_obu` inputs) —
+/// the OBU-level flags + operating points, composed with the sequence-header body
+/// and color config.
+#[derive(Clone, Debug)]
+pub struct SequenceHeaderObu {
+    pub profile: i32,
+    pub still_picture: bool,
+    pub reduced_still_picture_hdr: bool,
+    pub timing_info_present: bool,
+    pub timing_info: TimingInfoHeader,
+    pub decoder_model_info_present_flag: bool,
+    pub decoder_model_info: DecoderModelInfo,
+    pub display_model_info_present_flag: bool,
+    pub operating_points_cnt_minus_1: i32,
+    pub operating_point_idc: [i32; MAX_NUM_OPERATING_POINTS],
+    pub seq_level_idx: [i32; MAX_NUM_OPERATING_POINTS],
+    pub tier: [i32; MAX_NUM_OPERATING_POINTS],
+    pub op_decoder_model_param_present: [bool; MAX_NUM_OPERATING_POINTS],
+    pub op_display_model_param_present: [bool; MAX_NUM_OPERATING_POINTS],
+    pub op_decoder_buffer_delay: [u32; MAX_NUM_OPERATING_POINTS],
+    pub op_encoder_buffer_delay: [u32; MAX_NUM_OPERATING_POINTS],
+    pub op_low_delay_mode_flag: [bool; MAX_NUM_OPERATING_POINTS],
+    pub op_initial_display_delay: [i32; MAX_NUM_OPERATING_POINTS],
+    pub seq_header: SequenceHeaderParams,
+    pub color_config: ColorConfigParams,
+    pub film_grain_params_present: bool,
+}
+
+/// `write_bitstream_level`: the sequence level index at `LEVEL_BITS`=5.
+fn write_bitstream_level(wb: &mut WriteBitBuffer, seq_level_idx: i32) {
+    wb.write_literal(seq_level_idx, 5);
+}
+
+/// `av1_write_sequence_header_obu` (`av1/encoder/bitstream.c`): the complete
+/// sequence-header OBU payload — profile, still-picture / reduced-header flags,
+/// timing + decoder-model info, the operating-points loop (idc, level, tier,
+/// per-op decoder/display model params), then the sequence-header body, color
+/// config, film-grain-present flag, and the byte-alignment trailing bits.
+pub fn write_sequence_header_obu(wb: &mut WriteBitBuffer, s: &SequenceHeaderObu) {
+    wb.write_literal(s.profile, 3); // PROFILE_BITS
+    wb.write_bit(s.still_picture as u32);
+    wb.write_bit(s.reduced_still_picture_hdr as u32);
+    if s.reduced_still_picture_hdr {
+        write_bitstream_level(wb, s.seq_level_idx[0]);
+    } else {
+        wb.write_bit(s.timing_info_present as u32);
+        if s.timing_info_present {
+            write_timing_info_header(wb, &s.timing_info);
+            wb.write_bit(s.decoder_model_info_present_flag as u32);
+            if s.decoder_model_info_present_flag {
+                write_decoder_model_info(wb, &s.decoder_model_info);
+            }
+        }
+        wb.write_bit(s.display_model_info_present_flag as u32);
+        wb.write_literal(s.operating_points_cnt_minus_1, 5); // OP_POINTS_CNT_MINUS_1_BITS
+        for i in 0..=(s.operating_points_cnt_minus_1 as usize) {
+            wb.write_literal(s.operating_point_idc[i], 12); // OP_POINTS_IDC_BITS
+            write_bitstream_level(wb, s.seq_level_idx[i]);
+            if s.seq_level_idx[i] >= 8 {
+                // SEQ_LEVEL_4_0
+                wb.write_bit(s.tier[i] as u32);
+            }
+            if s.decoder_model_info_present_flag {
+                wb.write_bit(s.op_decoder_model_param_present[i] as u32);
+                if s.op_decoder_model_param_present[i] {
+                    write_dec_model_op_parameters(
+                        wb,
+                        s.op_decoder_buffer_delay[i],
+                        s.op_encoder_buffer_delay[i],
+                        s.op_low_delay_mode_flag[i],
+                        s.decoder_model_info.encoder_decoder_buffer_delay_length as u32,
+                    );
+                }
+            }
+            if s.display_model_info_present_flag {
+                wb.write_bit(s.op_display_model_param_present[i] as u32);
+                if s.op_display_model_param_present[i] {
+                    wb.write_literal(s.op_initial_display_delay[i] - 1, 4);
+                }
+            }
+        }
+    }
+    write_sequence_header(wb, &s.seq_header);
+    write_color_config(wb, &s.color_config);
+    wb.write_bit(s.film_grain_params_present as u32);
+    wb.add_trailing_bits();
+}

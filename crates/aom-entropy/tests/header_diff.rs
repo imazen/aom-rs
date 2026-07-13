@@ -666,3 +666,189 @@ fn timing_and_decoder_model_match_c() {
         assert_eq!(wb.bytes(), &c::ref_write_dec_model_op(dec_delay, enc_delay, low_delay, delay_len)[..], "op_params len={delay_len}");
     }
 }
+
+#[test]
+fn write_sequence_header_obu_matches_real_c() {
+    use aom_entropy::header::{
+        write_sequence_header_obu, ColorConfigParams, DecoderModelInfo, SequenceHeaderObu,
+        SequenceHeaderParams, TimingInfoHeader,
+    };
+    let mut rng = Rng(0x0b00_c0de_a11a_0009);
+    let valid_levels = [0i32, 4, 8, 12, 31]; // SEQ_LEVEL_2_0/3_0/4_0/5_0/MAX (all valid)
+    for _ in 0..100_000 {
+        let profile = rng.range(0, 3);
+        // still/reduced: reduced implies still (IMPLIES(!still,!reduced)).
+        let still_picture = rng.next().is_multiple_of(2);
+        let reduced = still_picture && rng.next().is_multiple_of(3);
+        // timing/decoder/display present: all 0 under reduced header.
+        let timing_present = !reduced && rng.next().is_multiple_of(2);
+        let dm_present = timing_present && rng.next().is_multiple_of(2);
+        let disp_present = !reduced && rng.next().is_multiple_of(2);
+        let op_cnt_m1 = if reduced { 0 } else { rng.range(0, 8) }; // 1..8 op points
+
+        let ed_delay_len = rng.range(1, 33);
+        let timing_info = TimingInfoHeader {
+            num_units_in_display_tick: rng.next() as u32,
+            time_scale: rng.next() as u32,
+            equal_picture_interval: rng.next().is_multiple_of(2),
+            num_ticks_per_picture: (rng.next() as u32 & 0x000f_fffe) + 1,
+        };
+        let decoder_model_info = DecoderModelInfo {
+            encoder_decoder_buffer_delay_length: ed_delay_len,
+            num_units_in_decoding_tick: rng.next() as u32,
+            buffer_removal_time_length: rng.range(1, 33),
+            frame_presentation_time_length: rng.range(1, 33),
+        };
+
+        let mut operating_point_idc = [0i32; 32];
+        let mut seq_level_idx = [0i32; 32];
+        let mut tier = [0i32; 32];
+        let mut op_dmpp = [false; 32];
+        let mut op_dispp = [false; 32];
+        let mut op_dec_delay = [0u32; 32];
+        let mut op_enc_delay = [0u32; 32];
+        let mut op_low_delay = [false; 32];
+        let mut op_init_delay = [0i32; 32];
+        let delay_mask: u32 = if ed_delay_len >= 32 { u32::MAX } else { (1u32 << ed_delay_len) - 1 };
+        for i in 0..=(op_cnt_m1 as usize) {
+            operating_point_idc[i] = rng.range(0, 4096);
+            seq_level_idx[i] = valid_levels[rng.range(0, 5) as usize];
+            tier[i] = rng.range(0, 2);
+            op_dmpp[i] = dm_present && rng.next().is_multiple_of(2);
+            op_dispp[i] = disp_present && rng.next().is_multiple_of(2);
+            op_dec_delay[i] = rng.next() as u32 & delay_mask;
+            op_enc_delay[i] = rng.next() as u32 & delay_mask;
+            op_low_delay[i] = rng.next().is_multiple_of(2);
+            op_init_delay[i] = rng.range(1, 11); // asserted [1,10]
+        }
+
+        // sequence-header body (force_integer_mv == 2 when force_sct == 0)
+        let force_sct = rng.range(0, 3);
+        let force_int_mv = if force_sct == 0 { 2 } else { rng.range(0, 3) };
+        let nbw = rng.range(1, 17) as u32;
+        let nbh = rng.range(1, 17) as u32;
+        let delta_frame_id_length = rng.range(2, 18);
+        let frame_id_length = delta_frame_id_length + 1 + rng.range(0, 8);
+        let seq_header = SequenceHeaderParams {
+            num_bits_width: nbw,
+            num_bits_height: nbh,
+            max_frame_width: rng.range(1, 1 << nbw.min(20)),
+            max_frame_height: rng.range(1, 1 << nbh.min(20)),
+            reduced_still_picture_hdr: reduced,
+            frame_id_numbers_present_flag: rng.next().is_multiple_of(2),
+            delta_frame_id_length,
+            frame_id_length,
+            sb_size_128: rng.next().is_multiple_of(2),
+            enable_filter_intra: rng.next().is_multiple_of(2),
+            enable_intra_edge_filter: rng.next().is_multiple_of(2),
+            enable_interintra_compound: rng.next().is_multiple_of(2),
+            enable_masked_compound: rng.next().is_multiple_of(2),
+            enable_warped_motion: rng.next().is_multiple_of(2),
+            enable_dual_filter: rng.next().is_multiple_of(2),
+            enable_order_hint: rng.next().is_multiple_of(2),
+            enable_dist_wtd_comp: rng.next().is_multiple_of(2),
+            enable_ref_frame_mvs: rng.next().is_multiple_of(2),
+            force_screen_content_tools: force_sct,
+            force_integer_mv: force_int_mv,
+            order_hint_bits_minus_1: rng.range(0, 8),
+            enable_superres: rng.next().is_multiple_of(2),
+            enable_cdef: rng.next().is_multiple_of(2),
+            enable_restoration: rng.next().is_multiple_of(2),
+        };
+
+        // color config (spec-valid subsampling per profile; unspecified CICP)
+        let bit_depth = if profile == 2 { [8, 10, 12][rng.range(0, 3) as usize] } else { [8, 10][rng.range(0, 2) as usize] };
+        let monochrome = profile != 1 && rng.next().is_multiple_of(3);
+        let (ssx, ssy) = if profile == 0 {
+            (1, 1)
+        } else if profile == 1 {
+            (0, 0)
+        } else if bit_depth == 12 {
+            match rng.range(0, 3) {
+                0 => (1, 1),
+                1 => (0, 0),
+                _ => (1, 0),
+            }
+        } else {
+            (1, 0)
+        };
+        let color_config = ColorConfigParams {
+            bit_depth,
+            profile,
+            monochrome,
+            color_primaries: 2,          // unspecified (CICP paths covered elsewhere)
+            transfer_characteristics: 2, // unspecified
+            matrix_coefficients: 2,      // unspecified
+            color_range: rng.next().is_multiple_of(2),
+            subsampling_x: ssx,
+            subsampling_y: ssy,
+            chroma_sample_position: rng.range(0, 4),
+            separate_uv_delta_q: rng.next().is_multiple_of(2),
+        };
+
+        let s = SequenceHeaderObu {
+            profile,
+            still_picture,
+            reduced_still_picture_hdr: reduced,
+            timing_info_present: timing_present,
+            timing_info,
+            decoder_model_info_present_flag: dm_present,
+            decoder_model_info,
+            display_model_info_present_flag: disp_present,
+            operating_points_cnt_minus_1: op_cnt_m1,
+            operating_point_idc,
+            seq_level_idx,
+            tier,
+            op_decoder_model_param_present: op_dmpp,
+            op_display_model_param_present: op_dispp,
+            op_decoder_buffer_delay: op_dec_delay,
+            op_encoder_buffer_delay: op_enc_delay,
+            op_low_delay_mode_flag: op_low_delay,
+            op_initial_display_delay: op_init_delay,
+            seq_header,
+            color_config,
+            film_grain_params_present: rng.next().is_multiple_of(2),
+        };
+
+        let mut wb = WriteBitBuffer::new();
+        write_sequence_header_obu(&mut wb, &s);
+        let got = wb.bytes().to_vec();
+
+        // pack for the direct C oracle
+        let top: [i64; 16] = [
+            profile as i64, still_picture as i64, reduced as i64, timing_present as i64,
+            dm_present as i64, disp_present as i64, op_cnt_m1 as i64, s.film_grain_params_present as i64,
+            timing_info.num_units_in_display_tick as i64, timing_info.time_scale as i64,
+            timing_info.equal_picture_interval as i64, timing_info.num_ticks_per_picture as i64,
+            decoder_model_info.encoder_decoder_buffer_delay_length as i64,
+            decoder_model_info.num_units_in_decoding_tick as i64,
+            decoder_model_info.buffer_removal_time_length as i64,
+            decoder_model_info.frame_presentation_time_length as i64,
+        ];
+        let sh: [i64; 24] = [
+            nbw as i64, nbh as i64, seq_header.max_frame_width as i64, seq_header.max_frame_height as i64,
+            reduced as i64, seq_header.frame_id_numbers_present_flag as i64, delta_frame_id_length as i64,
+            frame_id_length as i64, seq_header.sb_size_128 as i64, seq_header.enable_filter_intra as i64,
+            seq_header.enable_intra_edge_filter as i64, seq_header.enable_interintra_compound as i64,
+            seq_header.enable_masked_compound as i64, seq_header.enable_warped_motion as i64,
+            seq_header.enable_dual_filter as i64, seq_header.enable_order_hint as i64,
+            seq_header.enable_dist_wtd_comp as i64, seq_header.enable_ref_frame_mvs as i64,
+            force_sct as i64, force_int_mv as i64, seq_header.order_hint_bits_minus_1 as i64,
+            seq_header.enable_superres as i64, seq_header.enable_cdef as i64, seq_header.enable_restoration as i64,
+        ];
+        let cc: [i64; 11] = [
+            bit_depth as i64, profile as i64, monochrome as i64, 2, 2, 2,
+            color_config.color_range as i64, ssx as i64, ssy as i64,
+            color_config.chroma_sample_position as i64, color_config.separate_uv_delta_q as i64,
+        ];
+        let to_i64 = |a: &[i32; 32]| -> [i64; 32] { std::array::from_fn(|i| a[i] as i64) };
+        let bool_i64 = |a: &[bool; 32]| -> [i64; 32] { std::array::from_fn(|i| a[i] as i64) };
+        let u32_i64 = |a: &[u32; 32]| -> [i64; 32] { std::array::from_fn(|i| a[i] as i64) };
+        let want = c::ref_write_sequence_header_obu(
+            &top, &sh, &cc, &to_i64(&operating_point_idc), &to_i64(&seq_level_idx), &to_i64(&tier),
+            &bool_i64(&op_dmpp), &bool_i64(&op_dispp), &u32_i64(&op_dec_delay), &u32_i64(&op_enc_delay),
+            &bool_i64(&op_low_delay), &to_i64(&op_init_delay),
+        );
+        assert_eq!(got, want, "write_sequence_header_obu profile={profile} reduced={reduced} op_cnt={op_cnt_m1}");
+    }
+}

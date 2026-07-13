@@ -614,3 +614,87 @@ uint32_t shim_write_dec_model_op(uint32_t dec_delay, uint32_t enc_delay,
   aom_wb_write_bit(&wb, low_delay);
   return aom_wb_bytes_written(&wb);
 }
+
+/* CAPSTONE: fills a real SequenceHeader from packed params and calls the REAL
+ * exported av1_write_sequence_header_obu — a direct oracle (not a transcription)
+ * for the whole sequence-header OBU. */
+#include "av1/common/av1_common_int.h"
+uint32_t av1_write_sequence_header_obu(const SequenceHeader *seq_params,
+                                       uint8_t *const dst, size_t dst_size);
+
+uint32_t shim_write_sequence_header_obu(const long long *top, const long long *sh,
+                                        const long long *cc, const long long *idc,
+                                        const long long *level, const long long *tier,
+                                        const long long *dmpp, const long long *dispp,
+                                        const long long *decdelay, const long long *encdelay,
+                                        const long long *lowdelay, const long long *initdelay,
+                                        uint8_t *out) {
+  SequenceHeader seq;
+  memset(&seq, 0, sizeof(seq));
+
+  seq.profile = (int)top[0];
+  seq.still_picture = (uint8_t)top[1];
+  seq.reduced_still_picture_hdr = (uint8_t)top[2];
+  seq.timing_info_present = (int)top[3];
+  seq.decoder_model_info_present_flag = (uint8_t)top[4];
+  seq.display_model_info_present_flag = (uint8_t)top[5];
+  seq.operating_points_cnt_minus_1 = (int)top[6];
+  seq.film_grain_params_present = (uint8_t)top[7];
+  seq.timing_info.num_units_in_display_tick = (uint32_t)top[8];
+  seq.timing_info.time_scale = (uint32_t)top[9];
+  seq.timing_info.equal_picture_interval = (int)top[10];
+  seq.timing_info.num_ticks_per_picture = (uint32_t)top[11];
+  seq.decoder_model_info.encoder_decoder_buffer_delay_length = (int)top[12];
+  seq.decoder_model_info.num_units_in_decoding_tick = (uint32_t)top[13];
+  seq.decoder_model_info.buffer_removal_time_length = (int)top[14];
+  seq.decoder_model_info.frame_presentation_time_length = (int)top[15];
+
+  seq.num_bits_width = (int)sh[0];
+  seq.num_bits_height = (int)sh[1];
+  seq.max_frame_width = (int)sh[2];
+  seq.max_frame_height = (int)sh[3];
+  seq.frame_id_numbers_present_flag = (uint8_t)sh[5];
+  seq.delta_frame_id_length = (int)sh[6];
+  seq.frame_id_length = (int)sh[7];
+  seq.sb_size = sh[8] ? BLOCK_128X128 : BLOCK_64X64;
+  seq.enable_filter_intra = (uint8_t)sh[9];
+  seq.enable_intra_edge_filter = (uint8_t)sh[10];
+  seq.enable_interintra_compound = (uint8_t)sh[11];
+  seq.enable_masked_compound = (uint8_t)sh[12];
+  seq.enable_warped_motion = (uint8_t)sh[13];
+  seq.enable_dual_filter = (uint8_t)sh[14];
+  seq.order_hint_info.enable_order_hint = (int)sh[15];
+  seq.order_hint_info.enable_dist_wtd_comp = (int)sh[16];
+  seq.order_hint_info.enable_ref_frame_mvs = (int)sh[17];
+  seq.force_screen_content_tools = (uint8_t)sh[18];
+  seq.force_integer_mv = (uint8_t)sh[19];
+  seq.order_hint_info.order_hint_bits_minus_1 = (int)sh[20];
+  seq.enable_superres = (uint8_t)sh[21];
+  seq.enable_cdef = (uint8_t)sh[22];
+  seq.enable_restoration = (uint8_t)sh[23];
+
+  seq.bit_depth = (aom_bit_depth_t)cc[0];
+  seq.monochrome = (uint8_t)cc[2];
+  seq.color_primaries = (aom_color_primaries_t)cc[3];
+  seq.transfer_characteristics = (aom_transfer_characteristics_t)cc[4];
+  seq.matrix_coefficients = (aom_matrix_coefficients_t)cc[5];
+  seq.color_range = (int)cc[6];
+  seq.subsampling_x = (int)cc[7];
+  seq.subsampling_y = (int)cc[8];
+  seq.chroma_sample_position = (aom_chroma_sample_position_t)cc[9];
+  seq.separate_uv_delta_q = (uint8_t)cc[10];
+
+  for (int i = 0; i < MAX_NUM_OPERATING_POINTS; i++) {
+    seq.operating_point_idc[i] = (int)idc[i];
+    seq.seq_level_idx[i] = (AV1_LEVEL)level[i];
+    seq.tier[i] = (uint8_t)tier[i];
+    seq.op_params[i].decoder_model_param_present_flag = (int)dmpp[i];
+    seq.op_params[i].display_model_param_present_flag = (int)dispp[i];
+    seq.op_params[i].decoder_buffer_delay = (uint32_t)decdelay[i];
+    seq.op_params[i].encoder_buffer_delay = (uint32_t)encdelay[i];
+    seq.op_params[i].low_delay_mode_flag = (int)lowdelay[i];
+    seq.op_params[i].initial_display_delay = (int)initdelay[i];
+  }
+
+  return av1_write_sequence_header_obu(&seq, out, 4096);
+}

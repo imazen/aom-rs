@@ -220,6 +220,21 @@ extern "C" {
     fn shim_write_timing_info(disp_tick: u32, time_scale: u32, equal_pic: i32, ticks_per_pic: u32, out: *mut u8) -> u32;
     fn shim_write_decoder_model_info(ed_delay_len: i32, dec_tick: u32, rem_time_len: i32, pres_time_len: i32, out: *mut u8) -> u32;
     fn shim_write_dec_model_op(dec_delay: u32, enc_delay: u32, low_delay: i32, delay_len: i32, out: *mut u8) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_sequence_header_obu(top: *const i64, sh: *const i64, cc: *const i64, idc: *const i64, level: *const i64, tier: *const i64, dmpp: *const i64, dispp: *const i64, decdelay: *const i64, encdelay: *const i64, lowdelay: *const i64, initdelay: *const i64, out: *mut u8) -> u32;
+}
+
+/// Reference `av1_write_sequence_header_obu` — the REAL exported function, fed a
+/// `SequenceHeader` populated from the packed params (direct oracle, not a
+/// transcription).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_sequence_header_obu(top: &[i64; 16], sh: &[i64; 24], cc: &[i64; 11], idc: &[i64; 32], level: &[i64; 32], tier: &[i64; 32], dmpp: &[i64; 32], dispp: &[i64; 32], decdelay: &[i64; 32], encdelay: &[i64; 32], lowdelay: &[i64; 32], initdelay: &[i64; 32]) -> Vec<u8> {
+    let mut out = vec![0u8; 4096];
+    let n = unsafe {
+        shim_write_sequence_header_obu(top.as_ptr(), sh.as_ptr(), cc.as_ptr(), idc.as_ptr(), level.as_ptr(), tier.as_ptr(), dmpp.as_ptr(), dispp.as_ptr(), decdelay.as_ptr(), encdelay.as_ptr(), lowdelay.as_ptr(), initdelay.as_ptr(), out.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `aom_wb_write_uvlc`.
