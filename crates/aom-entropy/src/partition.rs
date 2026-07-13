@@ -290,3 +290,32 @@ pub fn write_intra_uv_mode(enc: &mut OdEcEnc, uv_mode_cdf: &mut [u16], uv_mode: 
     let n = UV_INTRA_MODES - (!cfl_allowed) as usize;
     write_symbol(enc, uv_mode, uv_mode_cdf, n);
 }
+
+const NEARESTMV: i32 = 13;
+const GLOBALMV: i32 = 15;
+const NEWMV: i32 = 16;
+
+/// `write_inter_mode` (`av1/encoder/bitstream.c`): the single-reference inter mode as a
+/// cascade of three binary symbols keyed off `mode_ctx` — is-not-NEWMV on
+/// `newmv_cdf[mode_ctx & 7]`, then (if not NEWMV) is-not-GLOBALMV on
+/// `zeromv_cdf[(mode_ctx>>3) & 1]`, then (if not GLOBALMV) is-not-NEARESTMV on
+/// `refmv_cdf[(mode_ctx>>4) & 15]`. Only the CDFs on the taken path adapt.
+pub fn write_inter_mode(
+    enc: &mut OdEcEnc,
+    newmv_cdf: &mut [[u16; 3]; 6],
+    zeromv_cdf: &mut [[u16; 3]; 2],
+    refmv_cdf: &mut [[u16; 3]; 6],
+    mode: i32,
+    mode_ctx: i32,
+) {
+    let newmv_ctx = (mode_ctx & 7) as usize;
+    write_symbol(enc, (mode != NEWMV) as i32, &mut newmv_cdf[newmv_ctx], 2);
+    if mode != NEWMV {
+        let zeromv_ctx = ((mode_ctx >> 3) & 1) as usize;
+        write_symbol(enc, (mode != GLOBALMV) as i32, &mut zeromv_cdf[zeromv_ctx], 2);
+        if mode != GLOBALMV {
+            let refmv_ctx = ((mode_ctx >> 4) & 15) as usize;
+            write_symbol(enc, (mode != NEARESTMV) as i32, &mut refmv_cdf[refmv_ctx], 2);
+        }
+    }
+}

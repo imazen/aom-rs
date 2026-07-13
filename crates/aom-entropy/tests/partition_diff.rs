@@ -406,3 +406,50 @@ fn write_intra_uv_mode_matches_c() {
         assert_eq!(&my_cdf[..ns + 1], &want_cdf[..ns + 1], "uv_mode cdf cfl={cfl_allowed} m={uv_mode}");
     }
 }
+
+#[test]
+fn write_inter_mode_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_inter_mode;
+    let mut rng = Rng(0x14e6_c0de_a11a_0009);
+    let bin_cdf = |rng: &mut Rng| -> [u16; 3] { [1 + (rng.next() % 32766) as u16, 0, 0] };
+    for _ in 0..300_000 {
+        let mut newmv = [[0u16; 3]; 6];
+        let mut zeromv = [[0u16; 3]; 2];
+        let mut refmv = [[0u16; 3]; 6];
+        for c in &mut newmv {
+            *c = bin_cdf(&mut rng);
+        }
+        for c in &mut zeromv {
+            *c = bin_cdf(&mut rng);
+        }
+        for c in &mut refmv {
+            *c = bin_cdf(&mut rng);
+        }
+        // valid mode_ctx: newmv_ctx in [0,5], zeromv_ctx in [0,1], refmv_ctx in [0,5]
+        let newmv_ctx = (rng.next() % 6) as i32;
+        let zeromv_ctx = (rng.next() % 2) as i32;
+        let refmv_ctx = (rng.next() % 6) as i32;
+        let mode_ctx = newmv_ctx | (zeromv_ctx << 3) | (refmv_ctx << 4);
+        let mode = [13i32, 14, 15, 16][(rng.next() % 4) as usize]; // NEAREST/NEAR/GLOBAL/NEW MV
+
+        let mut my_nm = newmv;
+        let mut my_zm = zeromv;
+        let mut my_rm = refmv;
+        let mut enc = OdEcEnc::new();
+        write_inter_mode(&mut enc, &mut my_nm, &mut my_zm, &mut my_rm, mode, mode_ctx);
+        let got = enc.done().to_vec();
+
+        let nf: [u16; 18] = std::array::from_fn(|i| newmv[i / 3][i % 3]);
+        let zf: [u16; 6] = std::array::from_fn(|i| zeromv[i / 3][i % 3]);
+        let rf: [u16; 18] = std::array::from_fn(|i| refmv[i / 3][i % 3]);
+        let (want, onm, ozm, orm) = c::ref_write_inter_mode(&nf, &zf, &rf, mode, mode_ctx);
+        assert_eq!(got, want, "inter_mode bytes mode={mode} ctx={mode_ctx}");
+        let my_nf: [u16; 18] = std::array::from_fn(|i| my_nm[i / 3][i % 3]);
+        let my_zf: [u16; 6] = std::array::from_fn(|i| my_zm[i / 3][i % 3]);
+        let my_rf: [u16; 18] = std::array::from_fn(|i| my_rm[i / 3][i % 3]);
+        assert_eq!(my_nf, onm, "inter_mode newmv cdf");
+        assert_eq!(my_zf, ozm, "inter_mode zeromv cdf");
+        assert_eq!(my_rf, orm, "inter_mode refmv cdf");
+    }
+}

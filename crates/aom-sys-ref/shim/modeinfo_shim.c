@@ -222,3 +222,37 @@ uint32_t shim_write_intra_uv_mode(uint16_t *uv_mode_cdf, int uv_mode, int cfl_al
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* write_inter_mode: 3-symbol cascade over pristine C od_ec. CDFs flat:
+ * newmv[6][3], zeromv[2][3], refmv[6][3]. */
+uint32_t shim_write_inter_mode(uint16_t *newmv_cdf, uint16_t *zeromv_cdf,
+                               uint16_t *refmv_cdf, int mode, int mode_ctx, uint8_t *out,
+                               uint16_t *out_newmv, uint16_t *out_zeromv,
+                               uint16_t *out_refmv) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  int newmv_ctx = mode_ctx & 7;
+  uint16_t *nc = newmv_cdf + newmv_ctx * 3;
+  od_ec_encode_cdf_q15(&ec, mode != NEWMV, nc, 2);
+  update_cdf(nc, mode != NEWMV, 2);
+  if (mode != NEWMV) {
+    int zeromv_ctx = (mode_ctx >> 3) & 1;
+    uint16_t *zc = zeromv_cdf + zeromv_ctx * 3;
+    od_ec_encode_cdf_q15(&ec, mode != GLOBALMV, zc, 2);
+    update_cdf(zc, mode != GLOBALMV, 2);
+    if (mode != GLOBALMV) {
+      int refmv_ctx = (mode_ctx >> 4) & 15;
+      uint16_t *rc = refmv_cdf + refmv_ctx * 3;
+      od_ec_encode_cdf_q15(&ec, mode != NEARESTMV, rc, 2);
+      update_cdf(rc, mode != NEARESTMV, 2);
+    }
+  }
+  uint32_t n = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &n);
+  for (uint32_t i = 0; i < n; i++) out[i] = buf[i];
+  for (int i = 0; i < 6 * 3; i++) out_newmv[i] = newmv_cdf[i];
+  for (int i = 0; i < 2 * 3; i++) out_zeromv[i] = zeromv_cdf[i];
+  for (int i = 0; i < 6 * 3; i++) out_refmv[i] = refmv_cdf[i];
+  od_ec_enc_clear(&ec);
+  return n;
+}

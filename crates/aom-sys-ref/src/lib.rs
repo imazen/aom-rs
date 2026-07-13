@@ -243,12 +243,26 @@ extern "C" {
     fn shim_size_group_lookup(bsize: i32) -> i32;
     fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_write_inter_mode(newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, mode: i32, mode_ctx: i32, out: *mut u8, out_newmv: *mut u16, out_zeromv: *mut u16, out_refmv: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
 }
 
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `write_inter_mode` (3-symbol cascade over the pristine C od_ec + update_cdf).
+/// Returns coded bytes + the adapted newmv[18]/zeromv[6]/refmv[18] flat CDF arrays.
+#[allow(clippy::type_complexity)]
+pub fn ref_write_inter_mode(newmv: &[u16; 18], zeromv: &[u16; 6], refmv: &[u16; 18], mode: i32, mode_ctx: i32) -> (Vec<u8>, [u16; 18], [u16; 6], [u16; 18]) {
+    let mut nm = *newmv; let mut zm = *zeromv; let mut rm = *refmv;
+    let mut out = vec![0u8; 16];
+    let mut onm = [0u16; 18]; let mut ozm = [0u16; 6]; let mut orm = [0u16; 18];
+    let n = unsafe { shim_write_inter_mode(nm.as_mut_ptr(), zm.as_mut_ptr(), rm.as_mut_ptr(), mode, mode_ctx, out.as_mut_ptr(), onm.as_mut_ptr(), ozm.as_mut_ptr(), orm.as_mut_ptr()) };
+    out.truncate(n as usize);
+    (out, onm, ozm, orm)
 }
 
 /// Reference `size_group_lookup[bsize]`.
