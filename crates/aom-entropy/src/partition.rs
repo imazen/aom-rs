@@ -243,3 +243,24 @@ pub fn write_cfl_alphas(
         write_symbol(enc, idx & 15, &mut cfl_alpha_cdf[ctx], CFL_ALPHABET_SIZE);
     }
 }
+
+const INTRA_MODES: usize = 13;
+/// `intra_mode_context[INTRA_MODES]` (`common_data.h`): maps a Y prediction mode to
+/// its keyframe Y-mode CDF context.
+const INTRA_MODE_CONTEXT: [usize; INTRA_MODES] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0];
+
+/// `get_y_mode_cdf` context (`av1_common_int.h`): `(intra_mode_context[above_mode],
+/// intra_mode_context[left_mode])` selecting `kf_y_cdf[above_ctx][left_ctx]`. An absent
+/// neighbour resolves to `DC_PRED` (0).
+pub fn get_y_mode_ctx(above_mode: Option<i32>, left_mode: Option<i32>) -> (usize, usize) {
+    let a = above_mode.unwrap_or(0) as usize;
+    let l = left_mode.unwrap_or(0) as usize;
+    (INTRA_MODE_CONTEXT[a], INTRA_MODE_CONTEXT[l])
+}
+
+/// `write_intra_y_mode_kf` (`av1/encoder/bitstream.c`): the keyframe intra luma mode —
+/// `aom_write_symbol(mode, kf_y_cdf[above_ctx][left_ctx], INTRA_MODES)` (adapted). The
+/// caller selects the CDF via [`get_y_mode_ctx`].
+pub fn write_intra_y_mode_kf(enc: &mut OdEcEnc, kf_y_cdf: &mut [u16], mode: i32) {
+    write_symbol(enc, mode, kf_y_cdf, INTRA_MODES);
+}

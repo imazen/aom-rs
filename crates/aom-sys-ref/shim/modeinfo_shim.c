@@ -179,3 +179,28 @@ uint32_t shim_write_cfl_alphas(uint16_t *cfl_sign_cdf, uint16_t *cfl_alpha_cdf, 
   od_ec_enc_clear(&ec);
   return n;
 }
+
+/* get_y_mode_cdf context via the real intra_mode_context table + the block-mode
+ * neighbour rule (absent => DC_PRED). Returns (above_ctx<<8)|left_ctx. */
+#include "av1/common/common_data.h" /* intra_mode_context */
+int shim_get_y_mode_ctx(int above_present, int above_mode, int left_present,
+                        int left_mode) {
+  int a = above_present ? above_mode : 0; /* DC_PRED */
+  int l = left_present ? left_mode : 0;
+  return (intra_mode_context[a] << 8) | intra_mode_context[l];
+}
+
+/* write_intra_y_mode_kf symbol (INTRA_MODES) over pristine C od_ec. */
+uint32_t shim_write_intra_y_mode_kf(uint16_t *kf_y_cdf, int mode, uint8_t *out,
+                                    uint16_t *out_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  od_ec_encode_cdf_q15(&ec, mode, kf_y_cdf, INTRA_MODES);
+  update_cdf(kf_y_cdf, mode, INTRA_MODES);
+  uint32_t n = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &n);
+  for (uint32_t i = 0; i < n; i++) out[i] = buf[i];
+  for (int i = 0; i < INTRA_MODES + 1; i++) out_cdf[i] = kf_y_cdf[i];
+  od_ec_enc_clear(&ec);
+  return n;
+}

@@ -238,6 +238,8 @@ extern "C" {
     fn shim_write_delta_qindex(delta_q_cdf: *mut u16, delta_qindex: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_delta_lflevel(delta_lf_cdf: *mut u16, delta_lflevel: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_cfl_alphas(cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, idx: i32, joint_sign: i32, out: *mut u8, out_sign_cdf: *mut u16, out_alpha_cdf: *mut u16) -> u32;
+    fn shim_get_y_mode_ctx(above_present: i32, above_mode: i32, left_present: i32, left_mode: i32) -> i32;
+    fn shim_write_intra_y_mode_kf(kf_y_cdf: *mut u16, mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
 }
@@ -245,6 +247,22 @@ extern "C" {
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `get_y_mode_cdf` context (real intra_mode_context table + block-mode rule).
+pub fn ref_get_y_mode_ctx(above_present: bool, above_mode: i32, left_present: bool, left_mode: i32) -> (usize, usize) {
+    let v = unsafe { shim_get_y_mode_ctx(above_present as i32, above_mode, left_present as i32, left_mode) };
+    ((v >> 8) as usize, (v & 0xff) as usize)
+}
+
+/// Reference `write_intra_y_mode_kf` (transcribed symbol over the pristine C od_ec + update_cdf).
+pub fn ref_write_intra_y_mode_kf(kf_y_cdf: &[u16; 14], mode: i32) -> (Vec<u8>, [u16; 14]) {
+    let mut cdf = *kf_y_cdf;
+    let mut out = vec![0u8; 16];
+    let mut out_cdf = [0u16; 14];
+    let n = unsafe { shim_write_intra_y_mode_kf(cdf.as_mut_ptr(), mode, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    out.truncate(n as usize);
+    (out, out_cdf)
 }
 
 /// Reference `write_cfl_alphas` (transcribed over the pristine C od_ec + update_cdf).

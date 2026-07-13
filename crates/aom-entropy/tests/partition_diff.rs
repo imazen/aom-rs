@@ -310,3 +310,56 @@ fn write_cfl_alphas_matches_c() {
         assert_eq!(&my_alpha_flat[..], &want_alpha[..], "cfl alpha cdf idx={idx} js={joint_sign}");
     }
 }
+
+#[test]
+fn get_y_mode_ctx_matches_c() {
+    use aom_entropy::partition::get_y_mode_ctx;
+    for ap in [false, true] {
+        for lp in [false, true] {
+            for am in 0..13 {
+                for lm in 0..13 {
+                    let above = if ap { Some(am) } else { None };
+                    let left = if lp { Some(lm) } else { None };
+                    assert_eq!(
+                        get_y_mode_ctx(above, left),
+                        c::ref_get_y_mode_ctx(ap, am, lp, lm),
+                        "y_mode_ctx ap={ap} am={am} lp={lp} lm={lm}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn write_intra_y_mode_kf_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_intra_y_mode_kf;
+    let mut rng = Rng(0x14a5_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        // valid 13-symbol CDF (14 entries incl count)
+        let mut vals = [0i32; 13];
+        for v in vals.iter_mut().take(12) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..12].sort_unstable();
+        vals[..12].reverse();
+        let mut cdf = [0u16; 14];
+        let mut prev = 32768i32;
+        for i in 0..12 {
+            let v = vals[i].min(prev - 1).max((12 - i) as i32);
+            cdf[i] = v as u16;
+            prev = v;
+        }
+        cdf[12] = 0;
+        cdf[13] = 0;
+        let mode = (rng.next() % 13) as i32;
+        let mut my_cdf = cdf;
+        let mut enc = OdEcEnc::new();
+        write_intra_y_mode_kf(&mut enc, &mut my_cdf, mode);
+        let got = enc.done().to_vec();
+        let (want, want_cdf) = c::ref_write_intra_y_mode_kf(&cdf, mode);
+        assert_eq!(got, want, "intra_y_kf bytes mode={mode}");
+        assert_eq!(my_cdf, want_cdf, "intra_y_kf cdf mode={mode}");
+    }
+}
