@@ -65,20 +65,21 @@ both tracks, fully bit-exact.**
 - Transpiler `xtask/transpile_txfm1d.py` for the regular ping-pong butterflies.
 - Coverage ledger `coverage/checklist.json`.
 
-## Next (critical path — speed-0 encoder)
+## Next candidates
 
-1. **Forward 2-D transform** (`av1_fwd_txfm2d.c`): row/col config, transpose,
-   rounding/shift stages, `av1_transform_config`. Composes the 1-D kernels above.
-2. **Quantization / dequant** (`av1_quantize.c`) — next bit-exact encoder stage.
-3. AVX2/NEON SIMD specializations of the 2-D transform, each diffed against the
-   scalar port (lane-level), matching libaom's own C-vs-SIMD contract.
-4. Begin the decoder track's inverse transforms in parallel (`av1_inv_txfm1d.c`)
-   — same methodology, mirror harness.
+1. **Coefficient coding**: scan orders, txb context, `av1_write_coeffs_txb` /
+   `read_coeffs_txb` — ties transform+quant to the entropy layer (both tracks).
+2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
+   per-mode bit-exact, differential per predictor.
+3. **Loop filters**: deblock, CDEF, loop-restoration (decoder + encoder search).
+4. AVX2/NEON SIMD specializations (perf gate), each diffed lane-level vs scalar.
+5. Encoder RDO + rate control (hardest bit-identity target).
 
 ## Gate posture (honest)
 
-Two gates are *mechanized but far from satisfied*: correctness (only the txfm1d
-module is green so far) and coverage (12 items green of the full surface). Perf,
-full encoder/decoder bitstream, and zenavif gates are not yet exercised. The
-value delivered so far is the verified methodology + first module, not a
-finished codec.
+Real, verified, ratcheting progress across BOTH tracks — but still a fraction of
+the whole. Green so far: full transform subsystem, two quantizers, and the entire
+symbol-coding stack (range coder + CDF adaptation). None of the four project
+gates (full-corpus correctness, ≤1.20× perf, full coverage, zenavif parity) is
+satisfied yet; the machinery that makes each mechanically checkable is in place
+and every landed module is byte-exact vs C within it.
