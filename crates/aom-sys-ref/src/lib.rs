@@ -186,6 +186,18 @@ extern "C" {
     fn aom_sum_squares_i16_c(src: *const i16, n: u32) -> u64;
     fn aom_sum_squares_2d_i16_c(src: *const i16, src_stride: i32, width: i32, height: i32) -> u64;
     fn aom_vector_var_c(reff: *const i16, src: *const i16, bwl: i32) -> i32;
+    fn shim_wb_apply(data: *const u32, bits: *const i32, kind: *const i32, n: i32, out: *mut u8) -> u32;
+}
+
+/// Reference `aom_write_bit_buffer`: apply a sequence of literal ops (kind 0 =
+/// signed literal, 1 = unsigned literal, 2 = inv-signed literal) and return the
+/// produced bytes.
+pub fn ref_wb_apply(data: &[u32], bits: &[i32], kind: &[i32]) -> Vec<u8> {
+    let n = data.len();
+    let mut out = vec![0u8; 1 << 16];
+    let written = unsafe { shim_wb_apply(data.as_ptr(), bits.as_ptr(), kind.as_ptr(), n as i32, out.as_mut_ptr()) };
+    out.truncate(written as usize);
+    out
 }
 
 /// Reference `aom_vector_var_c`.

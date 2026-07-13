@@ -8,6 +8,7 @@
 pub mod cdf;
 pub mod dec;
 pub mod enc;
+pub mod wb;
 
 pub use cdf::{read_symbol, update_cdf, write_symbol};
 pub use dec::OdEcDec;
