@@ -928,3 +928,69 @@ fn read_frame_size_with_refs_inverts_write() {
         }
     }
 }
+
+#[test]
+fn read_inter_ref_signaling_inverts_write() {
+    use aom_entropy::header::{read_inter_ref_signaling, write_inter_ref_signaling, InterRefSignaling};
+    let mut rng = Rng(0x1e_12e5_c0de_01d0);
+    for _ in 0..100_000 {
+        let short = rng.next() & 1 == 1;
+        // short signalling requires order hint; else force order-hint random.
+        let enable_order_hint = short || rng.next() & 1 == 1;
+        // distinct ref_map_idx in [0,8) so frame-id deltas don't alias a map slot.
+        let mut pool = [0i32, 1, 2, 3, 4, 5, 6, 7];
+        for i in (1..8).rev() {
+            let j = (rng.next() % (i as u64 + 1)) as usize;
+            pool.swap(i, j);
+        }
+        let mut ref_map_idx = [0i32; 7];
+        ref_map_idx.copy_from_slice(&pool[..7]);
+
+        // frame ids only exercised on the not-short path (short needs av1_set_frame_refs).
+        let frame_id_present = !short && rng.next() & 1 == 1;
+        let frame_id_length = 3 + (rng.next() % 13) as u32; // [3,15]
+        let m = 1i32 << frame_id_length;
+        let delta_frame_id_length = 2 + (rng.next() % (frame_id_length - 2).max(1) as u64) as u32; // [2, fidl-1]
+        let current_frame_id = (rng.next() % m as u64) as i32;
+        let mut want_delta = [0i32; 7];
+        let mut ref_frame_id = [0i32; 8];
+        if frame_id_present {
+            for r in 0..7 {
+                let d = (rng.next() % (1u64 << delta_frame_id_length)) as i32; // [0, 2^dfidl)
+                want_delta[r] = d;
+                // set ref_frame_id[map_idx] so the encoder recomputes exactly d.
+                ref_frame_id[ref_map_idx[r] as usize] = (current_frame_id - (d + 1) + m).rem_euclid(m);
+            }
+        }
+
+        let s = InterRefSignaling {
+            enable_order_hint,
+            frame_refs_short_signaling: short,
+            ref_map_idx,
+            set_ref_frame_config: false,
+            rtc_reference: [0; 7],
+            rtc_ref_idx: [0; 7],
+            number_spatial_layers: 1,
+            frame_id_numbers_present_flag: frame_id_present,
+            frame_id_length,
+            current_frame_id,
+            ref_frame_id,
+            delta_frame_id_length,
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_inter_ref_signaling(&mut wb, &s);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        let (gshort, glst, ggld, gremap, gdelta) =
+            read_inter_ref_signaling(&mut rb, enable_order_hint, frame_id_present, delta_frame_id_length);
+        assert_eq!(gshort, short, "short flag");
+        if short {
+            assert_eq!((glst, ggld), (ref_map_idx[0], ref_map_idx[3]), "short lst/gld");
+        } else {
+            assert_eq!(gremap, ref_map_idx, "remapped idx");
+            if frame_id_present {
+                assert_eq!(gdelta, want_delta, "frame-id deltas");
+            }
+        }
+    }
+}

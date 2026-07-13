@@ -2249,3 +2249,35 @@ pub fn read_frame_size_with_refs(
         (fs.superres_upscaled_width, fs.superres_upscaled_height, rw, rh, fs.scale_denominator, -1)
     }
 }
+
+/// `read_inter_ref_signaling` — inverse of [`write_inter_ref_signaling`] (the reference-
+/// frame index signalling in the frame header). Reads the short-signalling flag (order-
+/// hint gated) and, if set, the LAST/GOLDEN map indices; otherwise the seven remapped
+/// reference indices; plus, when frame ids are present, the per-reference
+/// `delta_frame_id_minus_1`. Returns `(frame_refs_short_signaling, lst_ref, gld_ref,
+/// remapped_ref_idx, delta_frame_id_minus_1)`. Short-signalling's full index derivation
+/// (`av1_set_frame_refs`) is a separate step the caller runs from `(lst_ref, gld_ref)`.
+pub fn read_inter_ref_signaling(
+    rb: &mut ReadBitBuffer,
+    enable_order_hint: bool,
+    frame_id_numbers_present_flag: bool,
+    delta_frame_id_length: u32,
+) -> (bool, i32, i32, [i32; 7], [i32; 7]) {
+    let frame_refs_short_signaling = enable_order_hint && rb.read_bit() != 0;
+    let (mut lst_ref, mut gld_ref) = (0, 0);
+    if frame_refs_short_signaling {
+        lst_ref = rb.read_literal(3);
+        gld_ref = rb.read_literal(3);
+    }
+    let mut remapped_ref_idx = [0i32; 7];
+    let mut delta_frame_id_minus_1 = [0i32; 7];
+    for r in 0..7 {
+        if !frame_refs_short_signaling {
+            remapped_ref_idx[r] = rb.read_literal(3);
+        }
+        if frame_id_numbers_present_flag {
+            delta_frame_id_minus_1[r] = rb.read_literal(delta_frame_id_length);
+        }
+    }
+    (frame_refs_short_signaling, lst_ref, gld_ref, remapped_ref_idx, delta_frame_id_minus_1)
+}
