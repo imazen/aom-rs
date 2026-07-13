@@ -426,3 +426,25 @@ pub fn encode_coding_block_plane(
     }
     BlockContexts { above, left }
 }
+
+/// The pixel-domain reconstruction distortion for a transform block — the SSE
+/// the encoder's final RD uses. Reconstructs `pred + inv_txfm(dqcoeff)` (clamped
+/// to the bd pixel range, via [`av1_inv_txfm2d_add`]) and returns the sum of
+/// squared differences vs `source`. `dqcoeff` has `inv_input_len(tx_size)`
+/// entries; `pred`/`source`/output are the full `TX_W x TX_H` pixel block
+/// (contiguous, stride = TX_W). Pixels are u16 (libaom's internal representation
+/// for all bit depths; for bd=8 the values are simply <= 255).
+pub fn pixel_distortion(
+    dqcoeff: &[i32],
+    tx_size: usize,
+    tx_type: usize,
+    pred: &[u16],
+    source: &[u16],
+    bd: i32,
+) -> i64 {
+    let w = TX_W[tx_size];
+    let h = TX_H[tx_size];
+    let mut recon = pred[..w * h].to_vec();
+    aom_transform::inv_txfm2d::av1_inv_txfm2d_add(dqcoeff, &mut recon, w, tx_type, tx_size, bd);
+    aom_dist::highbd_sse(&recon, w, source, w, w, h)
+}

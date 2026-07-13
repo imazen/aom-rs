@@ -28,6 +28,7 @@ dependencies = [
 name = "aom-encode"
 version = "0.0.1"
 dependencies = [
+ "aom-dist",
  "aom-entropy",
  "aom-quant",
  "aom-sys-ref",
