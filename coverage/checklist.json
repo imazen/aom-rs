@@ -362,6 +362,28 @@
           "test": "convolve_diff::convolve_x_y_sr_byte_identical"
         }
       }
+    },
+    "dist.hadamard_satd": {
+      "status": "green",
+      "note": "Hadamard transform (4x4/8x8/16x16) + SATD for encoder RD cost (speed-0 path). 32x32/64x64 + highbd: TODO.",
+      "items": {
+        "aom_hadamard_4x4": {
+          "status": "green",
+          "test": "hadamard_diff::hadamard_satd_byte_identical"
+        },
+        "aom_hadamard_8x8": {
+          "status": "green",
+          "test": "hadamard_diff::hadamard_satd_byte_identical"
+        },
+        "aom_hadamard_16x16": {
+          "status": "green",
+          "test": "hadamard_diff::hadamard_satd_byte_identical"
+        },
+        "aom_satd": {
+          "status": "green",
+          "test": "hadamard_diff::hadamard_satd_byte_identical"
+        }
+      }
     }
   }
 }

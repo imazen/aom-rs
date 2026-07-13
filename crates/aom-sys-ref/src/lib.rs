@@ -64,6 +64,33 @@ pub fn ref_convolve_y_sr(src: &[u8], src_off: usize, ss: usize, w: usize, h: usi
     dst
 }
 
+// aom_dsp/avg.c — Hadamard transform + SATD.
+extern "C" {
+    pub fn aom_hadamard_4x4_c(src: *const i16, stride: isize, coeff: *mut i32);
+    pub fn aom_hadamard_8x8_c(src: *const i16, stride: isize, coeff: *mut i32);
+    pub fn aom_hadamard_16x16_c(src: *const i16, stride: isize, coeff: *mut i32);
+    pub fn aom_satd_c(coeff: *const i32, length: i32) -> i32;
+}
+
+/// Reference `aom_hadamard_<n>x<n>_c` for `n` in {4,8,16}; returns `n*n` coeffs.
+pub fn ref_hadamard(n: usize, src: &[i16], stride: usize) -> Vec<i32> {
+    let mut coeff = vec![0i32; n * n];
+    unsafe {
+        match n {
+            4 => aom_hadamard_4x4_c(src.as_ptr(), stride as isize, coeff.as_mut_ptr()),
+            8 => aom_hadamard_8x8_c(src.as_ptr(), stride as isize, coeff.as_mut_ptr()),
+            16 => aom_hadamard_16x16_c(src.as_ptr(), stride as isize, coeff.as_mut_ptr()),
+            _ => unreachable!(),
+        }
+    }
+    coeff
+}
+
+/// Reference `aom_satd_c`.
+pub fn ref_satd(coeff: &[i32]) -> i32 {
+    unsafe { aom_satd_c(coeff.as_ptr(), coeff.len() as i32) }
+}
+
 // av1/common/cdef_block.c — CDEF direction search.
 extern "C" {
     pub fn cdef_find_dir_c(img: *const u16, stride: i32, var: *mut i32, coeff_shift: i32) -> i32;

@@ -3,6 +3,7 @@
 //! variance — the workhorses of encoder motion search / RDO (speed-0 path).
 
 pub mod avx2;
+pub mod hadamard;
 
 const FILTER_BITS: i32 = 7;
 
