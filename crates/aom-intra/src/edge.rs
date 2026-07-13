@@ -14,11 +14,8 @@ pub fn edge_filter_strength(bs0: i32, bs1: i32, delta: i32, ty: i32) -> i32 {
             if d >= 56 {
                 strength = 1;
             }
-        } else if blk_wh <= 12 {
-            if d >= 40 {
-                strength = 1;
-            }
         } else if blk_wh <= 16 {
+            // libaom has separate <=12 and <=16 branches with identical action.
             if d >= 40 {
                 strength = 1;
             }
@@ -121,6 +118,7 @@ pub fn upsample_intra_edge(buf: &mut [u8], off: usize, sz: usize) {
     }
     inp[sz + 2] = buf[off + sz - 1] as i32;
     buf[off - 2] = inp[0] as u8;
+    #[allow(clippy::needless_range_loop)]
     for i in 0..sz {
         let s = (-inp[i] + 9 * inp[i + 1] + 9 * inp[i + 2] - inp[i + 3] + 8) >> 4;
         let s = s.clamp(0, 255) as u8;
