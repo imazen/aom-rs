@@ -197,7 +197,12 @@ both tracks, fully bit-exact.**
   chain the C reference steps as oracle and cover all 19 tx sizes x 7 tx types x FP/B x
   QM/flat (x update on/off for the writer), with coverage guards (nonzero-eob fraction,
   trellis-reduced-eob, byte-producing fraction). av1_write_tx_type (plane-0 tx_type) out
-  of scope on both sides. bd=8 (lowbd); highbd follows the highbd forward transform.
+  of scope on both sides. **Both bit depths**: the AV1 forward transform is bd-independent
+  in this build (verified bd 8 == bd 12 output — stage_range only feeds the disabled
+  forward range-check), and the trellis / entropy-ctx / writer all operate on quantized
+  coefficients, so highbd differs *only* in the quantizer family. QuantParams.bd > 8
+  dispatches the 64-bit highbd quantizers; the residual->bytes capstone is byte-identical
+  to C at bd 8 AND bd 12.
 
 - **per-block entropy-context propagation (aom-txb)** — the neighbour-context
   loop gating every txb (both tracks): get_txb_ctx (above/left -> txb_skip_ctx /
@@ -248,15 +253,13 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **highbd forward transform** (`av1_fwd_txfm2d` bd=10/12): the one missing piece
-   before the entire block-encode pipeline works for highbd (all highbd quantizers +
-   the trellis QM/flat are already bit-exact). Port the highbd fwd stages, then
-   parameterize aom-encode by bd.
-2. **DC-only quantizer** (`av1_quantize_dc`): the third quant_func_list entry
-   (QuantKind::Dc) — small, completes the quant dispatch, facade oracle pattern.
-3. **av1_write_tx_type into the block bitstream**: write_tx_type is ported (aom-txb);
+1. **av1_write_tx_type into the block bitstream**: write_tx_type is ported (aom-txb);
    wire it ahead of the coefficients in encode_block_coeffs for the complete plane-0
    per-block signaling (needs the tx_type CDFs + intra-dir/ext-tx-set context).
+2. **DC-only quantizer** (`av1_quantize_dc`): the third quant_func_list entry
+   (QuantKind::Dc) — small, completes the quant dispatch, facade oracle pattern.
+3. **Transform-block loop / cost_coeffs RD wiring**: drive xform_quant_optimize +
+   write_coeffs across a block's txbs; av1_cost_coeffs_txb is ported for the RD side.
 4. **Mode & partition search (RDO)** — the hardest bit-identity target; the layer that
    drives xform_quant_optimize per candidate.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
