@@ -25,6 +25,24 @@
       "items": {
         "av1_fwd_txfm2d_all_sizes": {"status": "green", "test": "txfm2d_diff::txfm2d_differential_fuzz"}
       }
+    },
+    "transform.inv_txfm1d": {
+      "status": "green",
+      "note": "Inverse 1D family; live per-stage clamp_value driven by stage_range.",
+      "items": {
+        "av1_idct4":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_idct8":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_idct16": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_idct32": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_idct64": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_iadst4":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_iadst8":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_iadst16": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_iidentity4":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_iidentity8":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_iidentity16": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
+        "av1_iidentity32": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"}
+      }
     }
   }
 }

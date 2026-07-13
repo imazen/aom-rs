@@ -5,7 +5,8 @@ use crate::cospi::cospi_arr;
 use crate::fdct::half_btf;
 
 /// Bit-exact port of libaom `av1_fdct8` (transpiled, harness-verified).
-pub fn av1_fdct8(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[i8]) {
+#[allow(unused_variables)]
+pub fn av1_fdct8(input: &[i32], out: &mut [i32], cos_bit: i32, stage_range: &[i8]) {
     let cospi = cospi_arr(cos_bit);
     let mut step = [0i32; 8];
     out[0] = input[0].wrapping_add(input[7]);
@@ -51,7 +52,8 @@ pub fn av1_fdct8(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[i
 }
 
 /// Bit-exact port of libaom `av1_fdct16` (transpiled, harness-verified).
-pub fn av1_fdct16(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[i8]) {
+#[allow(unused_variables)]
+pub fn av1_fdct16(input: &[i32], out: &mut [i32], cos_bit: i32, stage_range: &[i8]) {
     let cospi = cospi_arr(cos_bit);
     let mut step = [0i32; 16];
     out[0] = input[0].wrapping_add(input[15]);
@@ -169,7 +171,8 @@ pub fn av1_fdct16(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[
 }
 
 /// Bit-exact port of libaom `av1_fdct32` (transpiled, harness-verified).
-pub fn av1_fdct32(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[i8]) {
+#[allow(unused_variables)]
+pub fn av1_fdct32(input: &[i32], out: &mut [i32], cos_bit: i32, stage_range: &[i8]) {
     let cospi = cospi_arr(cos_bit);
     let mut step = [0i32; 32];
     out[0] = input[0].wrapping_add(input[31]);
@@ -463,7 +466,8 @@ pub fn av1_fdct32(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[
 }
 
 /// Bit-exact port of libaom `av1_fdct64` (transpiled, harness-verified).
-pub fn av1_fdct64(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[i8]) {
+#[allow(unused_variables)]
+pub fn av1_fdct64(input: &[i32], out: &mut [i32], cos_bit: i32, stage_range: &[i8]) {
     let cospi = cospi_arr(cos_bit);
     let mut step = [0i32; 64];
     out[0] = input[0].wrapping_add(input[63]);
@@ -1173,7 +1177,8 @@ pub fn av1_fdct64(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[
 }
 
 /// Bit-exact port of libaom `av1_fadst8` (transpiled, harness-verified).
-pub fn av1_fadst8(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[i8]) {
+#[allow(unused_variables)]
+pub fn av1_fadst8(input: &[i32], out: &mut [i32], cos_bit: i32, stage_range: &[i8]) {
     let cospi = cospi_arr(cos_bit);
     let mut step = [0i32; 8];
     out[0] = input[0];
@@ -1235,7 +1240,8 @@ pub fn av1_fadst8(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[
 }
 
 /// Bit-exact port of libaom `av1_fadst16` (transpiled, harness-verified).
-pub fn av1_fadst16(input: &[i32], out: &mut [i32], cos_bit: i32, _stage_range: &[i8]) {
+#[allow(unused_variables)]
+pub fn av1_fadst16(input: &[i32], out: &mut [i32], cos_bit: i32, stage_range: &[i8]) {
     let cospi = cospi_arr(cos_bit);
     let mut step = [0i32; 16];
     out[0] = input[0];

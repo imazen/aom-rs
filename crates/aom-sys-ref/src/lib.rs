@@ -41,6 +41,20 @@ extern "C" {
     pub fn av1_fidentity8_c(i: *const i32, o: *mut i32, c: i8, s: *const i8);
     pub fn av1_fidentity16_c(i: *const i32, o: *mut i32, c: i8, s: *const i8);
     pub fn av1_fidentity32_c(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+
+    // av1/common/av1_inv_txfm1d.c — inverse 1D transforms.
+    pub fn av1_idct4(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_idct8(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_idct16(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_idct32(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_idct64(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_iadst4(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_iadst8(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_iadst16(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_iidentity4_c(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_iidentity8_c(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_iidentity16_c(i: *const i32, o: *mut i32, c: i8, s: *const i8);
+    pub fn av1_iidentity32_c(i: *const i32, o: *mut i32, c: i8, s: *const i8);
 }
 
 /// Call a reference forward 1D transform, returning `n` output coefficients.

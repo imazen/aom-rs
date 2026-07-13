@@ -20,6 +20,12 @@ Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
   Oracle needs `av1_rtcd()` init (some `_c` entry points call SIMD-dispatched
   helpers); handled once in `aom-sys-ref::ref_init`.
 
+- **Inverse 1-D transforms** (`av1_inv_txfm1d.c`), all 12 kernels:
+  `idct{4,8,16,32,64}`, `iadst{4,8,16}`, `iidentity{4,8,16,32}`. Adds a live
+  per-stage `clamp_value(stage_range)` (transpiler extended to track stage index
+  + emit clamps). Harness: `tests/inv_txfm1d_diff.rs`, 4.8M differential
+  comparisons + edge cases, byte-identical to C. (Decoder track.)
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.

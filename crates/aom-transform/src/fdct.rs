@@ -30,6 +30,18 @@ pub fn round_shift(value: i64, bit: i32) -> i32 {
     ((value + (1i64 << (bit - 1))) >> bit) as i32
 }
 
+/// libaom `clamp_value(value, bit)` from `av1_inv_txfm1d.h` — bit-exact.
+/// Active in the inverse transforms (not gated behind range-check config).
+#[inline]
+pub fn clamp_value(value: i32, bit: i8) -> i32 {
+    if bit <= 0 {
+        return value; // Do nothing for invalid clamp bit.
+    }
+    let max_value = (1i64 << (bit - 1)) - 1;
+    let min_value = -(1i64 << (bit - 1));
+    (value as i64).clamp(min_value, max_value) as i32
+}
+
 /// Bit-exact port of `av1_fdct4`.
 ///
 /// `output` must have length >= 4. `stage_range` is accepted for signature
