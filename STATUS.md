@@ -131,6 +131,13 @@ both tracks, fully bit-exact.**
   floor / inv_map. `prob_cost_diff.rs`, ~36k derivations. Coefficient-coding RD
   loop (CDF -> costs -> cost_coeffs_txb) is now end-to-end bit-exact.
 
+- **av1_fill_coeff_costs (aom-txb)** — assemble the per-(txs_ctx, plane)
+  LV_MAP_COEFF_COST tables from a frame's coeff CDFs (the production source of
+  cost_coeffs_txb's tables). Newly verified: base_cost[4..7] trellis-diff +
+  lps_cost cumulation/diff fixups. `fill_diff.rs`, 4000 random CDF sets. The
+  coefficient-coding cost pipeline (frame CDFs -> fill -> LvMapCoeffCost ->
+  cost_coeffs_txb) is end-to-end bit-exact.
+
 ## Coverage gate (auto-derived, honest)
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec
