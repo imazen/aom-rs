@@ -234,3 +234,74 @@ fn frame_size_cluster_matches_c() {
         assert_eq!(wb.bytes(), &want[..], "frame_size {fs:?}");
     }
 }
+
+#[test]
+fn write_tile_info_matches_c() {
+    use aom_entropy::header::{write_tile_info, TileInfoHeader};
+    let mut rng = Rng(0x71fe_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let mib_size_log2 = rng.range(4, 6) as u32; // 4 or 5
+        let uniform = rng.next().is_multiple_of(2);
+        let mut col_start_sb = [0i32; 65];
+        let mut row_start_sb = [0i32; 65];
+
+        let (mi_cols, mi_rows, cols, rows, log2_cols, log2_rows, min_c, max_c, min_r, max_r, max_width_sb, max_height_sb);
+        if uniform {
+            // uniform spacing: log2 in [min, max]; the partition arrays are unused.
+            min_c = rng.range(0, 3);
+            max_c = min_c + rng.range(0, 4);
+            log2_cols = min_c + rng.range(0, (max_c - min_c) + 1);
+            min_r = rng.range(0, 3);
+            max_r = min_r + rng.range(0, 4);
+            log2_rows = min_r + rng.range(0, (max_r - min_r) + 1);
+            cols = 1usize << log2_cols;
+            rows = 1usize << log2_rows;
+            mi_cols = rng.range(1, 4096);
+            mi_rows = rng.range(1, 4096);
+            max_width_sb = rng.range(1, 64);
+            max_height_sb = rng.range(1, 64);
+        } else {
+            // explicit: build a valid partition summing to width_sb / height_sb.
+            let ncols = rng.range(1, 8) as usize;
+            let nrows = rng.range(1, 8) as usize;
+            let max_tile = rng.range(1, 8);
+            let mut wsum = 0;
+            for i in 0..ncols {
+                let s = rng.range(1, max_tile + 1);
+                col_start_sb[i + 1] = col_start_sb[i] + s;
+                wsum += s;
+            }
+            let mut hsum = 0;
+            for i in 0..nrows {
+                let s = rng.range(1, max_tile + 1);
+                row_start_sb[i + 1] = row_start_sb[i] + s;
+                hsum += s;
+            }
+            cols = ncols;
+            rows = nrows;
+            // mi_cols chosen so ceil_power_of_two(mi_cols, mib) == wsum exactly.
+            mi_cols = wsum << mib_size_log2;
+            mi_rows = hsum << mib_size_log2;
+            max_width_sb = max_tile + rng.range(0, 4); // >= every tile size
+            max_height_sb = max_tile + rng.range(0, 4);
+            log2_cols = rng.range(0, 4);
+            log2_rows = rng.range(0, 4);
+            min_c = 0;
+            max_c = 6;
+            min_r = 0;
+            max_r = 6;
+        }
+
+        let t = TileInfoHeader {
+            mi_cols, mi_rows, mib_size_log2, uniform_spacing: uniform,
+            log2_cols, min_log2_cols: min_c, max_log2_cols: max_c,
+            log2_rows, min_log2_rows: min_r, max_log2_rows: max_r,
+            cols, rows, col_start_sb, row_start_sb, max_width_sb, max_height_sb,
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_tile_info(&mut wb, &t);
+        let got = wb.bytes().to_vec();
+        let want = c::ref_write_tile_info(mi_cols, mi_rows, mib_size_log2, uniform, log2_cols, min_c, max_c, log2_rows, min_r, max_r, cols, rows, &col_start_sb, &row_start_sb, max_width_sb, max_height_sb);
+        assert_eq!(got, want, "write_tile_info {t:?}");
+    }
+}

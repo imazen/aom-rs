@@ -219,3 +219,54 @@ uint32_t shim_write_frame_size(int frame_size_override, int num_bits_width,
   }
   return aom_wb_bytes_written(&wb);
 }
+
+/* Tile-info frame-header component, transcribed control flow over the real
+ * aom_wb (assert(width_sb==0) omitted — debug-only, no byte effect). */
+static void shim_wb_write_uniform(struct aom_write_bit_buffer *wb, int n, int v) {
+  const int l = get_unsigned_bits(n);
+  const int m = (1 << l) - n;
+  if (l == 0) return;
+  if (v < m) {
+    aom_wb_write_literal(wb, v, l - 1);
+  } else {
+    aom_wb_write_literal(wb, m + ((v - m) >> 1), l - 1);
+    aom_wb_write_literal(wb, (v - m) & 1, 1);
+  }
+}
+
+uint32_t shim_write_tile_info(int mi_cols, int mi_rows, int mib_size_log2,
+                              int uniform_spacing, int log2_cols, int min_log2_cols,
+                              int max_log2_cols, int log2_rows, int min_log2_rows,
+                              int max_log2_rows, int cols, int rows,
+                              const int *col_start_sb, const int *row_start_sb,
+                              int max_width_sb, int max_height_sb, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  int width_sb = CEIL_POWER_OF_TWO(mi_cols, mib_size_log2);
+  int height_sb = CEIL_POWER_OF_TWO(mi_rows, mib_size_log2);
+  aom_wb_write_bit(&wb, uniform_spacing);
+  if (uniform_spacing) {
+    int ones = log2_cols - min_log2_cols;
+    while (ones--) aom_wb_write_bit(&wb, 1);
+    if (log2_cols < max_log2_cols) aom_wb_write_bit(&wb, 0);
+    ones = log2_rows - min_log2_rows;
+    while (ones--) aom_wb_write_bit(&wb, 1);
+    if (log2_rows < max_log2_rows) aom_wb_write_bit(&wb, 0);
+  } else {
+    for (int i = 0; i < cols; i++) {
+      int size_sb = col_start_sb[i + 1] - col_start_sb[i];
+      shim_wb_write_uniform(&wb, AOMMIN(width_sb, max_width_sb), size_sb - 1);
+      width_sb -= size_sb;
+    }
+    for (int i = 0; i < rows; i++) {
+      int size_sb = row_start_sb[i + 1] - row_start_sb[i];
+      shim_wb_write_uniform(&wb, AOMMIN(height_sb, max_height_sb), size_sb - 1);
+      height_sb -= size_sb;
+    }
+  }
+  /* write_tile_info trailing (saved_wb copy has no byte effect) */
+  if (rows * cols > 1) {
+    aom_wb_write_literal(&wb, 0, log2_cols + log2_rows);
+    aom_wb_write_literal(&wb, 3, 2);
+  }
+  return aom_wb_bytes_written(&wb);
+}

@@ -288,3 +288,95 @@ pub fn write_frame_size(wb: &mut WriteBitBuffer, fs: &FrameSizeHeader) {
     write_superres_scale(wb, fs.enable_superres, fs.scale_denominator);
     write_render_size(wb, fs.scaling_active, fs.render_width, fs.render_height);
 }
+
+// ---- tile info ------------------------------------------------------------
+
+const MAX_TILE_COLS: usize = 64;
+const MAX_TILE_ROWS: usize = 64;
+
+/// `CEIL_POWER_OF_TWO(value, n)` (`aom_ports/mem.h`): `ceil(value / 2^n)`.
+fn ceil_power_of_two(value: i32, n: u32) -> i32 {
+    (value + (1 << n) - 1) >> n
+}
+
+/// `wb_write_uniform` (`av1/encoder/bitstream.c`): the uncompressed-header form of
+/// `write_uniform` — a value `v` in `[0, n)` coded in `l-1` or `l` bits where
+/// `l = get_unsigned_bits(n)` and `m = (1 << l) - n`.
+pub fn wb_write_uniform(wb: &mut WriteBitBuffer, n: i32, v: i32) {
+    let l = get_unsigned_bits(n as u32);
+    if l == 0 {
+        return;
+    }
+    let m = (1i32 << l) - n;
+    if v < m {
+        wb.write_literal(v, l - 1);
+    } else {
+        wb.write_literal(m + ((v - m) >> 1), l - 1);
+        wb.write_literal((v - m) & 1, 1);
+    }
+}
+
+/// The tile-info frame-header state (`cm->mi_params` + `cm->tiles`).
+#[derive(Clone, Debug)]
+pub struct TileInfoHeader {
+    pub mi_cols: i32,
+    pub mi_rows: i32,
+    pub mib_size_log2: u32,
+    pub uniform_spacing: bool,
+    pub log2_cols: i32,
+    pub min_log2_cols: i32,
+    pub max_log2_cols: i32,
+    pub log2_rows: i32,
+    pub min_log2_rows: i32,
+    pub max_log2_rows: i32,
+    pub cols: usize,
+    pub rows: usize,
+    pub col_start_sb: [i32; MAX_TILE_COLS + 1],
+    pub row_start_sb: [i32; MAX_TILE_ROWS + 1],
+    pub max_width_sb: i32,
+    pub max_height_sb: i32,
+}
+
+/// `write_tile_info_max_tile`: uniform-spacing flag, then either the unary
+/// log2-cols/rows increments (uniform) or the per-tile `wb_write_uniform` sizes
+/// (explicit).
+pub fn write_tile_info_max_tile(wb: &mut WriteBitBuffer, t: &TileInfoHeader) {
+    let mut width_sb = ceil_power_of_two(t.mi_cols, t.mib_size_log2);
+    let mut height_sb = ceil_power_of_two(t.mi_rows, t.mib_size_log2);
+    wb.write_bit(t.uniform_spacing as u32);
+    if t.uniform_spacing {
+        for _ in 0..(t.log2_cols - t.min_log2_cols) {
+            wb.write_bit(1);
+        }
+        if t.log2_cols < t.max_log2_cols {
+            wb.write_bit(0);
+        }
+        for _ in 0..(t.log2_rows - t.min_log2_rows) {
+            wb.write_bit(1);
+        }
+        if t.log2_rows < t.max_log2_rows {
+            wb.write_bit(0);
+        }
+    } else {
+        for i in 0..t.cols {
+            let size_sb = t.col_start_sb[i + 1] - t.col_start_sb[i];
+            wb_write_uniform(wb, width_sb.min(t.max_width_sb), size_sb - 1);
+            width_sb -= size_sb;
+        }
+        for i in 0..t.rows {
+            let size_sb = t.row_start_sb[i + 1] - t.row_start_sb[i];
+            wb_write_uniform(wb, height_sb.min(t.max_height_sb), size_sb - 1);
+            height_sb -= size_sb;
+        }
+    }
+}
+
+/// `write_tile_info`: `write_tile_info_max_tile`, then (for >1 tile) the CDF-update
+/// tile id (all zero here) and the tile-size-bytes-minus-one field (=3, 2 bits).
+pub fn write_tile_info(wb: &mut WriteBitBuffer, t: &TileInfoHeader) {
+    write_tile_info_max_tile(wb, t);
+    if t.rows * t.cols > 1 {
+        wb.write_literal(0, (t.log2_cols + t.log2_rows) as u32);
+        wb.write_literal(3, 2);
+    }
+}

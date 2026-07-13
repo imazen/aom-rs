@@ -203,6 +203,19 @@ extern "C" {
     fn shim_write_render_size(scaling_active: i32, rw: i32, rh: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_frame_size(frame_size_override: i32, num_bits_width: i32, num_bits_height: i32, up_w: i32, up_h: i32, enable_superres: i32, denom: i32, scaling_active: i32, rw: i32, rh: i32, out: *mut u8) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_tile_info(mi_cols: i32, mi_rows: i32, mib_size_log2: i32, uniform_spacing: i32, log2_cols: i32, min_log2_cols: i32, max_log2_cols: i32, log2_rows: i32, min_log2_rows: i32, max_log2_rows: i32, cols: i32, rows: i32, col_start_sb: *const i32, row_start_sb: *const i32, max_width_sb: i32, max_height_sb: i32, out: *mut u8) -> u32;
+}
+
+/// Reference `write_tile_info` (transcribed control flow over the real aom_wb).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_tile_info(mi_cols: i32, mi_rows: i32, mib_size_log2: u32, uniform_spacing: bool, log2_cols: i32, min_log2_cols: i32, max_log2_cols: i32, log2_rows: i32, min_log2_rows: i32, max_log2_rows: i32, cols: usize, rows: usize, col_start_sb: &[i32; 65], row_start_sb: &[i32; 65], max_width_sb: i32, max_height_sb: i32) -> Vec<u8> {
+    let mut out = vec![0u8; 128];
+    let n = unsafe {
+        shim_write_tile_info(mi_cols, mi_rows, mib_size_log2 as i32, uniform_spacing as i32, log2_cols, min_log2_cols, max_log2_cols, log2_rows, min_log2_rows, max_log2_rows, cols as i32, rows as i32, col_start_sb.as_ptr(), row_start_sb.as_ptr(), max_width_sb, max_height_sb, out.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `encode_segmentation` (transcribed control flow over the real aom_wb + seg tables).
