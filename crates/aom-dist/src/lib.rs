@@ -408,3 +408,20 @@ pub fn sum_squares_2d_i16(src: &[i16], src_stride: usize, width: usize, height: 
     }
     ss
 }
+
+/// `aom_vector_var_c` (`aom_dsp/avg.c`): variance of `ref - src` over a
+/// `4<<bwl`-wide vector, used by the motion/RD search. `mean_abs^2` is computed
+/// in **unsigned** 32-bit (it can reach ~2^32 for bwl=5), and the final subtract
+/// is unsigned then reinterpreted — replicated exactly for bit-identity.
+pub fn vector_var(reff: &[i16], src: &[i16], bwl: i32) -> i32 {
+    let width = 4usize << bwl;
+    let mut sse: i32 = 0;
+    let mut mean: i32 = 0;
+    for i in 0..width {
+        let diff = reff[i] as i32 - src[i] as i32;
+        mean += diff;
+        sse += diff * diff;
+    }
+    let mean_abs = mean.unsigned_abs();
+    (sse as u32).wrapping_sub(mean_abs.wrapping_mul(mean_abs) >> (bwl as u32 + 2)) as i32
+}

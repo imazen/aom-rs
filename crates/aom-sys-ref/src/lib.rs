@@ -166,6 +166,12 @@ extern "C" {
     fn av1_model_rd_from_var_lapndz(var: i64, n_log2: u32, qstep: u32, rate: *mut i32, dist: *mut i64);
     fn aom_sum_squares_i16_c(src: *const i16, n: u32) -> u64;
     fn aom_sum_squares_2d_i16_c(src: *const i16, src_stride: i32, width: i32, height: i32) -> u64;
+    fn aom_vector_var_c(reff: *const i16, src: *const i16, bwl: i32) -> i32;
+}
+
+/// Reference `aom_vector_var_c`.
+pub fn ref_vector_var(reff: &[i16], src: &[i16], bwl: i32) -> i32 {
+    unsafe { aom_vector_var_c(reff.as_ptr(), src.as_ptr(), bwl) }
 }
 
 /// Reference `aom_sum_squares_i16_c` (sum of squared i16 values).
