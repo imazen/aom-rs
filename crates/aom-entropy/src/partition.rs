@@ -1265,3 +1265,50 @@ pub fn write_palette_mode_info_flags(
         }
     }
 }
+
+const PALETTE_MAX_SIZE: usize = 8;
+
+/// `aom_ceil_log2` (`aom_ports/bitops.h`): `ceil(log2(n))` — `0` for `n < 2`, else
+/// `get_msb(n - 1) + 1`.
+fn aom_ceil_log2(n: i32) -> i32 {
+    if n < 2 {
+        0
+    } else {
+        get_msb((n - 1) as u32) as i32 + 1
+    }
+}
+
+/// `delta_encode_palette_colors` (`av1/encoder/bitstream.c`): code an ascending list
+/// of `num` palette colours not found in the neighbour cache. The first colour is a
+/// raw `bit_depth`-bit literal; the rest are coded as deltas (`>= min_val`) with a
+/// bit-width that starts at `max(ceil_log2(max_delta + 1 - min_val), bit_depth - 3)`
+/// (the excess over `bit_depth - 3` sent in 2 bits) and shrinks as the remaining
+/// `range` narrows. `min_val` is 1 for luma, 0 for chroma-U.
+pub fn delta_encode_palette_colors(enc: &mut OdEcEnc, colors: &[i32], bit_depth: i32, min_val: i32) {
+    let num = colors.len();
+    if num == 0 {
+        return;
+    }
+    write_literal(enc, colors[0], bit_depth as u32);
+    if num == 1 {
+        return;
+    }
+    let mut max_delta = 0;
+    let mut deltas = [0i32; PALETTE_MAX_SIZE];
+    for i in 1..num {
+        let delta = colors[i] - colors[i - 1];
+        deltas[i - 1] = delta;
+        if delta > max_delta {
+            max_delta = delta;
+        }
+    }
+    let min_bits = bit_depth - 3;
+    let mut bits = aom_ceil_log2(max_delta + 1 - min_val).max(min_bits);
+    let mut range = (1 << bit_depth) - colors[0] - min_val;
+    write_literal(enc, bits - min_bits, 2);
+    for &delta in deltas.iter().take(num - 1) {
+        write_literal(enc, delta - min_val, bits as u32);
+        range -= delta;
+        bits = bits.min(aom_ceil_log2(range));
+    }
+}

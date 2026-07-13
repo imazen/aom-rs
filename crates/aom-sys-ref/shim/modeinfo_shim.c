@@ -847,3 +847,40 @@ uint32_t shim_write_palette_flags_sizes(int mode_dc, int n_y, uint16_t *y_mode_c
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- delta_encode_palette_colors (av1/encoder/bitstream.c) --- */
+/* Body copied verbatim; aom_write_literal -> mi_literal. aom_ceil_log2 is the real
+ * one from aom_ports/bitops.h (already included above). colors is ascending, deltas
+ * >= min_val (caller-guaranteed). */
+uint32_t shim_delta_encode_palette_colors(const int *colors, int num, int bit_depth,
+                                          int min_val, uint8_t *out) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (num > 0) {
+    mi_literal(&ec, colors[0], bit_depth);
+    if (num > 1) {
+      int max_delta = 0;
+      int deltas[PALETTE_MAX_SIZE];
+      memset(deltas, 0, sizeof(deltas));
+      for (int i = 1; i < num; ++i) {
+        const int delta = colors[i] - colors[i - 1];
+        deltas[i - 1] = delta;
+        if (delta > max_delta) max_delta = delta;
+      }
+      const int min_bits = bit_depth - 3;
+      int cl = aom_ceil_log2(max_delta + 1 - min_val);
+      int bits = cl > min_bits ? cl : min_bits;
+      int range = (1 << bit_depth) - colors[0] - min_val;
+      mi_literal(&ec, bits - min_bits, 2);
+      for (int i = 0; i < num - 1; ++i) {
+        mi_literal(&ec, deltas[i] - min_val, bits);
+        range -= deltas[i];
+        int clr = aom_ceil_log2(range);
+        bits = bits < clr ? bits : clr;
+      }
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}

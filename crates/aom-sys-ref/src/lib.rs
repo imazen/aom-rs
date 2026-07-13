@@ -273,6 +273,7 @@ extern "C" {
     fn shim_get_palette_mode_ctx(ha: i32, a_psize: i32, hl: i32, l_psize: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_palette_flags_sizes(mode_dc: i32, n_y: i32, y_mode_cdf: *mut u16, y_size_cdf: *mut u16, uv_dc: i32, n_uv: i32, uv_mode_cdf: *mut u16, uv_size_cdf: *mut u16, out: *mut u8, o_ym: *mut u16, o_ys: *mut u16, o_um: *mut u16, o_us: *mut u16) -> u32;
+    fn shim_delta_encode_palette_colors(colors: *const i32, num: i32, bit_depth: i32, min_val: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_ref_frames(cdfs: *mut u16, seg_ref: i32, seg_skipgmv: i32, rmode_select: i32, comp_allowed: i32, is_compound: i32, comp_ref_type: i32, ref0: i32, ref1: i32, out: *mut u8, out_cdfs: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
@@ -483,6 +484,16 @@ pub fn ref_write_palette_flags_sizes(
     };
     out.truncate(n as usize);
     (out, oym, oys, oum, ous)
+}
+
+/// Reference `delta_encode_palette_colors` (over pristine C od_ec, real aom_ceil_log2).
+pub fn ref_delta_encode_palette_colors(colors: &[i32], bit_depth: i32, min_val: i32) -> Vec<u8> {
+    let mut out = vec![0u8; 64];
+    let n = unsafe {
+        shim_delta_encode_palette_colors(colors.as_ptr(), colors.len() as i32, bit_depth, min_val, out.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `av1_get_intra_inter_context` (facade over the real exported fn).

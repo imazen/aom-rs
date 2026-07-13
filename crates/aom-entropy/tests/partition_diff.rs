@@ -1317,3 +1317,32 @@ fn palette_contexts_and_flags_match_c() {
         assert_eq!(rus, ous, "uv_size_cdf");
     }
 }
+
+#[test]
+fn delta_encode_palette_colors_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::delta_encode_palette_colors;
+    let mut rng = Rng(0xde17_a000_c0de_0003);
+    for &bit_depth in &[8i32, 10, 12] {
+        let maxv = 1i32 << bit_depth;
+        for min_val in [0i32, 1] {
+            for num in 1..=8usize {
+                let step_max = (maxv / (num as i32 + 1)).max(1);
+                for _ in 0..40_000 {
+                    // Build an ascending colour list with deltas >= min_val, all < 2^bd.
+                    let mut colors = vec![0i32; num];
+                    let mut cur = (rng.next() % step_max as u64) as i32;
+                    for c in colors.iter_mut() {
+                        *c = cur;
+                        cur += min_val + (rng.next() % step_max as u64) as i32;
+                    }
+                    let mut enc = OdEcEnc::new();
+                    delta_encode_palette_colors(&mut enc, &colors, bit_depth, min_val);
+                    let got = enc.done().to_vec();
+                    let want = c::ref_delta_encode_palette_colors(&colors, bit_depth, min_val);
+                    assert_eq!(got, want, "bd={bit_depth} min_val={min_val} num={num} colors={colors:?}");
+                }
+            }
+        }
+    }
+}
