@@ -180,3 +180,26 @@ pub fn write_delta_qindex(enc: &mut OdEcEnc, delta_q_cdf: &mut [u16], delta_qind
         write_bit(enc, sign as i32);
     }
 }
+
+const DELTA_LF_SMALL: i32 = 3;
+const DELTA_LF_PROBS: usize = 3;
+
+/// `write_delta_lflevel` (`av1/encoder/bitstream.c`): the per-superblock delta
+/// loop-filter level — same exp-Golomb delta coding as [`write_delta_qindex`]
+/// (`DELTA_LF_SMALL == DELTA_Q_SMALL == 3`), on the caller-selected delta-lf CDF
+/// (the single `delta_lf_cdf` or, for `delta_lf_multi`, `delta_lf_multi_cdf[lf_id]`).
+pub fn write_delta_lflevel(enc: &mut OdEcEnc, delta_lf_cdf: &mut [u16], delta_lflevel: i32) {
+    let sign = delta_lflevel < 0;
+    let abs = delta_lflevel.abs();
+    let smallval = abs < DELTA_LF_SMALL;
+    write_symbol(enc, abs.min(DELTA_LF_SMALL), delta_lf_cdf, DELTA_LF_PROBS + 1);
+    if !smallval {
+        let rem_bits = get_msb((abs - 1) as u32) as i32;
+        let thr = (1 << rem_bits) + 1;
+        write_literal(enc, rem_bits - 1, 3);
+        write_literal(enc, abs - thr, rem_bits as u32);
+    }
+    if abs > 0 {
+        write_bit(enc, sign as i32);
+    }
+}

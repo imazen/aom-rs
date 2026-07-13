@@ -124,3 +124,30 @@ uint32_t shim_write_delta_qindex(uint16_t *delta_q_cdf, int delta_qindex, uint8_
   od_ec_enc_clear(&ec);
   return n;
 }
+
+/* Transcribed write_delta_lflevel over pristine C od_ec (DELTA_LF_* constants).
+ * The multi/single CDF selection is the caller's; the selected CDF is passed in. */
+uint32_t shim_write_delta_lflevel(uint16_t *delta_lf_cdf, int delta_lflevel, uint8_t *out,
+                                  uint16_t *out_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  int sign = delta_lflevel < 0;
+  int a = sign ? -delta_lflevel : delta_lflevel;
+  int smallval = a < DELTA_LF_SMALL;
+  int sym = a < DELTA_LF_SMALL ? a : DELTA_LF_SMALL;
+  od_ec_encode_cdf_q15(&ec, sym, delta_lf_cdf, DELTA_LF_PROBS + 1);
+  update_cdf(delta_lf_cdf, sym, DELTA_LF_PROBS + 1);
+  if (!smallval) {
+    int rem_bits = get_msb(a - 1);
+    int thr = (1 << rem_bits) + 1;
+    mi_literal(&ec, rem_bits - 1, 3);
+    mi_literal(&ec, a - thr, rem_bits);
+  }
+  if (a > 0) mi_bit(&ec, sign);
+  uint32_t n = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &n);
+  for (uint32_t i = 0; i < n; i++) out[i] = buf[i];
+  for (int i = 0; i < DELTA_LF_PROBS + 2; i++) out_cdf[i] = delta_lf_cdf[i];
+  od_ec_enc_clear(&ec);
+  return n;
+}

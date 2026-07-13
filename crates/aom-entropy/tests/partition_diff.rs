@@ -228,3 +228,35 @@ fn write_delta_qindex_matches_c() {
         assert_eq!(my_cdf, want_cdf, "write_delta_qindex cdf dq={delta_qindex}");
     }
 }
+
+#[test]
+fn write_delta_lflevel_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_delta_lflevel;
+    let mut rng = Rng(0xd11f_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let mut vals = [0i32; 3];
+        for v in &mut vals {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals.sort_unstable();
+        vals.reverse();
+        let mut cdf = [0u16; 5];
+        let mut prev = 32768i32;
+        for i in 0..3 {
+            let v = vals[i].min(prev - 1).max((3 - i) as i32);
+            cdf[i] = v as u16;
+            prev = v;
+        }
+        cdf[3] = 0;
+        cdf[4] = 0;
+        let delta_lflevel = (rng.next() % 511) as i32 - 255;
+        let mut my_cdf = cdf;
+        let mut enc = OdEcEnc::new();
+        write_delta_lflevel(&mut enc, &mut my_cdf, delta_lflevel);
+        let got = enc.done().to_vec();
+        let (want, want_cdf) = c::ref_write_delta_lflevel(&cdf, delta_lflevel);
+        assert_eq!(got, want, "write_delta_lflevel bytes d={delta_lflevel}");
+        assert_eq!(my_cdf, want_cdf, "write_delta_lflevel cdf d={delta_lflevel}");
+    }
+}
