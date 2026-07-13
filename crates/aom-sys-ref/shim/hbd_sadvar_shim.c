@@ -468,3 +468,17 @@ unsigned int shim_hbd_obmc_sad(int i,const uint16_t*r,int rs,const int*ws,const 
 int64_t aom_highbd_sse_c(const uint8_t*,int,const uint8_t*,int,int,int);
 int64_t shim_hbd_sse(const uint16_t*a,int as,const uint16_t*b,int bs,int w,int h){
   return aom_highbd_sse_c(CONVERT_TO_BYTEPTR(a),as,CONVERT_TO_BYTEPTR(b),bs,w,h);}
+
+/* aom_highbd_subtract_block_c oracle: diff = src - pred (u16), strided. */
+void aom_highbd_subtract_block_c(int rows, int cols, int16_t *diff,
+                                 long diff_stride, const uint8_t *src8,
+                                 long src_stride, const uint8_t *pred8,
+                                 long pred_stride);
+void shim_highbd_subtract_block(int rows, int cols, int16_t *diff, int diff_stride,
+                                const uint16_t *src, int src_stride,
+                                const uint16_t *pred, int pred_stride) {
+  const uint8_t *sp = CONVERT_TO_BYTEPTR(src);
+  const uint8_t *pp = CONVERT_TO_BYTEPTR(pred);
+  aom_highbd_subtract_block_c(rows, cols, diff, diff_stride, sp, src_stride, pp,
+                              pred_stride);
+}

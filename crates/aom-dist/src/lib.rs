@@ -325,3 +325,36 @@ pub fn highbd_block_error(coeff: &[i32], dqcoeff: &[i32], bd: u8) -> (i64, i64) 
     sqcoeff = (sqcoeff + rounding) >> shift;
     (error, sqcoeff)
 }
+
+/// `aom_subtract_block_c` (`aom_dsp/subtract.c`): the residual generator —
+/// `diff[r][c] = src[r][c] - pred[r][c]`, row by row. Natively strided (the
+/// `diff`/`src`/`pred` row strides are independent). This is the input the
+/// encoder feeds to the forward transform.
+#[allow(clippy::too_many_arguments)]
+pub fn subtract_block(
+    rows: usize, cols: usize, diff: &mut [i16], diff_stride: usize,
+    src: &[u8], src_stride: usize, pred: &[u8], pred_stride: usize,
+) {
+    for r in 0..rows {
+        let (d, s, p) = (r * diff_stride, r * src_stride, r * pred_stride);
+        for c in 0..cols {
+            diff[d + c] = src[s + c] as i16 - pred[p + c] as i16;
+        }
+    }
+}
+
+/// `aom_highbd_subtract_block_c`: highbd (10/12-bit) residual generator. Same as
+/// [`subtract_block`] but 16-bit `src`/`pred`; the difference is truncated to
+/// `i16` exactly as the C stores `int` into `int16_t`.
+#[allow(clippy::too_many_arguments)]
+pub fn highbd_subtract_block(
+    rows: usize, cols: usize, diff: &mut [i16], diff_stride: usize,
+    src: &[u16], src_stride: usize, pred: &[u16], pred_stride: usize,
+) {
+    for r in 0..rows {
+        let (d, s, p) = (r * diff_stride, r * src_stride, r * pred_stride);
+        for c in 0..cols {
+            diff[d + c] = (src[s + c] as i32 - pred[p + c] as i32) as i16;
+        }
+    }
+}

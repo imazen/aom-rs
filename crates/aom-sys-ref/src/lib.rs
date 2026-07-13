@@ -160,6 +160,20 @@ pub fn ref_hbd_sse(a: &[u16], as_: usize, b: &[u16], bs: usize, w: usize, h: usi
 extern "C" {
     fn av1_block_error_c(coeff: *const i32, dqcoeff: *const i32, block_size: isize, ssz: *mut i64) -> i64;
     fn av1_highbd_block_error_c(coeff: *const i32, dqcoeff: *const i32, block_size: isize, ssz: *mut i64, bd: i32) -> i64;
+    fn aom_subtract_block_c(rows: i32, cols: i32, diff: *mut i16, diff_stride: isize, src: *const u8, src_stride: isize, pred: *const u8, pred_stride: isize);
+    fn shim_highbd_subtract_block(rows: i32, cols: i32, diff: *mut i16, diff_stride: i32, src: *const u16, src_stride: i32, pred: *const u16, pred_stride: i32);
+}
+
+/// Reference `aom_subtract_block_c` (residual = src - pred). Writes `diff`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_subtract_block(rows: usize, cols: usize, diff: &mut [i16], diff_stride: usize, src: &[u8], src_stride: usize, pred: &[u8], pred_stride: usize) {
+    unsafe { aom_subtract_block_c(rows as i32, cols as i32, diff.as_mut_ptr(), diff_stride as isize, src.as_ptr(), src_stride as isize, pred.as_ptr(), pred_stride as isize) }
+}
+
+/// Reference `aom_highbd_subtract_block_c` (residual = src - pred, u16).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_highbd_subtract_block(rows: usize, cols: usize, diff: &mut [i16], diff_stride: usize, src: &[u16], src_stride: usize, pred: &[u16], pred_stride: usize) {
+    unsafe { shim_highbd_subtract_block(rows as i32, cols as i32, diff.as_mut_ptr(), diff_stride as i32, src.as_ptr(), src_stride as i32, pred.as_ptr(), pred_stride as i32) }
 }
 
 /// Reference `av1_block_error_c` (transform-domain distortion). Returns (error, ssz).
