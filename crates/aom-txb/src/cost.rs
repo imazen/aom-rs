@@ -79,6 +79,9 @@ fn br_cost(level: i32, lps: &[i32]) -> i32 {
 
 const LPS_STRIDE: usize = (COEFF_BASE_RANGE as usize + 1) * 2; // 26
 
+/// `get_eob_cost` (crate-visible wrapper for the trellis).
+pub(crate) fn eob_cost_pub(eob: usize, t: &CoeffCostTables, tx_class: TxClass) -> i32 { eob_cost(eob, t, tx_class) }
+
 /// `get_eob_cost`.
 fn eob_cost(eob: usize, t: &CoeffCostTables, tx_class: TxClass) -> i32 {
     let (eob_pt, eob_extra) = get_eob_pos_token(eob as i32);

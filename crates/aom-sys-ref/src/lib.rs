@@ -761,6 +761,8 @@ extern "C" {
     fn shim_iscan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_cost_tokens_from_cdf(costs: *mut i32, cdf: *const u16, inv_map: *const i32);
     #[allow(clippy::too_many_arguments)]
+    fn shim_optimize_txb(tx_size: i32, tx_type: i32, qcoeff: *mut i32, dqcoeff: *mut i32, tcoeff: *const i32, eob: i32, dequant: *const i16, rdmult: i64, dc_sign_ctx: i32, txb_skip_ctx: i32, sharpness: i32, scan: *const i16, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32, out_rate: *mut i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_two_coeff_cost_simple(ci: i32, abs_qc: i32, coeff_ctx: i32, base: *const i32, lps: *const i32, bhl: i32, tx_class: i32, levels: *const u8, cost_low: *mut i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_coeff_cost_eob(ci: i32, abs_qc: i32, sign: i32, coeff_ctx: i32, dc_sign_ctx: i32, base_eob: *const i32, dc_sign: *const i32, lps: *const i32, bhl: i32, tx_class: i32) -> i32;
@@ -886,4 +888,13 @@ pub fn ref_coeff_cost_eob(ci: usize, abs_qc: i32, sign: usize, coeff_ctx: usize,
 #[allow(clippy::too_many_arguments)]
 pub fn ref_coeff_cost_general(is_last: bool, ci: usize, abs_qc: i32, sign: usize, coeff_ctx: usize, dc_sign_ctx: usize, base_eob: &[i32], base: &[i32], dc_sign: &[i32], lps: &[i32], bhl: u32, tx_class: i32, levels: &[u8]) -> i32 {
     unsafe { shim_coeff_cost_general(is_last as i32, ci as i32, abs_qc, sign as i32, coeff_ctx as i32, dc_sign_ctx as i32, base_eob.as_ptr(), base.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), bhl as i32, tx_class, levels.as_ptr()) }
+}
+
+/// Reference `av1_optimize_txb` (non-QM trellis). Optimizes qcoeff/dqcoeff in
+/// place; returns (eob, rate_cost).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_optimize_txb(tx_size: usize, tx_type: usize, qcoeff: &mut [i32], dqcoeff: &mut [i32], tcoeff: &[i32], eob: usize, dequant: &[i16], rdmult: i64, dc_sign_ctx: usize, txb_skip_ctx: usize, sharpness: i32, scan: &[i16], txb_skip: &[i32], base_eob: &[i32], base: &[i32], eob_extra: &[i32], dc_sign: &[i32], lps: &[i32], eob_cost: &[i32]) -> (usize, i32) {
+    let mut rate = 0i32;
+    let e = unsafe { shim_optimize_txb(tx_size as i32, tx_type as i32, qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), tcoeff.as_ptr(), eob as i32, dequant.as_ptr(), rdmult, dc_sign_ctx as i32, txb_skip_ctx as i32, sharpness, scan.as_ptr(), txb_skip.as_ptr(), base_eob.as_ptr(), base.as_ptr(), eob_extra.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), eob_cost.as_ptr(), &mut rate) };
+    (e as usize, rate)
 }
