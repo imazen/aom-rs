@@ -1,24 +1,15 @@
 /* Shim over av1 txb coefficient-coding kernels + scan/ctx-offset data.
- * Oracle use only. */
+ * Oracle use only. Include the real libaom headers so the kernel prototypes,
+ * scan orders, cost helpers, and tx tables are the pristine declarations. */
 #include <stdint.h>
-
-typedef int32_t tran_low_t;
-
-void av1_txb_init_levels_c(const tran_low_t *coeff, int width, int height,
-                           uint8_t *levels);
-void av1_get_nz_map_contexts_c(const uint8_t *levels, const int16_t *scan,
-                               int eob, int tx_size, int tx_class,
-                               int8_t *coeff_contexts);
-int av1_get_eob_pos_token(int eob, int *extra);
-
-extern const int8_t *av1_nz_map_ctx_offset[19];
-
-/* Layout mirror of libaom SCAN_ORDER (av1/common/scan.h): two pointers. */
-typedef struct {
-  const int16_t *scan;
-  const int16_t *iscan;
-} SHIM_SCAN_ORDER;
-extern const SHIM_SCAN_ORDER av1_scan_orders[19][16];
+#include <string.h>
+#include "av1/common/enums.h"
+#include "av1/common/scan.h"
+#include "av1/common/txb_common.h"
+#include "av1/encoder/block.h"
+#include "av1/encoder/cost.h"
+#include "av1/encoder/encodetxb.h"
+#include "av1/encoder/txb_rdopt_utils.h"
 
 void shim_txb_init_levels(const int32_t *coeff, int width, int height,
                           uint8_t *levels) {
@@ -57,9 +48,7 @@ const int16_t *shim_iscan(int tx_size, int tx_type) {
  * av1_txb_init_levels_c, av1_get_nz_map_contexts_c, av1_scan_orders).
  * av1_write_tx_type (plane=0 tx_type signaling) is intentionally out of
  * scope. */
-#include <string.h>
 #include "aom_dsp/entenc.h"
-#include "aom_dsp/prob.h"
 
 /* Flat CDF arena offsets (u16 units). MUST match aom-txb::cdf_arena. */
 #define A_TXB_SKIP 0            /* [5][13] n=2  (stride 3)  */
@@ -246,4 +235,105 @@ int shim_write_coeffs_txb(const int32_t *tcoeff, int eob, int tx_size,
   else memcpy(out, buf, n);
   od_ec_enc_clear(&ec);
   return (int)n;
+}
+
+/* ---- av1_cost_coeffs_txb (warehouse_efficients_txb) RD-cost harness --------
+ * Transcribes the warehouse_efficients_txb loop (txb_rdopt.c) but drops the
+ * get_tx_type_cost term (plane-0 tx_type is out of scope, matching the writer).
+ * The LV_MAP_COEFF_COST / LV_MAP_EOB_COST tables are supplied as flat int
+ * arrays (identical on both sides) so this isolates the cost-summation logic
+ * from the separate CDF->cost derivation. Uses the pristine static-inline cost
+ * helpers (get_eob_cost, get_br_cost, get_br_ctx[_eob]) + av1_txb_init_levels_c
+ * + av1_get_nz_map_contexts_c. */
+int shim_cost_coeffs_txb(const int32_t *qcoeff, int eob, int tx_size,
+                         int tx_type, int txb_skip_ctx, int dc_sign_ctx,
+                         const int *txb_skip_cost, const int *base_eob_cost,
+                         const int *base_cost, const int *eob_extra_cost,
+                         const int *dc_sign_cost, const int *lps_cost,
+                         const int *eob_cost_tbl) {
+  LV_MAP_COEFF_COST cc;
+  memcpy(cc.txb_skip_cost, txb_skip_cost, sizeof(cc.txb_skip_cost));
+  memcpy(cc.base_eob_cost, base_eob_cost, sizeof(cc.base_eob_cost));
+  memcpy(cc.base_cost, base_cost, sizeof(cc.base_cost));
+  memcpy(cc.eob_extra_cost, eob_extra_cost, sizeof(cc.eob_extra_cost));
+  memcpy(cc.dc_sign_cost, dc_sign_cost, sizeof(cc.dc_sign_cost));
+  memcpy(cc.lps_cost, lps_cost, sizeof(cc.lps_cost));
+  LV_MAP_EOB_COST ec;
+  memcpy(ec.eob_cost, eob_cost_tbl, sizeof(ec.eob_cost));
+
+  const TX_CLASS tx_class = tx_type_to_class[tx_type];
+  const int bhl = get_txb_bhl(tx_size);
+  const int width = get_txb_wide(tx_size);
+  const int height = get_txb_high(tx_size);
+  const int16_t *const scan = av1_scan_orders[tx_size][tx_type].scan;
+  uint8_t levels_buf[TX_PAD_2D];
+  uint8_t *const levels = set_levels(levels_buf, height);
+  int8_t coeff_contexts[MAX_TX_SQUARE];
+
+  int cost = cc.txb_skip_cost[txb_skip_ctx][0];
+  if (eob > 1) av1_txb_init_levels_c(qcoeff, width, height, levels);
+  /* get_tx_type_cost intentionally omitted */
+  cost += get_eob_cost(eob, &ec, &cc, tx_class);
+  av1_get_nz_map_contexts_c(levels, scan, eob, tx_size, tx_class,
+                            coeff_contexts);
+
+  const int(*lps)[COEFF_BASE_RANGE + 1 + COEFF_BASE_RANGE + 1] = cc.lps_cost;
+  int c = eob - 1;
+  {
+    const int pos = scan[c];
+    const int32_t v = qcoeff[pos];
+    if (v) {
+      const int sign = AOMSIGN(v);
+      const int level = (v ^ sign) - sign;
+      const int coeff_ctx = coeff_contexts[pos];
+      cost += cc.base_eob_cost[coeff_ctx][AOMMIN(level, 3) - 1];
+      if (level > NUM_BASE_LEVELS) {
+        const int ctx = get_br_ctx_eob(pos, bhl, tx_class);
+        cost += get_br_cost(level, lps[ctx]);
+      }
+      if (c) {
+        cost += av1_cost_literal(1);
+      } else {
+        const int sign01 = (sign ^ sign) - sign;
+        cost += cc.dc_sign_cost[dc_sign_ctx][sign01];
+        return cost;
+      }
+    }
+  }
+  const int(*base_c)[8] = cc.base_cost;
+  for (c = eob - 2; c >= 1; --c) {
+    const int pos = scan[c];
+    const int coeff_ctx = coeff_contexts[pos];
+    const int32_t v = qcoeff[pos];
+    if (!v) {
+      cost += base_c[coeff_ctx][0];
+      continue;
+    }
+    const int level = abs(v);
+    cost += base_c[coeff_ctx][AOMMIN(level, 3)];
+    cost += av1_cost_literal(1);
+    if (level > NUM_BASE_LEVELS) {
+      const int ctx = get_br_ctx(levels, pos, bhl, tx_class);
+      cost += get_br_cost(level, lps[ctx]);
+    }
+  }
+  {
+    const int pos = scan[c];
+    const int32_t v = qcoeff[pos];
+    const int coeff_ctx = coeff_contexts[pos];
+    if (!v) {
+      cost += base_c[coeff_ctx][0];
+    } else {
+      const int sign = AOMSIGN(v);
+      const int level = (v ^ sign) - sign;
+      cost += base_c[coeff_ctx][AOMMIN(level, 3)];
+      const int sign01 = (sign ^ sign) - sign;
+      cost += cc.dc_sign_cost[dc_sign_ctx][sign01];
+      if (level > NUM_BASE_LEVELS) {
+        const int ctx = get_br_ctx(levels, pos, bhl, tx_class);
+        cost += get_br_cost(level, lps[ctx]);
+      }
+    }
+  }
+  return cost;
 }

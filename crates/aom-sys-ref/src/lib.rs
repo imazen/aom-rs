@@ -760,6 +760,8 @@ extern "C" {
     fn shim_scan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_iscan(tx_size: i32, tx_type: i32) -> *const i16;
     #[allow(clippy::too_many_arguments)]
+    fn shim_cost_coeffs_txb(qcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_coeffs_txb(tcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, plane_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, allow_update_cdf: i32, cdfs: *mut u16, out: *mut u8, out_cap: i32) -> i32;
 }
 
@@ -807,4 +809,15 @@ pub fn ref_write_coeffs_txb(tcoeff: &[i32], eob: usize, tx_size: usize, tx_type:
     };
     out.truncate(n as usize);
     out
+}
+
+/// Reference `av1_cost_coeffs_txb` (warehouse_efficients_txb, tx_type cost out
+/// of scope). Cost tables are flat: txb_skip_cost[13][2], base_eob_cost[4][3],
+/// base_cost[42][8], eob_extra_cost[9][2], dc_sign_cost[3][2], lps_cost[21][26],
+/// eob_cost[2][11].
+#[allow(clippy::too_many_arguments)]
+pub fn ref_cost_coeffs_txb(qcoeff: &[i32], eob: usize, tx_size: usize, tx_type: usize, txb_skip_ctx: usize, dc_sign_ctx: usize, txb_skip_cost: &[i32], base_eob_cost: &[i32], base_cost: &[i32], eob_extra_cost: &[i32], dc_sign_cost: &[i32], lps_cost: &[i32], eob_cost: &[i32]) -> i32 {
+    unsafe {
+        shim_cost_coeffs_txb(qcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, txb_skip_cost.as_ptr(), base_eob_cost.as_ptr(), base_cost.as_ptr(), eob_extra_cost.as_ptr(), dc_sign_cost.as_ptr(), lps_cost.as_ptr(), eob_cost.as_ptr())
+    }
 }
