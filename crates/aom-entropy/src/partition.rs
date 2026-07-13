@@ -1373,3 +1373,116 @@ pub fn write_palette_colors_v(enc: &mut OdEcEnc, colors_v: &[u16], bit_depth: i3
         }
     }
 }
+
+const MIN_SB_SIZE_LOG2: i32 = 6;
+
+/// `palette_add_to_cache` (`pred_common.c`): append `val` to `cache`, skipping it when
+/// it equals the current last entry (the merged lists are sorted, so this dedups).
+fn palette_add_to_cache(cache: &mut [u16], n: &mut usize, val: u16) {
+    if *n > 0 && val == cache[*n - 1] {
+        return;
+    }
+    cache[*n] = val;
+    *n += 1;
+}
+
+/// `av1_get_palette_cache` (`pred_common.c`): build the neighbour colour cache for
+/// `plane` by merging the above and left neighbours' (individually sorted) palettes
+/// into one sorted, deduplicated list. The above neighbour is dropped when the block
+/// sits on a superblock-row boundary (`row % (1<<MIN_SB_SIZE_LOG2) == 0`, `row =
+/// -mb_to_top_edge >> 3`). Each neighbour is passed as its full `3*PALETTE_MAX_SIZE`
+/// `palette_colors` layout with the plane's colour count. Returns the cache length.
+#[allow(clippy::too_many_arguments)]
+pub fn get_palette_cache(
+    cache: &mut [u16],
+    plane: usize,
+    mb_to_top_edge: i32,
+    has_above: bool,
+    above_colors: &[u16],
+    mut above_n: i32,
+    has_left: bool,
+    left_colors: &[u16],
+    mut left_n: i32,
+) -> usize {
+    let row = -mb_to_top_edge >> 3;
+    // Do not refer to above SB row when on SB boundary.
+    let use_above = has_above && (row % (1 << MIN_SB_SIZE_LOG2)) != 0;
+    if !use_above {
+        above_n = 0;
+    }
+    if !has_left {
+        left_n = 0;
+    }
+    if above_n == 0 && left_n == 0 {
+        return 0;
+    }
+    let mut above_idx = plane * PALETTE_MAX_SIZE;
+    let mut left_idx = plane * PALETTE_MAX_SIZE;
+    let mut n = 0;
+    // Merge the sorted lists of base colors from above and left.
+    while above_n > 0 && left_n > 0 {
+        let v_above = above_colors[above_idx];
+        let v_left = left_colors[left_idx];
+        if v_left < v_above {
+            palette_add_to_cache(cache, &mut n, v_left);
+            left_idx += 1;
+            left_n -= 1;
+        } else {
+            palette_add_to_cache(cache, &mut n, v_above);
+            above_idx += 1;
+            above_n -= 1;
+            if v_left == v_above {
+                left_idx += 1;
+                left_n -= 1;
+            }
+        }
+    }
+    while above_n > 0 {
+        palette_add_to_cache(cache, &mut n, above_colors[above_idx]);
+        above_idx += 1;
+        above_n -= 1;
+    }
+    while left_n > 0 {
+        palette_add_to_cache(cache, &mut n, left_colors[left_idx]);
+        left_idx += 1;
+        left_n -= 1;
+    }
+    n
+}
+
+/// `av1_index_color_cache` (`av1/encoder/palette.c`): mark which cache entries appear in
+/// the block's `colors` (`cache_color_found`), and collect the colours *not* in the
+/// cache (`out_cache_colors`, preserving order). Returns `n_out_cache`. With an empty
+/// cache every colour is out-of-cache.
+pub fn index_color_cache(cache: &[u16], colors: &[u16]) -> (Vec<u8>, Vec<i32>, usize) {
+    let n_cache = cache.len();
+    let n_colors = colors.len();
+    if n_cache == 0 {
+        let out: Vec<i32> = colors.iter().map(|&c| c as i32).collect();
+        return (Vec::new(), out, n_colors);
+    }
+    let mut cache_color_found = vec![0u8; n_cache];
+    let mut in_cache_flags = [0u8; PALETTE_MAX_SIZE];
+    let mut n_in_cache = 0;
+    for i in 0..n_cache {
+        if n_in_cache >= n_colors {
+            break;
+        }
+        for j in 0..n_colors {
+            if colors[j] == cache[i] {
+                in_cache_flags[j] = 1;
+                cache_color_found[i] = 1;
+                n_in_cache += 1;
+                break;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(n_colors - n_in_cache);
+    for i in 0..n_colors {
+        if in_cache_flags[i] == 0 {
+            out.push(colors[i] as i32);
+        }
+    }
+    let n_out = out.len();
+    (cache_color_found, out, n_out)
+}

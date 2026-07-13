@@ -1367,3 +1367,72 @@ fn write_palette_colors_v_matches_c() {
         }
     }
 }
+
+#[test]
+fn get_palette_cache_matches_c() {
+    use aom_entropy::partition::get_palette_cache;
+    let mut rng = Rng(0xca6e_0000_c0de_0005);
+    // Build a full 3*8 palette_colors array with `n` sorted colours at plane offset.
+    let mk = |rng: &mut Rng, plane: usize, n: usize, bd: i32| -> ([u16; 24], i32) {
+        let maxv = 1u64 << bd;
+        let mut v: Vec<u16> = (0..n).map(|_| (rng.next() % maxv) as u16).collect();
+        v.sort_unstable();
+        let mut arr = [0u16; 24];
+        for (k, &c) in v.iter().enumerate() {
+            arr[plane * 8 + k] = c;
+        }
+        (arr, n as i32)
+    };
+    for plane in 0..2usize {
+        for _ in 0..120_000 {
+            let bd = [8i32, 10, 12][(rng.next() % 3) as usize];
+            let ha = rng.next().is_multiple_of(2);
+            let hl = rng.next().is_multiple_of(2);
+            let an = (rng.next() % 9) as usize; // 0..8
+            let ln = (rng.next() % 9) as usize;
+            let (a_colors, a_n) = mk(&mut rng, plane, an, bd);
+            let (l_colors, l_n) = mk(&mut rng, plane, ln, bd);
+            // row = -mb_to_top_edge>>3; sweep boundary + interior.
+            let mte = -((rng.next() % 20) as i32) * 32;
+            let mut cache = [0u16; 16];
+            let n = get_palette_cache(&mut cache, plane, mte, ha, &a_colors, a_n, hl, &l_colors, l_n);
+            // C facade takes both sizes; only plane's is used.
+            let (a_s0, a_s1) = if plane == 0 { (a_n, 0) } else { (0, a_n) };
+            let (l_s0, l_s1) = if plane == 0 { (l_n, 0) } else { (0, l_n) };
+            let (want, wn) = c::ref_get_palette_cache(plane as i32, mte, ha, &a_colors, a_s0, a_s1, hl, &l_colors, l_s0, l_s1);
+            assert_eq!(n as i32, wn, "n plane={plane} an={an} ln={ln} mte={mte}");
+            assert_eq!(&cache[..n], &want[..], "cache plane={plane} an={an} ln={ln} mte={mte}");
+        }
+    }
+}
+
+#[test]
+fn index_color_cache_matches_c() {
+    use aom_entropy::partition::index_color_cache;
+    let mut rng = Rng(0x1de0_0000_c0de_0006);
+    for _ in 0..300_000 {
+        let bd = [8i32, 10, 12][(rng.next() % 3) as usize];
+        let maxv = 1u64 << bd;
+        let n_cache = (rng.next() % 17) as usize; // 0..16
+        let n_colors = 1 + (rng.next() % 8) as usize; // 1..8
+        // cache is sorted+deduped in practice; make it sorted (dups allowed — the fn
+        // just does membership tests so any cache is a valid differential input).
+        let mut cache: Vec<u16> = (0..n_cache).map(|_| (rng.next() % maxv) as u16).collect();
+        cache.sort_unstable();
+        // colours: some drawn from the cache to force matches, some random.
+        let colors: Vec<u16> = (0..n_colors)
+            .map(|_| {
+                if n_cache > 0 && rng.next().is_multiple_of(2) {
+                    cache[(rng.next() as usize) % n_cache]
+                } else {
+                    (rng.next() % maxv) as u16
+                }
+            })
+            .collect();
+        let (found, out, n_out) = index_color_cache(&cache, &colors);
+        let (wfound, wout, wn) = c::ref_index_color_cache(&cache, &colors);
+        assert_eq!(n_out as i32, wn, "n_out cache={cache:?} colors={colors:?}");
+        assert_eq!(out, wout, "out_colors cache={cache:?} colors={colors:?}");
+        assert_eq!(found, wfound[..n_cache], "found cache={cache:?} colors={colors:?}");
+    }
+}

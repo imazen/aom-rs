@@ -931,3 +931,32 @@ uint32_t shim_write_palette_colors_v(const uint16_t *colors_v, int n, int bit_de
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- palette colour cache: av1_get_palette_cache + av1_index_color_cache --- */
+/* av1_get_palette_cache is a facade over the real fn (reads xd->above/left_mbmi
+ * palettes, applies the SB-row-boundary gate on above via mb_to_top_edge, and merges
+ * the two sorted neighbour lists into a sorted+deduped cache). */
+int shim_get_palette_cache(int plane, int mb_to_top_edge, int ha, const uint16_t *a_colors,
+                           int a_size0, int a_size1, int hl, const uint16_t *l_colors,
+                           int l_size0, int l_size1, uint16_t *out_cache) {
+  MB_MODE_INFO ami, lmi;
+  MACROBLOCKD xd;
+  for (int i = 0; i < 3 * PALETTE_MAX_SIZE; i++) {
+    ami.palette_mode_info.palette_colors[i] = a_colors[i];
+    lmi.palette_mode_info.palette_colors[i] = l_colors[i];
+  }
+  ami.palette_mode_info.palette_size[0] = (uint8_t)a_size0;
+  ami.palette_mode_info.palette_size[1] = (uint8_t)a_size1;
+  lmi.palette_mode_info.palette_size[0] = (uint8_t)l_size0;
+  lmi.palette_mode_info.palette_size[1] = (uint8_t)l_size1;
+  xd.above_mbmi = ha ? &ami : (MB_MODE_INFO *)0;
+  xd.left_mbmi = hl ? &lmi : (MB_MODE_INFO *)0;
+  xd.mb_to_top_edge = mb_to_top_edge;
+  return av1_get_palette_cache(&xd, plane, out_cache);
+}
+
+/* av1_index_color_cache — real (exported) fn. Returns n_out; fills found[] + out_colors[]. */
+int shim_index_color_cache(const uint16_t *cache, int n_cache, const uint16_t *colors,
+                           int n_colors, uint8_t *found, int *out_colors) {
+  return av1_index_color_cache(cache, n_cache, colors, n_colors, found, out_colors);
+}

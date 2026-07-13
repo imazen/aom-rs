@@ -276,6 +276,9 @@ extern "C" {
     fn shim_delta_encode_palette_colors(colors: *const i32, num: i32, bit_depth: i32, min_val: i32, out: *mut u8) -> u32;
     fn shim_write_palette_colors_v(colors_v: *const u16, n: i32, bit_depth: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_get_palette_cache(plane: i32, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_size0: i32, a_size1: i32, hl: i32, l_colors: *const u16, l_size0: i32, l_size1: i32, out_cache: *mut u16) -> i32;
+    fn shim_index_color_cache(cache: *const u16, n_cache: i32, colors: *const u16, n_colors: i32, found: *mut u8, out_colors: *mut i32) -> i32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_ref_frames(cdfs: *mut u16, seg_ref: i32, seg_skipgmv: i32, rmode_select: i32, comp_allowed: i32, is_compound: i32, comp_ref_type: i32, ref0: i32, ref1: i32, out: *mut u8, out_cdfs: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_get_comp_reference_type_context(ha: i32, a_r0: i32, a_r1: i32, a_ibc: i32, hl: i32, l_r0: i32, l_r1: i32, l_ibc: i32) -> i32;
@@ -506,6 +509,36 @@ pub fn ref_write_palette_colors_v(colors_v: &[u16], bit_depth: i32) -> Vec<u8> {
     };
     out.truncate(n as usize);
     out
+}
+
+/// Reference `av1_get_palette_cache` (facade). Neighbour `palette_colors` are the full
+/// 3*PALETTE_MAX_SIZE layout. Returns (cache[0..n], n).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_get_palette_cache(
+    plane: i32, mb_to_top_edge: i32,
+    ha: bool, a_colors: &[u16; 24], a_size0: i32, a_size1: i32,
+    hl: bool, l_colors: &[u16; 24], l_size0: i32, l_size1: i32,
+) -> (Vec<u16>, i32) {
+    let mut cache = vec![0u16; 16];
+    let n = unsafe {
+        shim_get_palette_cache(plane, mb_to_top_edge, ha as i32, a_colors.as_ptr(), a_size0, a_size1,
+            hl as i32, l_colors.as_ptr(), l_size0, l_size1, cache.as_mut_ptr())
+    };
+    cache.truncate(n as usize);
+    (cache, n)
+}
+
+/// Reference `av1_index_color_cache` (exported). Returns (found[0..n_cache],
+/// out_colors[0..n_out], n_out).
+pub fn ref_index_color_cache(cache: &[u16], colors: &[u16]) -> (Vec<u8>, Vec<i32>, i32) {
+    let mut found = vec![0u8; cache.len().max(1)];
+    let mut out_colors = vec![0i32; colors.len().max(1)];
+    let n = unsafe {
+        shim_index_color_cache(cache.as_ptr(), cache.len() as i32, colors.as_ptr(),
+            colors.len() as i32, found.as_mut_ptr(), out_colors.as_mut_ptr())
+    };
+    out_colors.truncate(n as usize);
+    (found, out_colors, n)
 }
 
 /// Reference `av1_get_intra_inter_context` (facade over the real exported fn).
