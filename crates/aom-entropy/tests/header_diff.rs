@@ -76,3 +76,49 @@ fn encode_quantization_spec_anchor() {
     encode_quantization(&mut wb, &qp, 1, false);
     assert_eq!(wb.bytes(), &[0x5a, 0x00]);
 }
+
+#[test]
+fn encode_loopfilter_matches_c() {
+    use aom_entropy::header::{encode_loopfilter, LoopfilterHeader};
+    let mut rng = Rng(0x10f1_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let deltas8 = |rng: &mut Rng| -> [i8; 8] {
+            let mut a = [0i8; 8];
+            for x in &mut a {
+                *x = (rng.next() % 127) as i8 - 63;
+            }
+            a
+        };
+        let deltas2 = |rng: &mut Rng| -> [i8; 2] {
+            [(rng.next() % 127) as i8 - 63, (rng.next() % 127) as i8 - 63]
+        };
+        // Sometimes make last == current so "changed"/"meaningful" go both ways.
+        let ref_deltas = deltas8(&mut rng);
+        let last_ref = if rng.next().is_multiple_of(3) { ref_deltas } else { deltas8(&mut rng) };
+        let mode_deltas = deltas2(&mut rng);
+        let last_mode = if rng.next().is_multiple_of(3) { mode_deltas } else { deltas2(&mut rng) };
+        let lf = LoopfilterHeader {
+            allow_intrabc: rng.next().is_multiple_of(7),
+            filter_level: [rng.range(0, 64), rng.range(0, 64)],
+            filter_level_u: rng.range(0, 64),
+            filter_level_v: rng.range(0, 64),
+            sharpness_level: rng.range(0, 8),
+            mode_ref_delta_enabled: rng.next().is_multiple_of(2),
+            mode_ref_delta_update: rng.next().is_multiple_of(2),
+            ref_deltas,
+            mode_deltas,
+            last_ref_deltas: last_ref,
+            last_mode_deltas: last_mode,
+        };
+        let num_planes = if rng.next().is_multiple_of(4) { 1 } else { 3 };
+        let mut wb = WriteBitBuffer::new();
+        encode_loopfilter(&mut wb, &lf, num_planes);
+        let got = wb.bytes().to_vec();
+        let want = c::ref_encode_loopfilter(
+            lf.allow_intrabc, lf.filter_level, lf.filter_level_u, lf.filter_level_v,
+            lf.sharpness_level, lf.mode_ref_delta_enabled, lf.mode_ref_delta_update, &lf.ref_deltas,
+            &lf.mode_deltas, &lf.last_ref_deltas, &lf.last_mode_deltas, num_planes,
+        );
+        assert_eq!(got, want, "encode_loopfilter {lf:?} np={num_planes}");
+    }
+}

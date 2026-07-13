@@ -193,6 +193,17 @@ extern "C" {
     fn shim_write_obu_header(obu_type: i32, has_nonzero_op: i32, is_layer_specific: i32, obu_extension: i32, dst: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_encode_quantization(base_qindex: i32, y_dc: i32, u_dc: i32, u_ac: i32, v_dc: i32, v_ac: i32, using_qm: i32, qm_y: i32, qm_u: i32, qm_v: i32, num_planes: i32, separate_uv: i32, out: *mut u8) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_loopfilter(allow_intrabc: i32, fl0: i32, fl1: i32, flu: i32, flv: i32, sharpness: i32, mode_ref_enabled: i32, mode_ref_update: i32, ref_deltas: *const i8, mode_deltas: *const i8, last_ref: *const i8, last_mode: *const i8, num_planes: i32, out: *mut u8) -> u32;
+}
+
+/// Reference `encode_loopfilter` (transcribed control flow over the real aom_wb).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_loopfilter(allow_intrabc: bool, filter_level: [i32; 2], flu: i32, flv: i32, sharpness: i32, mode_ref_enabled: bool, mode_ref_update: bool, ref_deltas: &[i8; 8], mode_deltas: &[i8; 2], last_ref: &[i8; 8], last_mode: &[i8; 2], num_planes: usize) -> Vec<u8> {
+    let mut out = vec![0u8; 32];
+    let n = unsafe { shim_encode_loopfilter(allow_intrabc as i32, filter_level[0], filter_level[1], flu, flv, sharpness, mode_ref_enabled as i32, mode_ref_update as i32, ref_deltas.as_ptr(), mode_deltas.as_ptr(), last_ref.as_ptr(), last_mode.as_ptr(), num_planes as i32, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `encode_quantization` (transcribed control flow over the real aom_wb).

@@ -73,3 +73,41 @@ uint32_t shim_encode_quantization(int base_qindex, int y_dc, int u_dc, int u_ac,
   }
   return aom_wb_bytes_written(&wb);
 }
+
+/* Transcribed control flow of encode_loopfilter over the real aom_wb. */
+uint32_t shim_encode_loopfilter(int allow_intrabc, int fl0, int fl1, int flu,
+                                int flv, int sharpness, int mode_ref_enabled,
+                                int mode_ref_update, const signed char *ref_deltas,
+                                const signed char *mode_deltas,
+                                const signed char *last_ref,
+                                const signed char *last_mode, int num_planes,
+                                uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  if (allow_intrabc) return aom_wb_bytes_written(&wb);
+  aom_wb_write_literal(&wb, fl0, 6);
+  aom_wb_write_literal(&wb, fl1, 6);
+  if (num_planes > 1 && (fl0 || fl1)) {
+    aom_wb_write_literal(&wb, flu, 6);
+    aom_wb_write_literal(&wb, flv, 6);
+  }
+  aom_wb_write_literal(&wb, sharpness, 3);
+  aom_wb_write_bit(&wb, mode_ref_enabled);
+  int meaningful = 0;
+  if (mode_ref_update) {
+    for (int i = 0; i < 8; i++) if (ref_deltas[i] != last_ref[i]) meaningful = 1;
+    for (int i = 0; i < 2; i++) if (mode_deltas[i] != last_mode[i]) meaningful = 1;
+  }
+  aom_wb_write_bit(&wb, meaningful);
+  if (!meaningful) return aom_wb_bytes_written(&wb);
+  for (int i = 0; i < 8; i++) {
+    int changed = ref_deltas[i] != last_ref[i];
+    aom_wb_write_bit(&wb, changed);
+    if (changed) aom_wb_write_inv_signed_literal(&wb, ref_deltas[i], 6);
+  }
+  for (int i = 0; i < 2; i++) {
+    int changed = mode_deltas[i] != last_mode[i];
+    aom_wb_write_bit(&wb, changed);
+    if (changed) aom_wb_write_inv_signed_literal(&wb, mode_deltas[i], 6);
+  }
+  return aom_wb_bytes_written(&wb);
+}

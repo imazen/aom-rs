@@ -65,3 +65,61 @@ pub fn encode_quantization(
         }
     }
 }
+
+/// The loop-filter frame-header state (`cm->lf` + the resolved primary-ref-frame
+/// "last" deltas — the caller picks `av1_set_default_*_deltas` when there is no
+/// primary ref buffer).
+#[derive(Clone, Copy, Debug)]
+pub struct LoopfilterHeader {
+    pub allow_intrabc: bool,
+    pub filter_level: [i32; 2],
+    pub filter_level_u: i32,
+    pub filter_level_v: i32,
+    pub sharpness_level: i32,
+    pub mode_ref_delta_enabled: bool,
+    pub mode_ref_delta_update: bool,
+    pub ref_deltas: [i8; 8],       // REF_FRAMES
+    pub mode_deltas: [i8; 2],      // MAX_MODE_LF_DELTAS
+    pub last_ref_deltas: [i8; 8],
+    pub last_mode_deltas: [i8; 2],
+}
+
+/// `encode_loopfilter` (`av1/encoder/bitstream.c`): the loop-filter params —
+/// y/uv filter levels, sharpness, and (when meaningful) the per-ref / per-mode
+/// delta updates vs the previous frame's deltas. Writes nothing when
+/// `allow_intrabc`.
+pub fn encode_loopfilter(wb: &mut WriteBitBuffer, lf: &LoopfilterHeader, num_planes: usize) {
+    if lf.allow_intrabc {
+        return;
+    }
+    wb.write_literal(lf.filter_level[0], 6);
+    wb.write_literal(lf.filter_level[1], 6);
+    if num_planes > 1 && (lf.filter_level[0] != 0 || lf.filter_level[1] != 0) {
+        wb.write_literal(lf.filter_level_u, 6);
+        wb.write_literal(lf.filter_level_v, 6);
+    }
+    wb.write_literal(lf.sharpness_level, 3);
+    wb.write_bit(lf.mode_ref_delta_enabled as u32);
+
+    let meaningful = lf.mode_ref_delta_update
+        && (lf.ref_deltas.iter().zip(&lf.last_ref_deltas).any(|(a, b)| a != b)
+            || lf.mode_deltas.iter().zip(&lf.last_mode_deltas).any(|(a, b)| a != b));
+    wb.write_bit(meaningful as u32);
+    if !meaningful {
+        return;
+    }
+    for (&delta, &last) in lf.ref_deltas.iter().zip(&lf.last_ref_deltas) {
+        let changed = delta != last;
+        wb.write_bit(changed as u32);
+        if changed {
+            wb.write_inv_signed_literal(delta as i32, 6);
+        }
+    }
+    for (&delta, &last) in lf.mode_deltas.iter().zip(&lf.last_mode_deltas) {
+        let changed = delta != last;
+        wb.write_bit(changed as u32);
+        if changed {
+            wb.write_inv_signed_literal(delta as i32, 6);
+        }
+    }
+}
