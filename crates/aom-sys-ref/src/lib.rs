@@ -242,6 +242,7 @@ extern "C" {
     fn shim_write_intra_y_mode_kf(kf_y_cdf: *mut u16, mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_size_group_lookup(bsize: i32) -> i32;
     fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_drl_idx(drl_cdf: *mut u16, mode: i32, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, out_cdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_mode(newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, mode: i32, mode_ctx: i32, out: *mut u8, out_newmv: *mut u16, out_zeromv: *mut u16, out_refmv: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
@@ -251,6 +252,16 @@ extern "C" {
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `write_drl_idx` (over the pristine C od_ec + the real av1_drl_ctx).
+pub fn ref_write_drl_idx(drl_cdf: &[u16; 9], mode: i32, ref_mv_idx: i32, ref_mv_count: i32, weight: &[u16; 4]) -> (Vec<u8>, [u16; 9]) {
+    let mut cdf = *drl_cdf;
+    let mut out = vec![0u8; 16];
+    let mut out_cdf = [0u16; 9];
+    let n = unsafe { shim_write_drl_idx(cdf.as_mut_ptr(), mode, ref_mv_idx, ref_mv_count, weight.as_ptr(), out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    out.truncate(n as usize);
+    (out, out_cdf)
 }
 
 /// Reference `write_inter_mode` (3-symbol cascade over the pristine C od_ec + update_cdf).

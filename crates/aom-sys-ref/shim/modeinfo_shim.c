@@ -256,3 +256,43 @@ uint32_t shim_write_inter_mode(uint16_t *newmv_cdf, uint16_t *zeromv_cdf,
   od_ec_enc_clear(&ec);
   return n;
 }
+
+/* write_drl_idx over pristine C od_ec, calling the REAL av1_drl_ctx +
+ * have_nearmv_in_inter_mode. drl_cdf flat [3][3]; weight[4]. */
+#include "av1/common/mvref_common.h"
+uint32_t shim_write_drl_idx(uint16_t *drl_cdf, int mode, int ref_mv_idx, int ref_mv_count,
+                            const uint16_t *weight, uint8_t *out, uint16_t *out_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  int new_mv = (mode == NEWMV || mode == NEW_NEWMV);
+  if (new_mv) {
+    for (int idx = 0; idx < 2; ++idx) {
+      if (ref_mv_count > idx + 1) {
+        uint8_t ctx = av1_drl_ctx(weight, idx);
+        uint16_t *c = drl_cdf + ctx * 3;
+        od_ec_encode_cdf_q15(&ec, ref_mv_idx != idx, c, 2);
+        update_cdf(c, ref_mv_idx != idx, 2);
+        if (ref_mv_idx == idx) goto done;
+      }
+    }
+    goto done;
+  }
+  if (have_nearmv_in_inter_mode(mode)) {
+    for (int idx = 1; idx < 3; ++idx) {
+      if (ref_mv_count > idx + 1) {
+        uint8_t ctx = av1_drl_ctx(weight, idx);
+        uint16_t *c = drl_cdf + ctx * 3;
+        od_ec_encode_cdf_q15(&ec, ref_mv_idx != (idx - 1), c, 2);
+        update_cdf(c, ref_mv_idx != (idx - 1), 2);
+        if (ref_mv_idx == (idx - 1)) goto done;
+      }
+    }
+  }
+done:;
+  uint32_t n = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &n);
+  for (uint32_t i = 0; i < n; i++) out[i] = buf[i];
+  for (int i = 0; i < 3 * 3; i++) out_cdf[i] = drl_cdf[i];
+  od_ec_enc_clear(&ec);
+  return n;
+}

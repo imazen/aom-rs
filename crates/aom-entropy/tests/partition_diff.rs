@@ -453,3 +453,37 @@ fn write_inter_mode_matches_c() {
         assert_eq!(my_rf, orm, "inter_mode refmv cdf");
     }
 }
+
+#[test]
+fn write_drl_idx_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_drl_idx;
+    let mut rng = Rng(0xd21c_c0de_a11a_0009);
+    let bin_cdf = |rng: &mut Rng| -> [u16; 3] { [1 + (rng.next() % 32766) as u16, 0, 0] };
+    for _ in 0..300_000 {
+        let mut drl = [[0u16; 3]; 3];
+        for c in &mut drl {
+            *c = bin_cdf(&mut rng);
+        }
+        // weights straddle REF_CAT_LEVEL=640
+        let mut weight = [0u16; 4];
+        for w in &mut weight {
+            *w = (rng.next() % 1400) as u16;
+        }
+        // modes that write DRL: NEWMV=16, NEW_NEWMV=24, NEARMV=14, NEAR_NEARMV=18, NEAR_NEWMV=21, NEW_NEARMV=22; plus some that skip
+        let mode = [16i32, 24, 14, 18, 21, 22, 15, 13][(rng.next() % 8) as usize];
+        let ref_mv_idx = (rng.next() % 3) as i32;
+        let ref_mv_count = (rng.next() % 5) as i32;
+
+        let mut my_drl = drl;
+        let mut enc = OdEcEnc::new();
+        write_drl_idx(&mut enc, &mut my_drl, mode, ref_mv_idx, ref_mv_count, &weight);
+        let got = enc.done().to_vec();
+
+        let df: [u16; 9] = std::array::from_fn(|i| drl[i / 3][i % 3]);
+        let (want, odf) = c::ref_write_drl_idx(&df, mode, ref_mv_idx, ref_mv_count, &weight);
+        assert_eq!(got, want, "drl bytes mode={mode} idx={ref_mv_idx} cnt={ref_mv_count}");
+        let my_df: [u16; 9] = std::array::from_fn(|i| my_drl[i / 3][i % 3]);
+        assert_eq!(my_df, odf, "drl cdf mode={mode} idx={ref_mv_idx} cnt={ref_mv_count}");
+    }
+}

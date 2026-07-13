@@ -319,3 +319,65 @@ pub fn write_inter_mode(
         }
     }
 }
+
+const REF_CAT_LEVEL: u16 = 640;
+const NEW_NEWMV: i32 = 24;
+
+/// `av1_drl_ctx` (`mvref_common.h`): the DRL CDF context from the two candidate ref-mv
+/// weights around `ref_idx` relative to `REF_CAT_LEVEL`.
+fn av1_drl_ctx(weight: &[u16], ref_idx: usize) -> usize {
+    let a = weight[ref_idx] >= REF_CAT_LEVEL;
+    let b = weight[ref_idx + 1] >= REF_CAT_LEVEL;
+    if a && b {
+        0
+    } else if a && !b {
+        1
+    } else if !a && !b {
+        2
+    } else {
+        0
+    }
+}
+
+fn have_nearmv_in_inter_mode(mode: i32) -> bool {
+    // NEARMV=14, NEAR_NEARMV=18, NEAR_NEWMV=21, NEW_NEARMV=22
+    mode == 14 || mode == 18 || mode == 21 || mode == 22
+}
+
+/// `write_drl_idx` (`av1/encoder/bitstream.c`): the dynamic-ref-list index — up to two
+/// binary symbols selecting `ref_mv_idx` among the candidate ref MVs, on the
+/// weight-derived DRL CDF context. NEWMV modes scan idx 0..1; NEAR modes scan idx 1..2
+/// (offset by the NEARESTMV slot). Stops once the chosen index is coded.
+pub fn write_drl_idx(
+    enc: &mut OdEcEnc,
+    drl_cdf: &mut [[u16; 3]; 3],
+    mode: i32,
+    ref_mv_idx: i32,
+    ref_mv_count: i32,
+    weight: &[u16],
+) {
+    let new_mv = mode == NEWMV || mode == NEW_NEWMV;
+    if new_mv {
+        for idx in 0..2 {
+            if ref_mv_count > idx + 1 {
+                let ctx = av1_drl_ctx(weight, idx as usize);
+                write_symbol(enc, (ref_mv_idx != idx) as i32, &mut drl_cdf[ctx], 2);
+                if ref_mv_idx == idx {
+                    return;
+                }
+            }
+        }
+        return;
+    }
+    if have_nearmv_in_inter_mode(mode) {
+        for idx in 1..3 {
+            if ref_mv_count > idx + 1 {
+                let ctx = av1_drl_ctx(weight, idx as usize);
+                write_symbol(enc, (ref_mv_idx != idx - 1) as i32, &mut drl_cdf[ctx], 2);
+                if ref_mv_idx == idx - 1 {
+                    return;
+                }
+            }
+        }
+    }
+}
