@@ -126,3 +126,96 @@ uint32_t shim_encode_cdef(int enable_cdef, int allow_intrabc, int damping,
   }
   return aom_wb_bytes_written(&wb);
 }
+
+/* Segmentation / frame-size frame-header components, transcribed control flow
+ * over the real aom_wb (and the real exported seg-feature tables). */
+#include "av1/common/seg_common.h"
+#include "av1/common/common.h"  /* get_unsigned_bits, clamp */
+#include "av1/common/filter.h"  /* SWITCHABLE, LOG_SWITCHABLE_FILTERS */
+#include "av1/common/scale.h"   /* SCALE_NUMERATOR */
+#include "av1/common/enums.h"   /* SUPERRES_SCALE_BITS, SUPERRES_SCALE_DENOMINATOR_MIN */
+
+uint32_t shim_encode_segmentation(int enabled, int has_primary_ref, int update_map,
+                                  int temporal_update, int update_data,
+                                  const uint32_t *feature_mask,
+                                  const int *feature_data, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  aom_wb_write_bit(&wb, enabled);
+  if (!enabled) return aom_wb_bytes_written(&wb);
+  if (has_primary_ref) {
+    aom_wb_write_bit(&wb, update_map);
+    if (update_map) aom_wb_write_bit(&wb, temporal_update);
+    aom_wb_write_bit(&wb, update_data);
+  }
+  if (update_data) {
+    for (int i = 0; i < MAX_SEGMENTS; i++) {
+      for (int j = 0; j < SEG_LVL_MAX; j++) {
+        const int active = (feature_mask[i] & (1u << j)) != 0;
+        aom_wb_write_bit(&wb, active);
+        if (active) {
+          const int data_max = av1_seg_feature_data_max(j);
+          const int data_min = -data_max;
+          const int ubits = get_unsigned_bits(data_max);
+          const int data = clamp(feature_data[i * SEG_LVL_MAX + j], data_min, data_max);
+          if (av1_is_segfeature_signed(j))
+            aom_wb_write_inv_signed_literal(&wb, data, ubits);
+          else
+            aom_wb_write_literal(&wb, data, ubits);
+        }
+      }
+    }
+  }
+  return aom_wb_bytes_written(&wb);
+}
+
+uint32_t shim_write_frame_interp_filter(int filter, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  aom_wb_write_bit(&wb, filter == SWITCHABLE);
+  if (filter != SWITCHABLE) aom_wb_write_literal(&wb, filter, LOG_SWITCHABLE_FILTERS);
+  return aom_wb_bytes_written(&wb);
+}
+
+uint32_t shim_write_superres_scale(int enable_superres, int denom, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  if (!enable_superres) return aom_wb_bytes_written(&wb);
+  if (denom == SCALE_NUMERATOR) {
+    aom_wb_write_bit(&wb, 0);
+  } else {
+    aom_wb_write_bit(&wb, 1);
+    aom_wb_write_literal(&wb, denom - SUPERRES_SCALE_DENOMINATOR_MIN, SUPERRES_SCALE_BITS);
+  }
+  return aom_wb_bytes_written(&wb);
+}
+
+uint32_t shim_write_render_size(int scaling_active, int rw, int rh, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  aom_wb_write_bit(&wb, scaling_active);
+  if (scaling_active) {
+    aom_wb_write_literal(&wb, rw - 1, 16);
+    aom_wb_write_literal(&wb, rh - 1, 16);
+  }
+  return aom_wb_bytes_written(&wb);
+}
+
+uint32_t shim_write_frame_size(int frame_size_override, int num_bits_width,
+                               int num_bits_height, int up_w, int up_h,
+                               int enable_superres, int denom, int scaling_active,
+                               int rw, int rh, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  const int coded_width = up_w - 1;
+  const int coded_height = up_h - 1;
+  if (frame_size_override) {
+    aom_wb_write_literal(&wb, coded_width, num_bits_width);
+    aom_wb_write_literal(&wb, coded_height, num_bits_height);
+  }
+  if (enable_superres) {
+    if (denom == SCALE_NUMERATOR) aom_wb_write_bit(&wb, 0);
+    else { aom_wb_write_bit(&wb, 1); aom_wb_write_literal(&wb, denom - SUPERRES_SCALE_DENOMINATOR_MIN, SUPERRES_SCALE_BITS); }
+  }
+  aom_wb_write_bit(&wb, scaling_active);
+  if (scaling_active) {
+    aom_wb_write_literal(&wb, rw - 1, 16);
+    aom_wb_write_literal(&wb, rh - 1, 16);
+  }
+  return aom_wb_bytes_written(&wb);
+}

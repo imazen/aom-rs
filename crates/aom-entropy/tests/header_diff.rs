@@ -153,3 +153,84 @@ fn encode_cdef_matches_c() {
         assert_eq!(got, want, "encode_cdef {cdef:?} np={num_planes}");
     }
 }
+
+#[test]
+fn encode_segmentation_matches_c() {
+    use aom_entropy::header::{encode_segmentation, SegmentationHeader};
+    let mut rng = Rng(0x5e91_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        let mut feature_mask = [0u32; 8];
+        let mut feature_data = [[0i32; 8]; 8];
+        for (mask, row) in feature_mask.iter_mut().zip(feature_data.iter_mut()) {
+            // random subset of the 8 features active
+            *mask = (rng.next() as u32) & 0xff;
+            for cell in row.iter_mut() {
+                // span the clamp range on both signs (data_max up to 255)
+                *cell = rng.range(-300, 301);
+            }
+        }
+        let seg = SegmentationHeader {
+            enabled: rng.next().is_multiple_of(4),
+            has_primary_ref: rng.next().is_multiple_of(2),
+            update_map: rng.next().is_multiple_of(2),
+            temporal_update: rng.next().is_multiple_of(2),
+            update_data: rng.next().is_multiple_of(2),
+            feature_mask,
+            feature_data,
+        };
+        let mut wb = WriteBitBuffer::new();
+        encode_segmentation(&mut wb, &seg);
+        let got = wb.bytes().to_vec();
+        let want = c::ref_encode_segmentation(seg.enabled, seg.has_primary_ref, seg.update_map, seg.temporal_update, seg.update_data, &feature_mask, &feature_data);
+        assert_eq!(got, want, "encode_segmentation {seg:?}");
+    }
+}
+
+#[test]
+fn frame_size_cluster_matches_c() {
+    use aom_entropy::header::{
+        write_frame_interp_filter, write_frame_size, write_render_size, write_superres_scale,
+        FrameSizeHeader,
+    };
+    let mut rng = Rng(0xf5ce_c0de_a11a_0009);
+    for _ in 0..200_000 {
+        // interp filter: 0..=4 (4 = SWITCHABLE)
+        let filter = rng.range(0, 5);
+        let mut wb = WriteBitBuffer::new();
+        write_frame_interp_filter(&mut wb, filter);
+        assert_eq!(wb.bytes(), &c::ref_write_frame_interp_filter(filter)[..], "interp_filter {filter}");
+
+        // superres: denom == 8 (no scale) or [9, 16)
+        let enable_superres = rng.next().is_multiple_of(2);
+        let denom = if rng.next().is_multiple_of(2) { 8 } else { rng.range(9, 17) };
+        let mut wb = WriteBitBuffer::new();
+        write_superres_scale(&mut wb, enable_superres, denom);
+        assert_eq!(wb.bytes(), &c::ref_write_superres_scale(enable_superres, denom)[..], "superres en={enable_superres} d={denom}");
+
+        // render size
+        let scaling_active = rng.next().is_multiple_of(2);
+        let rw = rng.range(1, 65536);
+        let rh = rng.range(1, 65536);
+        let mut wb = WriteBitBuffer::new();
+        write_render_size(&mut wb, scaling_active, rw, rh);
+        assert_eq!(wb.bytes(), &c::ref_write_render_size(scaling_active, rw, rh)[..], "render {scaling_active} {rw}x{rh}");
+
+        // full frame size
+        let fs = FrameSizeHeader {
+            frame_size_override: rng.next().is_multiple_of(2),
+            num_bits_width: rng.range(4, 17) as u32,
+            num_bits_height: rng.range(4, 17) as u32,
+            superres_upscaled_width: rng.range(1, 65536),
+            superres_upscaled_height: rng.range(1, 65536),
+            enable_superres,
+            scale_denominator: denom,
+            scaling_active,
+            render_width: rw,
+            render_height: rh,
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_frame_size(&mut wb, &fs);
+        let want = c::ref_write_frame_size(fs.frame_size_override, fs.num_bits_width, fs.num_bits_height, fs.superres_upscaled_width, fs.superres_upscaled_height, fs.enable_superres, fs.scale_denominator, fs.scaling_active, fs.render_width, fs.render_height);
+        assert_eq!(wb.bytes(), &want[..], "frame_size {fs:?}");
+    }
+}

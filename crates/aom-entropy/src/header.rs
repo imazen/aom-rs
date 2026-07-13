@@ -152,3 +152,139 @@ pub fn encode_cdef(wb: &mut WriteBitBuffer, cdef: &CdefHeader, num_planes: usize
         }
     }
 }
+
+// ---- segmentation ---------------------------------------------------------
+
+const MAX_SEGMENTS: usize = 8;
+const SEG_LVL_MAX: usize = 8;
+/// `av1_seg_feature_data_max` table (`seg_common.c`): MAXQ, then MAX_LOOP_FILTER×4,
+/// then 7 (REF_FRAME), 0 (SKIP), 0 (GLOBALMV).
+const SEG_FEATURE_DATA_MAX: [i32; SEG_LVL_MAX] = [255, 63, 63, 63, 63, 7, 0, 0];
+/// `av1_is_segfeature_signed` table: the ALT_Q + 4 ALT_LF features are signed.
+const SEG_FEATURE_SIGNED: [bool; SEG_LVL_MAX] =
+    [true, true, true, true, true, false, false, false];
+
+/// `get_unsigned_bits` (`common.h`): `num > 0 ? get_msb(num) + 1 : 0`.
+fn get_unsigned_bits(num_values: u32) -> u32 {
+    if num_values == 0 { 0 } else { 32 - num_values.leading_zeros() }
+}
+
+/// The segmentation frame-header state (`cm->seg` + `primary_ref_frame`).
+#[derive(Clone, Debug)]
+pub struct SegmentationHeader {
+    pub enabled: bool,
+    /// `primary_ref_frame != PRIMARY_REF_NONE` — gates the update flags.
+    pub has_primary_ref: bool,
+    pub update_map: bool,
+    pub temporal_update: bool,
+    pub update_data: bool,
+    /// `feature_mask[seg]` — bit `j` set means feature `j` is active for segment `seg`.
+    pub feature_mask: [u32; MAX_SEGMENTS],
+    pub feature_data: [[i32; SEG_LVL_MAX]; MAX_SEGMENTS],
+}
+
+/// `encode_segmentation` (`av1/encoder/bitstream.c`): the segmentation params —
+/// enabled flag, the update-map/temporal/update-data flags (only with a primary
+/// ref), then, when `update_data`, per (segment × feature) an active bit and the
+/// clamped feature value (inv-signed for the signed features, plain literal
+/// otherwise, both at `get_unsigned_bits(data_max)`).
+pub fn encode_segmentation(wb: &mut WriteBitBuffer, seg: &SegmentationHeader) {
+    wb.write_bit(seg.enabled as u32);
+    if !seg.enabled {
+        return;
+    }
+    if seg.has_primary_ref {
+        wb.write_bit(seg.update_map as u32);
+        if seg.update_map {
+            wb.write_bit(seg.temporal_update as u32);
+        }
+        wb.write_bit(seg.update_data as u32);
+    }
+    if seg.update_data {
+        for i in 0..MAX_SEGMENTS {
+            for j in 0..SEG_LVL_MAX {
+                let active = seg.feature_mask[i] & (1 << j) != 0;
+                wb.write_bit(active as u32);
+                if active {
+                    let data_max = SEG_FEATURE_DATA_MAX[j];
+                    let ubits = get_unsigned_bits(data_max as u32);
+                    let data = seg.feature_data[i][j].clamp(-data_max, data_max);
+                    if SEG_FEATURE_SIGNED[j] {
+                        wb.write_inv_signed_literal(data, ubits);
+                    } else {
+                        wb.write_literal(data, ubits);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- interpolation filter / frame size ------------------------------------
+
+const SWITCHABLE: i32 = 4; // SWITCHABLE_FILTERS + 1
+const LOG_SWITCHABLE_FILTERS: u32 = 2;
+const SCALE_NUMERATOR: i32 = 8;
+const SUPERRES_SCALE_DENOMINATOR_MIN: i32 = SCALE_NUMERATOR + 1;
+const SUPERRES_SCALE_BITS: u32 = 3;
+
+/// `write_frame_interp_filter`: a SWITCHABLE flag, and (when not switchable) the
+/// filter index at `LOG_SWITCHABLE_FILTERS`=2 bits.
+pub fn write_frame_interp_filter(wb: &mut WriteBitBuffer, filter: i32) {
+    wb.write_bit((filter == SWITCHABLE) as u32);
+    if filter != SWITCHABLE {
+        wb.write_literal(filter, LOG_SWITCHABLE_FILTERS);
+    }
+}
+
+/// `write_superres_scale`: nothing when superres is disabled; otherwise a scale
+/// flag and (when scaling) the denominator offset at `SUPERRES_SCALE_BITS`=3.
+pub fn write_superres_scale(wb: &mut WriteBitBuffer, enable_superres: bool, scale_denominator: i32) {
+    if !enable_superres {
+        return;
+    }
+    if scale_denominator == SCALE_NUMERATOR {
+        wb.write_bit(0);
+    } else {
+        wb.write_bit(1);
+        wb.write_literal(scale_denominator - SUPERRES_SCALE_DENOMINATOR_MIN, SUPERRES_SCALE_BITS);
+    }
+}
+
+/// `write_render_size`: a scaling-active flag, and (when active) render width/height
+/// minus one at 16 bits each.
+pub fn write_render_size(wb: &mut WriteBitBuffer, scaling_active: bool, render_width: i32, render_height: i32) {
+    wb.write_bit(scaling_active as u32);
+    if scaling_active {
+        wb.write_literal(render_width - 1, 16);
+        wb.write_literal(render_height - 1, 16);
+    }
+}
+
+/// The frame-size frame-header state (`write_frame_size` inputs).
+#[derive(Clone, Copy, Debug)]
+pub struct FrameSizeHeader {
+    pub frame_size_override: bool,
+    pub num_bits_width: u32,
+    pub num_bits_height: u32,
+    pub superres_upscaled_width: i32,
+    pub superres_upscaled_height: i32,
+    pub enable_superres: bool,
+    pub scale_denominator: i32,
+    pub scaling_active: bool,
+    pub render_width: i32,
+    pub render_height: i32,
+}
+
+/// `write_frame_size`: the coded width/height minus one (only when overriding the
+/// sequence-header size), then the superres scale and render size.
+pub fn write_frame_size(wb: &mut WriteBitBuffer, fs: &FrameSizeHeader) {
+    let coded_width = fs.superres_upscaled_width - 1;
+    let coded_height = fs.superres_upscaled_height - 1;
+    if fs.frame_size_override {
+        wb.write_literal(coded_width, fs.num_bits_width);
+        wb.write_literal(coded_height, fs.num_bits_height);
+    }
+    write_superres_scale(wb, fs.enable_superres, fs.scale_denominator);
+    write_render_size(wb, fs.scaling_active, fs.render_width, fs.render_height);
+}

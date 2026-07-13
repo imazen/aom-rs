@@ -197,6 +197,54 @@ extern "C" {
     fn shim_encode_loopfilter(allow_intrabc: i32, fl0: i32, fl1: i32, flu: i32, flv: i32, sharpness: i32, mode_ref_enabled: i32, mode_ref_update: i32, ref_deltas: *const i8, mode_deltas: *const i8, last_ref: *const i8, last_mode: *const i8, num_planes: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_encode_cdef(enable_cdef: i32, allow_intrabc: i32, damping: i32, cdef_bits: i32, nb: i32, y: *const i32, uv: *const i32, num_planes: i32, out: *mut u8) -> u32;
+    fn shim_encode_segmentation(enabled: i32, has_primary_ref: i32, update_map: i32, temporal_update: i32, update_data: i32, feature_mask: *const u32, feature_data: *const i32, out: *mut u8) -> u32;
+    fn shim_write_frame_interp_filter(filter: i32, out: *mut u8) -> u32;
+    fn shim_write_superres_scale(enable_superres: i32, denom: i32, out: *mut u8) -> u32;
+    fn shim_write_render_size(scaling_active: i32, rw: i32, rh: i32, out: *mut u8) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_write_frame_size(frame_size_override: i32, num_bits_width: i32, num_bits_height: i32, up_w: i32, up_h: i32, enable_superres: i32, denom: i32, scaling_active: i32, rw: i32, rh: i32, out: *mut u8) -> u32;
+}
+
+/// Reference `encode_segmentation` (transcribed control flow over the real aom_wb + seg tables).
+pub fn ref_encode_segmentation(enabled: bool, has_primary_ref: bool, update_map: bool, temporal_update: bool, update_data: bool, feature_mask: &[u32; 8], feature_data: &[[i32; 8]; 8]) -> Vec<u8> {
+    let flat: Vec<i32> = feature_data.iter().flatten().copied().collect();
+    let mut out = vec![0u8; 64];
+    let n = unsafe { shim_encode_segmentation(enabled as i32, has_primary_ref as i32, update_map as i32, temporal_update as i32, update_data as i32, feature_mask.as_ptr(), flat.as_ptr(), out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference `write_frame_interp_filter`.
+pub fn ref_write_frame_interp_filter(filter: i32) -> Vec<u8> {
+    let mut out = vec![0u8; 4];
+    let n = unsafe { shim_write_frame_interp_filter(filter, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference `write_superres_scale`.
+pub fn ref_write_superres_scale(enable_superres: bool, denom: i32) -> Vec<u8> {
+    let mut out = vec![0u8; 4];
+    let n = unsafe { shim_write_superres_scale(enable_superres as i32, denom, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference `write_render_size`.
+pub fn ref_write_render_size(scaling_active: bool, rw: i32, rh: i32) -> Vec<u8> {
+    let mut out = vec![0u8; 8];
+    let n = unsafe { shim_write_render_size(scaling_active as i32, rw, rh, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference `write_frame_size`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_frame_size(frame_size_override: bool, num_bits_width: u32, num_bits_height: u32, up_w: i32, up_h: i32, enable_superres: bool, denom: i32, scaling_active: bool, rw: i32, rh: i32) -> Vec<u8> {
+    let mut out = vec![0u8; 16];
+    let n = unsafe { shim_write_frame_size(frame_size_override as i32, num_bits_width as i32, num_bits_height as i32, up_w, up_h, enable_superres as i32, denom, scaling_active as i32, rw, rh, out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `encode_cdef` (transcribed control flow over the real aom_wb).
