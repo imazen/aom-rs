@@ -406,6 +406,52 @@
           "test": "cdef_filter_diff::cdef_filter8_byte_identical"
         }
       }
+    },
+    "intra.highbd": {
+      "status": "green",
+      "note": "Highbd (10/12-bit) non-directional intra predictors, all 10 modes x 19 sizes. Highbd directional: TODO.",
+      "items": {
+        "aom_highbd_dc_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_dc_top_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_dc_left_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_dc_128_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_v_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_h_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_paeth_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_smooth_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_smooth_v_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        },
+        "aom_highbd_smooth_h_predictor": {
+          "status": "green",
+          "test": "highbd_diff::highbd_intra_byte_identical"
+        }
+      }
     }
   }
 }

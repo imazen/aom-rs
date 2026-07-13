@@ -252,6 +252,27 @@ extern "C" {
     );
 }
 
+extern "C" {
+    fn shim_highbd_intra_pred(
+        mode: i32, size_idx: i32, dst: *mut u16, stride: isize, above: *const u16, left: *const u16, bd: i32,
+    );
+}
+
+/// Reference highbd intra prediction. Returns the `bw*bh` predicted block.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_highbd_intra_pred(
+    mode: usize, size_idx: usize, bw: usize, bh: usize, above_tl: &[u16], left: &[u16], bd: i32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; bw * bh];
+    unsafe {
+        shim_highbd_intra_pred(
+            mode as i32, size_idx as i32, dst.as_mut_ptr(), bw as isize,
+            above_tl.as_ptr().add(1), left.as_ptr(), bd,
+        )
+    }
+    dst
+}
+
 /// Reference intra prediction. `above_tl` has the top-left at index 0 followed
 /// by the `bw` above samples; `left` has `bh` samples. Returns the `bw*bh`
 /// predicted block (stride = bw).
