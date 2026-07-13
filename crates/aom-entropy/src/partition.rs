@@ -2226,3 +2226,75 @@ pub fn write_inter_segment_id(
         }
     }
 }
+
+/// `pack_inter_mode_mvs` prefix (`av1/encoder/bitstream.c:1092`): the INTER per-block
+/// driver up to the inter/intra mode split — inter_segment_id (before skip) -> skip_mode
+/// -> skip (= 1 when skip_mode, else write_skip) -> inter_segment_id (after skip) -> cdef
+/// -> delta_q_params -> is_inter (coded only when not a skip-mode block). Returns
+/// `(skip, skip_mode)`; the caller returns before the mode coding when `skip_mode`. All
+/// state (segment/skip-mode/skip/cdef/delta/intra-inter CDFs + running values) updated in
+/// place.
+#[allow(clippy::too_many_arguments)]
+pub fn write_inter_prefix(
+    enc: &mut OdEcEnc,
+    update_map: bool,
+    segid_preskip: bool,
+    temporal_update: bool,
+    seg_id_predicted: i32,
+    pred_cdf: &mut [u16],
+    seg_cdf: &mut [u16],
+    seg_enabled: bool,
+    segment_id: i32,
+    seg_pred: i32,
+    last_active_segid: i32,
+    skip_mode_cdf: &mut [u16],
+    frame_skip_mode_flag: bool,
+    sm_seg_skip: bool,
+    sm_comp_allowed: bool,
+    sm_seg_ref_gmv: bool,
+    skip_mode: i32,
+    skip_cdf: &mut [u16],
+    skip_seg_active: bool,
+    skip_txfm: i32,
+    coded_lossless: bool,
+    allow_intrabc: bool,
+    mi_row: i32,
+    mi_col: i32,
+    mib_size: i32,
+    sb_size: usize,
+    cdef_transmitted: &mut [bool; 4],
+    cdef_bits: u32,
+    cdef_strength: i32,
+    dq_present: bool,
+    dlf_present: bool,
+    dlf_multi: bool,
+    num_planes: i32,
+    bsize: usize,
+    cur_qindex: i32,
+    current_base_qindex: &mut i32,
+    dq_res: i32,
+    mbmi_delta_lf: &[i32; FRAME_LF_COUNT],
+    xd_delta_lf: &mut [i32; FRAME_LF_COUNT],
+    mbmi_delta_lf_from_base: i32,
+    xd_delta_lf_from_base: &mut i32,
+    dlf_res: i32,
+    delta_q_cdf: &mut [u16],
+    delta_lf_multi_cdf: &mut [[u16; 5]; FRAME_LF_COUNT],
+    delta_lf_cdf: &mut [u16],
+    intra_inter_cdf: &mut [u16],
+    seg_ref_frame_active: bool,
+    seg_globalmv_active: bool,
+    is_inter: i32,
+) -> (i32, i32) {
+    write_inter_segment_id(enc, update_map, true, segid_preskip, false, temporal_update, seg_id_predicted, pred_cdf, seg_cdf, seg_enabled, segment_id, seg_pred, last_active_segid);
+    write_skip_mode(enc, skip_mode_cdf, frame_skip_mode_flag, sm_seg_skip, sm_comp_allowed, sm_seg_ref_gmv, skip_mode);
+    let skip = if skip_mode != 0 { 1 } else { write_skip(enc, skip_cdf, skip_seg_active, skip_txfm) };
+    write_inter_segment_id(enc, update_map, false, segid_preskip, skip != 0, temporal_update, seg_id_predicted, pred_cdf, seg_cdf, seg_enabled, segment_id, seg_pred, last_active_segid);
+    write_cdef(enc, coded_lossless, allow_intrabc, mi_row, mi_col, mib_size, sb_size, skip, cdef_transmitted, cdef_bits, cdef_strength);
+    let super_block_upper_left = (mi_row & (mib_size - 1)) == 0 && (mi_col & (mib_size - 1)) == 0;
+    write_delta_q_params_sb(enc, dq_present, dlf_present, dlf_multi, num_planes, bsize, sb_size, skip, super_block_upper_left, cur_qindex, current_base_qindex, dq_res, mbmi_delta_lf, xd_delta_lf, mbmi_delta_lf_from_base, xd_delta_lf_from_base, dlf_res, delta_q_cdf, delta_lf_multi_cdf, delta_lf_cdf);
+    if skip_mode == 0 {
+        write_is_inter(enc, intra_inter_cdf, seg_ref_frame_active, seg_globalmv_active, is_inter);
+    }
+    (skip, skip_mode)
+}

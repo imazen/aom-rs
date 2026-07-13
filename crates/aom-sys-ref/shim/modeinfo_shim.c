@@ -1735,40 +1735,112 @@ int shim_get_pred_context_seg_id(int ha, int a_sip, int hl, int l_sip) {
  * (segp->pred_cdf[ctx], caller-selected); seg_cdf is the spatial_pred_seg_cdf[cdf_num]
  * for the actual seg id (via seg_body). Only the CODED output is reproduced (the
  * set_spatial_segment_id side effects have no byte effect). */
+/* write_inter_segment_id body writing into an existing od_ec (reused by the inter prefix). */
+static void inter_seg_id_into(od_ec_enc *ec, int update_map, int preskip, int segid_preskip,
+    int skip, int temporal_update, int seg_id_predicted, uint16_t *pred_cdf, uint16_t *seg_cdf,
+    int seg_enabled, int segment_id, int seg_pred, int last_active_segid) {
+  if (!update_map) return;
+  int do_seg_block = 0;
+  if (preskip) {
+    if (segid_preskip) do_seg_block = 1;
+  } else {
+    if (!segid_preskip) {
+      if (skip) {
+        seg_body(ec, seg_cdf, seg_enabled, update_map, 1, segment_id, seg_pred, last_active_segid);
+      } else {
+        do_seg_block = 1;
+      }
+    }
+  }
+  if (do_seg_block) {
+    if (temporal_update) {
+      od_ec_encode_cdf_q15(ec, seg_id_predicted, pred_cdf, 2);
+      update_cdf(pred_cdf, seg_id_predicted, 2);
+      if (!seg_id_predicted)
+        seg_body(ec, seg_cdf, seg_enabled, update_map, 0, segment_id, seg_pred, last_active_segid);
+    } else {
+      seg_body(ec, seg_cdf, seg_enabled, update_map, 0, segment_id, seg_pred, last_active_segid);
+    }
+  }
+}
+/* write_skip_mode / write_is_inter bodies (reused by the inter prefix). */
+static void skip_mode_body(od_ec_enc *ec, uint16_t *cdf, int frame_flag, int seg_skip,
+                           int comp_allowed, int seg_ref_gmv, int skip_mode) {
+  if (!frame_flag || seg_skip || !comp_allowed || seg_ref_gmv) return;
+  od_ec_encode_cdf_q15(ec, skip_mode, cdf, 2);
+  update_cdf(cdf, skip_mode, 2);
+}
+static void is_inter_body(od_ec_enc *ec, uint16_t *cdf, int seg_ref_active, int seg_gmv_active,
+                          int is_inter) {
+  if (!seg_ref_active) {
+    if (seg_gmv_active) return;
+    od_ec_encode_cdf_q15(ec, is_inter, cdf, 2);
+    update_cdf(cdf, is_inter, 2);
+  }
+}
+
 uint32_t shim_write_inter_segment_id(int update_map, int preskip, int segid_preskip, int skip,
     int temporal_update, int seg_id_predicted, uint16_t *pred_cdf, uint16_t *seg_cdf,
     int seg_enabled, int segment_id, int seg_pred, int last_active_segid, uint8_t *out,
     uint16_t *o_predcdf, uint16_t *o_segcdf) {
   od_ec_enc ec; od_ec_enc_init(&ec, 256);
-  if (update_map) {
-    int do_seg_block = 0;
-    if (preskip) {
-      if (segid_preskip) do_seg_block = 1;
-    } else {
-      if (!segid_preskip) {
-        if (skip) {
-          /* write_segment_id(skip_txfm=1): sets seg id, codes nothing. */
-          seg_body(&ec, seg_cdf, seg_enabled, update_map, 1, segment_id, seg_pred, last_active_segid);
-        } else {
-          do_seg_block = 1;
-        }
-      }
-    }
-    if (do_seg_block) {
-      if (temporal_update) {
-        od_ec_encode_cdf_q15(&ec, seg_id_predicted, pred_cdf, 2);
-        update_cdf(pred_cdf, seg_id_predicted, 2);
-        if (!seg_id_predicted)
-          seg_body(&ec, seg_cdf, seg_enabled, update_map, 0, segment_id, seg_pred, last_active_segid);
-      } else {
-        seg_body(&ec, seg_cdf, seg_enabled, update_map, 0, segment_id, seg_pred, last_active_segid);
-      }
-    }
-  }
+  inter_seg_id_into(&ec, update_map, preskip, segid_preskip, skip, temporal_update, seg_id_predicted,
+                    pred_cdf, seg_cdf, seg_enabled, segment_id, seg_pred, last_active_segid);
   uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
   for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
   for (int i = 0; i < 3; i++) o_predcdf[i] = pred_cdf[i];
   for (int i = 0; i < 9; i++) o_segcdf[i] = seg_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
+
+/* --- pack_inter_mode_mvs prefix (av1/encoder/bitstream.c:1092) --- */
+/* inter_segment_id(preskip) -> skip_mode -> skip -> inter_segment_id(postskip) -> cdef
+ * -> delta_q_params -> is_inter(if !skip_mode), over ONE od_ec. Returns skip + skip_mode
+ * (the caller returns early on skip_mode). Reuses all the extracted inline bodies. */
+uint32_t shim_write_inter_prefix(
+    int update_map, int segid_preskip, int temporal_update, int seg_id_predicted, uint16_t *pred_cdf,
+    uint16_t *seg_cdf, int seg_enabled, int segment_id, int seg_pred, int last_active_segid,
+    uint16_t *skip_mode_cdf, int frame_skip_mode_flag, int sm_seg_skip, int sm_comp_allowed,
+    int sm_seg_ref_gmv, int skip_mode, uint16_t *skip_cdf, int skip_seg_active, int skip_txfm,
+    int coded_lossless, int allow_intrabc, int mi_row, int mi_col, int mib_size, int sb_size,
+    const int *cdef_trans_in, int cdef_bits, int cdef_strength, int dq_present, int dlf_present,
+    int dlf_multi, int num_planes, int bsize, int cur_qindex, int cur_base_qindex, int dq_res,
+    const int *mbmi_dlf, const int *xd_dlf_in, int mbmi_dlf_base, int xd_dlf_base_in, int dlf_res,
+    uint16_t *dq_cdf, uint16_t *dlf_multi_cdf, uint16_t *dlf_cdf, uint16_t *intra_inter_cdf,
+    int seg_ref_frame_active, int seg_globalmv_active, int is_inter, uint8_t *out, int *out_skip,
+    int *out_skip_mode, uint16_t *o_predcdf, uint16_t *o_segcdf, uint16_t *o_smcdf, uint16_t *o_skipcdf,
+    int *o_cdef_trans, uint16_t *o_dqcdf, uint16_t *o_dlfmcdf, uint16_t *o_dlfcdf, int *o_base,
+    int *o_xd_dlf, int *o_xd_dlf_base, uint16_t *o_iicdf) {
+  int cdef_trans[4], xd_dlf[FRAME_LF_COUNT];
+  for (int i = 0; i < 4; i++) cdef_trans[i] = cdef_trans_in[i];
+  for (int i = 0; i < FRAME_LF_COUNT; i++) xd_dlf[i] = xd_dlf_in[i];
+  int base = cur_base_qindex, xd_dlf_base = xd_dlf_base_in;
+  const int sbul = ((mi_row & (mib_size - 1)) == 0) && ((mi_col & (mib_size - 1)) == 0);
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  inter_seg_id_into(&ec, update_map, 1, segid_preskip, 0, temporal_update, seg_id_predicted,
+                    pred_cdf, seg_cdf, seg_enabled, segment_id, seg_pred, last_active_segid);
+  skip_mode_body(&ec, skip_mode_cdf, frame_skip_mode_flag, sm_seg_skip, sm_comp_allowed,
+                 sm_seg_ref_gmv, skip_mode);
+  int skip = skip_mode ? 1 : skip_body(&ec, skip_cdf, skip_seg_active, skip_txfm);
+  inter_seg_id_into(&ec, update_map, 0, segid_preskip, skip, temporal_update, seg_id_predicted,
+                    pred_cdf, seg_cdf, seg_enabled, segment_id, seg_pred, last_active_segid);
+  cdef_body(&ec, coded_lossless, allow_intrabc, mi_row, mi_col, mib_size, sb_size, skip, cdef_trans,
+            cdef_bits, cdef_strength);
+  dqparams_body(&ec, dq_present, dlf_present, dlf_multi, num_planes, bsize, sb_size, skip, sbul,
+                cur_qindex, &base, dq_res, mbmi_dlf, xd_dlf, mbmi_dlf_base, &xd_dlf_base, dlf_res,
+                dq_cdf, dlf_multi_cdf, dlf_cdf);
+  if (!skip_mode) is_inter_body(&ec, intra_inter_cdf, seg_ref_frame_active, seg_globalmv_active, is_inter);
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  *out_skip = skip; *out_skip_mode = skip_mode; *o_base = base; *o_xd_dlf_base = xd_dlf_base;
+  for (int i = 0; i < 3; i++) { o_predcdf[i] = pred_cdf[i]; o_smcdf[i] = skip_mode_cdf[i]; o_skipcdf[i] = skip_cdf[i]; o_iicdf[i] = intra_inter_cdf[i]; }
+  for (int i = 0; i < 9; i++) o_segcdf[i] = seg_cdf[i];
+  for (int i = 0; i < 4; i++) o_cdef_trans[i] = cdef_trans[i];
+  for (int i = 0; i < DELTA_Q_PROBS + 2; i++) o_dqcdf[i] = dq_cdf[i];
+  for (int i = 0; i < FRAME_LF_COUNT * (DELTA_LF_PROBS + 2); i++) o_dlfmcdf[i] = dlf_multi_cdf[i];
+  for (int i = 0; i < DELTA_LF_PROBS + 2; i++) o_dlfcdf[i] = dlf_cdf[i];
+  for (int i = 0; i < FRAME_LF_COUNT; i++) o_xd_dlf[i] = xd_dlf[i];
   od_ec_enc_clear(&ec);
   return nb;
 }

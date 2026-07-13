@@ -2374,3 +2374,117 @@ fn write_inter_segment_id_matches_c() {
         assert_eq!(rsc, osc, "seg_cdf");
     }
 }
+
+#[test]
+fn write_inter_prefix_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_inter_prefix;
+    use aom_sys_ref::InterPrefixRef;
+    let mut rng = Rng(0x1e_7a5e_c0de_0013);
+    fn mk(rng: &mut Rng, nsyms: usize) -> Vec<u16> {
+        let mut c = vec![0u16; nsyms + 1];
+        let mut prev = 32768i32;
+        for e in c.iter_mut().take(nsyms - 1) {
+            let v = (prev - 1 - (rng.next() % 400) as i32).max(1);
+            *e = v as u16;
+            prev = v;
+        }
+        c
+    }
+    for _ in 0..200_000 {
+        let update_map = !rng.next().is_multiple_of(3);
+        let segid_preskip = rng.next().is_multiple_of(2);
+        let temporal_update = rng.next().is_multiple_of(2);
+        let seg_id_predicted = (rng.next() % 2) as i32;
+        let seg_enabled = update_map;
+        let last_active_segid = (rng.next() % 8) as i32;
+        let segment_id = (rng.next() % (last_active_segid as u64 + 1)) as i32;
+        let seg_pred = (rng.next() % (last_active_segid as u64 + 1)) as i32;
+        let frame_skip_mode_flag = rng.next().is_multiple_of(2);
+        let sm_seg_skip = rng.next().is_multiple_of(4);
+        let sm_comp_allowed = !rng.next().is_multiple_of(3);
+        let sm_seg_ref_gmv = rng.next().is_multiple_of(4);
+        let skip_mode = (rng.next() % 2) as i32;
+        let skip_seg_active = rng.next().is_multiple_of(4);
+        let skip_txfm = (rng.next() % 2) as i32;
+        let coded_lossless = rng.next().is_multiple_of(6);
+        let allow_intrabc = rng.next().is_multiple_of(6);
+        let mib_size = if rng.next().is_multiple_of(2) { 16 } else { 32 };
+        let sb_size = if mib_size == 32 { 15 } else { 12 };
+        let mi_row = (rng.next() % 64) as i32;
+        let mi_col = (rng.next() % 64) as i32;
+        let mut cdef_trans = [0i32; 4];
+        for t in cdef_trans.iter_mut() { *t = (rng.next() % 2) as i32; }
+        let cdef_bits = (rng.next() % 4) as i32;
+        let cdef_strength = if cdef_bits == 0 { 0 } else { (rng.next() % (1u64 << cdef_bits)) as i32 };
+        let dq_present = !rng.next().is_multiple_of(3);
+        let dlf_present = rng.next().is_multiple_of(2);
+        let dlf_multi = rng.next().is_multiple_of(2);
+        let num_planes = if rng.next().is_multiple_of(2) { 3 } else { 1 };
+        let bsize = (rng.next() % 22) as i32;
+        let cur_qindex = 1 + (rng.next() % 255) as i32;
+        let cur_base = (rng.next() % 256) as i32;
+        let dq_res = [1i32, 2, 4][(rng.next() % 3) as usize];
+        let mut mbmi_dlf = [0i32; 4];
+        let mut xd_dlf = [0i32; 4];
+        for k in 0..4 { mbmi_dlf[k] = (rng.next() % 129) as i32 - 64; xd_dlf[k] = (rng.next() % 129) as i32 - 64; }
+        let mbmi_dlf_base = (rng.next() % 129) as i32 - 64;
+        let xd_dlf_base = (rng.next() % 129) as i32 - 64;
+        let dlf_res = [1i32, 2, 4][(rng.next() % 3) as usize];
+        let seg_ref_frame_active = rng.next().is_multiple_of(3);
+        let seg_globalmv_active = rng.next().is_multiple_of(3);
+        let is_inter = (rng.next() % 2) as i32;
+        let pred_cdf: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let seg_cdf: [u16; 9] = mk(&mut rng, 8).try_into().unwrap();
+        let skip_mode_cdf: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let skip_cdf: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let dq_cdf: [u16; 5] = mk(&mut rng, 4).try_into().unwrap();
+        let mut dlmc_n = [[0u16; 5]; 4];
+        let mut dlmc_f = [0u16; 20];
+        for id in 0..4 { let row = mk(&mut rng, 4); for j in 0..5 { dlmc_n[id][j] = row[j]; dlmc_f[id * 5 + j] = row[j]; } }
+        let dlf_cdf: [u16; 5] = mk(&mut rng, 4).try_into().unwrap();
+        let ii_cdf: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+
+        let mut enc = OdEcEnc::new();
+        let (mut rpc, mut rsc, mut rsmc, mut rskc, mut rdqc, mut rdlmc, mut rdlc, mut riic) =
+            (pred_cdf, seg_cdf, skip_mode_cdf, skip_cdf, dq_cdf, dlmc_n, dlf_cdf, ii_cdf);
+        let mut r_ctr = [cdef_trans[0] != 0, cdef_trans[1] != 0, cdef_trans[2] != 0, cdef_trans[3] != 0];
+        let mut r_base = cur_base;
+        let mut r_xd = xd_dlf;
+        let mut r_xdb = xd_dlf_base;
+        let (skip, sm) = write_inter_prefix(
+            &mut enc, update_map, segid_preskip, temporal_update, seg_id_predicted, &mut rpc, &mut rsc,
+            seg_enabled, segment_id, seg_pred, last_active_segid, &mut rsmc, frame_skip_mode_flag,
+            sm_seg_skip, sm_comp_allowed, sm_seg_ref_gmv, skip_mode, &mut rskc, skip_seg_active,
+            skip_txfm, coded_lossless, allow_intrabc, mi_row, mi_col, mib_size, sb_size as usize,
+            &mut r_ctr, cdef_bits as u32, cdef_strength, dq_present, dlf_present, dlf_multi, num_planes,
+            bsize as usize, cur_qindex, &mut r_base, dq_res, &mbmi_dlf, &mut r_xd, mbmi_dlf_base,
+            &mut r_xdb, dlf_res, &mut rdqc, &mut rdlmc, &mut rdlc, &mut riic, seg_ref_frame_active,
+            seg_globalmv_active, is_inter,
+        );
+        let got = enc.done().to_vec();
+
+        let inp = InterPrefixRef {
+            update_map, segid_preskip, temporal_update, seg_id_predicted, pred_cdf: &pred_cdf,
+            seg_cdf: &seg_cdf, seg_enabled, segment_id, seg_pred, last_active_segid,
+            skip_mode_cdf: &skip_mode_cdf, frame_skip_mode_flag, sm_seg_skip, sm_comp_allowed,
+            sm_seg_ref_gmv, skip_mode, skip_cdf: &skip_cdf, skip_seg_active, skip_txfm, coded_lossless,
+            allow_intrabc, mi_row, mi_col, mib_size, sb_size, cdef_trans: &cdef_trans, cdef_bits,
+            cdef_strength, dq_present, dlf_present, dlf_multi, num_planes, bsize, cur_qindex,
+            cur_base_qindex: cur_base, dq_res, mbmi_dlf: &mbmi_dlf, xd_dlf: &xd_dlf, mbmi_dlf_base,
+            xd_dlf_base, dlf_res, dq_cdf: &dq_cdf, dlf_multi_cdf: &dlmc_f, dlf_cdf: &dlf_cdf,
+            intra_inter_cdf: &ii_cdf, seg_ref_frame_active, seg_globalmv_active, is_inter,
+        };
+        let o = c::ref_write_inter_prefix(&inp);
+        assert_eq!(got, o.bytes, "bytes um={update_map} sm={skip_mode} skip_seg={skip_seg_active} dq={dq_present} ii={is_inter}");
+        assert_eq!(skip, o.skip, "skip"); assert_eq!(sm, o.skip_mode, "skip_mode");
+        assert_eq!(rpc, o.pred_cdf, "pred_cdf"); assert_eq!(rsc, o.seg_cdf, "seg_cdf");
+        assert_eq!(rsmc, o.skip_mode_cdf, "skip_mode_cdf"); assert_eq!(rskc, o.skip_cdf, "skip_cdf");
+        let r_ctr_i: [i32; 4] = core::array::from_fn(|i| r_ctr[i] as i32);
+        assert_eq!(r_ctr_i, o.cdef_trans, "cdef_trans"); assert_eq!(rdqc, o.dq_cdf, "dq_cdf");
+        let rdlmc_f: [u16; 20] = core::array::from_fn(|i| rdlmc[i / 5][i % 5]);
+        assert_eq!(rdlmc_f, o.dlf_multi_cdf, "dlf_multi_cdf"); assert_eq!(rdlc, o.dlf_cdf, "dlf_cdf");
+        assert_eq!(r_base, o.base_qindex, "base"); assert_eq!(r_xd, o.xd_dlf, "xd_dlf");
+        assert_eq!(r_xdb, o.xd_dlf_base, "xd_dlf_base"); assert_eq!(riic, o.intra_inter_cdf, "intra_inter_cdf");
+    }
+}
