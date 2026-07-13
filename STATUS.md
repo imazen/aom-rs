@@ -98,6 +98,18 @@ both tracks, fully bit-exact.**
   ~297k comparisons (SAD + variance + sub-pixel variance), byte-identical
   to C. The highbd distortion trio (speed-0 highbd motion-search / RDO) is complete.
 
+- **Coefficient-coding kernels (aom-txb)** (`av1/encoder/encodetxb.c`,
+  `av1/common/txb_common.{h,c}`, `av1/common/scan.c`), encoder critical path —
+  the first step toward `av1_write_coeffs_txb` / `av1_cost_coeffs_txb`:
+  `av1_txb_init_levels` (transposed-layout padded level map, exact write
+  footprint) + `av1_get_nz_map_contexts` (per-coefficient entropy contexts, all
+  3 TX classes; both RTCD-dispatched hot kernels), `av1_get_eob_pos_token`, the
+  `av1_nz_map_ctx_offset` tables (5,232 entries, exact 19-way alias mapping),
+  and the full `av1_scan_orders` scan+iscan tables (20,064 entries, 19x16).
+  Harness: `aom-txb/tests/txb_diff.rs` — table data entry-for-entry vs C, all
+  1024 eob tokens, kernels byte-identical over 19 sizes x 7 tx_types x 300
+  iters (~160k context-array comparisons).
+
 ## Coverage gate (auto-derived, honest)
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec
@@ -142,8 +154,11 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **Coefficient coding**: scan orders, txb context, `av1_write_coeffs_txb` /
-   `read_coeffs_txb` — ties transform+quant to the entropy layer (both tracks).
+1. **Coefficient coding, next stage**: `av1_write_coeffs_txb` bitstream diff.
+   Kernels + scan orders + ctx tables are now green in aom-txb; the remaining
+   work is a C harness that fabricates the minimal FRAME_CONTEXT/MACROBLOCK
+   state (start with the plane=1 path, which skips av1_write_tx_type) and a
+   Rust writer on aom-entropy's bit-exact od_ec, diffing produced bytes.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
    per-mode bit-exact, differential per predictor.
 3. **Loop filters**: deblock, CDEF, loop-restoration (decoder + encoder search).
