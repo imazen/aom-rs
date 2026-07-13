@@ -60,6 +60,12 @@ both tracks, fully bit-exact.**
   With the no-qm variants this closes the entire scalar quantizer surface
   (b + fp, lowbd + highbd, qm + flat). Adaptive `_adaptive` variants: TODO.
 
+- **DC-only quantizer (aom-quant)**: av1_quantize_dc / av1_highbd_quantize_dc — the
+  AV1_XFORM_QUANT_DC path (quantize coefficient 0 only, zeroing the rest). Reached
+  through the real av1_*quantize_dc_facade (no transcription). With FP + B this
+  completes the quant_func_list (FP/B/DC) x (lowbd/highbd) x (flat/QM). Harness:
+  quantize_dc_diff.rs. Wired into aom-encode as QuantKind::Dc across all 3 harnesses.
+
 - **Entropy coder** (`aom_dsp/entenc.c`, `entdec.c`), both tracks: the Daala
   `od_ec` range coder. Encoder (`od_ec_enc`) produces byte-identical output to C
   (uint64 low + backward carry propagation + flush); decoder (`od_ec_dec`,
@@ -253,14 +259,15 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **av1_write_tx_type into the block bitstream**: write_tx_type is ported (aom-txb);
-   wire it ahead of the coefficients in encode_block_coeffs for the complete plane-0
-   per-block signaling (needs the tx_type CDFs + intra-dir/ext-tx-set context).
-2. **DC-only quantizer** (`av1_quantize_dc`): the third quant_func_list entry
-   (QuantKind::Dc) — small, completes the quant dispatch, facade oracle pattern.
-3. **Transform-block loop / cost_coeffs RD wiring**: drive xform_quant_optimize +
-   write_coeffs across a block's txbs; av1_cost_coeffs_txb is ported for the RD side.
-4. **Mode & partition search (RDO)** — the hardest bit-identity target; the layer that
+1. **av1_write_tx_type into the txb bitstream**: write_tx_type is ported+validated
+   (aom-txb ext_tx.rs, ext_tx_diff.rs). The C writes it *inside* av1_write_coeffs_txb,
+   between the txb_skip flag and eob, so a complete-txb writer (txb_skip -> tx_type ->
+   eob -> coeffs) is a new aom-txb entry taking the tx-type/mode context (is_inter,
+   intra dir, filter-intra, ext-tx-set) + the tx_type CDFs; then encode_block_coeffs
+   calls it. Needs a matching shim (extend shim_write_coeffs_txb with the tx_type call).
+2. **Transform-block loop / cost_coeffs RD wiring**: drive xform_quant_optimize +
+   write across a block's txbs; av1_cost_coeffs_txb is ported for the RD side.
+3. **Mode & partition search (RDO)** — the hardest bit-identity target; the layer that
    drives xform_quant_optimize per candidate.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
    per-mode bit-exact, differential per predictor.
