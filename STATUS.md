@@ -118,6 +118,13 @@ both tracks, fully bit-exact.**
   identical over 19 sizes x 7 tx_types x plane{0,1} x update{on,off} x 40 blocks.
   (av1_write_tx_type / plane-0 tx_type signaling: next.)
 
+- **av1_cost_coeffs_txb (aom-txb)** — the RD-cost twin of the writer and the
+  single hottest speed-0 function (per-candidate-txb in mode / tx-type search):
+  same symbol chain, sums LV_MAP_COEFF_COST / LV_MAP_EOB_COST entries instead of
+  emitting bits (get_eob_cost, get_br_cost/golomb, get_br_ctx_eob, 3-phase scan
+  walk). Integer-identical to C. Harness: `cost_coeffs_diff.rs` — 19 sizes x 7
+  tx_types x 120 random (cost-table, block) pairs.
+
 ## Coverage gate (auto-derived, honest)
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec
