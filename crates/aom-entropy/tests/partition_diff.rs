@@ -2635,3 +2635,88 @@ fn write_inter_mode_drl_matches_c() {
         assert_eq!(rdrl_f, odrl, "drl");
     }
 }
+
+#[test]
+fn write_inter_mode_tail_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_inter_mode_tail;
+    use aom_sys_ref::InterTailRef;
+    let mut rng = Rng(0x1e_7a11_c0de_0017u64);
+    fn mk(rng: &mut Rng, nsyms: usize) -> Vec<u16> {
+        let mut c = vec![0u16; nsyms + 1];
+        let mut prev = 32768i32;
+        for e in c.iter_mut().take(nsyms - 1) {
+            let v = (prev - 1 - (rng.next() % 300) as i32).max(1);
+            *e = v as u16;
+            prev = v;
+        }
+        c
+    }
+    for _ in 0..200_000 {
+        let interintra_allowed = rng.next().is_multiple_of(2);
+        let interintra = (rng.next() % 2) as i32;
+        let ii_mode = (rng.next() % 4) as i32; // INTERINTRA_MODES
+        let wedge_used_ii = rng.next().is_multiple_of(2);
+        let use_wedge_ii = (rng.next() % 2) as i32;
+        let ii_wedge_index = (rng.next() % 16) as i32;
+        let motion_mode_present = rng.next().is_multiple_of(2);
+        let last_motion_mode_allowed = (rng.next() % 3) as i32;
+        let motion_mode = (rng.next() % 3) as i32; // MOTION_MODES
+        let has_second_ref = rng.next().is_multiple_of(2);
+        let masked_used = rng.next().is_multiple_of(2);
+        let comp_group_idx = (rng.next() % 2) as i32;
+        let dist_wtd = rng.next().is_multiple_of(2);
+        let compound_idx = (rng.next() % 2) as i32;
+        let wedge_used_ct = rng.next().is_multiple_of(2);
+        let comp_type = 2 + (rng.next() % 2) as i32; // WEDGE/DIFFWTD
+        let ct_wedge_index = (rng.next() % 16) as i32;
+        let wedge_sign = (rng.next() % 2) as i32;
+        let mask_type = (rng.next() % 2) as i32;
+        let interp_needed = rng.next().is_multiple_of(2);
+        let is_switchable = rng.next().is_multiple_of(2);
+        let enable_dual = rng.next().is_multiple_of(2);
+        let f0 = (rng.next() % 3) as i32;
+        let f1 = (rng.next() % 3) as i32;
+        let ii: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let iim: [u16; 5] = mk(&mut rng, 4).try_into().unwrap();
+        let wii: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let wix: [u16; 17] = mk(&mut rng, 16).try_into().unwrap();
+        let obmc: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let mm: [u16; 4] = mk(&mut rng, 3).try_into().unwrap();
+        let cgi: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let cidx: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let ct: [u16; 3] = mk(&mut rng, 2).try_into().unwrap();
+        let ic0: [u16; 4] = mk(&mut rng, 3).try_into().unwrap();
+        let ic1: [u16; 4] = mk(&mut rng, 3).try_into().unwrap();
+
+        let mut enc = OdEcEnc::new();
+        let (mut rii, mut riim, mut rwii, mut rwix, mut robmc, mut rmm) = (ii, iim, wii, wix, obmc, mm);
+        let (mut rcgi, mut rcidx, mut rct, mut ric0, mut ric1) = (cgi, cidx, ct, ic0, ic1);
+        write_inter_mode_tail(
+            &mut enc, interintra_allowed, interintra, &mut rii, ii_mode, &mut riim, wedge_used_ii,
+            use_wedge_ii, &mut rwii, ii_wedge_index, &mut rwix, motion_mode_present, &mut robmc,
+            &mut rmm, last_motion_mode_allowed, motion_mode, has_second_ref, masked_used,
+            comp_group_idx, &mut rcgi, dist_wtd, compound_idx, &mut rcidx, wedge_used_ct, comp_type,
+            &mut rct, ct_wedge_index, wedge_sign, mask_type, interp_needed, is_switchable,
+            enable_dual, f0, f1, &mut ric0, &mut ric1,
+        );
+        let got = enc.done().to_vec();
+
+        let inp = InterTailRef {
+            interintra_allowed, interintra, ii_cdf: &ii, ii_mode, ii_mode_cdf: &iim, wedge_used_ii,
+            use_wedge_ii, wedge_ii_cdf: &wii, ii_wedge_index, wedge_idx_cdf: &wix, motion_mode_present,
+            obmc_cdf: &obmc, mm_cdf: &mm, last_motion_mode_allowed, motion_mode, has_second_ref,
+            masked_used, comp_group_idx, cgi_cdf: &cgi, dist_wtd, compound_idx, cidx_cdf: &cidx,
+            wedge_used_ct, comp_type, ctype_cdf: &ct, ct_wedge_index, wedge_sign, mask_type,
+            interp_needed, is_switchable, enable_dual, f0, f1, interp_cdf0: &ic0, interp_cdf1: &ic1,
+        };
+        let (want, o_all) = c::ref_write_inter_mode_tail(&inp);
+        assert_eq!(got, want, "bytes iia={interintra_allowed} ii={interintra} mmp={motion_mode_present} h2r={has_second_ref}");
+        let mut all = Vec::with_capacity(52);
+        all.extend_from_slice(&rii); all.extend_from_slice(&riim); all.extend_from_slice(&rwii);
+        all.extend_from_slice(&rwix); all.extend_from_slice(&robmc); all.extend_from_slice(&rmm);
+        all.extend_from_slice(&rcgi); all.extend_from_slice(&rcidx); all.extend_from_slice(&rct);
+        all.extend_from_slice(&ric0); all.extend_from_slice(&ric1);
+        assert_eq!(all.as_slice(), &o_all[..], "adapted CDFs");
+    }
+}

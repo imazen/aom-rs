@@ -297,6 +297,8 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_mode_drl(seg_skip: i32, mode: i32, mode_ctx: i32, inter_compound_mode_cdf: *mut u16, newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, drl_cdf: *mut u16, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, o_icm: *mut u16, o_newmv: *mut u16, o_zeromv: *mut u16, o_refmv: *mut u16, o_drl: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_write_inter_mode_tail(interintra_allowed: i32, interintra: i32, ii_cdf: *mut u16, ii_mode: i32, ii_mode_cdf: *mut u16, wedge_used_ii: i32, use_wedge_ii: i32, wedge_ii_cdf: *mut u16, ii_wedge_index: i32, wedge_idx_cdf: *mut u16, motion_mode_present: i32, obmc_cdf: *mut u16, mm_cdf: *mut u16, last_motion_mode_allowed: i32, motion_mode: i32, has_second_ref: i32, masked_used: i32, comp_group_idx: i32, cgi_cdf: *mut u16, dist_wtd: i32, compound_idx: i32, cidx_cdf: *mut u16, wedge_used_ct: i32, comp_type: i32, ctype_cdf: *mut u16, ct_wedge_index: i32, wedge_sign: i32, mask_type: i32, interp_needed: i32, is_switchable: i32, enable_dual: i32, f0: i32, f1: i32, interp_cdf0: *mut u16, interp_cdf1: *mut u16, out: *mut u8, o_all: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_segment_id(update_map: i32, preskip: i32, segid_preskip: i32, skip: i32, temporal_update: i32, seg_id_predicted: i32, pred_cdf: *mut u16, seg_cdf: *mut u16, seg_enabled: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, out: *mut u8, o_predcdf: *mut u16, o_segcdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_prefix(update_map: i32, segid_preskip: i32, temporal_update: i32, seg_id_predicted: i32, pred_cdf: *mut u16, seg_cdf: *mut u16, seg_enabled: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, skip_mode_cdf: *mut u16, frame_skip_mode_flag: i32, sm_seg_skip: i32, sm_comp_allowed: i32, sm_seg_ref_gmv: i32, skip_mode: i32, skip_cdf: *mut u16, skip_seg_active: i32, skip_txfm: i32, coded_lossless: i32, allow_intrabc: i32, mi_row: i32, mi_col: i32, mib_size: i32, sb_size: i32, cdef_trans_in: *const i32, cdef_bits: i32, cdef_strength: i32, dq_present: i32, dlf_present: i32, dlf_multi: i32, num_planes: i32, bsize: i32, cur_qindex: i32, cur_base_qindex: i32, dq_res: i32, mbmi_dlf: *const i32, xd_dlf_in: *const i32, mbmi_dlf_base: i32, xd_dlf_base_in: i32, dlf_res: i32, dq_cdf: *mut u16, dlf_multi_cdf: *mut u16, dlf_cdf: *mut u16, intra_inter_cdf: *mut u16, seg_ref_frame_active: i32, seg_globalmv_active: i32, is_inter: i32, out: *mut u8, out_skip: *mut i32, out_skip_mode: *mut i32, o_predcdf: *mut u16, o_segcdf: *mut u16, o_smcdf: *mut u16, o_skipcdf: *mut u16, o_cdef_trans: *mut i32, o_dqcdf: *mut u16, o_dlfmcdf: *mut u16, o_dlfcdf: *mut u16, o_base: *mut i32, o_xd_dlf: *mut i32, o_xd_dlf_base: *mut i32, o_iicdf: *mut u16) -> u32;
@@ -643,6 +645,80 @@ pub fn ref_write_inter_mode_drl(
     };
     out.truncate(n as usize);
     (out, oicm, onm, ozm, orm, odrl)
+}
+
+/// Inputs for the inter mode-body tail oracle (interintra + motion_mode + compound_type
+/// + interp_filter). interintra/compound_type share the one wedge_idx_cdf.
+pub struct InterTailRef<'a> {
+    pub interintra_allowed: bool,
+    pub interintra: i32,
+    pub ii_cdf: &'a [u16; 3],
+    pub ii_mode: i32,
+    pub ii_mode_cdf: &'a [u16; 5],
+    pub wedge_used_ii: bool,
+    pub use_wedge_ii: i32,
+    pub wedge_ii_cdf: &'a [u16; 3],
+    pub ii_wedge_index: i32,
+    pub wedge_idx_cdf: &'a [u16; 17],
+    pub motion_mode_present: bool,
+    pub obmc_cdf: &'a [u16; 3],
+    pub mm_cdf: &'a [u16; 4],
+    pub last_motion_mode_allowed: i32,
+    pub motion_mode: i32,
+    pub has_second_ref: bool,
+    pub masked_used: bool,
+    pub comp_group_idx: i32,
+    pub cgi_cdf: &'a [u16; 3],
+    pub dist_wtd: bool,
+    pub compound_idx: i32,
+    pub cidx_cdf: &'a [u16; 3],
+    pub wedge_used_ct: bool,
+    pub comp_type: i32,
+    pub ctype_cdf: &'a [u16; 3],
+    pub ct_wedge_index: i32,
+    pub wedge_sign: i32,
+    pub mask_type: i32,
+    pub interp_needed: bool,
+    pub is_switchable: bool,
+    pub enable_dual: bool,
+    pub f0: i32,
+    pub f1: i32,
+    pub interp_cdf0: &'a [u16; 4],
+    pub interp_cdf1: &'a [u16; 4],
+}
+
+/// Reference inter mode-body tail over one od_ec. Returns (bytes, all adapted CDFs packed:
+/// ii[3] ii_mode[5] wedge_ii[3] wedge_idx[17] obmc[3] mm[4] cgi[3] cidx[3] ctype[3]
+/// interp0[4] interp1[4] = 52).
+pub fn ref_write_inter_mode_tail(inp: &InterTailRef) -> (Vec<u8>, [u16; 52]) {
+    let mut ii = *inp.ii_cdf;
+    let mut iim = *inp.ii_mode_cdf;
+    let mut wii = *inp.wedge_ii_cdf;
+    let mut wix = *inp.wedge_idx_cdf;
+    let mut obmc = *inp.obmc_cdf;
+    let mut mm = *inp.mm_cdf;
+    let mut cgi = *inp.cgi_cdf;
+    let mut cidx = *inp.cidx_cdf;
+    let mut ct = *inp.ctype_cdf;
+    let mut ic0 = *inp.interp_cdf0;
+    let mut ic1 = *inp.interp_cdf1;
+    let mut out = vec![0u8; 64];
+    let mut o_all = [0u16; 52];
+    let n = unsafe {
+        shim_write_inter_mode_tail(
+            inp.interintra_allowed as i32, inp.interintra, ii.as_mut_ptr(), inp.ii_mode,
+            iim.as_mut_ptr(), inp.wedge_used_ii as i32, inp.use_wedge_ii, wii.as_mut_ptr(),
+            inp.ii_wedge_index, wix.as_mut_ptr(), inp.motion_mode_present as i32, obmc.as_mut_ptr(),
+            mm.as_mut_ptr(), inp.last_motion_mode_allowed, inp.motion_mode, inp.has_second_ref as i32,
+            inp.masked_used as i32, inp.comp_group_idx, cgi.as_mut_ptr(), inp.dist_wtd as i32,
+            inp.compound_idx, cidx.as_mut_ptr(), inp.wedge_used_ct as i32, inp.comp_type,
+            ct.as_mut_ptr(), inp.ct_wedge_index, inp.wedge_sign, inp.mask_type, inp.interp_needed as i32,
+            inp.is_switchable as i32, inp.enable_dual as i32, inp.f0, inp.f1, ic0.as_mut_ptr(),
+            ic1.as_mut_ptr(), out.as_mut_ptr(), o_all.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, o_all)
 }
 
 /// Inputs for the `pack_inter_mode_mvs` prefix oracle (inter_segment_id -> skip_mode ->

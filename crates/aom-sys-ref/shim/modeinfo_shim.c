@@ -484,19 +484,37 @@ uint32_t shim_write_is_inter(uint16_t *cdf, int seg_ref, int seg_gmv, int is_int
   return nb;
 }
 
-uint32_t shim_write_motion_mode(uint16_t *obmc_cdf, uint16_t *mm_cdf, int last_allowed,
-                                int mm, uint8_t *out, uint16_t *out_obmc, uint16_t *out_mm) {
-  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+/* write_motion_mode / write_mb_interp_filter bodies writing into an existing od_ec
+ * (reused by the inter mode-body tail). */
+static void motion_mode_into(od_ec_enc *ec, uint16_t *obmc_cdf, uint16_t *mm_cdf,
+                             int last_allowed, int mm) {
   switch (last_allowed) {
     case 0: break; /* SIMPLE_TRANSLATION */
     case 1: /* OBMC_CAUSAL */
-      od_ec_encode_cdf_q15(&ec, mm == 1, obmc_cdf, 2);
+      od_ec_encode_cdf_q15(ec, mm == 1, obmc_cdf, 2);
       update_cdf(obmc_cdf, mm == 1, 2);
       break;
     default:
-      od_ec_encode_cdf_q15(&ec, mm, mm_cdf, MOTION_MODES);
+      od_ec_encode_cdf_q15(ec, mm, mm_cdf, MOTION_MODES);
       update_cdf(mm_cdf, mm, MOTION_MODES);
   }
+}
+static void interp_filter_into(od_ec_enc *ec, uint16_t *cdf0, uint16_t *cdf1, int interp_needed,
+                               int is_switchable, int enable_dual, int f0, int f1) {
+  if (interp_needed && is_switchable) {
+    od_ec_encode_cdf_q15(ec, f0, cdf0, SWITCHABLE_FILTERS);
+    update_cdf(cdf0, f0, SWITCHABLE_FILTERS);
+    if (enable_dual) {
+      od_ec_encode_cdf_q15(ec, f1, cdf1, SWITCHABLE_FILTERS);
+      update_cdf(cdf1, f1, SWITCHABLE_FILTERS);
+    }
+  }
+}
+
+uint32_t shim_write_motion_mode(uint16_t *obmc_cdf, uint16_t *mm_cdf, int last_allowed,
+                                int mm, uint8_t *out, uint16_t *out_obmc, uint16_t *out_mm) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  motion_mode_into(&ec, obmc_cdf, mm_cdf, last_allowed, mm);
   uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
   for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
   for (int i = 0; i < 3; i++) out_obmc[i] = obmc_cdf[i];
@@ -509,14 +527,7 @@ uint32_t shim_write_mb_interp_filter(uint16_t *cdf0, uint16_t *cdf1, int interp_
                                      int is_switchable, int enable_dual, int f0, int f1,
                                      uint8_t *out, uint16_t *out0, uint16_t *out1) {
   od_ec_enc ec; od_ec_enc_init(&ec, 256);
-  if (interp_needed && is_switchable) {
-    od_ec_encode_cdf_q15(&ec, f0, cdf0, SWITCHABLE_FILTERS);
-    update_cdf(cdf0, f0, SWITCHABLE_FILTERS);
-    if (enable_dual) {
-      od_ec_encode_cdf_q15(&ec, f1, cdf1, SWITCHABLE_FILTERS);
-      update_cdf(cdf1, f1, SWITCHABLE_FILTERS);
-    }
-  }
+  interp_filter_into(&ec, cdf0, cdf1, interp_needed, is_switchable, enable_dual, f0, f1);
   uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
   for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
   for (int i = 0; i < 4; i++) { out0[i] = cdf0[i]; out1[i] = cdf1[i]; }
@@ -1121,26 +1132,34 @@ uint32_t shim_write_palette_mode_info(int mode_dc, int uv_dc, int bit_depth, int
 /* Transcribed verbatim over od_ec. INTERINTRA_MODES=4, MAX_WEDGE_TYPES=16. The outer
  * gate (reference_mode / enable_interintra_compound / is_interintra_allowed) and
  * av1_is_wedge_used(bsize) are the caller's; CDFs are pre-selected by bsize_group/bsize. */
+/* interintra coding body (the outer allow-gate is the caller's); reused by the tail. */
+static void interintra_into(od_ec_enc *ec, int interintra, uint16_t *ii_cdf, int ii_mode,
+                            uint16_t *ii_mode_cdf, int wedge_used, int use_wedge,
+                            uint16_t *wedge_ii_cdf, int wedge_index, uint16_t *wedge_idx_cdf) {
+  od_ec_encode_cdf_q15(ec, interintra, ii_cdf, 2);
+  update_cdf(ii_cdf, interintra, 2);
+  if (interintra) {
+    od_ec_encode_cdf_q15(ec, ii_mode, ii_mode_cdf, INTERINTRA_MODES);
+    update_cdf(ii_mode_cdf, ii_mode, INTERINTRA_MODES);
+    if (wedge_used) {
+      od_ec_encode_cdf_q15(ec, use_wedge, wedge_ii_cdf, 2);
+      update_cdf(wedge_ii_cdf, use_wedge, 2);
+      if (use_wedge) {
+        od_ec_encode_cdf_q15(ec, wedge_index, wedge_idx_cdf, MAX_WEDGE_TYPES);
+        update_cdf(wedge_idx_cdf, wedge_index, MAX_WEDGE_TYPES);
+      }
+    }
+  }
+}
+
 uint32_t shim_write_interintra_info(int interintra, uint16_t *ii_cdf, int ii_mode,
                                     uint16_t *ii_mode_cdf, int wedge_used, int use_wedge,
                                     uint16_t *wedge_ii_cdf, int wedge_index,
                                     uint16_t *wedge_idx_cdf, uint8_t *out, uint16_t *o_ii,
                                     uint16_t *o_iim, uint16_t *o_wii, uint16_t *o_wix) {
   od_ec_enc ec; od_ec_enc_init(&ec, 256);
-  od_ec_encode_cdf_q15(&ec, interintra, ii_cdf, 2);
-  update_cdf(ii_cdf, interintra, 2);
-  if (interintra) {
-    od_ec_encode_cdf_q15(&ec, ii_mode, ii_mode_cdf, INTERINTRA_MODES);
-    update_cdf(ii_mode_cdf, ii_mode, INTERINTRA_MODES);
-    if (wedge_used) {
-      od_ec_encode_cdf_q15(&ec, use_wedge, wedge_ii_cdf, 2);
-      update_cdf(wedge_ii_cdf, use_wedge, 2);
-      if (use_wedge) {
-        od_ec_encode_cdf_q15(&ec, wedge_index, wedge_idx_cdf, MAX_WEDGE_TYPES);
-        update_cdf(wedge_idx_cdf, wedge_index, MAX_WEDGE_TYPES);
-      }
-    }
-  }
+  interintra_into(&ec, interintra, ii_cdf, ii_mode, ii_mode_cdf, wedge_used, use_wedge,
+                  wedge_ii_cdf, wedge_index, wedge_idx_cdf);
   uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
   for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
   for (int i = 0; i < 3; i++) { o_ii[i] = ii_cdf[i]; o_wii[i] = wedge_ii_cdf[i]; }
@@ -1172,6 +1191,35 @@ int shim_get_comp_group_idx_context(int ha, int a_rf0, int a_rf1, int a_cgi, int
  * The has_second_ref outer gate + is_interinter_compound_used(WEDGE) + the two CDF
  * contexts are the caller's; CDFs are pre-selected. MASKED_COMPOUND_TYPES=2,
  * MAX_WEDGE_TYPES=16, MAX_DIFFWTD_MASK_BITS=1. comp_type is COMPOUND_WEDGE(2)/DIFFWTD(3). */
+/* compound-type coding body (the has_second_ref gate is the caller's); reused by the tail. */
+static void compound_type_into(od_ec_enc *ec, int masked_used, int comp_group_idx,
+    uint16_t *cgi_cdf, int dist_wtd, int compound_idx, uint16_t *cidx_cdf, int wedge_used,
+    int comp_type, uint16_t *ctype_cdf, int wedge_index, uint16_t *wedge_idx_cdf, int wedge_sign,
+    int mask_type) {
+  if (masked_used) {
+    od_ec_encode_cdf_q15(ec, comp_group_idx, cgi_cdf, 2);
+    update_cdf(cgi_cdf, comp_group_idx, 2);
+  }
+  if (comp_group_idx == 0) {
+    if (dist_wtd) {
+      od_ec_encode_cdf_q15(ec, compound_idx, cidx_cdf, 2);
+      update_cdf(cidx_cdf, compound_idx, 2);
+    }
+  } else {
+    if (wedge_used) {
+      od_ec_encode_cdf_q15(ec, comp_type - COMPOUND_WEDGE, ctype_cdf, MASKED_COMPOUND_TYPES);
+      update_cdf(ctype_cdf, comp_type - COMPOUND_WEDGE, MASKED_COMPOUND_TYPES);
+    }
+    if (comp_type == COMPOUND_WEDGE) {
+      od_ec_encode_cdf_q15(ec, wedge_index, wedge_idx_cdf, MAX_WEDGE_TYPES);
+      update_cdf(wedge_idx_cdf, wedge_index, MAX_WEDGE_TYPES);
+      mi_bit(ec, wedge_sign);
+    } else {
+      mi_literal(ec, mask_type, MAX_DIFFWTD_MASK_BITS);
+    }
+  }
+}
+
 uint32_t shim_write_compound_type_info(int masked_used, int comp_group_idx, uint16_t *cgi_cdf,
                                        int dist_wtd, int compound_idx, uint16_t *cidx_cdf,
                                        int wedge_used, int comp_type, uint16_t *ctype_cdf,
@@ -1179,28 +1227,8 @@ uint32_t shim_write_compound_type_info(int masked_used, int comp_group_idx, uint
                                        int mask_type, uint8_t *out, uint16_t *o_cgi,
                                        uint16_t *o_cidx, uint16_t *o_ctype, uint16_t *o_wix) {
   od_ec_enc ec; od_ec_enc_init(&ec, 256);
-  if (masked_used) {
-    od_ec_encode_cdf_q15(&ec, comp_group_idx, cgi_cdf, 2);
-    update_cdf(cgi_cdf, comp_group_idx, 2);
-  }
-  if (comp_group_idx == 0) {
-    if (dist_wtd) {
-      od_ec_encode_cdf_q15(&ec, compound_idx, cidx_cdf, 2);
-      update_cdf(cidx_cdf, compound_idx, 2);
-    }
-  } else {
-    if (wedge_used) {
-      od_ec_encode_cdf_q15(&ec, comp_type - COMPOUND_WEDGE, ctype_cdf, MASKED_COMPOUND_TYPES);
-      update_cdf(ctype_cdf, comp_type - COMPOUND_WEDGE, MASKED_COMPOUND_TYPES);
-    }
-    if (comp_type == COMPOUND_WEDGE) {
-      od_ec_encode_cdf_q15(&ec, wedge_index, wedge_idx_cdf, MAX_WEDGE_TYPES);
-      update_cdf(wedge_idx_cdf, wedge_index, MAX_WEDGE_TYPES);
-      mi_bit(&ec, wedge_sign);
-    } else {
-      mi_literal(&ec, mask_type, MAX_DIFFWTD_MASK_BITS);
-    }
-  }
+  compound_type_into(&ec, masked_used, comp_group_idx, cgi_cdf, dist_wtd, compound_idx, cidx_cdf,
+                     wedge_used, comp_type, ctype_cdf, wedge_index, wedge_idx_cdf, wedge_sign, mask_type);
   uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
   for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
   for (int i = 0; i < 3; i++) { o_cgi[i] = cgi_cdf[i]; o_cidx[i] = cidx_cdf[i]; o_ctype[i] = ctype_cdf[i]; }
@@ -1930,6 +1958,47 @@ uint32_t shim_write_inter_mode_drl(int seg_skip, int mode, int mode_ctx,
   for (int i = 0; i < 6 * 3; i++) { o_newmv[i] = newmv_cdf[i]; o_refmv[i] = refmv_cdf[i]; }
   for (int i = 0; i < 2 * 3; i++) o_zeromv[i] = zeromv_cdf[i];
   for (int i = 0; i < 3 * 3; i++) o_drl[i] = drl_cdf[i];
+  od_ec_enc_clear(&ec);
+  return nb;
+}
+
+/* --- inter mode-body tail: interintra + motion_mode + compound_type + interp_filter --- */
+/* Over ONE od_ec. interintra + compound_type are mutually exclusive (ref[1]==INTRA vs
+ * ref[1]>INTRA) and share the one wedge_idx_cdf. Gates are the caller's. */
+uint32_t shim_write_inter_mode_tail(
+    int interintra_allowed, int interintra, uint16_t *ii_cdf, int ii_mode, uint16_t *ii_mode_cdf,
+    int wedge_used_ii, int use_wedge_ii, uint16_t *wedge_ii_cdf, int ii_wedge_index,
+    uint16_t *wedge_idx_cdf, int motion_mode_present, uint16_t *obmc_cdf, uint16_t *mm_cdf,
+    int last_motion_mode_allowed, int motion_mode, int has_second_ref, int masked_used,
+    int comp_group_idx, uint16_t *cgi_cdf, int dist_wtd, int compound_idx, uint16_t *cidx_cdf,
+    int wedge_used_ct, int comp_type, uint16_t *ctype_cdf, int ct_wedge_index, int wedge_sign,
+    int mask_type, int interp_needed, int is_switchable, int enable_dual, int f0, int f1,
+    uint16_t *interp_cdf0, uint16_t *interp_cdf1, uint8_t *out, uint16_t *o_all) {
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  if (interintra_allowed)
+    interintra_into(&ec, interintra, ii_cdf, ii_mode, ii_mode_cdf, wedge_used_ii, use_wedge_ii,
+                    wedge_ii_cdf, ii_wedge_index, wedge_idx_cdf);
+  if (motion_mode_present)
+    motion_mode_into(&ec, obmc_cdf, mm_cdf, last_motion_mode_allowed, motion_mode);
+  if (has_second_ref)
+    compound_type_into(&ec, masked_used, comp_group_idx, cgi_cdf, dist_wtd, compound_idx, cidx_cdf,
+                       wedge_used_ct, comp_type, ctype_cdf, ct_wedge_index, wedge_idx_cdf, wedge_sign,
+                       mask_type);
+  interp_filter_into(&ec, interp_cdf0, interp_cdf1, interp_needed, is_switchable, enable_dual, f0, f1);
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  int k = 0;
+  for (int i = 0; i < 3; i++) o_all[k++] = ii_cdf[i];
+  for (int i = 0; i < 5; i++) o_all[k++] = ii_mode_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = wedge_ii_cdf[i];
+  for (int i = 0; i < 17; i++) o_all[k++] = wedge_idx_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = obmc_cdf[i];
+  for (int i = 0; i < 4; i++) o_all[k++] = mm_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = cgi_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = cidx_cdf[i];
+  for (int i = 0; i < 3; i++) o_all[k++] = ctype_cdf[i];
+  for (int i = 0; i < 4; i++) o_all[k++] = interp_cdf0[i];
+  for (int i = 0; i < 4; i++) o_all[k++] = interp_cdf1[i];
   od_ec_enc_clear(&ec);
   return nb;
 }

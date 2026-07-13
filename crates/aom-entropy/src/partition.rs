@@ -2400,3 +2400,67 @@ pub fn write_inter_mode_drl(
         write_drl_idx(enc, drl_cdf, mode, ref_mv_idx, ref_mv_count, weight);
     }
 }
+
+/// The inter mode-body tail of `pack_inter_mode_mvs` (`av1/encoder/bitstream.c`):
+/// interintra info (when allowed) -> motion mode (when `ref_frame[1] != INTRA_FRAME`)
+/// -> compound type (when `has_second_ref`) -> the interpolation filter. interintra and
+/// compound-type are mutually exclusive in practice and share the one `wedge_idx_cdf`.
+/// All gates + CDFs are the caller's.
+#[allow(clippy::too_many_arguments)]
+pub fn write_inter_mode_tail(
+    enc: &mut OdEcEnc,
+    // interintra
+    interintra_allowed: bool,
+    interintra: i32,
+    ii_cdf: &mut [u16],
+    ii_mode: i32,
+    ii_mode_cdf: &mut [u16],
+    wedge_used_ii: bool,
+    use_wedge_ii: i32,
+    wedge_ii_cdf: &mut [u16],
+    ii_wedge_index: i32,
+    wedge_idx_cdf: &mut [u16],
+    // motion mode
+    motion_mode_present: bool,
+    obmc_cdf: &mut [u16],
+    mm_cdf: &mut [u16],
+    last_motion_mode_allowed: i32,
+    motion_mode: i32,
+    // compound type
+    has_second_ref: bool,
+    masked_used: bool,
+    comp_group_idx: i32,
+    cgi_cdf: &mut [u16],
+    dist_wtd: bool,
+    compound_idx: i32,
+    cidx_cdf: &mut [u16],
+    wedge_used_ct: bool,
+    comp_type: i32,
+    ctype_cdf: &mut [u16],
+    ct_wedge_index: i32,
+    wedge_sign: i32,
+    mask_type: i32,
+    // interp filter
+    interp_needed: bool,
+    is_switchable: bool,
+    enable_dual: bool,
+    f0: i32,
+    f1: i32,
+    interp_cdf0: &mut [u16],
+    interp_cdf1: &mut [u16],
+) {
+    write_interintra_info(
+        enc, interintra_allowed, interintra, ii_cdf, ii_mode, ii_mode_cdf, wedge_used_ii,
+        use_wedge_ii, wedge_ii_cdf, ii_wedge_index, wedge_idx_cdf,
+    );
+    if motion_mode_present {
+        write_motion_mode(enc, obmc_cdf, mm_cdf, last_motion_mode_allowed, motion_mode);
+    }
+    if has_second_ref {
+        write_compound_type_info(
+            enc, masked_used, comp_group_idx, cgi_cdf, dist_wtd, compound_idx, cidx_cdf,
+            wedge_used_ct, comp_type, ctype_cdf, ct_wedge_index, wedge_idx_cdf, wedge_sign, mask_type,
+        );
+    }
+    write_mb_interp_filter(enc, interp_cdf0, interp_cdf1, interp_needed, is_switchable, enable_dual, f0, f1);
+}
