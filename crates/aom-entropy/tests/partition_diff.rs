@@ -4512,3 +4512,127 @@ fn read_mb_modes_kf_struct_driver_roundtrips() {
         assert_eq!((se.current_base_qindex, se.xd_delta_lf, se.cdef_transmitted), (sd.current_base_qindex, sd.xd_delta_lf, sd.cdef_transmitted), "state carries");
     }
 }
+
+#[test]
+fn read_modes_b_tile_content_roundtrips() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        get_partition_subsize, get_uv_mode, is_directional_mode, read_modes_b, use_angle_delta,
+        write_modes_b, KfBlockState, KfCdfs, MbModeInfoKf,
+    };
+    let mut rng = Rng(0x1e_c0de_b10c_00d0u64);
+    let mk_comp = |rng: &mut Rng| -> [u16; 69] {
+        let mut c = [0u16; 69];
+        mk_ns_cdf(rng, 2, &mut c[0..3]); mk_ns_cdf(rng, 11, &mut c[3..15]); mk_ns_cdf(rng, 2, &mut c[15..18]);
+        for i in 0..10 { let o = 18 + i * 3; mk_ns_cdf(rng, 2, &mut c[o..o + 3]); }
+        for i in 0..2 { let o = 48 + i * 5; mk_ns_cdf(rng, 4, &mut c[o..o + 5]); }
+        mk_ns_cdf(rng, 4, &mut c[58..63]); mk_ns_cdf(rng, 2, &mut c[63..66]); mk_ns_cdf(rng, 2, &mut c[66..69]);
+        c
+    };
+    let gen_cdfs = |rng: &mut Rng, cfl: bool| -> KfCdfs {
+        let mut c = KfCdfs {
+            seg: [0; 9], skip: [0; 3], delta_q: [0; 5], delta_lf_multi: [[0; 5]; 4], delta_lf: [0; 5],
+            intrabc: [0; 3], ndvc_joints: [0; 5], ndvc_comp0: mk_comp(rng), ndvc_comp1: mk_comp(rng),
+            y_mode: [0; 14], y_angle: [0; 8], uv_mode: [0; 15], cfl_sign: [0; 9], cfl_alpha: [[0; 17]; 6],
+            uv_angle: [0; 8], pal_y_mode: [0; 3], pal_y_size: [0; 8], pal_uv_mode: [0; 3], pal_uv_size: [0; 8],
+            fi_use: [0; 3], fi_mode: [0; 6],
+        };
+        mk_ns_cdf(rng, 8, &mut c.seg); mk_ns_cdf(rng, 2, &mut c.skip); mk_ns_cdf(rng, 2, &mut c.intrabc);
+        mk_ns_cdf(rng, 4, &mut c.ndvc_joints); mk_ns_cdf(rng, 13, &mut c.y_mode); mk_ns_cdf(rng, 7, &mut c.y_angle);
+        mk_ns_cdf(rng, if cfl { 14 } else { 13 }, &mut c.uv_mode); mk_ns_cdf(rng, 8, &mut c.cfl_sign);
+        for a in c.cfl_alpha.iter_mut() { mk_ns_cdf(rng, 16, a); } mk_ns_cdf(rng, 7, &mut c.uv_angle);
+        mk_ns_cdf(rng, 2, &mut c.fi_use); mk_ns_cdf(rng, 5, &mut c.fi_mode);
+        c
+    };
+    fn gen_tree(rng: &mut Rng, bsize: usize, tree: &mut Vec<i8>, leaves: &mut Vec<usize>) {
+        if bsize > 3 && rng.next() & 1 == 1 {
+            tree.push(3); // SPLIT
+            let sub = get_partition_subsize(bsize, 3) as usize;
+            for _ in 0..4 { gen_tree(rng, sub, tree, leaves); }
+        } else {
+            tree.push(0); // NONE leaf
+            leaves.push(bsize);
+        }
+    }
+    for _ in 0..40_000 {
+        let seg_enabled = rng.next() & 1 == 1;
+        let update_map = seg_enabled && rng.next() & 1 == 1;
+        let last = (rng.next() % 8) as i32;
+        let mono = rng.next() & 1 == 1;
+        let chroma_ref = rng.next() & 1 == 1;
+        let cfl_allowed = rng.next() & 1 == 1;
+        let filter_allowed = rng.next() & 1 == 1;
+        let mut tree = Vec::new();
+        let mut leaves = Vec::new();
+        gen_tree(&mut rng, 12, &mut tree, &mut leaves); // 64x64 SB
+        // one MbModeInfoKf per leaf (intra: allow_intrabc=true + use_intrabc=0; no delta/cdef state)
+        let mut infos = Vec::with_capacity(leaves.len());
+        for &lb in &leaves {
+            let y_mode = (rng.next() % 13) as i32;
+            let y_ang = if use_angle_delta(lb) && is_directional_mode(y_mode) { (rng.next() % 7) as i32 - 3 } else { 0 };
+            let uv_n = if cfl_allowed { 14 } else { 13 };
+            let uv_mode = if !mono && chroma_ref { (rng.next() % uv_n as u64) as i32 } else { 0 };
+            let js = if uv_mode == 13 { (rng.next() % 8) as i32 } else { 0 };
+            let (su, sv) = ((js + 1) / 3, (js + 1) % 3);
+            let u = if uv_mode == 13 && su != 0 { (rng.next() % 16) as i32 } else { 0 };
+            let v = if uv_mode == 13 && sv != 0 { (rng.next() % 16) as i32 } else { 0 };
+            let uv_intra = get_uv_mode(uv_mode as usize);
+            let uv_ang = if !mono && chroma_ref && use_angle_delta(lb) && is_directional_mode(uv_intra) { (rng.next() % 7) as i32 - 3 } else { 0 };
+            let use_fi = if filter_allowed { (rng.next() & 1) as i32 } else { 0 };
+            infos.push(MbModeInfoKf {
+                segment_id: (rng.next() % (last as u64 + 1)) as i32, skip: (rng.next() & 1) as i32,
+                cdef_strength: 0, current_qindex: 100, delta_lf: [0; 4], delta_lf_from_base: 0,
+                use_intrabc: 0, dv_row: 0, dv_col: 0, y_mode, angle_delta_y: y_ang, uv_mode,
+                cfl_alpha_idx: (u << 4) | v, cfl_joint_sign: js, angle_delta_uv: uv_ang,
+                palette_size: [0, 0], use_filter_intra: use_fi, filter_intra_mode: if use_fi != 0 { (rng.next() % 5) as i32 } else { 0 },
+            });
+        }
+        let base_state = KfBlockState {
+            segid_preskip: rng.next() & 1 == 1, seg_enabled, update_map,
+            seg_pred: (rng.next() % (last as u64 + 1)) as i32, last_active_segid: last,
+            seg_skip_active: false, mi_row: 0, mi_col: 0, mib_size: 16, sb_size: 12, bsize: 12,
+            coded_lossless: false, allow_intrabc: true, cdef_bits: 0, dq_present: false,
+            dlf_present: false, dlf_multi: false, num_planes: 3, dq_res: 1, dlf_res: 1,
+            monochrome: mono, is_chroma_ref: chroma_ref, cfl_allowed, allow_palette: false, bit_depth: 8,
+            filter_allowed, mb_to_top_edge: 0, has_above: false, has_left: false,
+            cdef_transmitted: [false; 4], current_base_qindex: 100, xd_delta_lf: [0; 4], xd_delta_lf_from_base: 0,
+        };
+        let cdfs0 = gen_cdfs(&mut rng, cfl_allowed);
+        let mut enc = OdEcEnc::new();
+        let mut ce = cdfs0.clone();
+        let mut se = base_state.clone();
+        let mut above_e = [0i8; 128];
+        let mut left_e = [0i8; 32];
+        let mut arena_e = [[0u16; 11]; 20];
+        for (c, slot) in arena_e.iter_mut().enumerate() {
+            let bsl = c / 4;
+            let ns = if bsl == 0 { 4 } else if bsl == 4 { 8 } else { 10 };
+            mk_ns_cdf(&mut rng, ns, slot);
+        }
+        let arena0 = arena_e;
+        let n = write_modes_b(&mut enc, &mut above_e, &mut left_e, &mut arena_e, &mut ce, &mut se, &tree, &infos, 0, 0, 12);
+        let b = enc.done().to_vec();
+        let mut dec = OdEcDec::new(&b);
+        let mut cd = cdfs0.clone();
+        let mut sd = base_state.clone();
+        let mut above_d = [0i8; 128];
+        let mut left_d = [0i8; 32];
+        let mut arena_d = arena0;
+        let (gtree, ginfos) = read_modes_b(&mut dec, &mut above_d, &mut left_d, &mut arena_d, &mut cd, &mut sd, 0, 0, 12);
+        assert_eq!(gtree, tree, "partition tree");
+        assert_eq!(n, infos.len(), "block count");
+        assert_eq!(ginfos.len(), infos.len(), "decoded block count");
+        for (gi, fi) in ginfos.iter().zip(&infos) {
+            assert_eq!(gi.skip, fi.skip, "block skip");
+            assert_eq!(gi.y_mode, fi.y_mode, "block y_mode");
+            assert_eq!(gi.uv_mode, fi.uv_mode, "block uv_mode");
+        }
+        // CDF adaptation + partition arena + above context lockstep across the whole SB.
+        assert_eq!(ce.y_mode, cd.y_mode, "y_mode cdf");
+        assert_eq!(ce.skip, cd.skip, "skip cdf");
+        assert_eq!(ce.cfl_alpha, cd.cfl_alpha, "cfl cdf");
+        assert_eq!(arena_e, arena_d, "partition arena");
+        assert_eq!(above_e, above_d, "above ctx");
+    }
+}

@@ -4279,3 +4279,131 @@ pub fn write_mb_modes_kf(enc: &mut OdEcEnc, info: &MbModeInfoKf, c: &mut KfCdfs,
         s.filter_allowed, info.use_filter_intra, info.filter_intra_mode, &mut c.fi_use, &mut c.fi_mode,
     );
 }
+
+// ===================== tile-content dispatch (partition walk + block driver) =====================
+// Walks a superblock's square (NONE/SPLIT) partition tree and dispatches the KEY-frame
+// block driver at each PARTITION_NONE leaf. This is the first end-to-end tile-content
+// path: partition structure + per-block mode-info over one coder. The block driver takes
+// context-pre-selected CDFs (KfCdfs); per-neighbour mode-context selection is a later
+// layer. Rectangular partitions (HORZ/VERT/AB/4) are handled by the full version to come.
+
+#[allow(clippy::too_many_arguments)]
+fn write_modes_b_recurse(
+    enc: &mut OdEcEnc,
+    above: &mut [i8],
+    left: &mut [i8],
+    arena: &mut [[u16; 11]; 20],
+    cdfs: &mut KfCdfs,
+    state: &mut KfBlockState,
+    tree: &[i8],
+    t_idx: &mut usize,
+    infos: &[MbModeInfoKf],
+    i_idx: &mut usize,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) {
+    if bsize < BLOCK_8X8 {
+        return;
+    }
+    let p = tree[*t_idx] as i32;
+    *t_idx += 1;
+    let subsize = get_partition_subsize(bsize, p) as usize;
+    let hbs = MI_SIZE_WIDE[bsize] / 2;
+    let ctx = partition_plane_context(above, left, mi_row as usize, mi_col as usize, bsize) as usize;
+    write_partition(enc, &mut arena[ctx], partition_cdf_length(bsize), p, true, true, bsize);
+    if p == PARTITION_SPLIT_MODE && bsize > BLOCK_8X8 {
+        write_modes_b_recurse(enc, above, left, arena, cdfs, state, tree, t_idx, infos, i_idx, mi_row, mi_col, subsize);
+        write_modes_b_recurse(enc, above, left, arena, cdfs, state, tree, t_idx, infos, i_idx, mi_row, mi_col + hbs, subsize);
+        write_modes_b_recurse(enc, above, left, arena, cdfs, state, tree, t_idx, infos, i_idx, mi_row + hbs, mi_col, subsize);
+        write_modes_b_recurse(enc, above, left, arena, cdfs, state, tree, t_idx, infos, i_idx, mi_row + hbs, mi_col + hbs, subsize);
+    } else {
+        // PARTITION_NONE leaf: one block of `subsize`.
+        state.mi_row = mi_row;
+        state.mi_col = mi_col;
+        state.bsize = subsize;
+        write_mb_modes_kf(enc, &infos[*i_idx], cdfs, state);
+        *i_idx += 1;
+    }
+    update_ext_partition_context(above, left, mi_row, mi_col, subsize, bsize, p);
+}
+
+/// `write_modes_b` (square partitions) — encode one superblock's partition tree +
+/// per-leaf KEY-frame block mode-info. `infos` supplies one [`MbModeInfoKf`] per
+/// PARTITION_NONE leaf in pre-order. Returns the number of blocks written.
+#[allow(clippy::too_many_arguments)]
+pub fn write_modes_b(
+    enc: &mut OdEcEnc,
+    above: &mut [i8],
+    left: &mut [i8],
+    arena: &mut [[u16; 11]; 20],
+    cdfs: &mut KfCdfs,
+    state: &mut KfBlockState,
+    tree: &[i8],
+    infos: &[MbModeInfoKf],
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) -> usize {
+    let mut t_idx = 0;
+    let mut i_idx = 0;
+    write_modes_b_recurse(enc, above, left, arena, cdfs, state, tree, &mut t_idx, infos, &mut i_idx, mi_row, mi_col, bsize);
+    i_idx
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_modes_b_recurse(
+    dec: &mut OdEcDec,
+    above: &mut [i8],
+    left: &mut [i8],
+    arena: &mut [[u16; 11]; 20],
+    cdfs: &mut KfCdfs,
+    state: &mut KfBlockState,
+    tree: &mut Vec<i8>,
+    infos: &mut Vec<MbModeInfoKf>,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) {
+    if bsize < BLOCK_8X8 {
+        return;
+    }
+    let hbs = MI_SIZE_WIDE[bsize] / 2;
+    let ctx = partition_plane_context(above, left, mi_row as usize, mi_col as usize, bsize) as usize;
+    let p = read_partition(dec, &mut arena[ctx], partition_cdf_length(bsize), true, true, bsize);
+    tree.push(p as i8);
+    let subsize = get_partition_subsize(bsize, p) as usize;
+    if p == PARTITION_SPLIT_MODE && bsize > BLOCK_8X8 {
+        read_modes_b_recurse(dec, above, left, arena, cdfs, state, tree, infos, mi_row, mi_col, subsize);
+        read_modes_b_recurse(dec, above, left, arena, cdfs, state, tree, infos, mi_row, mi_col + hbs, subsize);
+        read_modes_b_recurse(dec, above, left, arena, cdfs, state, tree, infos, mi_row + hbs, mi_col, subsize);
+        read_modes_b_recurse(dec, above, left, arena, cdfs, state, tree, infos, mi_row + hbs, mi_col + hbs, subsize);
+    } else {
+        state.mi_row = mi_row;
+        state.mi_col = mi_col;
+        state.bsize = subsize;
+        infos.push(read_mb_modes_kf(dec, cdfs, state));
+    }
+    update_ext_partition_context(above, left, mi_row, mi_col, subsize, bsize, p);
+}
+
+/// `read_modes_b` (square partitions) — inverse of [`write_modes_b`]: decode one
+/// superblock's partition tree, dispatching [`read_mb_modes_kf`] at each PARTITION_NONE
+/// leaf. Returns `(partition_tree, per_leaf_mode_info)`.
+#[allow(clippy::too_many_arguments)]
+pub fn read_modes_b(
+    dec: &mut OdEcDec,
+    above: &mut [i8],
+    left: &mut [i8],
+    arena: &mut [[u16; 11]; 20],
+    cdfs: &mut KfCdfs,
+    state: &mut KfBlockState,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) -> (Vec<i8>, Vec<MbModeInfoKf>) {
+    let mut tree = Vec::new();
+    let mut infos = Vec::new();
+    read_modes_b_recurse(dec, above, left, arena, cdfs, state, &mut tree, &mut infos, mi_row, mi_col, bsize);
+    (tree, infos)
+}
