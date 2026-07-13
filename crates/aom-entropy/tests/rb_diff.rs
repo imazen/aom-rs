@@ -479,3 +479,90 @@ fn read_frame_size_inverts_write() {
         }
     }
 }
+
+#[test]
+fn read_color_config_inverts_write() {
+    use aom_entropy::header::{read_color_config, write_color_config, ColorConfigParams};
+    let mut rng = Rng(0x1e_c010_c0de_0160);
+    for _ in 0..100_000 {
+        let profile = (rng.next() % 3) as i32;
+        let bit_depth = if profile == 2 {
+            [8, 10, 12][(rng.next() % 3) as usize]
+        } else {
+            [8, 10][(rng.next() % 2) as usize]
+        };
+        let monochrome = profile != 1 && rng.next() & 1 == 1;
+
+        // sRGB draw only for non-mono profile-1 (short-circuits so RNG use matches the
+        // per-branch form).
+        let want_srgb = !monochrome && profile == 1 && rng.next() & 1 == 1;
+        let (ssx, ssy) = if monochrome {
+            (1, 1)
+        } else if want_srgb {
+            (0, 0)
+        } else if profile == 0 {
+            (1, 1)
+        } else if profile == 1 {
+            (0, 0)
+        } else if bit_depth == 12 {
+            let x = (rng.next() & 1) as i32;
+            let y = if x == 1 { (rng.next() & 1) as i32 } else { 0 };
+            (x, y)
+        } else {
+            (1, 0)
+        };
+
+        let (cp, tc, mc) = if want_srgb {
+            (1, 13, 0)
+        } else if rng.next() & 1 == 1 {
+            let mut cp = (rng.next() % 256) as i32;
+            let tc = (rng.next() % 256) as i32;
+            let mc = (rng.next() % 256) as i32;
+            if cp == 2 && tc == 2 && mc == 2 {
+                cp = 3;
+            }
+            if cp == 1 && tc == 13 && mc == 0 {
+                cp = 5; // avoid an accidental sRGB triple
+            }
+            (cp, tc, mc)
+        } else {
+            (2, 2, 2)
+        };
+
+        let chroma_pos = if !monochrome && !want_srgb && ssx == 1 && ssy == 1 {
+            (rng.next() % 4) as i32
+        } else {
+            0
+        };
+        let sep_uv = !monochrome && rng.next() & 1 == 1;
+        let color_range = want_srgb || rng.next() & 1 == 1;
+
+        let c = ColorConfigParams {
+            bit_depth,
+            profile,
+            monochrome,
+            color_primaries: cp,
+            transfer_characteristics: tc,
+            matrix_coefficients: mc,
+            color_range,
+            subsampling_x: ssx,
+            subsampling_y: ssy,
+            chroma_sample_position: chroma_pos,
+            separate_uv_delta_q: sep_uv,
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_color_config(&mut wb, &c);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        let g = read_color_config(&mut rb, profile);
+        let want = (
+            bit_depth, monochrome, cp, tc, mc, color_range, ssx, ssy, chroma_pos, sep_uv,
+        );
+        let got = (
+            g.bit_depth, g.monochrome, g.color_primaries, g.transfer_characteristics,
+            g.matrix_coefficients, g.color_range, g.subsampling_x, g.subsampling_y,
+            g.chroma_sample_position, g.separate_uv_delta_q,
+        );
+        assert_eq!(got, want, "color_config profile={profile} bd={bit_depth} mono={monochrome} srgb={want_srgb}");
+    }
+}

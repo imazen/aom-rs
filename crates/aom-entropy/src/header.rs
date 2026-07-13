@@ -1814,3 +1814,74 @@ pub fn read_frame_size(
         render_height,
     }
 }
+
+/// Inverse of `write_bitdepth`: `high_bitdepth` flag, plus (profile 2 + high) the
+/// `twelve_bit` flag. Yields 8/10/12.
+fn read_bitdepth(rb: &mut ReadBitBuffer, profile: i32) -> i32 {
+    let high_bitdepth = rb.read_bit() != 0;
+    if !high_bitdepth {
+        8
+    } else if profile == 2 && rb.read_bit() != 0 {
+        12
+    } else {
+        10
+    }
+}
+
+/// `read_color_config` (`av1_read_color_config`, `av1/decoder/obu.c`) — inverse of
+/// [`write_color_config`]: bit depth, monochrome, the color description (CICP), then the
+/// color range + subsampling (inferred per profile / sRGB / monochrome; only the profile-2
+/// 12-bit path codes subsampling) + chroma sample position + separate_uv_delta_q.
+/// `profile` comes from the sequence-header parse.
+pub fn read_color_config(rb: &mut ReadBitBuffer, profile: i32) -> ColorConfigParams {
+    let bit_depth = read_bitdepth(rb, profile);
+    let monochrome = if profile != 1 { rb.read_bit() != 0 } else { false };
+    let (cp, tc, mc) = if rb.read_bit() != 0 {
+        (rb.read_literal(8), rb.read_literal(8), rb.read_literal(8))
+    } else {
+        (2, 2, 2) // CICP UNSPECIFIED
+    };
+    let mut c = ColorConfigParams {
+        bit_depth,
+        profile,
+        monochrome,
+        color_primaries: cp,
+        transfer_characteristics: tc,
+        matrix_coefficients: mc,
+        color_range: false,
+        subsampling_x: 0,
+        subsampling_y: 0,
+        chroma_sample_position: 0,
+        separate_uv_delta_q: false,
+    };
+    if monochrome {
+        c.color_range = rb.read_bit() != 0;
+        c.subsampling_x = 1;
+        c.subsampling_y = 1;
+        return c;
+    }
+    if cp == 1 && tc == 13 && mc == 0 {
+        // sRGB: full range, 4:4:4 — inferred, nothing coded here.
+        c.color_range = true;
+    } else {
+        c.color_range = rb.read_bit() != 0;
+        if profile == 0 {
+            c.subsampling_x = 1;
+            c.subsampling_y = 1;
+        } else if profile == 1 {
+            c.subsampling_x = 0;
+            c.subsampling_y = 0;
+        } else if bit_depth == 12 {
+            c.subsampling_x = rb.read_bit() as i32;
+            c.subsampling_y = if c.subsampling_x != 0 { rb.read_bit() as i32 } else { 0 };
+        } else {
+            c.subsampling_x = 1;
+            c.subsampling_y = 0;
+        }
+        if c.subsampling_x == 1 && c.subsampling_y == 1 {
+            c.chroma_sample_position = rb.read_literal(2);
+        }
+    }
+    c.separate_uv_delta_q = rb.read_bit() != 0;
+    c
+}
