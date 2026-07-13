@@ -191,6 +191,16 @@ both tracks, fully bit-exact.**
   `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
   rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
+- **Transform-block loop — one coding-block plane (aom-encode)** — encode_coding_block_plane
+  iterates a plane's txbs in raster order (av1_foreach_transformed_block_in_plane),
+  threading the above/left ENTROPY_CONTEXT arrays: get_txb_ctx reads the neighbour context,
+  the txb encodes (encode_block_coeffs_full), then av1_set_entropy_contexts (interior memset)
+  fills the txb footprint with its entropy byte for the next txb. Differential re-runs the
+  loop with the C context/quant/optimize refs + the C-validated write: byte-identical bytes,
+  final contexts, and both adapted CDFs across 7 tilings (square+rect, 2x2..4x4) x plane 0/1
+  x FP/B/Dc x bd 8/12 x QM/flat. Uniform tx only; frame-edge clipping + block->tx partition +
+  chroma subsampling are the remaining lifts to a full coding block.
+
 - **Complete plane-0 txb bitstream: av1_write_tx_type wired in (aom-txb)** — the full
   av1_write_coeffs_txb order (txb_skip -> luma tx_type -> coefficients). The eob+coeffs
   payload is factored into a shared write_txb_body, so write_coeffs_txb (coeff-only) is
@@ -271,16 +281,13 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **Transform-block loop** (`av1_foreach_transformed_block` / the tx-block iteration
-   in encodemb): drive encode_block_coeffs_full across a coding block's txbs, threading
-   the per-plane above/left ENTROPY_CONTEXT arrays (each txb's txb_entropy_context feeds
-   the next txb's get_txb_ctx). Needs the block->txb partition (tx_size within the block)
-   + the entropy-context array management. This lifts "one txb" to "one coding block".
-2. **Reconstruction / distortion for RD**: inverse-transform dqcoeff (aom-transform inv
+1. **Reconstruction / distortion for RD**: inverse-transform dqcoeff (aom-transform inv
    is validated) + pixel SSE (aom-dist) to get the block distortion; with the trellis
-   rate this is the RD cost the mode search compares.
+   rate this is the RD cost the mode search compares. First clean non-bitstream RD piece.
+2. **Coding-block lifts**: frame-edge context clipping (av1_set_entropy_contexts edge
+   case), chroma subsampling (plane_bsize derivation), non-uniform block->tx partition.
 3. **Mode & partition search (RDO)** — the hardest bit-identity target; the layer that
-   drives encode_block_coeffs_full per candidate.
+   drives encode_coding_block_plane per candidate.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
    per-mode bit-exact, differential per predictor.
 3. **Loop filters**: deblock, CDEF, loop-restoration (decoder + encoder search).
