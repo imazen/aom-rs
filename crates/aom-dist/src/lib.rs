@@ -2,6 +2,8 @@
 //! `aom_dsp/sad.c`, `variance.c`). SAD, variance, and bilinear sub-pixel
 //! variance — the workhorses of encoder motion search / RDO (speed-0 path).
 
+pub mod avx2;
+
 const FILTER_BITS: i32 = 7;
 
 /// `bilinear_filters_2t` from `aom_dsp/aom_filter.h` (8 subpel positions).

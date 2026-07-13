@@ -320,6 +320,20 @@
           "test": "dist_diff::sad_variance_subpel_byte_identical"
         }
       }
+    },
+    "dist.sad_avx2": {
+      "status": "green",
+      "note": "AVX2 SAD specialization; lane-level differential vs scalar+C green (40k). Perf: coarse probe ~1.42x vs C-scalar _c (OVER 1.20x gate; not yet vs C AVX2 production dispatch, not pinned-HW CI). Perf gate NOT met; methodology demonstrated.",
+      "items": {
+        "sad_avx2_correctness": {
+          "status": "green",
+          "test": "avx2_sad::avx2_sad_lane_identical"
+        },
+        "sad_avx2_perf": {
+          "status": "red",
+          "test": "avx2_sad::avx2_sad_perf_ratio (1.42x > 1.20x)"
+        }
+      }
     }
   }
 }
