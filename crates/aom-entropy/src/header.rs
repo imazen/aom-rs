@@ -1350,3 +1350,133 @@ pub fn write_frame_header_trailing_flags(
     }
     wb.write_bit(reduced_tx_set_used as u32);
 }
+
+// ---- frame-header OBU: top-level assembly ---------------------------------
+
+/// The full uncompressed frame-header state (`write_uncompressed_header_obu`),
+/// composing the prefix, per-frame-type body, and the component tail.
+#[derive(Clone, Debug)]
+pub struct FrameHeaderObu {
+    pub prefix: FrameHeaderPrefix,
+    // per-frame-type body
+    pub allow_screen_content_tools: bool,
+    pub superres_scaled: bool,
+    pub allow_intrabc: bool,
+    pub frame_size: FrameSizeHeader,
+    pub inter_ref: InterRefSignaling,
+    pub frame_size_with_refs: FrameSizeWithRefs,
+    pub cur_frame_force_integer_mv: bool,
+    pub allow_high_precision_mv: bool,
+    pub interp_filter: i32,
+    pub switchable_motion_mode: bool,
+    pub might_allow_ref_frame_mvs: bool,
+    pub allow_ref_frame_mvs: bool,
+    // refresh frame context
+    pub refresh_frame_context_disabled: bool,
+    // tail
+    pub tile_info: TileInfoHeader,
+    pub quant: QuantParamsHeader,
+    pub num_planes: usize,
+    pub separate_uv_delta_q: bool,
+    pub segmentation: SegmentationHeader,
+    pub delta_q: DeltaQParams,
+    pub all_lossless: bool,
+    pub coded_lossless: bool,
+    pub loopfilter: LoopfilterHeader,
+    pub cdef: CdefHeader,
+    pub restoration: RestorationHeader,
+    pub tx_mode_select: bool,
+    pub reference_mode_select: bool,
+    pub skip_mode_allowed: bool,
+    pub skip_mode_flag: bool,
+    pub might_allow_warped_motion: bool,
+    pub allow_warped_motion: bool,
+    pub reduced_tx_set_used: bool,
+    pub global_motion: [WarpedMotionParams; 7],
+    pub ref_global_motion: [WarpedMotionParams; 7],
+    pub film_grain_params_present: bool,
+    pub film_grain: FilmGrainParams,
+    pub large_scale: bool,
+}
+
+/// `write_uncompressed_header_obu` (`av1/encoder/bitstream.c`): the full uncompressed
+/// frame header — the prefix (which may early-return for a shown-existing frame),
+/// the per-frame-type frame-size / ref-signaling body, the refresh-frame-context bit,
+/// then the component tail (tile info, quantization, segmentation, delta-q, loop
+/// filter / CDEF / restoration, TX mode, the trailing flags, global motion, film
+/// grain, and ext tile info). Does not emit the OBU trailing bits (the OBU wrapper
+/// adds those).
+pub fn write_frame_header_obu(wb: &mut WriteBitBuffer, p: &FrameHeaderObu) {
+    let (frame_size_override, early) = write_frame_header_prefix(wb, &p.prefix);
+    if early {
+        return;
+    }
+    let ft = p.prefix.frame_type;
+    let intra_only = ft == 0 || ft == 2;
+    let sframe = ft == 3;
+    let mut fs = p.frame_size;
+    fs.frame_size_override = frame_size_override != 0;
+
+    if ft == 0 || ft == 2 {
+        // KEY_FRAME / INTRA_ONLY_FRAME
+        write_frame_size(wb, &fs);
+        if p.allow_screen_content_tools && !p.superres_scaled {
+            wb.write_bit(p.allow_intrabc as u32);
+        }
+    } else if ft == 1 || sframe {
+        // INTER_FRAME / S_FRAME
+        write_inter_ref_signaling(wb, &p.inter_ref);
+        if !p.prefix.error_resilient_mode && frame_size_override != 0 {
+            write_frame_size_with_refs(wb, &p.frame_size_with_refs);
+        } else {
+            write_frame_size(wb, &fs);
+        }
+        if !p.cur_frame_force_integer_mv {
+            wb.write_bit(p.allow_high_precision_mv as u32);
+        }
+        write_frame_interp_filter(wb, p.interp_filter);
+        wb.write_bit(p.switchable_motion_mode as u32);
+        if p.might_allow_ref_frame_mvs {
+            wb.write_bit(p.allow_ref_frame_mvs as u32);
+        }
+    }
+
+    write_refresh_frame_context(
+        wb,
+        p.prefix.reduced_still_picture_hdr,
+        p.prefix.disable_cdf_update,
+        p.refresh_frame_context_disabled,
+    );
+
+    write_tile_info(wb, &p.tile_info);
+    encode_quantization(wb, &p.quant, p.num_planes, p.separate_uv_delta_q);
+    encode_segmentation(wb, &p.segmentation);
+    write_delta_q_params(wb, &p.delta_q);
+    if !p.all_lossless {
+        if !p.coded_lossless {
+            encode_loopfilter(wb, &p.loopfilter, p.num_planes);
+            encode_cdef(wb, &p.cdef, p.num_planes);
+        }
+        encode_restoration_mode(wb, &p.restoration, p.num_planes);
+    }
+    write_tx_mode(wb, p.coded_lossless, p.tx_mode_select);
+    write_frame_header_trailing_flags(
+        wb,
+        intra_only,
+        p.reference_mode_select,
+        p.skip_mode_allowed,
+        p.skip_mode_flag,
+        p.might_allow_warped_motion,
+        p.allow_warped_motion,
+        p.reduced_tx_set_used,
+    );
+    if !intra_only {
+        write_global_motion(wb, &p.global_motion, &p.ref_global_motion, p.allow_high_precision_mv);
+    }
+    if p.film_grain_params_present && (p.prefix.show_frame || p.prefix.showable_frame) {
+        write_film_grain_params(wb, &p.film_grain);
+    }
+    if p.large_scale {
+        write_ext_tile_info(wb, p.tile_info.rows, p.tile_info.cols);
+    }
+}
