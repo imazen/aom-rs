@@ -150,6 +150,13 @@ both tracks, fully bit-exact.**
   level-1-vs-level `diff`), get_two_coeff_cost_simple (cost + cost_low),
   get_coeff_cost_eob/general. Integer-identical to C (`trellis_cost_diff.rs`).
 
+- **av1_optimize_txb — the coefficient trellis (aom-txb)** — RD-optimal
+  coefficient rounding, the largest/hottest speed-0 function. Full non-QM trellis
+  (update_coeff_general/_eob/_simple + update_skip, RDCOST/get_coeff_dist/
+  get_qc_dqc_low) byte-identical to C: optimized qcoeff/dqcoeff + reduced eob +
+  rate. `optimize_diff.rs` — 19 sizes x 7 tx_types x 60 self-consistent blocks x
+  sharpness 0..7.
+
 ## Coverage gate (auto-derived, honest)
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec
