@@ -5,6 +5,8 @@
 //!
 //! Validated byte-for-byte against C for every (mode × block size).
 
+
+#![forbid(unsafe_code)]
 pub mod dir;
 mod weights;
 use weights::{SMOOTH_WEIGHTS, SMOOTH_WEIGHT_LOG2_SCALE};

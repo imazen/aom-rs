@@ -2,6 +2,8 @@
 //! kernels, port of libaom v3.14.1 `av1/common/cdef_block.c`. Both tracks.
 //! Starts with `cdef_find_dir` (the 8x8 direction search).
 
+
+#![forbid(unsafe_code)]
 pub const CDEF_BSTRIDE: usize = 144; // ALIGN_POWER_OF_TWO(128 + 16, 3)
 pub const CDEF_VERY_LARGE: i32 = 0x4000;
 

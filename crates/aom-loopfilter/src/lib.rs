@@ -6,6 +6,8 @@
 //! and 1 for vertical filters; the per-position step is the opposite.
 //! Validated byte-for-byte against C for random pixel windows + thresholds.
 
+
+#![forbid(unsafe_code)]
 pub mod highbd;
 
 #[inline]

@@ -2,6 +2,8 @@
 //! v3.14.1 `av1/common/convolve.c`), lowbd single-reference. Encoder critical
 //! path (motion compensation). Starts with x/y separable EIGHTTAP_REGULAR.
 
+
+#![forbid(unsafe_code)]
 const FILTER_BITS: i32 = 7;
 const ROUND0_BITS: i32 = 3;
 

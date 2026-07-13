@@ -5,6 +5,8 @@
 //! quantizer, no quant-matrix), which is the stage directly downstream of the
 //! forward transform.
 
+
+#![forbid(unsafe_code)]
 /// `ROUND_POWER_OF_TWO(value, n)` from `aom_ports/mem.h` — bit-exact.
 /// Note `(1<<n)>>1` yields 0 at n=0, so this is well-defined for `log_scale==0`.
 #[inline]

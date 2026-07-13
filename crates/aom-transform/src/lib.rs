@@ -4,6 +4,8 @@
 //! a differential harness in `tests/`. Scalar-first; SIMD specializations must
 //! match this scalar output exactly (the same contract libaom holds internally).
 
+
+#![forbid(unsafe_code)]
 pub mod cospi;
 pub mod fdct;
 pub mod inv_txfm1d_gen;
