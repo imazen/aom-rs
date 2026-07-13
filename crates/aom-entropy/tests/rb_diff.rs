@@ -1088,3 +1088,74 @@ fn read_refresh_and_film_grain_invert_write() {
         }
     }
 }
+
+#[test]
+fn read_sequence_header_inverts_write() {
+    use aom_entropy::header::{read_sequence_header, write_sequence_header, SequenceHeaderParams};
+    let mut rng = Rng(0x1e_5e90_c0de_01f0);
+    for _ in 0..100_000 {
+        let nbw = 1 + (rng.next() % 16) as u32;
+        let nbh = 1 + (rng.next() % 16) as u32;
+        let mfw = 1 + (rng.next() % (1u64 << nbw)) as i32;
+        let mfh = 1 + (rng.next() % (1u64 << nbh)) as i32;
+        let reduced = rng.next() & 1 == 1;
+        let (mut fidp, mut dfidl, mut fidl) = (false, 0, 0);
+        let (mut eic, mut emc, mut ewm, mut edf, mut eoh, mut edwc, mut erfm) =
+            (false, false, false, false, false, false, false);
+        let (mut fsct, mut fimv, mut ohbm1) = (2i32, 2i32, -1i32);
+        if !reduced {
+            fidp = rng.next() & 1 == 1;
+            if fidp {
+                dfidl = 2 + (rng.next() % 16) as i32;
+                fidl = dfidl + 1 + (rng.next() % 8) as i32;
+            }
+            eic = rng.next() & 1 == 1;
+            emc = rng.next() & 1 == 1;
+            ewm = rng.next() & 1 == 1;
+            edf = rng.next() & 1 == 1;
+            eoh = rng.next() & 1 == 1;
+            if eoh {
+                edwc = rng.next() & 1 == 1;
+                erfm = rng.next() & 1 == 1;
+            }
+            fsct = (rng.next() % 3) as i32;
+            if fsct > 0 {
+                fimv = (rng.next() % 3) as i32;
+            }
+            if eoh {
+                ohbm1 = (rng.next() % 8) as i32;
+            }
+        }
+        let s = SequenceHeaderParams {
+            num_bits_width: nbw, num_bits_height: nbh, max_frame_width: mfw, max_frame_height: mfh,
+            reduced_still_picture_hdr: reduced, frame_id_numbers_present_flag: fidp,
+            delta_frame_id_length: dfidl, frame_id_length: fidl, sb_size_128: rng.next() & 1 == 1,
+            enable_filter_intra: rng.next() & 1 == 1, enable_intra_edge_filter: rng.next() & 1 == 1,
+            enable_interintra_compound: eic, enable_masked_compound: emc, enable_warped_motion: ewm,
+            enable_dual_filter: edf, enable_order_hint: eoh, enable_dist_wtd_comp: edwc,
+            enable_ref_frame_mvs: erfm, force_screen_content_tools: fsct, force_integer_mv: fimv,
+            order_hint_bits_minus_1: ohbm1, enable_superres: rng.next() & 1 == 1,
+            enable_cdef: rng.next() & 1 == 1, enable_restoration: rng.next() & 1 == 1,
+        };
+        let mut wb = WriteBitBuffer::new();
+        write_sequence_header(&mut wb, &s);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        let g = read_sequence_header(&mut rb, reduced);
+        assert_eq!(
+            (g.num_bits_width, g.num_bits_height, g.max_frame_width, g.max_frame_height,
+             g.frame_id_numbers_present_flag, g.delta_frame_id_length, g.frame_id_length, g.sb_size_128),
+            (nbw, nbh, mfw, mfh, fidp, dfidl, fidl, s.sb_size_128), "seq hdr A red={reduced}"
+        );
+        assert_eq!(
+            (g.enable_filter_intra, g.enable_intra_edge_filter, g.enable_interintra_compound,
+             g.enable_masked_compound, g.enable_warped_motion, g.enable_dual_filter, g.enable_order_hint),
+            (s.enable_filter_intra, s.enable_intra_edge_filter, eic, emc, ewm, edf, eoh), "seq hdr B"
+        );
+        assert_eq!(
+            (g.enable_dist_wtd_comp, g.enable_ref_frame_mvs, g.force_screen_content_tools,
+             g.force_integer_mv, g.order_hint_bits_minus_1, g.enable_superres, g.enable_cdef, g.enable_restoration),
+            (edwc, erfm, fsct, fimv, ohbm1, s.enable_superres, s.enable_cdef, s.enable_restoration), "seq hdr C"
+        );
+    }
+}

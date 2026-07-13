@@ -2407,3 +2407,78 @@ pub fn read_film_grain_params(
     p.clip_to_restricted_range = rb.read_bit() != 0;
     p
 }
+
+/// `read_sequence_header` — inverse of [`write_sequence_header`]: frame-dimension bit
+/// widths + max dimensions, the frame-id lengths, superblock size, and the tool-enable
+/// flags. The `force_screen_content_tools` / `force_integer_mv` SELECT (value 2) encoding
+/// is a "choose" bit then, if not chosen, the explicit value; a reduced-still-picture
+/// header omits the compound/order-hint/force block (inferred defaults). `reduced_still_
+/// picture_hdr` comes from the sequence-header OBU parse.
+pub fn read_sequence_header(rb: &mut ReadBitBuffer, reduced_still_picture_hdr: bool) -> SequenceHeaderParams {
+    let num_bits_width = rb.read_literal(4) as u32 + 1;
+    let num_bits_height = rb.read_literal(4) as u32 + 1;
+    let max_frame_width = rb.read_literal(num_bits_width) + 1;
+    let max_frame_height = rb.read_literal(num_bits_height) + 1;
+
+    let mut frame_id_numbers_present_flag = false;
+    let (mut delta_frame_id_length, mut frame_id_length) = (0, 0);
+    if !reduced_still_picture_hdr {
+        frame_id_numbers_present_flag = rb.read_bit() != 0;
+        if frame_id_numbers_present_flag {
+            delta_frame_id_length = rb.read_literal(4) + 2;
+            frame_id_length = rb.read_literal(3) + delta_frame_id_length + 1;
+        }
+    }
+    let sb_size_128 = rb.read_bit() != 0;
+    let enable_filter_intra = rb.read_bit() != 0;
+    let enable_intra_edge_filter = rb.read_bit() != 0;
+
+    let mut s = SequenceHeaderParams {
+        num_bits_width,
+        num_bits_height,
+        max_frame_width,
+        max_frame_height,
+        reduced_still_picture_hdr,
+        frame_id_numbers_present_flag,
+        delta_frame_id_length,
+        frame_id_length,
+        sb_size_128,
+        enable_filter_intra,
+        enable_intra_edge_filter,
+        enable_interintra_compound: false,
+        enable_masked_compound: false,
+        enable_warped_motion: false,
+        enable_dual_filter: false,
+        enable_order_hint: false,
+        enable_dist_wtd_comp: false,
+        enable_ref_frame_mvs: false,
+        force_screen_content_tools: 2, // SELECT
+        force_integer_mv: 2,           // SELECT
+        order_hint_bits_minus_1: -1,
+        enable_superres: false,
+        enable_cdef: false,
+        enable_restoration: false,
+    };
+    if !reduced_still_picture_hdr {
+        s.enable_interintra_compound = rb.read_bit() != 0;
+        s.enable_masked_compound = rb.read_bit() != 0;
+        s.enable_warped_motion = rb.read_bit() != 0;
+        s.enable_dual_filter = rb.read_bit() != 0;
+        s.enable_order_hint = rb.read_bit() != 0;
+        if s.enable_order_hint {
+            s.enable_dist_wtd_comp = rb.read_bit() != 0;
+            s.enable_ref_frame_mvs = rb.read_bit() != 0;
+        }
+        s.force_screen_content_tools = if rb.read_bit() != 0 { 2 } else { rb.read_literal(1) };
+        if s.force_screen_content_tools > 0 {
+            s.force_integer_mv = if rb.read_bit() != 0 { 2 } else { rb.read_literal(1) };
+        }
+        if s.enable_order_hint {
+            s.order_hint_bits_minus_1 = rb.read_literal(3);
+        }
+    }
+    s.enable_superres = rb.read_bit() != 0;
+    s.enable_cdef = rb.read_bit() != 0;
+    s.enable_restoration = rb.read_bit() != 0;
+    s
+}
