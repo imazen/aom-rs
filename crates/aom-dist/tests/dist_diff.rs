@@ -1,0 +1,62 @@
+//! Differential harness for SAD / variance / sub-pixel variance vs C libaom
+//! v3.14.1 across all 22 block sizes.
+
+use aom_dist::{sad, sub_pixel_variance, variance};
+use aom_sys_ref as c;
+
+const SIZES: [(usize, usize); 22] = [
+    (4, 4), (4, 8), (4, 16), (8, 4), (8, 8), (8, 16), (8, 32), (16, 4), (16, 8), (16, 16), (16, 32),
+    (16, 64), (32, 8), (32, 16), (32, 32), (32, 64), (64, 16), (64, 32), (64, 64), (64, 128),
+    (128, 64), (128, 128),
+];
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn u8(&mut self) -> u8 {
+        (self.next() & 0xff) as u8
+    }
+}
+
+// Plane with padding so subpel first-pass can read one extra column/row.
+fn plane(rng: &mut Rng, stride: usize, rows: usize) -> Vec<u8> {
+    (0..stride * rows).map(|_| rng.u8()).collect()
+}
+
+#[test]
+fn sad_variance_subpel_byte_identical() {
+    let mut rng = Rng(0x_5ad0_1234_5678_9abc);
+    for (idx, &(w, h)) in SIZES.iter().enumerate() {
+        let a_stride = w + 8;
+        let b_stride = w + 8;
+        for _ in 0..3000 {
+            // a needs (h+1) rows x (w+1) cols for subpel; give margin.
+            let a = plane(&mut rng, a_stride, h + 2);
+            let b = plane(&mut rng, b_stride, h + 2);
+
+            // SAD
+            let got = sad(&a, a_stride, &b, b_stride, w, h);
+            let want = c::ref_sad(idx, &a, a_stride, &b, b_stride);
+            assert_eq!(got, want, "sad {w}x{h}");
+
+            // variance
+            let (gv, gs) = variance(&a, a_stride, &b, b_stride, w, h);
+            let (wv, ws) = c::ref_variance(idx, &a, a_stride, &b, b_stride);
+            assert_eq!((gv, gs), (wv, ws), "variance {w}x{h}");
+
+            // sub-pixel variance over all 8x8 subpel offsets
+            let xo = (rng.next() % 8) as usize;
+            let yo = (rng.next() % 8) as usize;
+            let (gv2, gs2) = sub_pixel_variance(&a, a_stride, xo, yo, &b, b_stride, w, h);
+            let (wv2, ws2) = c::ref_subpel_var(idx, &a, a_stride, xo, yo, &b, b_stride);
+            assert_eq!((gv2, gs2), (wv2, ws2), "subpel_var {w}x{h} xo={xo} yo={yo}");
+        }
+    }
+}

@@ -77,6 +77,12 @@ both tracks, fully bit-exact.**
   240k comparisons over branch-exercising pixel/threshold strategies,
   byte-identical to C. (Highbd variants: TODO.)
 
+- **Distortion metrics (encoder-critical, speed-0 path)** (`aom_dsp/sad.c`,
+  `variance.c`): `aom_sad`, `aom_variance`, `aom_sub_pixel_variance` (bilinear
+  2-tap) over all 22 block sizes. Harness: `aom-dist/tests/dist_diff.rs` —
+  ~198k comparisons (SAD + variance + subpel var/sse), byte-identical to C.
+  (avg/masked/obmc SAD + highbd: TODO.)
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.

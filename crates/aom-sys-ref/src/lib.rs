@@ -36,6 +36,35 @@ extern "C" {
     );
 }
 
+// sadvar_shim.c — SAD / variance / sub-pixel variance dispatch (22 sizes).
+extern "C" {
+    fn shim_sad(idx: i32, s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
+    fn shim_variance(idx: i32, a: *const u8, as_: i32, b: *const u8, bs: i32, sse: *mut u32) -> u32;
+    fn shim_subpel_var(idx: i32, a: *const u8, as_: i32, xo: i32, yo: i32, b: *const u8, bs: i32, sse: *mut u32) -> u32;
+}
+
+/// Reference `aom_sad<W>x<H>_c` for size index `idx`.
+pub fn ref_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize) -> u32 {
+    unsafe { shim_sad(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32) }
+}
+
+/// Reference `aom_variance<W>x<H>_c`; returns (variance, sse).
+pub fn ref_variance(idx: usize, a: &[u8], as_: usize, b: &[u8], bs: usize) -> (u32, u32) {
+    let mut sse = 0u32;
+    let v = unsafe { shim_variance(idx as i32, a.as_ptr(), as_ as i32, b.as_ptr(), bs as i32, &mut sse) };
+    (v, sse)
+}
+
+/// Reference `aom_sub_pixel_variance<W>x<H>_c`; returns (variance, sse).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_subpel_var(idx: usize, a: &[u8], as_: usize, xo: usize, yo: usize, b: &[u8], bs: usize) -> (u32, u32) {
+    let mut sse = 0u32;
+    let v = unsafe {
+        shim_subpel_var(idx as i32, a.as_ptr(), as_ as i32, xo as i32, yo as i32, b.as_ptr(), bs as i32, &mut sse)
+    };
+    (v, sse)
+}
+
 // aom_dsp/loopfilter.c — deblocking edge filters.
 pub type LpfFn = unsafe extern "C" fn(*mut u8, i32, *const u8, *const u8, *const u8);
 extern "C" {

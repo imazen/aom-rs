@@ -302,6 +302,24 @@
           "test": "lpf_diff::loopfilter_byte_identical"
         }
       }
+    },
+    "dist.sad_variance": {
+      "status": "green",
+      "note": "Encoder-critical distortion metrics (speed-0 RDO/motion search): aom_sad, aom_variance, aom_sub_pixel_variance (bilinear), all 22 block sizes. SAD_avg/masked/obmc + highbd: TODO.",
+      "items": {
+        "aom_sad": {
+          "status": "green",
+          "test": "dist_diff::sad_variance_subpel_byte_identical"
+        },
+        "aom_variance": {
+          "status": "green",
+          "test": "dist_diff::sad_variance_subpel_byte_identical"
+        },
+        "aom_sub_pixel_variance": {
+          "status": "green",
+          "test": "dist_diff::sad_variance_subpel_byte_identical"
+        }
+      }
     }
   }
 }
