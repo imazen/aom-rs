@@ -70,7 +70,27 @@ pub fn write_coeffs_txb(
     if eob == 0 {
         return;
     }
-    // (av1_write_tx_type — plane-0 tx_type — intentionally out of scope.)
+    // tx_type (plane-0) is written by write_coeffs_txb_full; here just the payload.
+    write_txb_body(enc, cdfs, tcoeff, eob, tx_size, tx_type, plane_type, dc_sign_ctx, upd);
+}
+
+/// The txb payload written after the `txb_skip` flag (and, for luma, the
+/// `tx_type`): the eob position + eob-extra bits, the coefficient base/br levels,
+/// and the sign/golomb pass. Shared by [`write_coeffs_txb`] and
+/// [`write_coeffs_txb_full`]. `upd` = `allow_update_cdf`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_txb_body(
+    enc: &mut OdEcEnc,
+    cdfs: &mut [u16],
+    tcoeff: &[i32],
+    eob: usize,
+    tx_size: usize,
+    tx_type: usize,
+    plane_type: usize,
+    dc_sign_ctx: usize,
+    upd: bool,
+) {
+    let txs_ctx = txsize_entropy_ctx(tx_size);
     let tx_class = TX_TYPE_TO_CLASS[tx_type];
     let (eob_pt, eob_extra) = get_eob_pos_token(eob as i32);
     let eob_multi_size = TXSIZE_LOG2_MINUS4[tx_size] as usize;
@@ -154,6 +174,50 @@ pub fn write_coeffs_txb(
             }
         }
     }
+}
+
+/// The complete txb writer: `txb_skip` flag, then (for luma, `plane_type == 0`,
+/// when `signal_gate`) the `tx_type` via [`write_tx_type`], then the coefficient
+/// payload — matching the full `av1_write_coeffs_txb` order. `ext_tx_cdf` is the
+/// caller-selected `[intra|inter]_ext_tx_cdf[eset][square_tx_size][intra_dir]`
+/// slot (separate from the coefficient `cdfs` arena); it is only touched on the
+/// luma tx_type path. The `tx_type` context (`is_inter`, `reduced`,
+/// `use_filter_intra`, `fi_mode`, `mode`, `signal_gate`) is what the encoder's
+/// mbmi/frame state would supply.
+#[allow(clippy::too_many_arguments)]
+pub fn write_coeffs_txb_full(
+    enc: &mut OdEcEnc,
+    cdfs: &mut [u16],
+    ext_tx_cdf: &mut [u16],
+    tcoeff: &[i32],
+    eob: usize,
+    tx_size: usize,
+    tx_type: usize,
+    plane_type: usize,
+    txb_skip_ctx: usize,
+    dc_sign_ctx: usize,
+    allow_update_cdf: bool,
+    is_inter: bool,
+    reduced: bool,
+    use_filter_intra: bool,
+    fi_mode: usize,
+    mode: usize,
+    signal_gate: bool,
+) {
+    let txs_ctx = txsize_entropy_ctx(tx_size);
+    let upd = allow_update_cdf;
+    sym(enc, cdfs, A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3, (eob == 0) as i32, 2, upd);
+    if eob == 0 {
+        return;
+    }
+    if plane_type == 0 {
+        // Only luma transmits tx_type.
+        crate::write_tx_type(
+            enc, ext_tx_cdf, tx_size, is_inter, reduced, tx_type, use_filter_intra, fi_mode, mode,
+            signal_gate,
+        );
+    }
+    write_txb_body(enc, cdfs, tcoeff, eob, tx_size, tx_type, plane_type, dc_sign_ctx, upd);
 }
 
 #[inline]

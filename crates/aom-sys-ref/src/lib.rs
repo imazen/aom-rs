@@ -839,7 +839,7 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_cost_coeffs_txb(qcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_coeffs_txb(tcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, plane_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, allow_update_cdf: i32, cdfs: *mut u16, out: *mut u8, out_cap: i32) -> i32;
+    fn shim_write_coeffs_txb(tcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, plane_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, allow_update_cdf: i32, cdfs: *mut u16, ext_tx_cdf: *mut u16, is_inter: i32, reduced: i32, use_fi: i32, fi_mode: i32, mode: i32, signal_gate: i32, out: *mut u8, out_cap: i32) -> i32;
 }
 
 /// Reference `av1_txb_init_levels_c` (writes into `levels`).
@@ -881,8 +881,23 @@ pub fn ref_iscan_order(tx_size: usize, tx_type: usize, len: usize) -> Vec<i16> {
 #[allow(clippy::too_many_arguments)]
 pub fn ref_write_coeffs_txb(tcoeff: &[i32], eob: usize, tx_size: usize, tx_type: usize, plane_type: usize, txb_skip_ctx: usize, dc_sign_ctx: usize, allow_update_cdf: bool, cdfs: &mut [u16]) -> Vec<u8> {
     let mut out = vec![0u8; 1 << 16];
+    let mut dummy = [0u16; 16];
+    // signal_gate = 0 => no tx_type write (reproduces the coeff-only path).
     let n = unsafe {
-        shim_write_coeffs_txb(tcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, plane_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, allow_update_cdf as i32, cdfs.as_mut_ptr(), out.as_mut_ptr(), out.len() as i32)
+        shim_write_coeffs_txb(tcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, plane_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, allow_update_cdf as i32, cdfs.as_mut_ptr(), dummy.as_mut_ptr(), 0, 0, 0, 0, 0, 0, out.as_mut_ptr(), out.len() as i32)
+    };
+    out.truncate(n as usize);
+    out
+}
+
+/// Reference full txb writer: `txb_skip` + (luma) `av1_write_tx_type` + coeffs,
+/// matching aom-txb's `write_coeffs_txb_full`. `ext_tx_cdf` is the selected ext-tx
+/// CDF slot; the tx_type context mirrors the encoder mbmi/frame state. Returns bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_write_coeffs_txb_full(tcoeff: &[i32], eob: usize, tx_size: usize, tx_type: usize, plane_type: usize, txb_skip_ctx: usize, dc_sign_ctx: usize, allow_update_cdf: bool, cdfs: &mut [u16], ext_tx_cdf: &mut [u16], is_inter: bool, reduced: bool, use_fi: bool, fi_mode: usize, mode: usize, signal_gate: bool) -> Vec<u8> {
+    let mut out = vec![0u8; 1 << 16];
+    let n = unsafe {
+        shim_write_coeffs_txb(tcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, plane_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, allow_update_cdf as i32, cdfs.as_mut_ptr(), ext_tx_cdf.as_mut_ptr(), is_inter as i32, reduced as i32, use_fi as i32, fi_mode as i32, mode as i32, signal_gate as i32, out.as_mut_ptr(), out.len() as i32)
     };
     out.truncate(n as usize);
     out

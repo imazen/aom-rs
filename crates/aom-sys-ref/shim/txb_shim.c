@@ -134,7 +134,9 @@ static int tw_get_br_ctx(const uint8_t *levels, int c, int bhl, int tx_class) {
 int shim_write_coeffs_txb(const int32_t *tcoeff, int eob, int tx_size,
                           int tx_type, int plane_type, int txb_skip_ctx,
                           int dc_sign_ctx, int allow_update_cdf,
-                          uint16_t *cdfs, unsigned char *out, int out_cap) {
+                          uint16_t *cdfs, uint16_t *ext_tx_cdf, int is_inter,
+                          int reduced, int use_fi, int fi_mode, int mode,
+                          int signal_gate, unsigned char *out, int out_cap) {
   od_ec_enc ec;
   od_ec_enc_init(&ec, 65536);
   const int txs_ctx = (k_txs_sqr[tx_size] + k_txs_sqr_up[tx_size] + 1) >> 1;
@@ -142,7 +144,16 @@ int shim_write_coeffs_txb(const int32_t *tcoeff, int eob, int tx_size,
   tw_symbol(&ec, cdfs + A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3,
             eob == 0, 2, allow_update_cdf);
   if (eob != 0) {
-    /* (av1_write_tx_type intentionally skipped) */
+    /* av1_write_tx_type: luma only, when the ext-tx set has >1 type and the
+     * caller's gate (qindex/skip/seg) allows it. Mirrors write_tx_type. */
+    if (plane_type == 0 && signal_gate) {
+      const TxSetType st = av1_get_ext_tx_set_type(tx_size, is_inter, reduced);
+      const int nsymbs = av1_num_ext_tx_set[st];
+      if (nsymbs > 1) {
+        tw_symbol(&ec, ext_tx_cdf, av1_ext_tx_ind[st][tx_type], nsymbs,
+                  allow_update_cdf);
+      }
+    }
     const int tx_class = k_tx_type_to_class[tx_type];
     int eob_extra;
     const int eob_pt = av1_get_eob_pos_token(eob, &eob_extra);
