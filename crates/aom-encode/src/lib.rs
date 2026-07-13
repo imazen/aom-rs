@@ -13,6 +13,8 @@
 //! forward transform lands.
 #![forbid(unsafe_code)]
 
+pub mod rd;
+
 use aom_entropy::enc::OdEcEnc;
 use aom_quant::{
     aom_highbd_quantize_b_no_qmatrix, aom_highbd_quantize_b_qm, aom_quantize_b_no_qmatrix,

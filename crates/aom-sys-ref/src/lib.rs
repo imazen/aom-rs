@@ -163,6 +163,15 @@ extern "C" {
     fn aom_subtract_block_c(rows: i32, cols: i32, diff: *mut i16, diff_stride: isize, src: *const u8, src_stride: isize, pred: *const u8, pred_stride: isize);
     fn shim_highbd_subtract_block(rows: i32, cols: i32, diff: *mut i16, diff_stride: i32, src: *const u16, src_stride: i32, pred: *const u16, pred_stride: i32);
     fn shim_block_error_qm(coeff: *const i32, dqcoeff: *const i32, block_size: isize, qmatrix: *const u8, scan: *const i16, ssz: *mut i64, bd: i32) -> i64;
+    fn av1_model_rd_from_var_lapndz(var: i64, n_log2: u32, qstep: u32, rate: *mut i32, dist: *mut i64);
+}
+
+/// Reference `av1_model_rd_from_var_lapndz` (Laplacian RD model). Returns (rate, dist).
+pub fn ref_model_rd_from_var_lapndz(var: i64, n_log2: u32, qstep: u32) -> (i32, i64) {
+    let mut rate = 0i32;
+    let mut dist = 0i64;
+    unsafe { av1_model_rd_from_var_lapndz(var, n_log2, qstep, &mut rate, &mut dist) }
+    (rate, dist)
 }
 
 /// Reference `av1_block_error_qm` (QM-weighted transform-domain distortion; the
