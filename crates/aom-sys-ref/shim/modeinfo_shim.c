@@ -2094,3 +2094,53 @@ uint32_t shim_write_partition_node(const signed char *above_in, const signed cha
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- write_modes_sb partition-tree recursion (av1/encoder/bitstream.c) --- */
+/* Fully-in-frame variant, block content stubbed (write_modes_b validated separately):
+ * per node (bsize>=8X8) consume the pre-order partition, write_partition on
+ * arena[ctx] (context threaded through the tree), recurse 4x on SPLIT, then
+ * update_ext_partition_context. bsize<8X8 nodes (4X4 leaves under 8X8 SPLIT) do nothing. */
+static void wms_recurse(od_ec_enc *ec, MACROBLOCKD *xd, const signed char *tree, int *idx,
+    int mi_row, int mi_col, int bsize, uint16_t *arena) {
+  if (bsize < BLOCK_8X8) return; /* 4X4 leaf: no partition, no context */
+  const int p = tree[(*idx)++];
+  const int subsize = get_partition_subsize((BLOCK_SIZE)bsize, (PARTITION_TYPE)p);
+  const int hbs = mi_size_wide[bsize] / 2;
+  const int ctx = partition_plane_context(xd, mi_row, mi_col, (BLOCK_SIZE)bsize);
+  uint16_t *cdf = arena + ctx * 11;
+  const int n = partition_cdf_length((BLOCK_SIZE)bsize);
+  od_ec_encode_cdf_q15(ec, p, cdf, n);
+  update_cdf(cdf, p, n);
+  if (p == PARTITION_SPLIT && bsize > BLOCK_8X8) {
+    wms_recurse(ec, xd, tree, idx, mi_row, mi_col, subsize, arena);
+    wms_recurse(ec, xd, tree, idx, mi_row, mi_col + hbs, subsize, arena);
+    wms_recurse(ec, xd, tree, idx, mi_row + hbs, mi_col, subsize, arena);
+    wms_recurse(ec, xd, tree, idx, mi_row + hbs, mi_col + hbs, subsize, arena);
+  }
+  /* other partitions: stub blocks (no bytes) */
+  update_ext_partition_context(xd, mi_row, mi_col, (BLOCK_SIZE)subsize, (BLOCK_SIZE)bsize,
+                               (PARTITION_TYPE)p);
+}
+
+uint32_t shim_write_modes_sb(const signed char *above_in, const signed char *left_in,
+    int mi_row, int mi_col, int bsize, const signed char *tree, int tree_len, uint16_t *arena,
+    uint8_t *out, signed char *above_out, signed char *left_out, uint16_t *arena_out,
+    int *tree_consumed) {
+  MACROBLOCKD xd;
+  static signed char above[64];
+  for (int i = 0; i < 64; i++) above[i] = above_in[i];
+  for (int i = 0; i < 32; i++) xd.left_partition_context[i] = left_in[i];
+  xd.above_partition_context = (PARTITION_CONTEXT *)above;
+  (void)tree_len;
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  int idx = 0;
+  wms_recurse(&ec, &xd, tree, &idx, mi_row, mi_col, bsize, arena);
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 64; i++) above_out[i] = above[i];
+  for (int i = 0; i < 32; i++) left_out[i] = xd.left_partition_context[i];
+  for (int i = 0; i < PARTITION_CONTEXTS * 11; i++) arena_out[i] = arena[i];
+  *tree_consumed = idx;
+  od_ec_enc_clear(&ec);
+  return nb;
+}

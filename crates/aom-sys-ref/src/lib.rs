@@ -300,6 +300,8 @@ extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn shim_write_partition_node(above_in: *const i8, left_in: *const i8, mi_row: i32, mi_col: i32, bsize: i32, partition: i32, mi_rows: i32, mi_cols: i32, arena: *mut u16, out: *mut u8, above_out: *mut i8, left_out: *mut i8, arena_out: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_write_modes_sb(above_in: *const i8, left_in: *const i8, mi_row: i32, mi_col: i32, bsize: i32, tree: *const i8, tree_len: i32, arena: *mut u16, out: *mut u8, above_out: *mut i8, left_out: *mut i8, arena_out: *mut u16, tree_consumed: *mut i32) -> u32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_block_mvs(mode: i32, is_compound: i32, diff_row0: i32, diff_col0: i32, diff_row1: i32, diff_col1: i32, usehp: i32, joints: *mut u16, comp0: *mut u16, comp1: *mut u16, out: *mut u8, o_joints: *mut u16, o_c0: *mut u16, o_c1: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_inter_mode_drl(seg_skip: i32, mode: i32, mode_ctx: i32, inter_compound_mode_cdf: *mut u16, newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, drl_cdf: *mut u16, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, o_icm: *mut u16, o_newmv: *mut u16, o_zeromv: *mut u16, o_refmv: *mut u16, o_drl: *mut u16) -> u32;
@@ -631,6 +633,27 @@ pub fn ref_collect_neighbors_ref_counts(
 /// Reference `get_partition_subsize` (static inline, common_data.h).
 pub fn ref_get_partition_subsize(bsize: i32, partition: i32) -> i32 {
     unsafe { shim_get_partition_subsize(bsize, partition) }
+}
+
+/// Reference `write_modes_sb` partition-tree recursion (fully-in-frame, stubbed blocks).
+/// tree is the pre-order partition sequence. Returns (bytes, above[64], left[32],
+/// arena[220], tree_consumed).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn ref_write_modes_sb(
+    above_in: &[i8; 64], left_in: &[i8; 32], mi_row: i32, mi_col: i32, bsize: i32, tree: &[i8],
+    arena: &[u16; 220],
+) -> (Vec<u8>, [i8; 64], [i8; 32], [u16; 220], i32) {
+    let mut ar = *arena;
+    let mut out = vec![0u8; 256];
+    let (mut ao, mut lo, mut aro) = ([0i8; 64], [0i8; 32], [0u16; 220]);
+    let mut consumed = 0i32;
+    let n = unsafe {
+        shim_write_modes_sb(above_in.as_ptr(), left_in.as_ptr(), mi_row, mi_col, bsize,
+            tree.as_ptr(), tree.len() as i32, ar.as_mut_ptr(), out.as_mut_ptr(), ao.as_mut_ptr(),
+            lo.as_mut_ptr(), aro.as_mut_ptr(), &mut consumed)
+    };
+    out.truncate(n as usize);
+    (out, ao, lo, aro, consumed)
 }
 
 /// Reference `write_modes_sb` per-node partition step (context-select -> write_partition

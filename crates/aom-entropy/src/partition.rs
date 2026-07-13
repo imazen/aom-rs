@@ -2637,3 +2637,59 @@ pub fn write_partition_node(
     let subsize = get_partition_subsize(bsize, partition) as usize;
     update_ext_partition_context(above, left, mi_row, mi_col, subsize, bsize, partition);
 }
+
+const PARTITION_SPLIT_MODE: i32 = 3;
+
+#[allow(clippy::too_many_arguments)]
+fn write_modes_sb_recurse(
+    enc: &mut OdEcEnc,
+    above: &mut [i8],
+    left: &mut [i8],
+    arena: &mut [[u16; 11]; 20],
+    tree: &[i8],
+    idx: &mut usize,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) {
+    if bsize < BLOCK_8X8 {
+        return; // 4X4 leaf under an 8X8 split: no partition, no context
+    }
+    let p = tree[*idx] as i32;
+    *idx += 1;
+    let subsize = get_partition_subsize(bsize, p) as usize;
+    let hbs = MI_SIZE_WIDE[bsize] / 2;
+    let ctx = partition_plane_context(above, left, mi_row as usize, mi_col as usize, bsize) as usize;
+    write_partition(enc, &mut arena[ctx], partition_cdf_length(bsize), p, true, true, bsize);
+    if p == PARTITION_SPLIT_MODE && bsize > BLOCK_8X8 {
+        write_modes_sb_recurse(enc, above, left, arena, tree, idx, mi_row, mi_col, subsize);
+        write_modes_sb_recurse(enc, above, left, arena, tree, idx, mi_row, mi_col + hbs, subsize);
+        write_modes_sb_recurse(enc, above, left, arena, tree, idx, mi_row + hbs, mi_col, subsize);
+        write_modes_sb_recurse(enc, above, left, arena, tree, idx, mi_row + hbs, mi_col + hbs, subsize);
+    }
+    update_ext_partition_context(above, left, mi_row, mi_col, subsize, bsize, p);
+}
+
+/// `write_modes_sb` (`av1/encoder/bitstream.c`): the partition-tree recursion for a
+/// superblock. At each node it codes the partition (context threaded through the tree
+/// via the neighbour partition context) and either recurses into four quadrants
+/// (`PARTITION_SPLIT`) or writes the sub-blocks. This fully-in-frame form takes the
+/// per-node partitions as a pre-order sequence and stubs the block content (which is
+/// coded by the separately-validated block drivers); it validates the partition symbol
+/// stream, the cross-node context threading, and the CDF-arena adaptation. Returns the
+/// number of `tree` entries consumed.
+#[allow(clippy::too_many_arguments)]
+pub fn write_modes_sb(
+    enc: &mut OdEcEnc,
+    above: &mut [i8],
+    left: &mut [i8],
+    arena: &mut [[u16; 11]; 20],
+    tree: &[i8],
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) -> usize {
+    let mut idx = 0usize;
+    write_modes_sb_recurse(enc, above, left, arena, tree, &mut idx, mi_row, mi_col, bsize);
+    idx
+}

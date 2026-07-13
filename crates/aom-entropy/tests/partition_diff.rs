@@ -2852,3 +2852,69 @@ fn write_partition_node_matches_c() {
         assert_eq!(ar_rs_f, ar_c, "arena bsize={bsize} scen={scenario}");
     }
 }
+
+#[test]
+fn write_modes_sb_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{get_partition_subsize, write_modes_sb};
+    let mut rng = Rng(0x1e_9d05_c0de_001au64);
+    // Generate a fully-in-frame partition tree (pre-order) for a square bsize.
+    fn gen(rng: &mut Rng, bsize: usize, out: &mut Vec<i8>) {
+        let cdf_len = if bsize == 3 { 4 } else if bsize == 15 { 8 } else { 10 };
+        let p = (rng.next() % cdf_len as u64) as i32;
+        out.push(p as i8);
+        if p == 3 && bsize > 3 {
+            let sub = get_partition_subsize(bsize, 3) as usize;
+            for _ in 0..4 {
+                gen(rng, sub, out);
+            }
+        }
+    }
+    let mk = |rng: &mut Rng, n: usize, out: &mut [u16]| {
+        let mut prev = 32768i32;
+        for e in out.iter_mut().take(n - 1) {
+            let v = (prev - 1 - (rng.next() % 400) as i32).max(n as i32);
+            *e = v as u16;
+            prev = v;
+        }
+        out[n - 1] = 0;
+        out[n] = 0;
+    };
+    for _ in 0..60_000 {
+        let mut tree = Vec::new();
+        gen(&mut rng, 12, &mut tree); // start at BLOCK_64X64
+        let tree_i8: Vec<i8> = tree.clone();
+        let mut above_in = [0i8; 64];
+        let mut left_in = [0i8; 32];
+        for a in above_in.iter_mut() {
+            *a = (rng.next() % 32) as i8;
+        }
+        for l in left_in.iter_mut() {
+            *l = (rng.next() % 32) as i8;
+        }
+        let mut arena_n = [[0u16; 11]; 20];
+        let mut arena_f = [0u16; 220];
+        for c in 0..20 {
+            let bsl = c / 4;
+            let ns = if bsl == 0 { 4 } else if bsl == 4 { 8 } else { 10 };
+            let mut row = [0u16; 11];
+            mk(&mut rng, ns, &mut row);
+            arena_n[c] = row;
+            for j in 0..11 {
+                arena_f[c * 11 + j] = row[j];
+            }
+        }
+        let mut enc = OdEcEnc::new();
+        let (mut a_rs, mut l_rs, mut ar_rs) = (above_in, left_in, arena_n);
+        let consumed = write_modes_sb(&mut enc, &mut a_rs, &mut l_rs, &mut ar_rs, &tree_i8, 0, 0, 12);
+        let got = enc.done().to_vec();
+        let (want, a_c, l_c, ar_c, consumed_c) =
+            c::ref_write_modes_sb(&above_in, &left_in, 0, 0, 12, &tree_i8, &arena_f);
+        assert_eq!(got, want, "bytes tree_len={}", tree.len());
+        assert_eq!(consumed as i32, consumed_c, "tree consumed");
+        assert_eq!(a_rs, a_c, "above");
+        assert_eq!(l_rs, l_c, "left");
+        let ar_rs_f: [u16; 220] = core::array::from_fn(|i| ar_rs[i / 11][i % 11]);
+        assert_eq!(ar_rs_f, ar_c, "arena");
+    }
+}
