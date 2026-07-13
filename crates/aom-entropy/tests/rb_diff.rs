@@ -710,3 +710,56 @@ fn read_global_motion_inverts_write() {
         assert_eq!(g.wmmat, wm, "gm wmmat ty={ty} hp={allow_hp}");
     }
 }
+
+#[test]
+fn read_timing_and_decoder_model_invert_write() {
+    use aom_entropy::header::{
+        read_decoder_model_info, read_timing_info_header, write_decoder_model_info,
+        write_timing_info_header, DecoderModelInfo, TimingInfoHeader,
+    };
+    let mut rng = Rng(0x1e_71de_c0de_01a0);
+    for _ in 0..100_000 {
+        // timing info
+        {
+            let equal = rng.next() & 1 == 1;
+            let t = TimingInfoHeader {
+                num_units_in_display_tick: rng.next() as u32,
+                time_scale: rng.next() as u32,
+                equal_picture_interval: equal,
+                num_ticks_per_picture: if equal { 1 + (rng.next() % (1 << 20)) as u32 } else { 1 },
+            };
+            let mut wb = WriteBitBuffer::new();
+            write_timing_info_header(&mut wb, &t);
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let g = read_timing_info_header(&mut rb);
+            assert_eq!(g.num_units_in_display_tick, t.num_units_in_display_tick, "timing units");
+            assert_eq!(g.time_scale, t.time_scale, "timing scale");
+            assert_eq!(g.equal_picture_interval, equal, "timing equal");
+            if equal {
+                assert_eq!(g.num_ticks_per_picture, t.num_ticks_per_picture, "timing ticks");
+            }
+        }
+        // decoder model info
+        {
+            let d = DecoderModelInfo {
+                encoder_decoder_buffer_delay_length: 1 + (rng.next() % 32) as i32,
+                num_units_in_decoding_tick: rng.next() as u32,
+                buffer_removal_time_length: 1 + (rng.next() % 32) as i32,
+                frame_presentation_time_length: 1 + (rng.next() % 32) as i32,
+            };
+            let mut wb = WriteBitBuffer::new();
+            write_decoder_model_info(&mut wb, &d);
+            let b = wb.bytes().to_vec();
+            let mut rb = ReadBitBuffer::new(&b);
+            let g = read_decoder_model_info(&mut rb);
+            assert_eq!(
+                (g.encoder_decoder_buffer_delay_length, g.num_units_in_decoding_tick,
+                 g.buffer_removal_time_length, g.frame_presentation_time_length),
+                (d.encoder_decoder_buffer_delay_length, d.num_units_in_decoding_tick,
+                 d.buffer_removal_time_length, d.frame_presentation_time_length),
+                "decoder model"
+            );
+        }
+    }
+}

@@ -2036,3 +2036,29 @@ pub fn read_global_motion(
 ) -> [WarpedMotionParams; 7] {
     core::array::from_fn(|i| read_global_motion_params(rb, &ref_global_motion[i], allow_hp))
 }
+
+/// `read_timing_info_header` — inverse of [`write_timing_info_header`]: display-tick
+/// units + time scale + the equal-picture-interval flag and (when set) the uvlc
+/// ticks-per-picture.
+pub fn read_timing_info_header(rb: &mut ReadBitBuffer) -> TimingInfoHeader {
+    let num_units_in_display_tick = rb.read_unsigned_literal(32);
+    let time_scale = rb.read_unsigned_literal(32);
+    let equal_picture_interval = rb.read_bit() != 0;
+    let num_ticks_per_picture = if equal_picture_interval { rb.read_uvlc() + 1 } else { 1 };
+    TimingInfoHeader { num_units_in_display_tick, time_scale, equal_picture_interval, num_ticks_per_picture }
+}
+
+/// `read_decoder_model_info` — inverse of [`write_decoder_model_info`]: the buffer-delay
+/// / buffer-removal / frame-presentation bit-lengths + decoding-tick units.
+pub fn read_decoder_model_info(rb: &mut ReadBitBuffer) -> DecoderModelInfo {
+    let encoder_decoder_buffer_delay_length = rb.read_literal(5) + 1;
+    let num_units_in_decoding_tick = rb.read_unsigned_literal(32);
+    let buffer_removal_time_length = rb.read_literal(5) + 1;
+    let frame_presentation_time_length = rb.read_literal(5) + 1;
+    DecoderModelInfo {
+        encoder_decoder_buffer_delay_length,
+        num_units_in_decoding_tick,
+        buffer_removal_time_length,
+        frame_presentation_time_length,
+    }
+}
