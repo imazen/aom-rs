@@ -151,3 +151,31 @@ uint32_t shim_write_delta_lflevel(uint16_t *delta_lf_cdf, int delta_lflevel, uin
   od_ec_enc_clear(&ec);
   return n;
 }
+
+/* Transcribed write_cfl_alphas over pristine C od_ec, using the real CFL_* macros.
+ * cfl_alpha_cdf is passed flat [6][17]; sign + up-to-two magnitude CDFs adapt. */
+uint32_t shim_write_cfl_alphas(uint16_t *cfl_sign_cdf, uint16_t *cfl_alpha_cdf, int idx,
+                               int joint_sign, uint8_t *out, uint16_t *out_sign_cdf,
+                               uint16_t *out_alpha_cdf) {
+  od_ec_enc ec;
+  od_ec_enc_init(&ec, 256);
+  od_ec_encode_cdf_q15(&ec, joint_sign, cfl_sign_cdf, CFL_JOINT_SIGNS);
+  update_cdf(cfl_sign_cdf, joint_sign, CFL_JOINT_SIGNS);
+  if (CFL_SIGN_U(joint_sign) != CFL_SIGN_ZERO) {
+    uint16_t *cdf_u = cfl_alpha_cdf + CFL_CONTEXT_U(joint_sign) * 17;
+    od_ec_encode_cdf_q15(&ec, CFL_IDX_U(idx), cdf_u, CFL_ALPHABET_SIZE);
+    update_cdf(cdf_u, CFL_IDX_U(idx), CFL_ALPHABET_SIZE);
+  }
+  if (CFL_SIGN_V(joint_sign) != CFL_SIGN_ZERO) {
+    uint16_t *cdf_v = cfl_alpha_cdf + CFL_CONTEXT_V(joint_sign) * 17;
+    od_ec_encode_cdf_q15(&ec, CFL_IDX_V(idx), cdf_v, CFL_ALPHABET_SIZE);
+    update_cdf(cdf_v, CFL_IDX_V(idx), CFL_ALPHABET_SIZE);
+  }
+  uint32_t n = 0;
+  const unsigned char *buf = od_ec_enc_done(&ec, &n);
+  for (uint32_t i = 0; i < n; i++) out[i] = buf[i];
+  for (int i = 0; i < 9; i++) out_sign_cdf[i] = cfl_sign_cdf[i];
+  for (int i = 0; i < 6 * 17; i++) out_alpha_cdf[i] = cfl_alpha_cdf[i];
+  od_ec_enc_clear(&ec);
+  return n;
+}

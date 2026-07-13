@@ -237,6 +237,7 @@ extern "C" {
     fn shim_write_skip(skip_cdf: *mut u16, seg_skip_active: i32, skip_txfm: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_delta_qindex(delta_q_cdf: *mut u16, delta_qindex: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
     fn shim_write_delta_lflevel(delta_lf_cdf: *mut u16, delta_lflevel: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_cfl_alphas(cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, idx: i32, joint_sign: i32, out: *mut u8, out_sign_cdf: *mut u16, out_alpha_cdf: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
 }
@@ -244,6 +245,19 @@ extern "C" {
 /// Reference `partition_cdf_length`.
 pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
     unsafe { shim_partition_cdf_length(bsize) }
+}
+
+/// Reference `write_cfl_alphas` (transcribed over the pristine C od_ec + update_cdf).
+/// Returns coded bytes, the adapted sign CDF (9), and the adapted alpha CDFs (6x17 flat).
+pub fn ref_write_cfl_alphas(cfl_sign_cdf: &[u16; 9], cfl_alpha_cdf: &[u16; 102], idx: i32, joint_sign: i32) -> (Vec<u8>, [u16; 9], [u16; 102]) {
+    let mut sc = *cfl_sign_cdf;
+    let mut ac = *cfl_alpha_cdf;
+    let mut out = vec![0u8; 16];
+    let mut osc = [0u16; 9];
+    let mut oac = [0u16; 102];
+    let n = unsafe { shim_write_cfl_alphas(sc.as_mut_ptr(), ac.as_mut_ptr(), idx, joint_sign, out.as_mut_ptr(), osc.as_mut_ptr(), oac.as_mut_ptr()) };
+    out.truncate(n as usize);
+    (out, osc, oac)
 }
 
 /// Reference `write_delta_lflevel` (transcribed over the pristine C od_ec + update_cdf).

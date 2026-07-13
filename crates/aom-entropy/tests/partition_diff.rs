@@ -260,3 +260,53 @@ fn write_delta_lflevel_matches_c() {
         assert_eq!(my_cdf, want_cdf, "write_delta_lflevel cdf d={delta_lflevel}");
     }
 }
+
+#[test]
+fn write_cfl_alphas_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_cfl_alphas;
+    let mut rng = Rng(0xcf1a_c0de_a11a_0009);
+    // build a valid ns-symbol inverse-cumulative CDF into cdf[0..ns], count at cdf[ns]
+    let mk = |rng: &mut Rng, ns: usize, cdf: &mut [u16]| {
+        let mut vals = [0i32; 16];
+        for v in vals.iter_mut().take(ns - 1) {
+            *v = 1 + (rng.next() % 32766) as i32;
+        }
+        vals[..ns - 1].sort_unstable();
+        vals[..ns - 1].reverse();
+        let mut prev = 32768i32;
+        for i in 0..ns - 1 {
+            let v = vals[i].min(prev - 1).max((ns - 1 - i) as i32);
+            cdf[i] = v as u16;
+            prev = v;
+        }
+        cdf[ns - 1] = 0;
+        cdf[ns] = 0;
+    };
+    for _ in 0..200_000 {
+        let mut sign_cdf = [0u16; 9];
+        mk(&mut rng, 8, &mut sign_cdf);
+        let mut alpha_flat = [0u16; 102];
+        let mut alpha = [[0u16; 17]; 6];
+        for ctx in 0..6 {
+            let mut c = [0u16; 17];
+            mk(&mut rng, 16, &mut c);
+            alpha[ctx] = c;
+            alpha_flat[ctx * 17..ctx * 17 + 17].copy_from_slice(&c);
+        }
+        let idx = (rng.next() % 256) as i32;
+        let joint_sign = (rng.next() % 8) as i32;
+
+        let mut my_sign = sign_cdf;
+        let mut my_alpha = alpha;
+        let mut enc = OdEcEnc::new();
+        write_cfl_alphas(&mut enc, &mut my_sign, &mut my_alpha, idx, joint_sign);
+        let got = enc.done().to_vec();
+
+        let (want, want_sign, want_alpha) = c::ref_write_cfl_alphas(&sign_cdf, &alpha_flat, idx, joint_sign);
+        assert_eq!(got, want, "cfl bytes idx={idx} js={joint_sign}");
+        assert_eq!(my_sign, want_sign, "cfl sign cdf idx={idx} js={joint_sign}");
+        let my_alpha_flat: Vec<u16> = my_alpha.iter().flatten().copied().collect();
+        assert_eq!(&my_alpha_flat[..], &want_alpha[..], "cfl alpha cdf idx={idx} js={joint_sign}");
+    }
+}

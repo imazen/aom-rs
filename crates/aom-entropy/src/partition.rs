@@ -203,3 +203,43 @@ pub fn write_delta_lflevel(enc: &mut OdEcEnc, delta_lf_cdf: &mut [u16], delta_lf
         write_bit(enc, sign as i32);
     }
 }
+
+const CFL_JOINT_SIGNS: usize = 8;
+const CFL_ALPHABET_SIZE: usize = 16;
+const CFL_SIGNS: i32 = 3;
+
+fn cfl_sign_u(js: i32) -> i32 {
+    ((js + 1) * 11) >> 5
+}
+fn cfl_sign_v(js: i32) -> i32 {
+    (js + 1) - CFL_SIGNS * cfl_sign_u(js)
+}
+fn cfl_context_u(js: i32) -> i32 {
+    js + 1 - CFL_SIGNS
+}
+fn cfl_context_v(js: i32) -> i32 {
+    cfl_sign_v(js) * CFL_SIGNS + cfl_sign_u(js) - CFL_SIGNS
+}
+
+/// `write_cfl_alphas` (`av1/encoder/bitstream.c`): the chroma-from-luma alpha coding —
+/// the joint-sign symbol on `cfl_sign_cdf` (8 symbols), then, for each plane whose sign
+/// is nonzero, the 4-bit alpha magnitude (`CFL_IDX_U/V(idx)`) on `cfl_alpha_cdf` at the
+/// plane's derived context. `cfl_alpha_cdf` holds the 6 context CDFs (17 entries each),
+/// all adapted in place.
+pub fn write_cfl_alphas(
+    enc: &mut OdEcEnc,
+    cfl_sign_cdf: &mut [u16],
+    cfl_alpha_cdf: &mut [[u16; 17]; 6],
+    idx: i32,
+    joint_sign: i32,
+) {
+    write_symbol(enc, joint_sign, cfl_sign_cdf, CFL_JOINT_SIGNS);
+    if cfl_sign_u(joint_sign) != 0 {
+        let ctx = cfl_context_u(joint_sign) as usize;
+        write_symbol(enc, idx >> 4, &mut cfl_alpha_cdf[ctx], CFL_ALPHABET_SIZE);
+    }
+    if cfl_sign_v(joint_sign) != 0 {
+        let ctx = cfl_context_v(joint_sign) as usize;
+        write_symbol(enc, idx & 15, &mut cfl_alpha_cdf[ctx], CFL_ALPHABET_SIZE);
+    }
+}
