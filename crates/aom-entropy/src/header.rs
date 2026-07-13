@@ -1676,3 +1676,59 @@ pub fn read_cdef_header(
     }
     c
 }
+
+/// `read_loopfilter` (setup_loopfilter, `av1/decoder/decodeframe.c`) — decoder-faithful
+/// inverse of [`encode_loopfilter`]: filter levels + sharpness, then the mode/ref delta
+/// state. Per the real decoder the delta-update bit is gated on `mode_ref_delta_enabled`
+/// (the libaom encoder only ever emits `enabled = 1`, where its unconditional
+/// `meaningful` bit coincides with this update bit). Unchanged deltas keep the caller's
+/// `last_*` (the primary-ref-frame carry). `allow_intrabc` / `num_planes` come from the
+/// frame/sequence parse.
+pub fn read_loopfilter(
+    rb: &mut ReadBitBuffer,
+    allow_intrabc: bool,
+    num_planes: usize,
+    last_ref_deltas: [i8; 8],
+    last_mode_deltas: [i8; 2],
+) -> LoopfilterHeader {
+    let mut lf = LoopfilterHeader {
+        allow_intrabc,
+        filter_level: [0, 0],
+        filter_level_u: 0,
+        filter_level_v: 0,
+        sharpness_level: 0,
+        mode_ref_delta_enabled: false,
+        mode_ref_delta_update: false,
+        ref_deltas: last_ref_deltas,
+        mode_deltas: last_mode_deltas,
+        last_ref_deltas,
+        last_mode_deltas,
+    };
+    if allow_intrabc {
+        return lf;
+    }
+    lf.filter_level[0] = rb.read_literal(6);
+    lf.filter_level[1] = rb.read_literal(6);
+    if num_planes > 1 && (lf.filter_level[0] != 0 || lf.filter_level[1] != 0) {
+        lf.filter_level_u = rb.read_literal(6);
+        lf.filter_level_v = rb.read_literal(6);
+    }
+    lf.sharpness_level = rb.read_literal(3);
+    lf.mode_ref_delta_enabled = rb.read_bit() != 0;
+    if lf.mode_ref_delta_enabled {
+        lf.mode_ref_delta_update = rb.read_bit() != 0;
+        if lf.mode_ref_delta_update {
+            for d in lf.ref_deltas.iter_mut() {
+                if rb.read_bit() != 0 {
+                    *d = rb.read_inv_signed_literal(6) as i8;
+                }
+            }
+            for d in lf.mode_deltas.iter_mut() {
+                if rb.read_bit() != 0 {
+                    *d = rb.read_inv_signed_literal(6) as i8;
+                }
+            }
+        }
+    }
+    lf
+}

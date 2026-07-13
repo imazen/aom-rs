@@ -291,3 +291,78 @@ fn read_quant_cdef_headers_invert_write() {
         }
     }
 }
+
+#[test]
+fn read_loopfilter_inverts_write() {
+    use aom_entropy::header::{encode_loopfilter, read_loopfilter, LoopfilterHeader};
+    let mut rng = Rng(0x1e_10f1_c0de_0130);
+    let d8 = |rng: &mut Rng| -> i8 { ((rng.next() % 127) as i32 - 63) as i8 };
+    for _ in 0..100_000 {
+        let num_planes = if rng.next() & 1 == 1 { 3 } else { 1 };
+        let fl0 = (rng.next() % 64) as i32;
+        let fl1 = (rng.next() % 64) as i32;
+        let uv_coded = num_planes > 1 && (fl0 != 0 || fl1 != 0);
+        let flu = if uv_coded { (rng.next() % 64) as i32 } else { 0 };
+        let flv = if uv_coded { (rng.next() % 64) as i32 } else { 0 };
+        let sharp = (rng.next() % 8) as i32;
+        let enabled = rng.next() & 1 == 1;
+
+        let mut last_ref = [0i8; 8];
+        let mut last_mode = [0i8; 2];
+        for r in last_ref.iter_mut() { *r = d8(&mut rng); }
+        for m in last_mode.iter_mut() { *m = d8(&mut rng); }
+
+        // Scenario A: some deltas change (meaningful=update=true). Scenario B: none (update=false).
+        let scenario_a = enabled && rng.next() & 1 == 1;
+        let mut ref_d = last_ref;
+        let mut mode_d = last_mode;
+        let update;
+        if scenario_a {
+            update = true;
+            // guarantee >=1 change vs last[0], staying in the su(6)=[-63,63] range.
+            let mut nv = d8(&mut rng);
+            if nv == last_ref[0] {
+                nv = if last_ref[0] < 63 { last_ref[0] + 1 } else { last_ref[0] - 1 };
+            }
+            ref_d[0] = nv;
+            for r in ref_d[1..].iter_mut() {
+                if rng.next() & 1 == 1 {
+                    *r = d8(&mut rng);
+                }
+            }
+            for m in mode_d.iter_mut() {
+                if rng.next() & 1 == 1 {
+                    *m = d8(&mut rng);
+                }
+            }
+        } else {
+            update = false; // deltas == last => meaningful false
+        }
+
+        let lf = LoopfilterHeader {
+            allow_intrabc: false,
+            filter_level: [fl0, fl1],
+            filter_level_u: flu,
+            filter_level_v: flv,
+            sharpness_level: sharp,
+            mode_ref_delta_enabled: enabled,
+            mode_ref_delta_update: update,
+            ref_deltas: ref_d,
+            mode_deltas: mode_d,
+            last_ref_deltas: last_ref,
+            last_mode_deltas: last_mode,
+        };
+        let mut wb = WriteBitBuffer::new();
+        encode_loopfilter(&mut wb, &lf, num_planes);
+        let b = wb.bytes().to_vec();
+        let mut rb = ReadBitBuffer::new(&b);
+        let g = read_loopfilter(&mut rb, false, num_planes, last_ref, last_mode);
+        assert_eq!(g.filter_level, [fl0, fl1], "filter levels");
+        assert_eq!((g.filter_level_u, g.filter_level_v), (flu, flv), "uv levels");
+        assert_eq!(g.sharpness_level, sharp, "sharpness");
+        assert_eq!(g.mode_ref_delta_enabled, enabled, "enabled");
+        assert_eq!(g.mode_ref_delta_update, update, "update np={num_planes} a={scenario_a}");
+        assert_eq!(g.ref_deltas, ref_d, "ref_deltas");
+        assert_eq!(g.mode_deltas, mode_d, "mode_deltas");
+    }
+}
