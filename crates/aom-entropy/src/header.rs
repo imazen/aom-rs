@@ -1044,3 +1044,153 @@ pub fn write_sequence_header_obu(wb: &mut WriteBitBuffer, s: &SequenceHeaderObu)
     wb.write_bit(s.film_grain_params_present as u32);
     wb.add_trailing_bits();
 }
+
+// ---- frame-header OBU: prefix ---------------------------------------------
+
+/// The bounded prefix state of `write_uncompressed_header_obu` (through the ref
+/// order hints — before the per-frame-type frame-size / ref-map signaling).
+#[derive(Clone, Debug)]
+pub struct FrameHeaderPrefix {
+    pub reduced_still_picture_hdr: bool,
+    pub show_existing_frame: bool, // encode_show_existing_frame(cm)
+    pub existing_fb_idx_to_show: i32,
+    pub decoder_model_info_present_flag: bool,
+    pub equal_picture_interval: bool,
+    pub frame_presentation_time: u32,
+    pub frame_presentation_time_length: u32,
+    pub frame_id_numbers_present_flag: bool,
+    pub frame_id_length: u32,
+    pub display_frame_id: i32,
+    pub frame_type: i32, // KEY=0 INTER=1 INTRA_ONLY=2 S=3
+    pub show_frame: bool,
+    pub showable_frame: bool,
+    pub error_resilient_mode: bool,
+    pub disable_cdf_update: bool,
+    pub force_screen_content_tools: i32,
+    pub allow_screen_content_tools: bool,
+    pub force_integer_mv: i32,
+    pub cur_frame_force_integer_mv: bool,
+    pub superres_upscaled_width: i32,
+    pub superres_upscaled_height: i32,
+    pub max_frame_width: i32,
+    pub max_frame_height: i32,
+    pub current_frame_id: i32,
+    pub enable_order_hint: bool,
+    pub order_hint: i32,
+    pub order_hint_bits_minus_1: i32,
+    pub primary_ref_frame: i32,
+    pub buffer_removal_time_present: bool,
+    pub operating_points_cnt_minus_1: i32,
+    pub op_decoder_model_param_present: [bool; 32],
+    pub operating_point_idc: [i32; 32],
+    pub temporal_layer_id: i32,
+    pub spatial_layer_id: i32,
+    pub buffer_removal_times: [u32; 32],
+    pub buffer_removal_time_length: u32,
+    pub refresh_frame_flags: i32,
+    pub ref_frame_map_order_hint: [i32; 8],
+}
+
+/// The prefix of `write_uncompressed_header_obu` (`av1/encoder/bitstream.c`): the
+/// show-existing-frame path, frame type / show / showable / error-resilient flags,
+/// disable-cdf-update, screen-content-tools + integer-mv, current-frame-id, the
+/// frame-size-override flag, order hint, primary ref, the buffer-removal-times loop,
+/// refresh flags, and the error-resilient ref order hints. Returns
+/// `(frame_size_override_flag, returned_early)` — the caller threads the override
+/// into the per-frame-type body; `returned_early` mirrors the show-existing-frame
+/// early return. The many spec asserts + `aom_internal_error` paths have no byte
+/// effect and are omitted (callers pass spec-valid state).
+pub fn write_frame_header_prefix(wb: &mut WriteBitBuffer, p: &FrameHeaderPrefix) -> (i32, bool) {
+    let sframe = p.frame_type == 3;
+    let intra_only = p.frame_type == 0 || p.frame_type == 2;
+    let tu_pts = |wb: &mut WriteBitBuffer| {
+        wb.write_unsigned_literal(p.frame_presentation_time, p.frame_presentation_time_length);
+    };
+    if !p.reduced_still_picture_hdr {
+        if p.show_existing_frame {
+            wb.write_bit(1);
+            wb.write_literal(p.existing_fb_idx_to_show, 3);
+            if p.decoder_model_info_present_flag && !p.equal_picture_interval {
+                tu_pts(wb);
+            }
+            if p.frame_id_numbers_present_flag {
+                wb.write_literal(p.display_frame_id, p.frame_id_length);
+            }
+            return (0, true);
+        }
+        wb.write_bit(0);
+        wb.write_literal(p.frame_type, 2);
+        wb.write_bit(p.show_frame as u32);
+        if p.show_frame {
+            if p.decoder_model_info_present_flag && !p.equal_picture_interval {
+                tu_pts(wb);
+            }
+        } else {
+            wb.write_bit(p.showable_frame as u32);
+        }
+        if sframe {
+            // assert(error_resilient_mode) — no bytes
+        } else if !(p.frame_type == 0 && p.show_frame) {
+            wb.write_bit(p.error_resilient_mode as u32);
+        }
+    }
+    wb.write_bit(p.disable_cdf_update as u32);
+    if p.force_screen_content_tools == 2 {
+        wb.write_bit(p.allow_screen_content_tools as u32);
+    }
+    if p.allow_screen_content_tools && p.force_integer_mv == 2 {
+        wb.write_bit(p.cur_frame_force_integer_mv as u32);
+    }
+    let mut frame_size_override_flag = 0;
+    if !p.reduced_still_picture_hdr {
+        if p.frame_id_numbers_present_flag {
+            wb.write_literal(p.current_frame_id, p.frame_id_length);
+        }
+        frame_size_override_flag = if sframe {
+            1
+        } else {
+            (p.superres_upscaled_width != p.max_frame_width
+                || p.superres_upscaled_height != p.max_frame_height) as i32
+        };
+        if !sframe {
+            wb.write_bit(frame_size_override_flag as u32);
+        }
+        if p.enable_order_hint {
+            wb.write_literal(p.order_hint, (p.order_hint_bits_minus_1 + 1) as u32);
+        }
+        if !p.error_resilient_mode && !intra_only {
+            wb.write_literal(p.primary_ref_frame, 3); // PRIMARY_REF_BITS
+        }
+    }
+    if p.decoder_model_info_present_flag {
+        wb.write_bit(p.buffer_removal_time_present as u32);
+        if p.buffer_removal_time_present {
+            for op in 0..=(p.operating_points_cnt_minus_1 as usize) {
+                if p.op_decoder_model_param_present[op] {
+                    let idc = p.operating_point_idc[op];
+                    if idc == 0
+                        || (((idc >> p.temporal_layer_id) & 0x1) != 0
+                            && ((idc >> (p.spatial_layer_id + 8)) & 0x1) != 0)
+                    {
+                        wb.write_unsigned_literal(
+                            p.buffer_removal_times[op],
+                            p.buffer_removal_time_length,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if (p.frame_type == 0 && !p.show_frame) || p.frame_type == 1 || p.frame_type == 2 {
+        wb.write_literal(p.refresh_frame_flags, 8); // REF_FRAMES
+    }
+    if (!intra_only || p.refresh_frame_flags != 0xff)
+        && p.error_resilient_mode
+        && p.enable_order_hint
+    {
+        for &oh in &p.ref_frame_map_order_hint {
+            wb.write_literal(oh, (p.order_hint_bits_minus_1 + 1) as u32);
+        }
+    }
+    (frame_size_override_flag, false)
+}

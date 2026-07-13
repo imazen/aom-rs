@@ -852,3 +852,112 @@ fn write_sequence_header_obu_matches_real_c() {
         assert_eq!(got, want, "write_sequence_header_obu profile={profile} reduced={reduced} op_cnt={op_cnt_m1}");
     }
 }
+
+#[test]
+fn write_frame_header_prefix_matches_c() {
+    use aom_entropy::header::{write_frame_header_prefix, FrameHeaderPrefix};
+    let mut rng = Rng(0xf4ed_c0de_a11a_0009);
+    let mask = |bits: u32| -> u32 { if bits >= 32 { u32::MAX } else { (1u32 << bits) - 1 } };
+    for _ in 0..300_000 {
+        let reduced = rng.next().is_multiple_of(5);
+        // reduced still picture => KEY, shown, no decoder-model, no show-existing.
+        let frame_type = if reduced { 0 } else { rng.range(0, 4) };
+        let show_existing = !reduced && rng.next().is_multiple_of(4);
+        let show_frame = reduced || rng.next().is_multiple_of(3);
+        let dm_present = !reduced && rng.next().is_multiple_of(3);
+        // S_FRAME requires error_resilient (asserted); keep spec-valid.
+        let error_resilient = if frame_type == 3 { true } else { !reduced && rng.next().is_multiple_of(2) };
+
+        let frame_id_present = rng.next().is_multiple_of(2);
+        let frame_id_length = rng.range(2, 17) as u32;
+        let fpt_len = rng.range(1, 33) as u32;
+        let oh_bits_m1 = rng.range(0, 8);
+        let oh_bits = (oh_bits_m1 + 1) as u32;
+        let brt_len = rng.range(1, 33) as u32;
+        let force_sct = rng.range(0, 3);
+        let force_int_mv = rng.range(0, 3);
+        let op_cnt_m1 = rng.range(0, 8);
+
+        // superres <= max (larger triggers internal_error). Sometimes equal.
+        let max_w = rng.range(16, 4097);
+        let max_h = rng.range(16, 4097);
+        let up_w = if rng.next().is_multiple_of(2) { max_w } else { rng.range(1, max_w + 1) };
+        let up_h = if rng.next().is_multiple_of(2) { max_h } else { rng.range(1, max_h + 1) };
+
+        let mut op_dmpp = [false; 32];
+        let mut op_idc = [0i32; 32];
+        let mut brt = [0u32; 32];
+        for i in 0..32 {
+            op_dmpp[i] = rng.next().is_multiple_of(2);
+            op_idc[i] = rng.range(0, 4096);
+            brt[i] = rng.next() as u32 & mask(brt_len);
+        }
+        let mut ref_oh = [0i32; 8];
+        for r in &mut ref_oh {
+            *r = (rng.next() as u32 & mask(oh_bits)) as i32;
+        }
+
+        let p = FrameHeaderPrefix {
+            reduced_still_picture_hdr: reduced,
+            show_existing_frame: show_existing,
+            existing_fb_idx_to_show: rng.range(0, 8),
+            decoder_model_info_present_flag: dm_present,
+            equal_picture_interval: rng.next().is_multiple_of(2),
+            frame_presentation_time: rng.next() as u32 & mask(fpt_len),
+            frame_presentation_time_length: fpt_len,
+            frame_id_numbers_present_flag: frame_id_present,
+            frame_id_length,
+            display_frame_id: (rng.next() as u32 & mask(frame_id_length)) as i32,
+            frame_type,
+            show_frame,
+            showable_frame: rng.next().is_multiple_of(2),
+            error_resilient_mode: error_resilient,
+            disable_cdf_update: rng.next().is_multiple_of(2),
+            force_screen_content_tools: force_sct,
+            allow_screen_content_tools: rng.next().is_multiple_of(2),
+            force_integer_mv: force_int_mv,
+            cur_frame_force_integer_mv: rng.next().is_multiple_of(2),
+            superres_upscaled_width: up_w,
+            superres_upscaled_height: up_h,
+            max_frame_width: max_w,
+            max_frame_height: max_h,
+            current_frame_id: (rng.next() as u32 & mask(frame_id_length)) as i32,
+            enable_order_hint: rng.next().is_multiple_of(2),
+            order_hint: (rng.next() as u32 & mask(oh_bits)) as i32,
+            order_hint_bits_minus_1: oh_bits_m1,
+            primary_ref_frame: rng.range(0, 8),
+            buffer_removal_time_present: rng.next().is_multiple_of(2),
+            operating_points_cnt_minus_1: op_cnt_m1,
+            op_decoder_model_param_present: op_dmpp,
+            operating_point_idc: op_idc,
+            temporal_layer_id: rng.range(0, 8),
+            spatial_layer_id: rng.range(0, 4),
+            buffer_removal_times: brt,
+            buffer_removal_time_length: brt_len,
+            refresh_frame_flags: rng.range(0, 256),
+            ref_frame_map_order_hint: ref_oh,
+        };
+
+        let mut wb = WriteBitBuffer::new();
+        write_frame_header_prefix(&mut wb, &p);
+        let got = wb.bytes().to_vec();
+
+        let t: [i64; 34] = [
+            reduced as i64, show_existing as i64, p.existing_fb_idx_to_show as i64, dm_present as i64,
+            p.equal_picture_interval as i64, p.frame_presentation_time as i64, fpt_len as i64,
+            frame_id_present as i64, frame_id_length as i64, p.display_frame_id as i64, frame_type as i64,
+            show_frame as i64, p.showable_frame as i64, error_resilient as i64, p.disable_cdf_update as i64,
+            force_sct as i64, p.allow_screen_content_tools as i64, force_int_mv as i64,
+            p.cur_frame_force_integer_mv as i64, up_w as i64, up_h as i64, max_w as i64, max_h as i64,
+            p.current_frame_id as i64, p.enable_order_hint as i64, p.order_hint as i64, oh_bits_m1 as i64,
+            p.primary_ref_frame as i64, p.buffer_removal_time_present as i64, op_cnt_m1 as i64,
+            p.temporal_layer_id as i64, p.spatial_layer_id as i64, brt_len as i64, p.refresh_frame_flags as i64,
+        ];
+        let op_dmpp_i: [i64; 32] = std::array::from_fn(|i| op_dmpp[i] as i64);
+        let op_idc_i: [i64; 32] = std::array::from_fn(|i| op_idc[i] as i64);
+        let brt_i: [i64; 32] = std::array::from_fn(|i| brt[i] as i64);
+        let ref_oh_i: [i64; 8] = std::array::from_fn(|i| ref_oh[i] as i64);
+        let want = c::ref_write_frame_header_prefix(&t, &op_dmpp_i, &op_idc_i, &brt_i, &ref_oh_i);
+        assert_eq!(got, want, "frame_header_prefix ft={frame_type} reduced={reduced} show_ex={show_existing}");
+    }
+}

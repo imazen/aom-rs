@@ -222,6 +222,15 @@ extern "C" {
     fn shim_write_dec_model_op(dec_delay: u32, enc_delay: u32, low_delay: i32, delay_len: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_sequence_header_obu(top: *const i64, sh: *const i64, cc: *const i64, idc: *const i64, level: *const i64, tier: *const i64, dmpp: *const i64, dispp: *const i64, decdelay: *const i64, encdelay: *const i64, lowdelay: *const i64, initdelay: *const i64, out: *mut u8) -> u32;
+    fn shim_write_frame_header_prefix(t: *const i64, op_dmpp: *const i64, op_idc: *const i64, brt: *const i64, ref_oh: *const i64, out: *mut u8) -> u32;
+}
+
+/// Reference `write_uncompressed_header_obu` prefix (transcribed over the real aom_wb).
+pub fn ref_write_frame_header_prefix(t: &[i64; 34], op_dmpp: &[i64; 32], op_idc: &[i64; 32], brt: &[i64; 32], ref_oh: &[i64; 8]) -> Vec<u8> {
+    let mut out = vec![0u8; 256];
+    let n = unsafe { shim_write_frame_header_prefix(t.as_ptr(), op_dmpp.as_ptr(), op_idc.as_ptr(), brt.as_ptr(), ref_oh.as_ptr(), out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
 }
 
 /// Reference `av1_write_sequence_header_obu` — the REAL exported function, fed a

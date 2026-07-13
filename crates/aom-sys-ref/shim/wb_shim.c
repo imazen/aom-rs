@@ -698,3 +698,78 @@ uint32_t shim_write_sequence_header_obu(const long long *top, const long long *s
 
   return av1_write_sequence_header_obu(&seq, out, 4096);
 }
+
+/* write_uncompressed_header_obu PREFIX, transcribed control flow over the real
+ * aom_wb (asserts + internal_error + buffer_removal side-effect increment omitted
+ * — no byte effect). Scalars packed in t[]; op/ref arrays passed flat. */
+uint32_t shim_write_frame_header_prefix(const long long *t, const long long *op_dmpp,
+                                        const long long *op_idc, const long long *brt,
+                                        const long long *ref_oh, uint8_t *out) {
+  struct aom_write_bit_buffer wb = { out, 0 };
+  int reduced = t[0], show_existing = t[1], existing_fb = t[2];
+  int dm_present = t[3], equal_pic = t[4];
+  int fpt = t[5], fpt_len = t[6], frame_id_present = t[7], frame_id_len = t[8];
+  int display_frame_id = t[9], frame_type = t[10], show_frame = t[11], showable = t[12];
+  int error_resilient = t[13], disable_cdf = t[14], force_sct = t[15], allow_sct = t[16];
+  int force_int_mv = t[17], cur_force_int_mv = t[18];
+  int up_w = t[19], up_h = t[20], max_w = t[21], max_h = t[22], current_frame_id = t[23];
+  int enable_order_hint = t[24], order_hint = t[25], oh_bits_m1 = t[26], primary_ref = t[27];
+  int brt_present = t[28], op_cnt_m1 = t[29], tlid = t[30], slid = t[31];
+  int brt_len = t[32], refresh_flags = t[33];
+  int sframe = (frame_type == 3);
+  int intra_only = (frame_type == 0 || frame_type == 2);
+
+  if (!reduced) {
+    if (show_existing) {
+      aom_wb_write_bit(&wb, 1);
+      aom_wb_write_literal(&wb, existing_fb, 3);
+      if (dm_present && !equal_pic) aom_wb_write_unsigned_literal(&wb, fpt, fpt_len);
+      if (frame_id_present) aom_wb_write_literal(&wb, display_frame_id, frame_id_len);
+      return aom_wb_bytes_written(&wb);
+    }
+    aom_wb_write_bit(&wb, 0);
+    aom_wb_write_literal(&wb, frame_type, 2);
+    aom_wb_write_bit(&wb, show_frame);
+    if (show_frame) {
+      if (dm_present && !equal_pic) aom_wb_write_unsigned_literal(&wb, fpt, fpt_len);
+    } else {
+      aom_wb_write_bit(&wb, showable);
+    }
+    if (sframe) {
+      /* assert error_resilient */
+    } else if (!(frame_type == 0 && show_frame)) {
+      aom_wb_write_bit(&wb, error_resilient);
+    }
+  }
+  aom_wb_write_bit(&wb, disable_cdf);
+  if (force_sct == 2) aom_wb_write_bit(&wb, allow_sct);
+  if (allow_sct && force_int_mv == 2) aom_wb_write_bit(&wb, cur_force_int_mv);
+
+  int frame_size_override_flag = 0;
+  if (!reduced) {
+    if (frame_id_present) aom_wb_write_literal(&wb, current_frame_id, frame_id_len);
+    frame_size_override_flag = sframe ? 1 : (up_w != max_w || up_h != max_h);
+    if (!sframe) aom_wb_write_bit(&wb, frame_size_override_flag);
+    if (enable_order_hint) aom_wb_write_literal(&wb, order_hint, oh_bits_m1 + 1);
+    if (!error_resilient && !intra_only) aom_wb_write_literal(&wb, primary_ref, 3);
+  }
+  if (dm_present) {
+    aom_wb_write_bit(&wb, brt_present);
+    if (brt_present) {
+      for (int op = 0; op < op_cnt_m1 + 1; op++) {
+        if (op_dmpp[op]) {
+          int idc = (int)op_idc[op];
+          if (idc == 0 || (((idc >> tlid) & 0x1) && ((idc >> (slid + 8)) & 0x1))) {
+            aom_wb_write_unsigned_literal(&wb, (uint32_t)brt[op], brt_len);
+          }
+        }
+      }
+    }
+  }
+  if ((frame_type == 0 && !show_frame) || frame_type == 1 || frame_type == 2)
+    aom_wb_write_literal(&wb, refresh_flags, 8);
+  if ((!intra_only || refresh_flags != 0xff) && error_resilient && enable_order_hint) {
+    for (int r = 0; r < 8; r++) aom_wb_write_literal(&wb, (int)ref_oh[r], oh_bits_m1 + 1);
+  }
+  return aom_wb_bytes_written(&wb);
+}
