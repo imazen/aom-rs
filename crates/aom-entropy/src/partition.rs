@@ -1486,3 +1486,93 @@ pub fn index_color_cache(cache: &[u16], colors: &[u16]) -> (Vec<u8>, Vec<i32>, u
     let n_out = out.len();
     (cache_color_found, out, n_out)
 }
+
+/// `write_palette_colors_y` / the U half of `write_palette_colors_uv`
+/// (`av1/encoder/bitstream.c`): for a palette plane, signal which of the neighbour
+/// cache's colours the block reuses (one bit each, until all `n` are placed), then
+/// delta-code the remaining out-of-cache colours. `min_val` is 1 for luma, 0 for U.
+#[allow(clippy::too_many_arguments)]
+fn write_palette_colors_plane(
+    enc: &mut OdEcEnc,
+    colors: &[u16],
+    n: usize,
+    plane: usize,
+    bit_depth: i32,
+    min_val: i32,
+    mb_to_top_edge: i32,
+    has_above: bool,
+    above_colors: &[u16],
+    above_n_plane: i32,
+    has_left: bool,
+    left_colors: &[u16],
+    left_n_plane: i32,
+) {
+    let mut cache = [0u16; 16];
+    let n_cache = get_palette_cache(
+        &mut cache, plane, mb_to_top_edge, has_above, above_colors, above_n_plane, has_left,
+        left_colors, left_n_plane,
+    );
+    let (found, out_colors, _n_out) = index_color_cache(&cache[..n_cache], &colors[..n]);
+    let mut n_in_cache = 0;
+    for &f in found.iter().take(n_cache) {
+        if n_in_cache >= n {
+            break;
+        }
+        write_bit(enc, i32::from(f));
+        n_in_cache += f as usize;
+    }
+    delta_encode_palette_colors(enc, &out_colors, bit_depth, min_val);
+}
+
+/// `write_palette_mode_info` (`av1/encoder/bitstream.c`), complete: the Y-palette
+/// on/off flag + size + colours for a DC_PRED block, then the UV_DC_PRED analogue
+/// (U colours through the cache, V colours through the unsorted delta/raw coder). The
+/// four CDFs are the caller's (bsize/mode)-selected slices, adapted in place. Neighbour
+/// palettes (full `3*PALETTE_MAX_SIZE` layout) feed the colour cache.
+#[allow(clippy::too_many_arguments)]
+pub fn write_palette_mode_info(
+    enc: &mut OdEcEnc,
+    mode_is_dc_pred: bool,
+    uv_dc_pred: bool,
+    bit_depth: i32,
+    palette_size: [i32; 2],
+    palette_colors: &[u16],
+    y_mode_cdf: &mut [u16],
+    y_size_cdf: &mut [u16],
+    uv_mode_cdf: &mut [u16],
+    uv_size_cdf: &mut [u16],
+    mb_to_top_edge: i32,
+    has_above: bool,
+    above_colors: &[u16],
+    above_size: [i32; 2],
+    has_left: bool,
+    left_colors: &[u16],
+    left_size: [i32; 2],
+) {
+    if mode_is_dc_pred {
+        let n = palette_size[0];
+        write_symbol(enc, i32::from(n > 0), y_mode_cdf, 2);
+        if n > 0 {
+            write_symbol(enc, n - PALETTE_MIN_SIZE, y_size_cdf, PALETTE_SIZES);
+            write_palette_colors_plane(
+                enc, palette_colors, n as usize, 0, bit_depth, 1, mb_to_top_edge, has_above,
+                above_colors, above_size[0], has_left, left_colors, left_size[0],
+            );
+        }
+    }
+    if uv_dc_pred {
+        let n = palette_size[1];
+        write_symbol(enc, i32::from(n > 0), uv_mode_cdf, 2);
+        if n > 0 {
+            write_symbol(enc, n - PALETTE_MIN_SIZE, uv_size_cdf, PALETTE_SIZES);
+            let colors_u = &palette_colors[PALETTE_MAX_SIZE..];
+            let vbase = 2 * PALETTE_MAX_SIZE;
+            let colors_v = &palette_colors[vbase..vbase + n as usize];
+            write_palette_colors_plane(
+                enc, colors_u, n as usize, 1, bit_depth, 0, mb_to_top_edge, has_above,
+                above_colors, above_size[1], has_left, left_colors, left_size[1],
+            );
+            write_palette_colors_v(enc, colors_v, bit_depth);
+        }
+    }
+}

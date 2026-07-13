@@ -960,3 +960,135 @@ int shim_index_color_cache(const uint16_t *cache, int n_cache, const uint16_t *c
                            int n_colors, uint8_t *found, int *out_colors) {
   return av1_index_color_cache(cache, n_cache, colors, n_colors, found, out_colors);
 }
+
+/* --- full write_palette_mode_info end-to-end (av1/encoder/bitstream.c) --- */
+/* Inline helpers mirroring delta_encode_palette_colors + the V-plane coder, writing
+ * into an existing od_ec (so the whole palette payload shares one bitstream). */
+static void de_pal_inline(od_ec_enc *ec, const int *colors, int num, int bit_depth, int min_val) {
+  if (num <= 0) return;
+  mi_literal(ec, colors[0], bit_depth);
+  if (num == 1) return;
+  int max_delta = 0, deltas[PALETTE_MAX_SIZE];
+  memset(deltas, 0, sizeof(deltas));
+  for (int i = 1; i < num; ++i) {
+    const int delta = colors[i] - colors[i - 1];
+    deltas[i - 1] = delta;
+    if (delta > max_delta) max_delta = delta;
+  }
+  const int min_bits = bit_depth - 3;
+  int cl = aom_ceil_log2(max_delta + 1 - min_val);
+  int bits = cl > min_bits ? cl : min_bits;
+  int range = (1 << bit_depth) - colors[0] - min_val;
+  mi_literal(ec, bits - min_bits, 2);
+  for (int i = 0; i < num - 1; ++i) {
+    mi_literal(ec, deltas[i] - min_val, bits);
+    range -= deltas[i];
+    int clr = aom_ceil_log2(range);
+    bits = bits < clr ? bits : clr;
+  }
+}
+
+static void wpc_v_inline(od_ec_enc *ec, const uint16_t *colors_v, int n, int bit_depth) {
+  PALETTE_MODE_INFO pmi;
+  pmi.palette_size[1] = (uint8_t)n;
+  for (int i = 0; i < n; i++) pmi.palette_colors[2 * PALETTE_MAX_SIZE + i] = colors_v[i];
+  const int max_val = 1 << bit_depth;
+  int zero_count = 0, min_bits_v = 0;
+  int bits_v = av1_get_palette_delta_bits_v(&pmi, bit_depth, &zero_count, &min_bits_v);
+  const int rate_using_delta = 2 + bit_depth + (bits_v + 1) * (n - 1) - zero_count;
+  const int rate_using_raw = bit_depth * n;
+  if (rate_using_delta < rate_using_raw) {
+    mi_bit(ec, 1);
+    mi_literal(ec, bits_v - min_bits_v, 2);
+    mi_literal(ec, colors_v[0], bit_depth);
+    for (int i = 1; i < n; ++i) {
+      if (colors_v[i] == colors_v[i - 1]) { mi_literal(ec, 0, bits_v); continue; }
+      const int delta = abs((int)colors_v[i] - colors_v[i - 1]);
+      const int sign_bit = colors_v[i] < colors_v[i - 1];
+      if (delta <= max_val - delta) { mi_literal(ec, delta, bits_v); mi_bit(ec, sign_bit); }
+      else { mi_literal(ec, max_val - delta, bits_v); mi_bit(ec, !sign_bit); }
+    }
+  } else {
+    mi_bit(ec, 0);
+    for (int i = 0; i < n; ++i) mi_literal(ec, colors_v[i], bit_depth);
+  }
+}
+
+/* write_palette_colors_y/uv Y/U cache-bits + delta portion, over the real
+ * av1_get_palette_cache + av1_index_color_cache. plane 0 (min_val 1) / plane 1 U
+ * (min_val 0). Reuses the caller's MACROBLOCKD for the neighbour cache. */
+static void wpc_plane_inline(od_ec_enc *ec, MACROBLOCKD *xd, const uint16_t *colors, int n,
+                             int plane, int bit_depth, int min_val) {
+  uint16_t color_cache[2 * PALETTE_MAX_SIZE];
+  const int n_cache = av1_get_palette_cache(xd, plane, color_cache);
+  int out_cache_colors[PALETTE_MAX_SIZE];
+  uint8_t cache_color_found[2 * PALETTE_MAX_SIZE];
+  const int n_out_cache =
+      av1_index_color_cache(color_cache, n_cache, colors, n, cache_color_found, out_cache_colors);
+  int n_in_cache = 0;
+  for (int i = 0; i < n_cache && n_in_cache < n; ++i) {
+    const int found = cache_color_found[i];
+    mi_bit(ec, found);
+    n_in_cache += found;
+  }
+  de_pal_inline(ec, out_cache_colors, n_out_cache, bit_depth, min_val);
+}
+
+uint32_t shim_write_palette_mode_info(int mode_dc, int uv_dc, int bit_depth, int bsize_ctx,
+                                      int y_mode_ctx, int uv_mode_ctx,
+                                      const uint8_t *palette_size, const uint16_t *palette_colors,
+                                      int mb_to_top_edge, int ha, const uint16_t *a_colors,
+                                      int a_s0, int a_s1, int hl, const uint16_t *l_colors,
+                                      int l_s0, int l_s1, uint16_t *y_mode_cdf, uint16_t *y_size_cdf,
+                                      uint16_t *uv_mode_cdf, uint16_t *uv_size_cdf, uint8_t *out,
+                                      uint16_t *o_ym, uint16_t *o_ys, uint16_t *o_um, uint16_t *o_us) {
+  (void)bsize_ctx; (void)y_mode_ctx; (void)uv_mode_ctx;
+  MB_MODE_INFO ami, lmi, mbmi;
+  MACROBLOCKD xd;
+  for (int i = 0; i < 3 * PALETTE_MAX_SIZE; i++) {
+    ami.palette_mode_info.palette_colors[i] = a_colors[i];
+    lmi.palette_mode_info.palette_colors[i] = l_colors[i];
+    mbmi.palette_mode_info.palette_colors[i] = palette_colors[i];
+  }
+  ami.palette_mode_info.palette_size[0] = (uint8_t)a_s0;
+  ami.palette_mode_info.palette_size[1] = (uint8_t)a_s1;
+  lmi.palette_mode_info.palette_size[0] = (uint8_t)l_s0;
+  lmi.palette_mode_info.palette_size[1] = (uint8_t)l_s1;
+  mbmi.palette_mode_info.palette_size[0] = palette_size[0];
+  mbmi.palette_mode_info.palette_size[1] = palette_size[1];
+  xd.above_mbmi = ha ? &ami : (MB_MODE_INFO *)0;
+  xd.left_mbmi = hl ? &lmi : (MB_MODE_INFO *)0;
+  xd.mb_to_top_edge = mb_to_top_edge;
+
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  const PALETTE_MODE_INFO *const pmi = &mbmi.palette_mode_info;
+  if (mode_dc) {
+    const int n = pmi->palette_size[0];
+    od_ec_encode_cdf_q15(&ec, n > 0, y_mode_cdf, 2);
+    update_cdf(y_mode_cdf, n > 0, 2);
+    if (n > 0) {
+      od_ec_encode_cdf_q15(&ec, n - PALETTE_MIN_SIZE, y_size_cdf, PALETTE_SIZES);
+      update_cdf(y_size_cdf, n - PALETTE_MIN_SIZE, PALETTE_SIZES);
+      wpc_plane_inline(&ec, &xd, pmi->palette_colors, n, 0, bit_depth, 1);
+    }
+  }
+  if (uv_dc) {
+    const int n = pmi->palette_size[1];
+    od_ec_encode_cdf_q15(&ec, n > 0, uv_mode_cdf, 2);
+    update_cdf(uv_mode_cdf, n > 0, 2);
+    if (n > 0) {
+      od_ec_encode_cdf_q15(&ec, n - PALETTE_MIN_SIZE, uv_size_cdf, PALETTE_SIZES);
+      update_cdf(uv_size_cdf, n - PALETTE_MIN_SIZE, PALETTE_SIZES);
+      const uint16_t *colors_u = pmi->palette_colors + PALETTE_MAX_SIZE;
+      const uint16_t *colors_v = pmi->palette_colors + 2 * PALETTE_MAX_SIZE;
+      wpc_plane_inline(&ec, &xd, colors_u, n, 1, bit_depth, 0);
+      wpc_v_inline(&ec, colors_v, n, bit_depth);
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 3; i++) { o_ym[i] = y_mode_cdf[i]; o_um[i] = uv_mode_cdf[i]; }
+  for (int i = 0; i < 8; i++) { o_ys[i] = y_size_cdf[i]; o_us[i] = uv_size_cdf[i]; }
+  od_ec_enc_clear(&ec);
+  return nb;
+}

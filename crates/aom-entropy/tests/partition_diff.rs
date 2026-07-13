@@ -1436,3 +1436,82 @@ fn index_color_cache_matches_c() {
         assert_eq!(found, wfound[..n_cache], "found cache={cache:?} colors={colors:?}");
     }
 }
+
+#[test]
+fn write_palette_mode_info_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::write_palette_mode_info;
+    let mut rng = Rng(0xfa11_e77e_c0de_0007);
+    // Strictly-increasing colour list of length `k` in [0, 2^bd) at plane offset.
+    let fill = |rng: &mut Rng, arr: &mut [u16; 24], plane: usize, k: usize, bd: i32| {
+        let maxv = 1i32 << bd;
+        let step = (maxv / (k as i32 + 2)).max(1);
+        let mut cur = (rng.next() % step as u64) as i32;
+        for j in 0..k {
+            arr[plane * 8 + j] = cur as u16;
+            cur += 1 + (rng.next() % step as u64) as i32;
+        }
+    };
+    for _ in 0..200_000 {
+        let bd = [8i32, 10, 12][(rng.next() % 3) as usize];
+        let maxv = 1u64 << bd;
+        let mode_dc = rng.next().is_multiple_of(2);
+        let uv_dc = rng.next().is_multiple_of(2);
+        let n_y = if rng.next().is_multiple_of(3) { 0 } else { 2 + (rng.next() % 7) as usize };
+        let n_uv = if rng.next().is_multiple_of(3) { 0 } else { 2 + (rng.next() % 7) as usize };
+        // Block palette: Y (sorted) @0, U (sorted) @8, V (unsorted) @16.
+        let mut pc = [0u16; 24];
+        fill(&mut rng, &mut pc, 0, n_y, bd);
+        fill(&mut rng, &mut pc, 1, n_uv, bd);
+        for j in 0..n_uv {
+            pc[16 + j] = (rng.next() % maxv) as u16;
+        }
+        let psize = [n_y as u8, n_uv as u8];
+        // Neighbours (sorted Y@0, U@8) — chance overlap with block drives cache hits.
+        let mk_nb = |rng: &mut Rng| -> ([u16; 24], [i32; 2]) {
+            let ay = (rng.next() % 9) as usize;
+            let au = (rng.next() % 9) as usize;
+            let mut a = [0u16; 24];
+            fill(rng, &mut a, 0, ay, bd);
+            fill(rng, &mut a, 1, au, bd);
+            (a, [ay as i32, au as i32])
+        };
+        let ha = rng.next().is_multiple_of(2);
+        let hl = rng.next().is_multiple_of(2);
+        let (a_colors, a_size) = mk_nb(&mut rng);
+        let (l_colors, l_size) = mk_nb(&mut rng);
+        let mte = -((rng.next() % 20) as i32) * 32;
+        // Pre-selected CDFs.
+        let ym = [1 + (rng.next() % 32766) as u16, 0, 0];
+        let um = [1 + (rng.next() % 32766) as u16, 0, 0];
+        let mk7 = |rng: &mut Rng| {
+            let mut c = [0u16; 8];
+            let mut prev = 32768i32;
+            for e in c.iter_mut().take(6) {
+                let v = (prev - 1 - (rng.next() % 200) as i32).max(1);
+                *e = v as u16;
+                prev = v;
+            }
+            c
+        };
+        let ys = mk7(&mut rng);
+        let us = mk7(&mut rng);
+
+        let mut enc = OdEcEnc::new();
+        let (mut rym, mut rys, mut rum, mut rus) = (ym, ys, um, us);
+        write_palette_mode_info(
+            &mut enc, mode_dc, uv_dc, bd, [n_y as i32, n_uv as i32], &pc,
+            &mut rym, &mut rys, &mut rum, &mut rus, mte, ha, &a_colors, a_size, hl, &l_colors, l_size,
+        );
+        let got = enc.done().to_vec();
+        let (want, oym, oys, oum, ous) = c::ref_write_palette_mode_info(
+            mode_dc, uv_dc, bd, &psize, &pc, mte, ha, &a_colors, &a_size, hl, &l_colors, &l_size,
+            &ym, &ys, &um, &us,
+        );
+        assert_eq!(got, want, "bytes bd={bd} mode_dc={mode_dc} uv_dc={uv_dc} n_y={n_y} n_uv={n_uv} pc={pc:?}");
+        assert_eq!(rym, oym, "y_mode_cdf");
+        assert_eq!(rys, oys, "y_size_cdf");
+        assert_eq!(rum, oum, "uv_mode_cdf");
+        assert_eq!(rus, ous, "uv_size_cdf");
+    }
+}

@@ -279,6 +279,8 @@ extern "C" {
     fn shim_get_palette_cache(plane: i32, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_size0: i32, a_size1: i32, hl: i32, l_colors: *const u16, l_size0: i32, l_size1: i32, out_cache: *mut u16) -> i32;
     fn shim_index_color_cache(cache: *const u16, n_cache: i32, colors: *const u16, n_colors: i32, found: *mut u8, out_colors: *mut i32) -> i32;
     #[allow(clippy::too_many_arguments)]
+    fn shim_write_palette_mode_info(mode_dc: i32, uv_dc: i32, bit_depth: i32, bsize_ctx: i32, y_mode_ctx: i32, uv_mode_ctx: i32, palette_size: *const u8, palette_colors: *const u16, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_s0: i32, a_s1: i32, hl: i32, l_colors: *const u16, l_s0: i32, l_s1: i32, y_mode_cdf: *mut u16, y_size_cdf: *mut u16, uv_mode_cdf: *mut u16, uv_size_cdf: *mut u16, out: *mut u8, o_ym: *mut u16, o_ys: *mut u16, o_um: *mut u16, o_us: *mut u16) -> u32;
+    #[allow(clippy::too_many_arguments)]
     fn shim_write_ref_frames(cdfs: *mut u16, seg_ref: i32, seg_skipgmv: i32, rmode_select: i32, comp_allowed: i32, is_compound: i32, comp_ref_type: i32, ref0: i32, ref1: i32, out: *mut u8, out_cdfs: *mut u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_get_comp_reference_type_context(ha: i32, a_r0: i32, a_r1: i32, a_ibc: i32, hl: i32, l_r0: i32, l_r1: i32, l_ibc: i32) -> i32;
@@ -539,6 +541,36 @@ pub fn ref_index_color_cache(cache: &[u16], colors: &[u16]) -> (Vec<u8>, Vec<i32
     };
     out_colors.truncate(n as usize);
     (found, out_colors, n)
+}
+
+/// Reference full `write_palette_mode_info` (flags + sizes + colours end-to-end, over
+/// pristine C od_ec + the real cache/index/delta-bits fns). CDFs are pre-selected by
+/// the caller. Returns (bytes, y_mode[3], y_size[8], uv_mode[3], uv_size[8]).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn ref_write_palette_mode_info(
+    mode_dc: bool, uv_dc: bool, bit_depth: i32,
+    palette_size: &[u8; 2], palette_colors: &[u16; 24],
+    mb_to_top_edge: i32,
+    ha: bool, a_colors: &[u16; 24], a_size: &[i32; 2],
+    hl: bool, l_colors: &[u16; 24], l_size: &[i32; 2],
+    y_mode_cdf: &[u16; 3], y_size_cdf: &[u16; 8],
+    uv_mode_cdf: &[u16; 3], uv_size_cdf: &[u16; 8],
+) -> (Vec<u8>, [u16; 3], [u16; 8], [u16; 3], [u16; 8]) {
+    let (mut ym, mut ys, mut um, mut us) = (*y_mode_cdf, *y_size_cdf, *uv_mode_cdf, *uv_size_cdf);
+    let mut out = vec![0u8; 128];
+    let (mut oym, mut oys, mut oum, mut ous) = ([0u16; 3], [0u16; 8], [0u16; 3], [0u16; 8]);
+    let n = unsafe {
+        shim_write_palette_mode_info(
+            mode_dc as i32, uv_dc as i32, bit_depth, 0, 0, 0,
+            palette_size.as_ptr(), palette_colors.as_ptr(), mb_to_top_edge,
+            ha as i32, a_colors.as_ptr(), a_size[0], a_size[1],
+            hl as i32, l_colors.as_ptr(), l_size[0], l_size[1],
+            ym.as_mut_ptr(), ys.as_mut_ptr(), um.as_mut_ptr(), us.as_mut_ptr(),
+            out.as_mut_ptr(), oym.as_mut_ptr(), oys.as_mut_ptr(), oum.as_mut_ptr(), ous.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oym, oys, oum, ous)
 }
 
 /// Reference `av1_get_intra_inter_context` (facade over the real exported fn).
