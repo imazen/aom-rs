@@ -159,6 +159,61 @@ extern "C" {
     pub fn av1_inv_txfm2d_add_64x16_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
 }
 
+// av1/encoder/av1_quantize.c — fast-path quantizers (no quant matrix).
+pub type QuantFpFn = unsafe extern "C" fn(
+    *const i32, isize, *const i16, *const i16, *const i16, *const i16, *mut i32, *mut i32,
+    *const i16, *mut u16, *const i16, *const i16,
+);
+extern "C" {
+    pub fn av1_quantize_fp_c(
+        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
+        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
+        eob: *mut u16, scan: *const i16, iscan: *const i16,
+    );
+    pub fn av1_quantize_fp_32x32_c(
+        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
+        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
+        eob: *mut u16, scan: *const i16, iscan: *const i16,
+    );
+    pub fn av1_quantize_fp_64x64_c(
+        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
+        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
+        eob: *mut u16, scan: *const i16, iscan: *const i16,
+    );
+}
+
+/// Reference `av1_quantize_fp` family. `log_scale` selects 0/1/2. Returns
+/// (qcoeff, dqcoeff, eob).
+pub fn ref_quantize_fp(
+    log_scale: i32,
+    coeff: &[i32],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    dequant: &[i16; 2],
+    scan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
+    let n = coeff.len();
+    let mut qcoeff = vec![0i32; n];
+    let mut dqcoeff = vec![0i32; n];
+    let mut eob: u16 = 0;
+    // zbin/quant_shift/iscan are unused by the fp path but must be valid ptrs.
+    let dummy = vec![0i16; n.max(2)];
+    let f: QuantFpFn = match log_scale {
+        0 => av1_quantize_fp_c,
+        1 => av1_quantize_fp_32x32_c,
+        2 => av1_quantize_fp_64x64_c,
+        _ => unreachable!(),
+    };
+    unsafe {
+        f(
+            coeff.as_ptr(), n as isize, dummy.as_ptr(), round.as_ptr(), quant.as_ptr(),
+            dummy.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
+            &mut eob, scan.as_ptr(), dummy.as_ptr(),
+        )
+    }
+    (qcoeff, dqcoeff, eob)
+}
+
 /// Reference inverse 2-D transform+add for `tx_size` (0..19). `dest` is the
 /// bd-bit pixel buffer to reconstruct onto (modified in place).
 pub fn ref_inv_txfm2d_add(

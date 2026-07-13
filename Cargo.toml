@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/aom-transform",
+    "crates/aom-quant",
     "crates/aom-sys-ref",
 ]
 

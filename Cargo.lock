@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "aom-quant"
+version = "0.0.1"
+dependencies = [
+ "aom-sys-ref",
+]
+
+[[package]]
 name = "aom-sys-ref"
 version = "0.0.1"
 

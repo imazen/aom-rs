@@ -50,6 +50,15 @@
       "items": {
         "av1_inv_txfm2d_add_all_sizes": {"status": "green", "test": "inv_txfm2d_diff::inv_txfm2d_differential_fuzz"}
       }
+    },
+    "quant.quantize_fp": {
+      "status": "green",
+      "note": "Encoder fast-path quantizer (no quant matrix), log_scale 0/1/2; qcoeff+dqcoeff+eob checked.",
+      "items": {
+        "av1_quantize_fp":       {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"},
+        "av1_quantize_fp_32x32": {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"},
+        "av1_quantize_fp_64x64": {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"}
+      }
     }
   }
 }
