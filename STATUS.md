@@ -81,7 +81,12 @@ both tracks, fully bit-exact.**
   `variance.c`): `aom_sad`, `aom_variance`, `aom_sub_pixel_variance` (bilinear
   2-tap) over all 22 block sizes. Harness: `aom-dist/tests/dist_diff.rs` —
   ~198k comparisons (SAD + variance + subpel var/sse), byte-identical to C.
-  (avg/masked/obmc SAD: TODO.)
+  (masked/obmc SAD: TODO.)
+
+- **Avg-SAD (compound prediction)** (`aom_dsp/sad.c`), both tracks:
+  `aom_sad*_avg_c` + `aom_highbd_sad*_avg_c` (SAD vs round(ref+second_pred)/2)
+  over the 17 non-4-side sizes libaom compiles in this config. Byte-identical to
+  C. (ref_init needed — avg-SAD calls the RTCD-dispatched aom_comp_avg_pred.)
 
 - **Highbd (10/12-bit) SAD + variance** (`aom_dsp/sad.c`, `variance.c`),
   encoder critical path: `aom_highbd_sad*` + `aom_highbd_{8,10,12}_variance*` over
