@@ -227,10 +227,23 @@ both tracks, fully bit-exact.**
   subexpfin family, each independently validated vs the real aom_wb. Component oracles are
   transcribed control flow over the **real aom_wb primitives** (debug-only asserts + xd
   side effects omitted — no byte effect); quant has an independent spec-layout anchor.
-  Remaining framing: the **frame-header OBU** — `write_uncompressed_header_obu` /
-  `write_frame_header_obu` ordering + the frame-type / ref-frame / show-frame state
-  machine (needs full AV1_COMMON state), plus the per-superblock tile-data
-  delta-q/delta-lf + mode-info signaling (aom_writer path, not aom_wb).
+
+- **Frame-header OBU — every piece bit-exact; assembled but the top-level stitch is not
+  yet end-to-end differential-tested.** All of `write_uncompressed_header_obu`'s parts are
+  ported and diffed at 200k–300k cases each in `header_diff.rs`:
+  `write_frame_header_prefix` (show-existing / frame-type / show / error-resilient /
+  screen-content / integer-mv / frame-size-override / order-hint / primary-ref /
+  buffer-removal loop / refresh flags / ref order hints), `write_frame_size_with_refs`,
+  `write_inter_ref_signaling` (short-signaling + per-ref map idx + modular delta-frame-id
+  + rtc config), `write_refresh_frame_context`, and `write_frame_header_trailing_flags`;
+  the tail is the already-bit-exact component set. `write_frame_header_obu` composes all
+  of these in the C's exact order (threading the prefix-computed frame_size_override).
+  **HONEST GAP:** the assembly compiles and calls only validated pieces, but the 40-line
+  ordering/gating dispatch is NOT yet differentially tested end-to-end — the function is
+  `static` and needs the sub-writers composed over one shared aom_wb (a shim `_wb`-inner
+  refactor + monolithic oracle). Until that lands, treat the stitch order as unverified.
+  Remaining framing after that: the per-superblock tile-data delta-q/delta-lf + mode-info
+  signaling (aom_writer arithmetic-coder path, not aom_wb).
 
 - **RD-search primitives (aom-encode `rd` module + aom-dist)** — the estimator set the
   mode search composes, all bit-exact: `model_rd_from_var_lapndz` (the fixed-point
