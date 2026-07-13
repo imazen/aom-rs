@@ -185,6 +185,18 @@ both tracks, fully bit-exact.**
   `optimize_qm_diff.rs` (transcribed shim threaded with the real inlines). The
   rate path (cost_coeffs_txb) is QM-independent, so no other trellis change.
 
+- **av1_xform_quant + full speed-0 block coefficient pipeline (aom-encode)** — the
+  new composition crate wiring the per-block encoder workhorse from the already
+  bit-exact sub-modules. `xform_quant` = av1_xform (av1_fwd_txfm2d) + av1_quant
+  (quantizer dispatch FP/B x flat/QM + entropy-ctx), with av1_get_tx_scale log_scale,
+  av1_get_max_eob n_coeffs, and use_optimize_b deferral. `xform_quant_optimize` adds
+  get_txb_ctx + av1_optimize_b (trellis, or av1_cost_skip_txb at eob 0) + the final
+  entropy-ctx write. Oracles chain the C reference steps (fwd -> quant -> ctx ->
+  optimize -> entropy_ctx); both harnesses cover all 19 tx sizes x 7 tx types x FP/B
+  x QM/flat, byte-identical coeff/qcoeff/dqcoeff/eob/ctx/rate, with coverage guards
+  (nonzero-eob fraction + trellis-actually-reduced-eob). bd=8 (lowbd); highbd follows
+  the highbd forward transform.
+
 - **per-block entropy-context propagation (aom-txb)** — the neighbour-context
   loop gating every txb (both tracks): get_txb_ctx (above/left -> txb_skip_ctx /
   dc_sign_ctx; general algorithm verified vs C's size-specialised variants) +
@@ -234,13 +246,15 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **av1_xform_quant composition** (`av1/encoder/encodemb.c`): the per-block
-   encoder workhorse = av1_xform (fwd transform) + av1_quant (quantize + entropy
-   ctx). Every piece is already bit-exact — av1_fwd_txfm2d (aom-transform, forward
-   validated), all scalar quantizers (aom-quant), txb_entropy_context (aom-txb).
-   The chunk is the Rust composition + an end-to-end residual->(qcoeff,dqcoeff,eob)
-   differential (shim chaining av1_fwd_txfm2d_<size>_c + the quantizer). Proves the
-   block-encode path integrates; surfaces any layout/scan/dc-ac wiring gaps.
+1. **Block coefficients -> bitstream bytes** (capstone): tie xform_quant_optimize
+   into av1_write_coeffs_txb (already bit-exact) so a residual becomes entropy-coded
+   coefficient bytes. Needs the FRAME_CONTEXT coeff-CDF state threaded: derive the
+   trellis cost tables from the CDFs (av1_fill_coeff_costs, ported) -> optimize ->
+   write_coeffs_txb (adapts the same CDFs). Differential on the produced bytes +
+   adapted CDFs. This is the "residual -> real encoder output" milestone.
+2. **DC-only quantizer** (`av1_quantize_dc`): the third quant_func_list entry
+   (QuantKind::Dc) — small, completes the quant dispatch, facade oracle pattern.
+3. **highbd forward transform** — unblocks the highbd xform_quant composition.
 2. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
    per-mode bit-exact, differential per predictor.
 3. **Loop filters**: deblock, CDEF, loop-restoration (decoder + encoder search).
