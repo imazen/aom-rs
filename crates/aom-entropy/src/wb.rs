@@ -54,12 +54,12 @@ impl WriteBitBuffer {
 
     /// `aom_wb_is_byte_aligned`.
     pub fn is_byte_aligned(&self) -> bool {
-        self.bit_offset % 8 == 0
+        self.bit_offset.is_multiple_of(8)
     }
 
     /// `aom_wb_bytes_written` (rounds up to whole bytes).
     pub fn bytes_written(&self) -> usize {
-        self.bit_offset / 8 + usize::from(self.bit_offset % 8 > 0)
+        self.bit_offset / 8 + usize::from(!self.bit_offset.is_multiple_of(8))
     }
 
     /// The written bytes (`bytes_written()`-long).
