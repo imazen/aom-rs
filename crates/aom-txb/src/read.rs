@@ -180,3 +180,40 @@ fn read_txb_body(
     }
     eob
 }
+
+/// `read_coeffs_txb_full` — inverse of [`crate::write::write_coeffs_txb_full`]: the
+/// txb_skip flag, then (luma, `plane_type == 0`) the `tx_type` via `read_tx_type` on the
+/// caller-selected `ext_tx_cdf` slot, then the coefficient body. Chroma inherits
+/// `tx_type_in` (derived from the luma block). Returns `(eob, tx_type)`.
+#[allow(clippy::too_many_arguments)]
+pub fn read_coeffs_txb_full(
+    dec: &mut OdEcDec,
+    cdfs: &mut [u16],
+    ext_tx_cdf: &mut [u16],
+    tcoeff: &mut [i32],
+    tx_size: usize,
+    plane_type: usize,
+    txb_skip_ctx: usize,
+    dc_sign_ctx: usize,
+    allow_update_cdf: bool,
+    is_inter: bool,
+    reduced: bool,
+    signal_gate: bool,
+    tx_type_in: usize,
+) -> (usize, usize) {
+    let txs_ctx = txsize_entropy_ctx(tx_size);
+    let upd = allow_update_cdf;
+    let all_zero = rsym(dec, cdfs, A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3, 2, upd);
+    let (width, height) = (txb_wide(tx_size), txb_high(tx_size));
+    tcoeff[..width * height].fill(0);
+    if all_zero != 0 {
+        return (0, 0);
+    }
+    let tx_type = if plane_type == 0 {
+        crate::read_tx_type(dec, ext_tx_cdf, tx_size, is_inter, reduced, signal_gate)
+    } else {
+        tx_type_in
+    };
+    let eob = read_txb_body(dec, cdfs, tcoeff, tx_size, tx_type, plane_type, dc_sign_ctx, upd);
+    (eob, tx_type)
+}

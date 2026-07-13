@@ -21,7 +21,7 @@ pub use scan::{iscan, scan, SCAN_ORDERS};
 mod write;
 pub use write::{txsize_entropy_ctx, write_coeffs_txb, write_coeffs_txb_full, CDF_ARENA_LEN};
 mod read;
-pub use read::read_coeffs_txb;
+pub use read::{read_coeffs_txb, read_coeffs_txb_full};
 mod cost;
 pub use cost::{cost_coeffs_txb, CoeffCostTables};
 mod prob_cost;
