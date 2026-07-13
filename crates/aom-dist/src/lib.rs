@@ -83,6 +83,18 @@ pub fn masked_sad(
     sad
 }
 
+/// `aom_highbd_obmc_sad<W>x<H>_c`: highbd OBMC SAD (samples 16-bit; wsrc/mask i32).
+pub fn highbd_obmc_sad(pre: &[u16], pre_stride: usize, wsrc: &[i32], mask: &[i32], w: usize, h: usize) -> u32 {
+    let mut sad: u32 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let d = (wsrc[y * w + x] - pre[y * pre_stride + x] as i32 * mask[y * w + x]).unsigned_abs();
+            sad += (d + 2048) >> 12;
+        }
+    }
+    sad
+}
+
 /// `aom_highbd_masked_sad<W>x<H>_c`: highbd wedge / diff-weighted compound SAD.
 /// Mask stays 8-bit (0..=64); samples are 16-bit.
 #[allow(clippy::too_many_arguments)]

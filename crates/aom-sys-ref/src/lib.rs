@@ -207,6 +207,12 @@ extern "C" {
     fn shim_hbd_sad_avg(i: i32, s: *const u16, ss: i32, r: *const u16, rs: i32, p: *const u16) -> u32;
     #[allow(clippy::too_many_arguments)]
     fn shim_hbd_masked_sad(i: i32, s: *const u16, ss: i32, r: *const u16, rs: i32, p: *const u16, m: *const u8, ms: i32, inv: i32) -> u32;
+    fn shim_hbd_obmc_sad(i: i32, r: *const u16, rs: i32, ws: *const i32, m: *const i32) -> u32;
+}
+
+/// Reference `aom_highbd_obmc_sad<W>x<H>_c`.
+pub fn ref_hbd_obmc_sad(idx: usize, r: &[u16], rs: usize, ws: &[i32], m: &[i32]) -> u32 {
+    unsafe { shim_hbd_obmc_sad(idx as i32, r.as_ptr(), rs as i32, ws.as_ptr(), m.as_ptr()) }
 }
 
 /// Reference `aom_highbd_masked_sad<W>x<H>_c` (highbd wedge / compound SAD).

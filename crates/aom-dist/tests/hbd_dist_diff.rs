@@ -4,7 +4,10 @@
 //! These are the highbd counterparts of the speed-0 encoder motion-search /
 //! RDO workhorses (`aom_highbd_sad*`, `aom_highbd_*_variance*`).
 
-use aom_dist::{highbd_masked_sad, highbd_sad, highbd_sad_avg, highbd_sub_pixel_variance, highbd_variance};
+use aom_dist::{
+    highbd_masked_sad, highbd_obmc_sad, highbd_sad, highbd_sad_avg, highbd_sub_pixel_variance,
+    highbd_variance,
+};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 22] = [
@@ -66,6 +69,13 @@ fn hbd_sad_variance_byte_identical() {
                     let wm = c::ref_hbd_masked_sad(idx, &a, a_stride, &b, b_stride, &sp2, &msk, m_stride, inv);
                     assert_eq!(gm, wm, "hbd_masked_sad {w}x{h} bd={bd} inv={inv}");
                 }
+
+                // highbd OBMC SAD
+                let wsrc: Vec<i32> = (0..w * h).map(|_| (rng.next() % (4096 * 4096)) as i32).collect();
+                let omask: Vec<i32> = (0..w * h).map(|_| (rng.next() % 4097) as i32).collect();
+                let go = highbd_obmc_sad(&a, a_stride, &wsrc, &omask, w, h);
+                let wo = c::ref_hbd_obmc_sad(idx, &a, a_stride, &wsrc, &omask);
+                assert_eq!(go, wo, "hbd_obmc_sad {w}x{h} bd={bd}");
 
                 // highbd variance (bd-normalised)
                 let (gv, gs) = highbd_variance(&a, a_stride, &b, b_stride, w, h, bd);

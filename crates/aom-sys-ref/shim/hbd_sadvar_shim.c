@@ -413,3 +413,53 @@ unsigned int shim_hbd_masked_sad(int i,const uint16_t*s,int ss,const uint16_t*r,
   case 20: return aom_highbd_masked_sad128x64_c(sp8,ss,rp,rs,pp,m,ms,inv);
   case 21: return aom_highbd_masked_sad128x128_c(sp8,ss,rp,rs,pp,m,ms,inv);
   default: return 0;}}
+
+/* highbd OBMC SAD, all 22 sizes */
+unsigned int aom_highbd_obmc_sad4x4_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad4x8_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad4x16_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad8x4_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad8x8_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad8x16_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad8x32_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad16x4_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad16x8_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad16x16_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad16x32_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad16x64_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad32x8_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad32x16_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad32x32_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad32x64_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad64x16_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad64x32_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad64x64_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad64x128_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad128x64_c(const uint8_t*,int,const int*,const int*);
+unsigned int aom_highbd_obmc_sad128x128_c(const uint8_t*,int,const int*,const int*);
+unsigned int shim_hbd_obmc_sad(int i,const uint16_t*r,int rs,const int*ws,const int*m){
+  const uint8_t* rp=CONVERT_TO_BYTEPTR(r);
+  switch(i){
+  case 0: return aom_highbd_obmc_sad4x4_c(rp,rs,ws,m);
+  case 1: return aom_highbd_obmc_sad4x8_c(rp,rs,ws,m);
+  case 2: return aom_highbd_obmc_sad4x16_c(rp,rs,ws,m);
+  case 3: return aom_highbd_obmc_sad8x4_c(rp,rs,ws,m);
+  case 4: return aom_highbd_obmc_sad8x8_c(rp,rs,ws,m);
+  case 5: return aom_highbd_obmc_sad8x16_c(rp,rs,ws,m);
+  case 6: return aom_highbd_obmc_sad8x32_c(rp,rs,ws,m);
+  case 7: return aom_highbd_obmc_sad16x4_c(rp,rs,ws,m);
+  case 8: return aom_highbd_obmc_sad16x8_c(rp,rs,ws,m);
+  case 9: return aom_highbd_obmc_sad16x16_c(rp,rs,ws,m);
+  case 10: return aom_highbd_obmc_sad16x32_c(rp,rs,ws,m);
+  case 11: return aom_highbd_obmc_sad16x64_c(rp,rs,ws,m);
+  case 12: return aom_highbd_obmc_sad32x8_c(rp,rs,ws,m);
+  case 13: return aom_highbd_obmc_sad32x16_c(rp,rs,ws,m);
+  case 14: return aom_highbd_obmc_sad32x32_c(rp,rs,ws,m);
+  case 15: return aom_highbd_obmc_sad32x64_c(rp,rs,ws,m);
+  case 16: return aom_highbd_obmc_sad64x16_c(rp,rs,ws,m);
+  case 17: return aom_highbd_obmc_sad64x32_c(rp,rs,ws,m);
+  case 18: return aom_highbd_obmc_sad64x64_c(rp,rs,ws,m);
+  case 19: return aom_highbd_obmc_sad64x128_c(rp,rs,ws,m);
+  case 20: return aom_highbd_obmc_sad128x64_c(rp,rs,ws,m);
+  case 21: return aom_highbd_obmc_sad128x128_c(rp,rs,ws,m);
+  default: return 0;}}
