@@ -4,6 +4,7 @@ members = [
     "crates/aom-transform",
     "crates/aom-quant",
     "crates/aom-entropy",
+    "crates/aom-intra",
     "crates/aom-sys-ref",
 ]
 

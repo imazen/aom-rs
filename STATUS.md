@@ -59,6 +59,12 @@ both tracks, fully bit-exact.**
   updates; adaptive encode byte-identical + adaptive decode symbol-identical to
   C over 10k sequences.
 
+- **Intra prediction (non-directional)** (`aom_dsp/intrapred.c`), both tracks:
+  DC / DC_top / DC_left / DC_128 / V / H / Paeth / Smooth / Smooth_V / Smooth_H,
+  generic over all 19 block sizes. Harness: `aom-intra/tests/intra_diff.rs` —
+  10 modes x 19 sizes x 2000 = 380k comparisons, byte-identical to C.
+  (Directional z1/z2/z3 predictors + highbd: TODO.)
+
 ## Infrastructure standing
 
 - Rust workspace + `aom-sys-ref` FFI oracle crate linking the reference `libaom.a`.

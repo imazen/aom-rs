@@ -36,6 +36,35 @@ extern "C" {
     );
 }
 
+// intra_shim.c — dispatch to aom_<mode>_predictor_<W>x<H>_c.
+extern "C" {
+    fn shim_intra_pred(
+        mode: i32, size_idx: i32, dst: *mut u8, stride: isize, above: *const u8, left: *const u8,
+    );
+}
+
+/// Reference intra prediction. `above_tl` has the top-left at index 0 followed
+/// by the `bw` above samples; `left` has `bh` samples. Returns the `bw*bh`
+/// predicted block (stride = bw).
+pub fn ref_intra_pred(
+    mode: usize,
+    size_idx: usize,
+    bw: usize,
+    bh: usize,
+    above_tl: &[u8],
+    left: &[u8],
+) -> Vec<u8> {
+    let mut dst = vec![0u8; bw * bh];
+    unsafe {
+        // C `above` points past the top-left sample so above[-1] is valid.
+        shim_intra_pred(
+            mode as i32, size_idx as i32, dst.as_mut_ptr(), bw as isize,
+            above_tl.as_ptr().add(1), left.as_ptr(),
+        )
+    }
+    dst
+}
+
 /// Reference `update_cdf`: returns the updated cdf array (length nsymbs+1).
 pub fn ref_update_cdf(cdf: &[u16], val: i32, nsymbs: usize) -> Vec<u16> {
     let mut out = cdf.to_vec();

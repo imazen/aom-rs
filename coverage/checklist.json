@@ -5,86 +5,246 @@
     "transform.fwd_txfm1d": {
       "status": "green",
       "items": {
-        "av1_fdct4":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fdct8":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fdct16": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fdct32": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fdct64": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fadst4":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fadst8":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fadst16": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fidentity4":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fidentity8":  {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fidentity16": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"},
-        "av1_fidentity32": {"status": "green", "test": "txfm1d_diff::txfm1d_differential_fuzz"}
+        "av1_fdct4": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fdct8": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fdct16": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fdct32": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fdct64": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fadst4": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fadst8": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fadst16": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fidentity4": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fidentity8": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fidentity16": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        },
+        "av1_fidentity32": {
+          "status": "green",
+          "test": "txfm1d_diff::txfm1d_differential_fuzz"
+        }
       }
     },
     "transform.fwd_txfm2d": {
       "status": "green",
       "note": "All 19 tx_size entry points, all valid tx_type combos (193 total), incl. 64-point coeff repacking, flips, rectangular Sqrt2 scaling.",
       "items": {
-        "av1_fwd_txfm2d_all_sizes": {"status": "green", "test": "txfm2d_diff::txfm2d_differential_fuzz"}
+        "av1_fwd_txfm2d_all_sizes": {
+          "status": "green",
+          "test": "txfm2d_diff::txfm2d_differential_fuzz"
+        }
       }
     },
     "transform.inv_txfm1d": {
       "status": "green",
       "note": "Inverse 1D family; live per-stage clamp_value driven by stage_range.",
       "items": {
-        "av1_idct4":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_idct8":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_idct16": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_idct32": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_idct64": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_iadst4":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_iadst8":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_iadst16": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_iidentity4":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_iidentity8":  {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_iidentity16": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"},
-        "av1_iidentity32": {"status": "green", "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"}
+        "av1_idct4": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_idct8": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_idct16": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_idct32": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_idct64": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_iadst4": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_iadst8": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_iadst16": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_iidentity4": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_iidentity8": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_iidentity16": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        },
+        "av1_iidentity32": {
+          "status": "green",
+          "test": "inv_txfm1d_diff::inv_txfm1d_differential_fuzz"
+        }
       }
     },
     "transform.inv_txfm2d_add": {
       "status": "green",
       "note": "Inverse 2D + reconstruction, all 19 sizes x valid tx_types x bd{8,10,12}, incl. 32-cap input remap, flips, NewInvSqrt2 rect scaling, clamp stages, highbd clip-add.",
       "items": {
-        "av1_inv_txfm2d_add_all_sizes": {"status": "green", "test": "inv_txfm2d_diff::inv_txfm2d_differential_fuzz"}
+        "av1_inv_txfm2d_add_all_sizes": {
+          "status": "green",
+          "test": "inv_txfm2d_diff::inv_txfm2d_differential_fuzz"
+        }
       }
     },
     "quant.quantize_fp": {
       "status": "green",
       "note": "Encoder fast-path quantizer (no quant matrix), log_scale 0/1/2; qcoeff+dqcoeff+eob checked.",
       "items": {
-        "av1_quantize_fp":       {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"},
-        "av1_quantize_fp_32x32": {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"},
-        "av1_quantize_fp_64x64": {"status": "green", "test": "quantize_fp_diff::quantize_fp_differential_fuzz"}
+        "av1_quantize_fp": {
+          "status": "green",
+          "test": "quantize_fp_diff::quantize_fp_differential_fuzz"
+        },
+        "av1_quantize_fp_32x32": {
+          "status": "green",
+          "test": "quantize_fp_diff::quantize_fp_differential_fuzz"
+        },
+        "av1_quantize_fp_64x64": {
+          "status": "green",
+          "test": "quantize_fp_diff::quantize_fp_differential_fuzz"
+        }
       }
     },
     "quant.quantize_b": {
       "status": "green",
       "note": "Dead-zone (zbin) quantizer with quant/quant_shift two-step, no quant matrix, log_scale 0/1/2.",
       "items": {
-        "aom_quantize_b": {"status": "green", "test": "quantize_b_diff::quantize_b_differential_fuzz"}
+        "aom_quantize_b": {
+          "status": "green",
+          "test": "quantize_b_diff::quantize_b_differential_fuzz"
+        }
       }
     },
     "entropy.od_ec": {
       "status": "green",
       "note": "Daala range coder core (both tracks). Encoder byte-identical, decoder symbol-identical + roundtrip. TODO: od_ec_enc_bits (raw bits), aom_writer/reader CDF adaptation layer.",
       "items": {
-        "od_ec_encode_bool_q15": {"status": "green", "test": "entropy_diff::entropy_encode_byte_identical"},
-        "od_ec_encode_cdf_q15":  {"status": "green", "test": "entropy_diff::entropy_encode_byte_identical"},
-        "od_ec_enc_done":        {"status": "green", "test": "entropy_diff::entropy_encode_byte_identical"},
-        "od_ec_decode_bool_q15": {"status": "green", "test": "entropy_diff::entropy_decode_matches_and_roundtrips"},
-        "od_ec_decode_cdf_q15":  {"status": "green", "test": "entropy_diff::entropy_decode_matches_and_roundtrips"}
+        "od_ec_encode_bool_q15": {
+          "status": "green",
+          "test": "entropy_diff::entropy_encode_byte_identical"
+        },
+        "od_ec_encode_cdf_q15": {
+          "status": "green",
+          "test": "entropy_diff::entropy_encode_byte_identical"
+        },
+        "od_ec_enc_done": {
+          "status": "green",
+          "test": "entropy_diff::entropy_encode_byte_identical"
+        },
+        "od_ec_decode_bool_q15": {
+          "status": "green",
+          "test": "entropy_diff::entropy_decode_matches_and_roundtrips"
+        },
+        "od_ec_decode_cdf_q15": {
+          "status": "green",
+          "test": "entropy_diff::entropy_decode_matches_and_roundtrips"
+        }
       }
     },
     "entropy.cdf_adapt": {
       "status": "green",
       "note": "CDF adaptation + adaptive symbol coding (both tracks). Completes the symbol-coding stack.",
       "items": {
-        "update_cdf":       {"status": "green", "test": "cdf_diff::update_cdf_matches_c"},
-        "aom_write_symbol": {"status": "green", "test": "cdf_diff::adaptive_symbol_coding_matches_c"},
-        "aom_read_symbol":  {"status": "green", "test": "cdf_diff::adaptive_symbol_coding_matches_c"}
+        "update_cdf": {
+          "status": "green",
+          "test": "cdf_diff::update_cdf_matches_c"
+        },
+        "aom_write_symbol": {
+          "status": "green",
+          "test": "cdf_diff::adaptive_symbol_coding_matches_c"
+        },
+        "aom_read_symbol": {
+          "status": "green",
+          "test": "cdf_diff::adaptive_symbol_coding_matches_c"
+        }
+      }
+    },
+    "intra.nondirectional": {
+      "status": "green",
+      "note": "Non-directional intra predictors (both tracks): DC/DC_top/DC_left/DC_128/V/H/Paeth/Smooth/Smooth_V/Smooth_H over all 19 block sizes. Directional (z1/z2/z3) + highbd: TODO.",
+      "items": {
+        "dc": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "dc_top": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "dc_left": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "dc_128": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "v": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "h": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "paeth": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "smooth": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "smooth_v": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        },
+        "smooth_h": {
+          "status": "green",
+          "test": "intra_diff::intra_predictors_byte_identical"
+        }
       }
     }
   }

@@ -16,29 +16,33 @@ fn main() {
         .canonicalize()
         .unwrap();
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let shim_c = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shim/entropy_shim.c");
-    let obj = out_dir.join("entropy_shim.o");
-    let lib = out_dir.join("libentropy_shim.a");
-    let status = std::process::Command::new("clang")
-        .args(["-O2", "-c"])
-        .arg(&shim_c)
-        .arg("-o")
-        .arg(&obj)
-        .arg(format!("-I{}", src_dir.display()))
-        .arg(format!("-I{}", src_dir.join("build").display()))
-        .status()
-        .expect("clang failed to run");
-    assert!(status.success(), "shim compile failed");
-    let ar = std::process::Command::new("ar")
-        .arg("crus")
-        .arg(&lib)
-        .arg(&obj)
-        .status()
-        .expect("ar failed");
-    assert!(ar.success(), "ar failed");
+    let shim_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shim");
+    let lib = out_dir.join("libaom_shim.a");
+    let mut objs = Vec::new();
+    for name in ["entropy_shim", "intra_shim"] {
+        let shim_c = shim_dir.join(format!("{name}.c"));
+        let obj = out_dir.join(format!("{name}.o"));
+        let status = std::process::Command::new("clang")
+            .args(["-O2", "-c"])
+            .arg(&shim_c)
+            .arg("-o")
+            .arg(&obj)
+            .arg(format!("-I{}", src_dir.display()))
+            .arg(format!("-I{}", src_dir.join("build").display()))
+            .status()
+            .expect("clang failed to run");
+        assert!(status.success(), "{name} compile failed");
+        println!("cargo:rerun-if-changed={}", shim_c.display());
+        objs.push(obj);
+    }
+    let mut ar = std::process::Command::new("ar");
+    ar.arg("crus").arg(&lib);
+    for o in &objs {
+        ar.arg(o);
+    }
+    assert!(ar.status().expect("ar failed").success(), "ar failed");
     println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=entropy_shim");
-    println!("cargo:rerun-if-changed={}", shim_c.display());
+    println!("cargo:rustc-link-lib=static=aom_shim");
 
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=static=aom");
