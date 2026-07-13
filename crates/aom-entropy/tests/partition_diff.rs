@@ -3639,3 +3639,133 @@ fn read_palette_colors_v_roundtrips() {
         assert_eq!(got, colors, "bd={bit_depth} n={n} colors={colors:?}");
     }
 }
+
+// ---- per-block leaf readers: is_inter / motion_mode / interp_filter / delta_q /
+//      delta_lf / segment_id — roundtrips vs the C-validated writers ----
+
+fn mk_ns_cdf(rng: &mut Rng, n: usize, out: &mut [u16]) {
+    for v in out.iter_mut() {
+        *v = 0;
+    }
+    let mut vals = [0i32; 16];
+    for v in vals.iter_mut().take(n - 1) {
+        *v = 1 + (rng.next() % 32766) as i32;
+    }
+    vals[..n - 1].sort_unstable();
+    vals[..n - 1].reverse();
+    let mut prev = 32768i32;
+    for i in 0..n - 1 {
+        let v = vals[i].min(prev - 1).max((n - 1 - i) as i32);
+        out[i] = v as u16;
+        prev = v;
+    }
+    out[n - 1] = 0;
+    out[n] = 0;
+}
+
+#[test]
+fn read_leaf_symbols_roundtrip() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        read_delta_lflevel, read_delta_qindex, read_is_inter, read_mb_interp_filter,
+        read_motion_mode, read_segment_id, write_delta_lflevel, write_delta_qindex, write_is_inter,
+        write_mb_interp_filter, write_motion_mode, write_segment_id,
+    };
+    let mut rng = Rng(0x1e_1eaf_c0de_00a0u64);
+    for _ in 0..120_000 {
+        // is_inter (coded path)
+        {
+            let is_inter = (rng.next() & 1) as i32;
+            let mut c = [0u16; 3];
+            mk_ns_cdf(&mut rng, 2, &mut c);
+            let mut enc = OdEcEnc::new();
+            let mut ce = c;
+            write_is_inter(&mut enc, &mut ce, false, false, is_inter);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let mut cd = c;
+            let got = read_is_inter(&mut dec, &mut cd, false, false);
+            assert_eq!(got, is_inter, "is_inter");
+            assert_eq!(ce, cd, "is_inter cdf");
+        }
+        // motion_mode
+        {
+            let last = (rng.next() % 3) as i32; // 0/1/2
+            let mm = match last {
+                0 => 0,
+                1 => (rng.next() & 1) as i32,
+                _ => (rng.next() % 3) as i32,
+            };
+            let mut obmc = [0u16; 3];
+            let mut mmc = [0u16; 4];
+            mk_ns_cdf(&mut rng, 2, &mut obmc);
+            mk_ns_cdf(&mut rng, 3, &mut mmc);
+            let mut enc = OdEcEnc::new();
+            let (mut oe, mut me) = (obmc, mmc);
+            write_motion_mode(&mut enc, &mut oe, &mut me, last, mm);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut od, mut md) = (obmc, mmc);
+            let got = read_motion_mode(&mut dec, &mut od, &mut md, last);
+            assert_eq!(got, mm, "motion_mode last={last}");
+            assert_eq!((oe, me), (od, md), "motion_mode cdf");
+        }
+        // interp_filter (needed + switchable)
+        {
+            let dual = rng.next() & 1 == 1;
+            let f0 = (rng.next() % 3) as i32;
+            let f1 = if dual { (rng.next() % 3) as i32 } else { f0 };
+            let mut c0 = [0u16; 4];
+            let mut c1 = [0u16; 4];
+            mk_ns_cdf(&mut rng, 3, &mut c0);
+            mk_ns_cdf(&mut rng, 3, &mut c1);
+            let mut enc = OdEcEnc::new();
+            let (mut e0, mut e1) = (c0, c1);
+            write_mb_interp_filter(&mut enc, &mut e0, &mut e1, true, true, dual, f0, f1);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut d0, mut d1) = (c0, c1);
+            let (g0, g1) = read_mb_interp_filter(&mut dec, &mut d0, &mut d1, true, true, dual);
+            assert_eq!((g0, g1), (f0, f1), "interp dual={dual}");
+            assert_eq!((e0, e1), (d0, d1), "interp cdf");
+        }
+        // delta_q + delta_lf
+        {
+            let dq = (rng.next() % 511) as i32 - 255;
+            let dl = (rng.next() % 511) as i32 - 255;
+            let mut cq = [0u16; 5];
+            let mut cl = [0u16; 5];
+            mk_ns_cdf(&mut rng, 4, &mut cq);
+            mk_ns_cdf(&mut rng, 4, &mut cl);
+            let mut enc = OdEcEnc::new();
+            let (mut eq, mut el) = (cq, cl);
+            write_delta_qindex(&mut enc, &mut eq, dq);
+            write_delta_lflevel(&mut enc, &mut el, dl);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let (mut dq_c, mut dl_c) = (cq, cl);
+            let gq = read_delta_qindex(&mut dec, &mut dq_c);
+            let gl = read_delta_lflevel(&mut dec, &mut dl_c);
+            assert_eq!((gq, gl), (dq, dl), "delta q/lf");
+            assert_eq!((eq, el), (dq_c, dl_c), "delta cdf");
+        }
+        // segment_id
+        {
+            let last = (rng.next() % 8) as i32; // last_active_segid 0..7
+            let segment_id = (rng.next() % (last as u64 + 1)) as i32;
+            let pred = (rng.next() % (last as u64 + 1)) as i32;
+            let mut c = [0u16; 9];
+            mk_ns_cdf(&mut rng, 8, &mut c);
+            let mut enc = OdEcEnc::new();
+            let mut ce = c;
+            write_segment_id(&mut enc, &mut ce, true, true, false, segment_id, pred, last);
+            let b = enc.done().to_vec();
+            let mut dec = OdEcDec::new(&b);
+            let mut cd = c;
+            let got = read_segment_id(&mut dec, &mut cd, pred, last);
+            assert_eq!(got, segment_id, "segment_id last={last} pred={pred}");
+            assert_eq!(ce, cd, "segment_id cdf");
+        }
+    }
+}

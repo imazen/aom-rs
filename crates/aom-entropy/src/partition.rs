@@ -3284,3 +3284,122 @@ pub fn read_palette_colors_v(dec: &mut OdEcDec, n: usize, bit_depth: i32) -> Vec
     }
     colors
 }
+
+/// `read_is_inter` — inverse of [`write_is_inter`]: the intra/inter flag. Coded only
+/// when neither the segment ref-frame nor global-mv feature forces the block; the
+/// forced cases infer inter (global-mv) or the caller's segment ref (ref feature).
+pub fn read_is_inter(
+    dec: &mut OdEcDec,
+    intra_inter_cdf: &mut [u16],
+    seg_ref_frame_active: bool,
+    seg_globalmv_active: bool,
+) -> i32 {
+    if seg_ref_frame_active || seg_globalmv_active {
+        return 1; // inferred inter (caller overrides for a ref-to-intra segment)
+    }
+    read_symbol(dec, intra_inter_cdf, 2)
+}
+
+/// `read_motion_mode` — inverse of [`write_motion_mode`]: SIMPLE when no other mode is
+/// allowed, the OBMC on/off bit when only OBMC is allowed, else the full motion mode.
+pub fn read_motion_mode(
+    dec: &mut OdEcDec,
+    obmc_cdf: &mut [u16],
+    motion_mode_cdf: &mut [u16],
+    last_motion_mode_allowed: i32,
+) -> i32 {
+    match last_motion_mode_allowed {
+        0 => 0, // SIMPLE
+        1 => read_symbol(dec, obmc_cdf, 2),
+        _ => read_symbol(dec, motion_mode_cdf, MOTION_MODES),
+    }
+}
+
+/// `read_mb_interp_filter` — inverse of [`write_mb_interp_filter`]: the (dual)
+/// interpolation filters. Coded only when needed and switchable; without dual-filter
+/// the vertical filter mirrors the horizontal. Returns `(filter0, filter1)`.
+pub fn read_mb_interp_filter(
+    dec: &mut OdEcDec,
+    cdf0: &mut [u16],
+    cdf1: &mut [u16],
+    interp_needed: bool,
+    is_switchable: bool,
+    enable_dual_filter: bool,
+) -> (i32, i32) {
+    if !interp_needed || !is_switchable {
+        return (0, 0); // inferred (the frame's fixed filter)
+    }
+    let f0 = read_symbol(dec, cdf0, SWITCHABLE_FILTERS);
+    let f1 = if enable_dual_filter {
+        read_symbol(dec, cdf1, SWITCHABLE_FILTERS)
+    } else {
+        f0
+    };
+    (f0, f1)
+}
+
+/// Read the exp-Golomb delta magnitude+sign shared by delta-q / delta-lf: the small
+/// value on the `probs+1`-symbol CDF, then (when it saturates) the get_msb remainder,
+/// then the sign. Inverse of the `write_delta_*` tail.
+fn read_delta_value(dec: &mut OdEcDec, cdf: &mut [u16], probs: usize, small: i32) -> i32 {
+    let s = read_symbol(dec, cdf, probs + 1);
+    let mut abs = s;
+    if s == small {
+        let rem_bits = read_literal(dec, 3) + 1;
+        let thr = (1 << rem_bits) + 1;
+        abs = read_literal(dec, rem_bits as u32) + thr;
+    }
+    if abs > 0 && read_bit(dec) != 0 {
+        -abs
+    } else {
+        abs
+    }
+}
+
+/// `read_delta_qindex` — inverse of [`write_delta_qindex`].
+pub fn read_delta_qindex(dec: &mut OdEcDec, delta_q_cdf: &mut [u16]) -> i32 {
+    read_delta_value(dec, delta_q_cdf, DELTA_Q_PROBS, DELTA_Q_SMALL)
+}
+
+/// `read_delta_lflevel` — inverse of [`write_delta_lflevel`].
+pub fn read_delta_lflevel(dec: &mut OdEcDec, delta_lf_cdf: &mut [u16]) -> i32 {
+    read_delta_value(dec, delta_lf_cdf, DELTA_LF_PROBS, DELTA_LF_SMALL)
+}
+
+/// `av1_neg_deinterleave` (`av1/common/seg_common.c`): inverse of [`neg_interleave`] —
+/// recover the segment id from its recentred code.
+pub fn neg_deinterleave(diff: i32, ref_: i32, max: i32) -> i32 {
+    if ref_ == 0 {
+        return diff;
+    }
+    if ref_ >= max - 1 {
+        return max - diff - 1;
+    }
+    if 2 * ref_ < max {
+        if diff <= 2 * ref_ {
+            if diff & 1 != 0 {
+                ref_ + ((diff + 1) >> 1)
+            } else {
+                ref_ - (diff >> 1)
+            }
+        } else {
+            diff
+        }
+    } else if diff <= 2 * (max - ref_ - 1) {
+        if diff & 1 != 0 {
+            ref_ + ((diff + 1) >> 1)
+        } else {
+            ref_ - (diff >> 1)
+        }
+    } else {
+        max - (diff + 1)
+    }
+}
+
+/// `read_segment_id` — inverse of [`write_segment_id`]: the spatial-pred segment id
+/// (neg-deinterleaved around `pred`). The caller applies the coding gate (segmentation
+/// enabled + map update + not skip-inferred).
+pub fn read_segment_id(dec: &mut OdEcDec, pred_cdf: &mut [u16], pred: i32, last_active_segid: i32) -> i32 {
+    let coded_id = read_symbol(dec, pred_cdf, MAX_SEGMENTS_MI);
+    neg_deinterleave(coded_id, pred, last_active_segid + 1)
+}
