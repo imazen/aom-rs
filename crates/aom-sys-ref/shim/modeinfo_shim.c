@@ -2144,3 +2144,32 @@ uint32_t shim_write_modes_sb(const signed char *above_in, const signed char *lef
   od_ec_enc_clear(&ec);
   return nb;
 }
+
+/* --- write_modes tile loop (av1/encoder/bitstream.c) --- */
+/* Partition-only (stubbed blocks): zero the above partition context once for the tile,
+ * then per SB row zero the left context and walk each SB (row-major) via wms_recurse,
+ * consuming the concatenated pre-order tree. above threads vertically across the tile;
+ * left threads horizontally within a row. tile is n_sb_rows x n_sb_cols SBs of sb_mi mi. */
+uint32_t shim_write_modes_tile(int n_sb_rows, int n_sb_cols, int sb_mi, int sb_size,
+    const signed char *tree, uint16_t *arena, uint8_t *out, signed char *above_out,
+    uint16_t *arena_out, int *tree_consumed) {
+  MACROBLOCKD xd;
+  static signed char above[128];
+  for (int i = 0; i < 128; i++) above[i] = 0; /* av1_zero_above_context */
+  xd.above_partition_context = (PARTITION_CONTEXT *)above;
+  od_ec_enc ec; od_ec_enc_init(&ec, 256);
+  int idx = 0;
+  for (int r = 0; r < n_sb_rows; r++) {
+    for (int i = 0; i < 32; i++) xd.left_partition_context[i] = 0; /* av1_zero_left_context per SB row */
+    for (int c = 0; c < n_sb_cols; c++) {
+      wms_recurse(&ec, &xd, tree, &idx, r * sb_mi, c * sb_mi, sb_size, arena);
+    }
+  }
+  uint32_t nb = 0; const unsigned char *buf = od_ec_enc_done(&ec, &nb);
+  for (uint32_t i = 0; i < nb; i++) out[i] = buf[i];
+  for (int i = 0; i < 128; i++) above_out[i] = above[i];
+  for (int i = 0; i < PARTITION_CONTEXTS * 11; i++) arena_out[i] = arena[i];
+  *tree_consumed = idx;
+  od_ec_enc_clear(&ec);
+  return nb;
+}

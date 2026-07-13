@@ -2693,3 +2693,33 @@ pub fn write_modes_sb(
     write_modes_sb_recurse(enc, above, left, arena, tree, &mut idx, mi_row, mi_col, bsize);
     idx
 }
+
+/// `write_modes` (`av1/encoder/bitstream.c`), partition-only form: the tile loop over
+/// superblocks. The above partition context is zeroed once for the tile and threads
+/// vertically across SB rows; the left context is zeroed at the start of each SB row and
+/// threads horizontally across the row's SBs. Each SB is walked by the partition-tree
+/// recursion, consuming the concatenated (row-major) pre-order partition sequence. Block
+/// content is stubbed (coded by the block drivers). Returns the entries consumed.
+#[allow(clippy::too_many_arguments)]
+pub fn write_modes_tile(
+    enc: &mut OdEcEnc,
+    above: &mut [i8],
+    arena: &mut [[u16; 11]; 20],
+    tree: &[i8],
+    n_sb_rows: i32,
+    n_sb_cols: i32,
+    sb_mi: i32,
+    sb_size: usize,
+) -> usize {
+    for a in above.iter_mut() {
+        *a = 0; // av1_zero_above_context
+    }
+    let mut idx = 0usize;
+    for r in 0..n_sb_rows {
+        let mut left = [0i8; 32]; // av1_zero_left_context per SB row
+        for c in 0..n_sb_cols {
+            write_modes_sb_recurse(enc, above, &mut left, arena, tree, &mut idx, r * sb_mi, c * sb_mi, sb_size);
+        }
+    }
+    idx
+}

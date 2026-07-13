@@ -2918,3 +2918,65 @@ fn write_modes_sb_matches_c() {
         assert_eq!(ar_rs_f, ar_c, "arena");
     }
 }
+
+#[test]
+fn write_modes_tile_matches_c() {
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{get_partition_subsize, write_modes_tile};
+    let mut rng = Rng(0x1e_7115_c0de_001bu64);
+    fn gen(rng: &mut Rng, bsize: usize, out: &mut Vec<i8>) {
+        let cdf_len = if bsize == 3 { 4 } else if bsize == 15 { 8 } else { 10 };
+        let p = (rng.next() % cdf_len as u64) as i32;
+        out.push(p as i8);
+        if p == 3 && bsize > 3 {
+            let sub = get_partition_subsize(bsize, 3) as usize;
+            for _ in 0..4 {
+                gen(rng, sub, out);
+            }
+        }
+    }
+    let mk = |rng: &mut Rng, n: usize, out: &mut [u16]| {
+        let mut prev = 32768i32;
+        for e in out.iter_mut().take(n - 1) {
+            let v = (prev - 1 - (rng.next() % 400) as i32).max(n as i32);
+            *e = v as u16;
+            prev = v;
+        }
+        out[n - 1] = 0;
+        out[n] = 0;
+    };
+    for _ in 0..30_000 {
+        let n_sb_rows = 1 + (rng.next() % 3) as i32;
+        let n_sb_cols = 1 + (rng.next() % 3) as i32;
+        // one tree per SB (row-major), concatenated.
+        let mut tree = Vec::new();
+        for _ in 0..(n_sb_rows * n_sb_cols) {
+            gen(&mut rng, 12, &mut tree); // BLOCK_64X64 SBs
+        }
+        let tree_i8: Vec<i8> = tree.clone();
+        let mut arena_n = [[0u16; 11]; 20];
+        let mut arena_f = [0u16; 220];
+        for c in 0..20 {
+            let bsl = c / 4;
+            let ns = if bsl == 0 { 4 } else if bsl == 4 { 8 } else { 10 };
+            let mut row = [0u16; 11];
+            mk(&mut rng, ns, &mut row);
+            arena_n[c] = row;
+            for j in 0..11 {
+                arena_f[c * 11 + j] = row[j];
+            }
+        }
+        let mut enc = OdEcEnc::new();
+        let mut above_rs = [0i8; 128];
+        let mut ar_rs = arena_n;
+        let consumed = write_modes_tile(&mut enc, &mut above_rs, &mut ar_rs, &tree_i8, n_sb_rows, n_sb_cols, 16, 12);
+        let got = enc.done().to_vec();
+        let (want, a_c, ar_c, consumed_c) =
+            c::ref_write_modes_tile(n_sb_rows, n_sb_cols, 16, 12, &tree_i8, &arena_f);
+        assert_eq!(got, want, "bytes {}x{} sbs, tree_len={}", n_sb_rows, n_sb_cols, tree.len());
+        assert_eq!(consumed as i32, consumed_c, "consumed");
+        assert_eq!(above_rs, a_c, "above");
+        let ar_rs_f: [u16; 220] = core::array::from_fn(|i| ar_rs[i / 11][i % 11]);
+        assert_eq!(ar_rs_f, ar_c, "arena");
+    }
+}
