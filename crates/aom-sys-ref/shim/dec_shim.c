@@ -1954,3 +1954,21 @@ int shim_dump_default_inter_ext_tx(int base_qindex, uint16_t *out) {
   free(rcb);
   return 0;
 }
+
+#include "aom_ports/mem.h"
+#include "config/av1_rtcd.h"
+
+/* Lossless 4x4 Walsh-Hadamard inverse-add oracle. The exported _c kernels take
+ * a BYTEPTR-packed highbd destination (CONVERT_TO_SHORTPTR shifts it back <<1),
+ * so wrap CONVERT_TO_BYTEPTR here and expose a native uint16_t* destination +
+ * eob dispatch, mirroring av1_highbd_iwht4x4_add (av1/common/idct.c). Uses the
+ * scalar _c kernels (not the RTCD pointer) to match the aom-transform scalar
+ * port. Decoder-track lossless addition, append-only. */
+void shim_highbd_iwht4x4_add(const int32_t *input, uint16_t *dest, int stride,
+                             int eob, int bd) {
+  uint8_t *dest8 = CONVERT_TO_BYTEPTR(dest);
+  if (eob > 1)
+    av1_highbd_iwht4x4_16_add_c(input, dest8, stride, bd);
+  else
+    av1_highbd_iwht4x4_1_add_c(input, dest8, stride, bd);
+}

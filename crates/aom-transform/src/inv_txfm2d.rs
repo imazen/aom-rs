@@ -235,3 +235,90 @@ pub fn av1_inv_txfm2d_add(
         }
     }
 }
+
+/// `UNIT_QUANT_SHIFT` (`aom_dsp/txfm_common.h`): the extra shift the reversible
+/// 4x4 Walsh–Hadamard folds into its input, cancelling the lossless dequant's
+/// unit quantizer (dc/ac step 4 at qindex 0) so `level * 4 >> 2 == level`.
+const UNIT_QUANT_SHIFT: i32 = 2;
+
+/// `av1_highbd_iwht4x4_add` (`av1/common/av1_inv_txfm2d.c`): the 4x4 reversible
+/// Walsh–Hadamard inverse transform used for `xd->lossless` blocks (forced
+/// `TX_4X4`, tx_type always `DCT_DCT`). `input` is the DEQUANTIZED 4x4
+/// coefficient block in raster order (as fed to [`av1_inv_txfm2d_add`] on the
+/// non-lossless path); `output` is a `bd`-bit pixel buffer of at least
+/// `4*stride`, holding the prediction on entry and the reconstruction on return.
+///
+/// Dispatches on `eob` exactly like the C wrapper: `eob > 1` runs the full
+/// 16-point transform, otherwise the DC-only special case. Per idct.c the
+/// `eob <= 1` branch is significant for lossless (it produces a different,
+/// correct result than the full transform on a DC-only block — not merely an
+/// optimization), so the two kernels are NOT interchangeable.
+pub fn av1_highbd_iwht4x4_add(input: &[i32], output: &mut [u16], stride: usize, eob: usize, bd: i32) {
+    if eob > 1 {
+        av1_highbd_iwht4x4_16_add(input, output, stride, bd);
+    } else {
+        av1_highbd_iwht4x4_1_add(input, output, stride, bd);
+    }
+}
+
+/// `av1_highbd_iwht4x4_16_add_c` — the full 4-point reversible Walsh–Hadamard
+/// applied column-then-row. Bit-exact port; `range_check_value(_, bd+1)` is a
+/// no-op in the production config (coefficient range checking off).
+fn av1_highbd_iwht4x4_16_add(input: &[i32], dest: &mut [u16], stride: usize, bd: i32) {
+    let mut out = [0i32; 16];
+    // Column pass: iteration i reads input[i], input[i+4], input[i+8],
+    // input[i+12] and writes out[i], out[i+4], out[i+8], out[i+12].
+    for i in 0..4 {
+        let mut a1 = input[i] >> UNIT_QUANT_SHIFT;
+        let mut c1 = input[i + 4] >> UNIT_QUANT_SHIFT;
+        let mut d1 = input[i + 8] >> UNIT_QUANT_SHIFT;
+        let mut b1 = input[i + 12] >> UNIT_QUANT_SHIFT;
+        a1 += c1;
+        d1 -= b1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= b1;
+        d1 += c1;
+        out[i] = a1;
+        out[i + 4] = b1;
+        out[i + 8] = c1;
+        out[i + 12] = d1;
+    }
+    // Row pass: iteration i reads out[4i..4i+4] and writes dest column i,
+    // rows 0..3 (dest[i], dest[i+stride], dest[i+2*stride], dest[i+3*stride]).
+    for i in 0..4 {
+        let mut a1 = out[4 * i];
+        let mut c1 = out[4 * i + 1];
+        let mut d1 = out[4 * i + 2];
+        let mut b1 = out[4 * i + 3];
+        a1 += c1;
+        d1 -= b1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= b1;
+        d1 += c1;
+        dest[i] = highbd_clip_pixel_add(dest[i], a1, bd);
+        dest[i + stride] = highbd_clip_pixel_add(dest[i + stride], b1, bd);
+        dest[i + 2 * stride] = highbd_clip_pixel_add(dest[i + 2 * stride], c1, bd);
+        dest[i + 3 * stride] = highbd_clip_pixel_add(dest[i + 3 * stride], d1, bd);
+    }
+}
+
+/// `av1_highbd_iwht4x4_1_add_c` — the DC-only special case (`eob <= 1`). Uses
+/// only the DC coefficient; bit-exact port.
+fn av1_highbd_iwht4x4_1_add(input: &[i32], dest: &mut [u16], stride: usize, bd: i32) {
+    let a1 = input[0] >> UNIT_QUANT_SHIFT;
+    let e1 = a1 >> 1;
+    let tmp = [a1 - e1, e1, e1, e1];
+    // Row pass: iteration i reads tmp[i] and writes dest column i, rows 0..3.
+    for i in 0..4 {
+        let e = tmp[i] >> 1;
+        let a = tmp[i] - e;
+        dest[i] = highbd_clip_pixel_add(dest[i], a, bd);
+        dest[i + stride] = highbd_clip_pixel_add(dest[i + stride], e, bd);
+        dest[i + 2 * stride] = highbd_clip_pixel_add(dest[i + 2 * stride], e, bd);
+        dest[i + 3 * stride] = highbd_clip_pixel_add(dest[i + 3 * stride], e, bd);
+    }
+}

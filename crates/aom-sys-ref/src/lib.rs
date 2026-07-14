@@ -6085,6 +6085,14 @@ extern "C" {
     pub fn av1_inv_txfm2d_add_64x16_c(i: *const i32, o: *mut u16, s: i32, t: i32, bd: i32);
 }
 
+extern "C" {
+    // Lossless 4x4 Walsh–Hadamard inverse-add. The _c kernels use libaom's
+    // packed-pointer highbd convention (CONVERT_TO_SHORTPTR shifts the dest
+    // pointer <<1), unlike the native-u16* inv_txfm2d_add_*_c above, so the shim
+    // wraps CONVERT_TO_BYTEPTR and dispatches on eob. Takes a native u16 dest.
+    fn shim_highbd_iwht4x4_add(input: *const i32, dest: *mut u16, stride: i32, eob: i32, bd: i32);
+}
+
 // av1/encoder/av1_quantize.c — fast-path quantizers (no quant matrix).
 pub type QuantFpFn = unsafe extern "C" fn(
     *const i32,
@@ -6373,6 +6381,23 @@ pub fn ref_inv_txfm2d_add(
             tx_type as i32,
             bd,
         )
+    }
+}
+
+/// `av1_highbd_iwht4x4_add` (`av1/common/idct.c`): the lossless 4x4 Walsh–Hadamard
+/// inverse-add. Dispatches on `eob` (>1 -> 16-point, else DC-only) exactly like
+/// the C wrapper. `input` is the dequantized 4x4 block; `dest` holds the
+/// prediction on entry and the reconstruction on return (bd-bit samples, row
+/// `stride`).
+pub fn ref_highbd_iwht4x4_add(input: &[i32], dest: &mut [u16], stride: usize, eob: usize, bd: i32) {
+    unsafe {
+        shim_highbd_iwht4x4_add(
+            input.as_ptr(),
+            dest.as_mut_ptr(),
+            stride as i32,
+            eob as i32,
+            bd,
+        );
     }
 }
 

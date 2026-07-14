@@ -84,3 +84,52 @@ fn inv_txfm2d_differential_fuzz() {
         }
     }
 }
+
+/// The lossless 4x4 Walsh–Hadamard inverse-add (`av1_highbd_iwht4x4_add`) vs the
+/// REAL exported C kernels (`av1_highbd_iwht4x4_16_add_c` / `_1_add_c`). Both eob
+/// arms (full 16-point and DC-only), all three bit depths, and strided
+/// destinations (the decoder feeds a plane stride > 4). Inputs span the full
+/// dequant clamp range `±(1<<(7+bd))` so the whole butterfly is exercised.
+#[test]
+fn highbd_iwht4x4_add_matches_c() {
+    use aom_transform::inv_txfm2d::av1_highbd_iwht4x4_add;
+    let mut rng = Rng(0x1D7_4A17);
+    let (mut full_cases, mut dc_cases) = (0usize, 0usize);
+    for bd in [8i32, 10, 12] {
+        let bound = 1i64 << (7 + bd); // dequant_txb clamp bound
+        let span = (2 * bound) as u64;
+        for stride in [4usize, 7, 16, 33] {
+            for _ in 0..3000 {
+                let full = rng.next() & 1 == 0;
+                let eob = if full { 2 + (rng.next() % 15) as usize } else { 1 };
+                let mut input = [0i32; 16];
+                if full {
+                    for v in input.iter_mut() {
+                        *v = ((rng.next() % span) as i64 - bound) as i32;
+                    }
+                    full_cases += 1;
+                } else {
+                    input[0] = ((rng.next() % span) as i64 - bound) as i32;
+                    dc_cases += 1;
+                }
+                let dest0: Vec<u16> = (0..4 * stride).map(|_| rng.pixel(bd)).collect();
+
+                let mut got = dest0.clone();
+                av1_highbd_iwht4x4_add(&input, &mut got, stride, eob, bd);
+
+                let mut want = dest0.clone();
+                c::ref_highbd_iwht4x4_add(&input, &mut want, stride, eob, bd);
+
+                assert_eq!(
+                    got, want,
+                    "WHT divergence: bd={bd} stride={stride} eob={eob} input={input:?}"
+                );
+            }
+        }
+    }
+    // Anti-vacuous: both dispatch arms must actually be exercised.
+    assert!(
+        full_cases > 1000 && dc_cases > 1000,
+        "WHT diff must exercise both eob>1 ({full_cases}) and eob<=1 ({dc_cases}) arms"
+    );
+}
