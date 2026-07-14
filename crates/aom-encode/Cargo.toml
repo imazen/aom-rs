@@ -16,3 +16,10 @@ aom-intra = { path = "../aom-intra" }
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }
+# Read-only use for decode-diff diagnostics only (see
+# tests/decode_diff_noise_case.rs) -- aom-decode itself is owned by the
+# decoder track; this crate never modifies it. dev-dependency only, so this
+# does not create a cycle in the library build graph (aom-decode's own
+# [dependencies] on aom-encode only applies when building aom-decode itself;
+# test binaries here are a separate compilation unit).
+aom-decode = { path = "../aom-decode" }

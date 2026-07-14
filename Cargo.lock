@@ -43,6 +43,7 @@ dependencies = [
 name = "aom-encode"
 version = "0.0.1"
 dependencies = [
+ "aom-decode",
  "aom-dist",
  "aom-entropy",
  "aom-intra",
