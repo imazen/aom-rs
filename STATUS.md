@@ -892,16 +892,28 @@ diverges and why.
 
 ### MISSING (honest, as of this chunk)
 
-- **AB/4-way partition types** — `encode_sb`/`pack.rs`/`partition_pick` cover
-  4 of 10 partition types (NONE/SPLIT/HORZ/VERT); `HORZ_A`/`HORZ_B`/`VERT_A`/
-  `VERT_B`/`HORZ_4`/`VERT_4` are unported. Plausible contributor to the
-  pseudo-random-noise divergence above (more partition freedom = more chances
-  the real search's actual winner isn't in this port's candidate set at all).
+- **AB partition types** — `HORZ_A`/`HORZ_B`/`VERT_A`/`VERT_B` are unported
+  (6 of 10 -> now 8 of 10 with 4-way landed, see the "4-way partitions
+  ported" milestone below). AB additionally needs the `reuse_prev_rd_results_
+  for_part_ab` context-copy mechanism (`pick_sb_modes`'s `rd_mode_is_ready`
+  early-return — LIVE at speed 0 both usages, unlike `reuse_best_prediction_
+  for_part_ab`'s mode-cache path which is OFF at speed 0 both usages, so that
+  half is dead-and-skippable) plus its own NN prune (`av1_prune_ab_
+  partitions`, partition_strategy.c ~line 1300, same shape as the 4-way NN
+  this chunk ported — not yet traced). The AB-probe test
+  (`encoder_gate_e2e_ab_attempt`, unasserted) is currently CONFOUNDED by the
+  nonzero-LF gap below (mismatches at byte 0, inside the header, before any
+  AB-relevant data) — needs either LF-level search landing first, or
+  lower-contrast AB-triggering content that still avoids the LF search
+  picking a nonzero level, to get a clean read.
 - **Loop-filter-level search** (`av1_pick_filter_level`) — every e2e case
-  observed `lf_level=[0,0]` (bootstrapped from the real parse, not derived);
-  unverified whether this port's LF search (ported for a different envelope —
-  see the "Deblocking applied" milestone) would independently derive 0 for
-  these specific inputs. A nonzero-LF case is untested end-to-end.
+  previously observed `lf_level=[0,0]` (bootstrapped from the real parse, not
+  derived); this chunk's AB-probe content is the FIRST case to reach
+  `lf_level != [0,0]` end-to-end (`[7,8]` .. `[8,16]` observed) and it
+  mismatches at byte 0 (inside the bootstrapped header) — CONFIRMED broken,
+  not just untested. Root cause not investigated (out of this chunk's
+  partition-type scope); next LF-track session should start here instead of
+  re-discovering it.
 - **CDEF-strength search** — sidestepped via `enable_cdef=false` throughout;
   the CDEF-strength RD search itself is not part of this chunk.
 - **The qindex-from-cq-level / rate-control mapping** — this chunk always
@@ -914,9 +926,87 @@ diverges and why.
   at n_sb=1 (single 64x64 SB). The 128x64 (2-SB) case is verified for Task 2's
   ASSEMBLY test (real tile bytes) but not attempted for Task 3's full
   derivation.
-- **The exact root cause of the pseudo-random-noise divergence** — diagnosed
-  to "somewhere past byte 1139", not isolated to a specific partition/mode/
-  tx-type decision.
+- ~~The exact root cause of the pseudo-random-noise divergence~~ — **FOUND**:
+  see the "4-way partitions ported" milestone below (decode-diff isolated it
+  to a `PARTITION_VERT_4` choice at a specific 16x16 node; now fixed).
+
+## 4-way partitions (HORZ_4/VERT_4) ported — noise-case divergence RESOLVED (2026-07-14, encoder track)
+
+**Decode-diff methodology (Task 1):** new
+`crates/aom-encode/tests/decode_diff_noise_case.rs` decodes BOTH this port's
+own bitstream and real aomenc's bitstream for the one previously-diverging
+`encoder_gate_e2e_textured_attempt` case (pseudo-random noise) with the
+already-bit-exact-vs-C decoder (`aom_decode::frame::
+decode_frame_obus_prefilter`), then diffs `KfTileDecode::tree` (the
+pre-order partition-symbol sequence) index-by-index instead of the raw
+bytes — byte offset alone doesn't localize the true first divergent symbol
+because range-coder carry propagation can shift the visible effect later
+than the actual diverging decision. **Finding: first divergence at
+(mi_row=8, mi_col=8, bsize=BLOCK_16X16) — real aomenc chose
+`PARTITION_VERT_4`, this port's search chose `PARTITION_VERT`** (VERT_4
+wasn't in its candidate set). A second 4-way node (`HORZ_4`) appears later
+in the real tree too. Confirmed, not guessed — direct decode-side evidence.
+
+**Port (Task 2):** `rd_pick_4partition` (partition_search.c:3919) — the
+HORZ_4/VERT_4 4-equal-strip RD search, reusing the already-verified
+`rd_pick_rect_partition` leaf primitive (its budget-subtraction +
+accumulate-or-invalidate shape is exactly `rd_try_subblock`, already
+partition-type/position-generic) — plus `prune_4_way_partition_search`'s
+gating (partition_search.c:4120), including the REAL neural-net prune
+(`av1_ml_prune_4_partition`, partition_strategy.c:1326): confirmed LIVE at
+speed 0 both usages (`part_sf.ml_prune_partition = 1` unconditionally at
+the top of both `set_allintra_speed_features_framesize_independent` and
+`set_good_speed_features_framesize_independent` — NOT gated by any `speed
+>= N`), unlike the rect-stage's NN prunes which are all intra-dead. Only
+the `ml_model_index == 1` ("hd_" weight set, 3-way softmax) branch is
+reachable (`ml_4_partition_search_level_index` stays 0 at speed 0 both
+usages, `0 < 3` picks that branch) — the other weight variant is
+intentionally not transcribed. Weight tables (mean/std/2-layer-MLP
+weights+biases for bsize 16/32/64, plus the search/not-search threshold
+tables) mechanically transcribed from `partition_model_weights.h` by a new
+`xtask/transcribe_part4_nn.py` (mirrors the established
+`transcribe_nz_ctx.py` pattern) into `crates/aom-encode/src/
+part4_nn_weights.rs`; the NN forward pass + feature engineering +
+threshold decision live in the new `part4_prune.rs`. `SbTree` gained
+`Horz4`/`Vert4` variants (`Box<[LeafWinner; 4]>`), threaded through
+`encode_sb.rs`'s dry-run walk and `pack.rs`'s real OUTPUT_ENABLED walk —
+both mirror the exact C recursion (`encode_sb`'s own
+`PARTITION_HORZ_4`/`VERT_4` arms, partition_search.c:1690-1705, cross-
+checked against the decoder's already-verified `decode_partition`'s
+matching arms for the same quarter-strip stepping + frame-bound trim).
+Interior-envelope simplification (matching the existing HORZ/VERT scope):
+this port only attempts a 4-way type when all 4 quarter-strips are
+guaranteed in-frame, not just the C's own half-block `has_rows`/`has_cols`
+check — an edge 4-way candidate with fewer than 4 codeable strips is out of
+scope (next lift). New `PickFrameCfg::enable_1to4_partitions` flag gates
+the whole stage (`false` at every pre-existing call site, preserving their
+established NONE/SPLIT/HORZ/VERT-only behavior/assertions exactly; `true`
+only at the two e2e-relevant test files).
+
+**Result: `encoder_gate_e2e_textured_attempt` now 7/7 (was 6/7) — PROMOTED
+to an asserted hard regression gate** (was exploratory/unasserted while the
+noise case was open). `decode_diff_noise_case.rs` independently confirms
+not just byte-identity but that the decoded partition trees AND every
+shared leaf's mode/tx/uv_mode fields are identical — now also a hard gate
+(was a diagnostic).
+
+**New AB-partition probe** (`encoder_gate_e2e_ab_attempt`, unasserted,
+exploratory): content engineered to make an AB split RD-attractive (one
+half flat, the other split into two differently-textured quadrants).
+Result: 0/4, but CONFOUNDED — all 4 mismatch at byte 0 (inside the
+bootstrapped frame header, before any partition data), because this
+content pushes real aomenc's independent LF search to a nonzero level for
+the first time in this test family, hitting the separate pre-existing gap
+now documented above. Does not (yet) give a clean read on AB need
+specifically.
+
+**AB (`HORZ_A`/`HORZ_B`/`VERT_A`/`VERT_B`) is NOT ported this chunk** — see
+the MISSING section above for exactly what's needed (the
+`reuse_prev_rd_results_for_part_ab` context-copy mechanism, LIVE at speed 0
+unlike its mode-cache-only cousin which is dead, plus AB's own NN prune).
+Commits: `756dfa1` (decode-diff investigation), `ae19fe6` (pre-existing fmt
+drift, separated), then the 4-way port itself (this session — see `git log`
+for the exact SHA landed after this doc update).
 
 ## Gate posture (honest)
 
@@ -926,10 +1016,15 @@ surface (fp+b, lowbd+highbd, QM+flat), the full coefficient trellis (QM+flat), a
 the entire symbol-coding stack (range coder + CDF adaptation). **The encoder-gate
 MVP milestone is reached**: this port's own search+pack pipeline produces a
 byte-identical AV1 bitstream to real aomenc for the smallest single-SB all-intra
-KEY frame (flat content, asserted) and for 6 of 7 genuinely-textured variants of
-it (exploratory) — the frame header is bootstrapped from the real parse
-(LF-level/CDEF-strength search unported), but every coded byte of the tile-group
-payload is this port's own derivation. None of the four project gates
-(full-corpus correctness, ≤1.20× perf, full coverage, zenavif parity) is
-satisfied yet; the machinery that makes each mechanically checkable is in place
-and every landed module is byte-exact vs C within it.
+KEY frame (flat content, asserted) and for 7 of 7 genuinely-textured variants
+of it (also now asserted — see the "4-way partitions ported" milestone: the
+4-way partition port fixed the one remaining pseudo-random-noise divergence)
+— the frame header is bootstrapped from the real parse (LF-level/CDEF-strength
+search unported — and the nonzero-LF header path is now CONFIRMED broken, not
+just untested, per the AB-probe finding above), but every coded byte of the
+tile-group payload is this port's own derivation. 8 of 10 `PARTITION_*` types
+are ported (NONE/SPLIT/HORZ/VERT/HORZ_4/VERT_4); AB (HORZ_A/HORZ_B/VERT_A/
+VERT_B) remains. None of the four project gates (full-corpus correctness,
+≤1.20× perf, full coverage, zenavif parity) is satisfied yet; the machinery
+that makes each mechanically checkable is in place and every landed module is
+byte-exact vs C within it.

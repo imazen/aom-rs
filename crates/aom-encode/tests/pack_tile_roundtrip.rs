@@ -716,6 +716,10 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             less_rectangular_check_level: if allintra { 1 } else { 0 },
             max_partition_size: 15,
             min_partition_size: 3,
+            // This file's own count_tree/decode-side stats are
+            // NONE/SPLIT/HORZ/VERT-only -- keep 4-way off (see the
+            // count_tree panic arm above). Not yet cross-checked here.
+            enable_1to4_partitions: false,
         };
         let pack_cfg = PackCfg {
             enable_filter_intra: true,
@@ -829,6 +833,13 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
                 aom_encode::encode_sb::SbTree::Vert(_) => {
                     s.vert += 1;
                     s.leaves += 2;
+                }
+                aom_encode::encode_sb::SbTree::Horz4(_)
+                | aom_encode::encode_sb::SbTree::Vert4(_) => {
+                    panic!(
+                        "this harness passes enable_1to4_partitions: false -- \
+                         rd_pick_partition_real must never produce a 4-way tree here"
+                    )
                 }
             }
         }
@@ -1091,6 +1102,10 @@ fn pack_tile_roundtrips_with_real_costs() {
             less_rectangular_check_level: if allintra { 1 } else { 0 },
             max_partition_size: 15,
             min_partition_size: 3,
+            // This file's own count_tree/decode-side stats are
+            // NONE/SPLIT/HORZ/VERT-only -- keep 4-way off (see the
+            // count_tree panic arm above). Not yet cross-checked here.
+            enable_1to4_partitions: false,
         };
         let pack_cfg = PackCfg {
             enable_filter_intra: true,

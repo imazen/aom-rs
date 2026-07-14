@@ -385,6 +385,14 @@ pub struct PickFrameCfg<'a> {
     /// `av1_prune_partitions_by_max_min_bsize` clamp,
     /// partition_strategy.c:1837).
     pub min_partition_size: usize,
+    /// `oxcf.part_cfg.enable_1to4_partitions` (aomenc default true —
+    /// `cfg->disable_1to4_partition_type == 0`; verified against
+    /// `av1_cx_iface.c:1124`). Gates the WHOLE `PARTITION_HORZ_4`/`VERT_4`
+    /// stage (`prune_4_way_partition_search`'s `partition4_allowed &=
+    /// enable_1to4_partitions`, partition_search.c:4165-4166) — set `false`
+    /// to reproduce this port's pre-4-way behavior exactly (existing
+    /// callers that don't yet cross-check 4-way trees use this).
+    pub enable_1to4_partitions: bool,
 }
 
 /// One leaf evaluation's differential-visibility record.
@@ -844,6 +852,120 @@ fn rd_pick_rect_partition(
     (this_rdc.rdcost, winner)
 }
 
+/// `rd_pick_4partition` (partition_search.c:3919): the HORZ_4/VERT_4
+/// sub-block loop — 4 equal strips, sequential RD budget accumulation
+/// reusing [`rd_pick_rect_partition`] as the per-leaf primitive (its
+/// budget-subtraction + accumulate-or-invalidate shape is exactly
+/// `rd_try_subblock`, already partition-type/position-generic), with
+/// dry-run propagation after each non-last subblock (`is_last = i==3`) —
+/// mirrors the rect stage's own sub-0-then-sub-1 propagation, generalized
+/// to 4. Returns `(sum_rdc, Some(winners))` only on a genuine win
+/// (`sum_rdc.rdcost < best_rdc.rdcost` after the FINAL `av1_rd_cost_update`,
+/// :3962-3963) — callers don't need a redundant outer check.
+///
+/// Interior-envelope simplification (matching the existing Horz/Vert
+/// interior-only scope): callers must only invoke this when all 4
+/// quarter-strips are guaranteed to fit in-frame (`mi_row/col +
+/// 3*quarter_step` within bounds) — the C's own per-i frame-bound trim
+/// (`:3947-3948`, which can code fewer than 4 leaves at a frame edge) is
+/// NOT modelled; an edge 4-way candidate is simply not attempted (next
+/// lift, matching "the edge-block partition-cost override + edge rect"
+/// already listed as out of scope for HORZ/VERT).
+#[allow(clippy::too_many_arguments)]
+fn rd_pick_4partition(
+    env: &SbEncodeEnv,
+    cfg: &PickFrameCfg,
+    tile: &mut TileCtxState,
+    grid: &mut ModeGrid,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    cfl: &mut CflCtx,
+    mi_row: i32,
+    mi_col: i32,
+    subsize: usize,
+    partition_type: usize, // 8 = PARTITION_HORZ_4, 9 = PARTITION_VERT_4
+    is_horz4: bool,
+    quarter_step: i32,
+    partition_cost: &[i32; 10],
+    best_rdc: &PartRdStats,
+    visits: &mut Vec<LeafVisit>,
+) -> (PartRdStats, Option<Box<[LeafWinner; 4]>>) {
+    // set_4_part_ctx_and_rdcost (:3898-3916).
+    let mut sum_rdc = PartRdStats::init();
+    sum_rdc.rate = partition_cost[partition_type];
+    sum_rdc.rdcost = crate::rd::rdcost(env.rdmult, sum_rdc.rate, 0);
+
+    let mut w: [Option<LeafWinner>; 4] = [None, None, None, None];
+    #[allow(clippy::needless_range_loop)]
+    // i drives position calc + w[i] store/reread, not a simple iterate
+    for i in 0..4usize {
+        let (r, c) = if is_horz4 {
+            (mi_row + (i as i32) * quarter_step, mi_col)
+        } else {
+            (mi_row, mi_col + (i as i32) * quarter_step)
+        };
+        debug_assert!(
+            if is_horz4 {
+                r < env.mi_rows
+            } else {
+                c < env.mi_cols
+            },
+            "caller must only invoke rd_pick_4partition when all 4 strips fit (module docs)"
+        );
+        let (_rd_i, winner) = rd_pick_rect_partition(
+            env,
+            cfg,
+            tile,
+            grid,
+            recon_y,
+            recon_u,
+            recon_v,
+            cfl,
+            r,
+            c,
+            subsize,
+            partition_type,
+            best_rdc,
+            &mut sum_rdc,
+            visits,
+        );
+        w[i] = winner;
+        // rd_try_subblock's own early-bail (:3161-3164), checked by the
+        // caller loop here exactly as rd_pick_rect_partition's own caller
+        // checks it between sub-blocks.
+        if sum_rdc.rdcost >= best_rdc.rdcost {
+            return (PartRdStats::invalid(), None);
+        }
+        if i < 3 {
+            // is_last = (i == SUB_PARTITIONS_PART4 - 1) — propagate winner
+            // pixels/contexts/mi-grid for the NEXT strip's leaf search.
+            let wi = w[i].as_mut().expect("valid sum implies a winner");
+            let _ = crate::encode_sb::encode_b_intra_dry(
+                env,
+                tile,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                wi,
+                r,
+                c,
+                partition_type,
+            );
+            grid.stamp(r, c, subsize, wi.mode as u8, env.mi_rows, env.mi_cols);
+        }
+    }
+    // Calculate the total cost and update the best partition (:3962-3967).
+    rd_cost_update(env.rdmult, &mut sum_rdc);
+    if sum_rdc.rdcost >= best_rdc.rdcost {
+        return (PartRdStats::invalid(), None);
+    }
+    let arr: [LeafWinner; 4] =
+        w.map(|x| x.expect("interior 4-way envelope: all 4 subblocks present on a win"));
+    (sum_rdc, Some(Box::new(arr)))
+}
+
 /// `av1_rd_pick_partition` with REAL leaves, NONE + SPLIT + HORZ + VERT —
 /// see the module docs for the exact C sequence. `none_rd_out` mirrors the
 /// C's `none_rd` out-pointer (the parent's `split_rd[idx]` slot; consumed
@@ -961,6 +1083,13 @@ pub fn rd_pick_partition_real(
 
     let mut found = false;
     let mut best_tree: Option<SbTree> = None;
+    // `pc_tree->partitioning` (context_tree.c:150 inits PARTITION_NONE at
+    // alloc; each stage overwrites on its own win, :4478/:4628/:3013/etc).
+    // Feeds the 4-way ML prune's `part_ctx` feature; the final (4-way-
+    // stage) write is unread THIS chunk (AB, which would read it next, is
+    // not yet ported) -- kept live rather than deleted since it's exactly
+    // what the AB chunk needs.
+    let mut pc_tree_partitioning: i32 = 0; // PARTITION_NONE
     // part_search_state->none_rd (:3366; the :4458 store is PRE-pt_cost).
     let mut none_rd: i64 = 0;
 
@@ -1019,6 +1148,7 @@ pub fn rd_pick_partition_real(
             if this_rdc.rdcost < best_rdc.rdcost {
                 best_rdc = this_rdc;
                 found = true;
+                pc_tree_partitioning = 0; // PARTITION_NONE
                 best_tree = Some(SbTree::Leaf(winner.expect("valid rate has a winner")));
             }
         }
@@ -1026,6 +1156,13 @@ pub fn rd_pick_partition_real(
         restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
     }
 
+    // split_rd[4] (:3367/:4566): the children's none_rd out-values, zeroed
+    // once at init_partition_search_state_params like the C's
+    // `av1_zero(part_search_state->split_rd)` (hoisted out of the
+    // do_square_split block so it survives -- unmutated, all-zero -- to the
+    // 4-way ML prune below when SPLIT doesn't run, exactly matching
+    // split_partition_search's own early return leaving it untouched).
+    let mut split_rd = [0i64; 4];
     // ---- PARTITION_SPLIT stage ----
     if do_square_split {
         let subsize = split_subsize(bsize);
@@ -1033,9 +1170,6 @@ pub fn rd_pick_partition_real(
         sum_rdc.rate = partition_cost[3];
         sum_rdc.rdcost = crate::rd::rdcost(env.rdmult, sum_rdc.rate, 0);
 
-        // split_rd[4] (:3367/:4566): the children's none_rd out-values —
-        // consumed only by intra-dead NN prunes; threaded for shape.
-        let mut split_rd = [0i64; 4];
         let mut children: Vec<Option<SbTree>> = Vec::new();
         let mut idx = 0usize;
         while idx < 4 && sum_rdc.rdcost < best_rdc.rdcost {
@@ -1083,6 +1217,7 @@ pub fn rd_pick_partition_real(
             if sum_rdc.rdcost < best_rdc.rdcost {
                 best_rdc = sum_rdc;
                 found = true;
+                pc_tree_partitioning = 3; // PARTITION_SPLIT
                 let kids: Vec<SbTree> = children
                     .into_iter()
                     .map(|t| t.expect("found split has 4 found children"))
@@ -1109,7 +1244,6 @@ pub fn rd_pick_partition_real(
         // max_partition_size || bsize == sb_size` — always true here.
         debug_assert!(bsize <= cfg.max_partition_size || bsize == env.sb_size);
         restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
-        let _ = split_rd; // NN-prune inputs (intra-dead; module docs).
     }
 
     // ---- rectangular partition stage (rectangular_partition_search,
@@ -1233,6 +1367,7 @@ pub fn rd_pick_partition_real(
             if sum_rdc.rdcost < best_rdc.rdcost {
                 best_rdc = sum_rdc;
                 found = true;
+                pc_tree_partitioning = 1 + i as i32; // PARTITION_HORZ / PARTITION_VERT
                 let pair = Box::new([
                     w0.take().expect("rect winner sub 0"),
                     w1.take().expect("interior rect winner sub 1"),
@@ -1251,7 +1386,176 @@ pub fn rd_pick_partition_real(
         // sub-0 encode debris restored before VERT evaluates.
         restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
     }
-    let _ = (rect_part_rd, is_rect_ctx_is_ready); // AB-stage inputs (next chunk).
+    // is_rect_ctx_is_ready: an AB-stage input (non-NULL only under a SPLIT
+    // parent's recursion); next chunk. rect_part_rd is consumed below by
+    // the 4-way ML prune.
+    let _ = is_rect_ctx_is_ready;
+
+    // ---- 4-way partition stage (rd_pick_4partition / prune_4_way_
+    // partition_search, partition_search.c:3919/4120; wired :5911-5936) ----
+    //
+    // prune_ext_part_state (prune_ext_part_none_skippable, :3979-3989):
+    // requires sf `skip_non_sq_part_based_on_none >= 1`, which is 0 at
+    // speed 0 both usages (the SAME sf field the rect-stage module docs
+    // already verified dead there) — so the C's `&& !prune_ext_part_state`
+    // factor is always true here and omitted.
+    //
+    // ext_partition_eval_thresh stays at its av1_reset_part_sf default
+    // (BLOCK_8X8) at speed 0 both usages — every override in
+    // speed_features.c is gated `if (speed >= 5)` (verified against the
+    // checked-in v3.14.1 source). ext_part_eval_based_on_cur_best is 0 at
+    // speed 0 both usages (allintra never sets it; good's only setter is
+    // `if (speed >= 5)`) so it never raises the threshold to BLOCK_128X128.
+    let partition4_allowed_base = cfg.enable_1to4_partitions
+        && do_rectangular_split
+        && BLK_1D[bsize] > BLK_1D[3] // > BLOCK_8X8
+        && has_rows
+        && has_cols;
+    // prune_part4_search == 2 at speed 0 both usages (verified): disables
+    // 4-way when the block's pixel width is below
+    // `min_partition_size_1d << 2`.
+    let width_ok = BLK_1D[bsize] >= (BLK_1D[cfg.min_partition_size] << 2);
+    let mut part4_allowed = [false, false]; // [HORZ4, VERT4]
+    // Interior-envelope simplification (module docs on rd_pick_4partition):
+    // this port only attempts a 4-way type when ALL 4 quarter-strips are
+    // guaranteed in-frame, not just the half-block `has_rows`/`has_cols`
+    // extent the C itself checks -- the C's own per-i frame-bound trim
+    // (coding fewer than 4 strips at a frame edge) is out of scope, same
+    // boundary as the existing interior-only HORZ/VERT scope.
+    let quarter_step_mi = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
+    let all_4_rows_fit = mi_row + 3 * quarter_step_mi < env.mi_rows;
+    let all_4_cols_fit = mi_col + 3 * quarter_step_mi < env.mi_cols;
+    if partition4_allowed_base && width_ok {
+        let horz4_subsize = get_partition_subsize(bsize, 8) as usize; // PARTITION_HORZ_4
+        let vert4_subsize = get_partition_subsize(bsize, 9) as usize; // PARTITION_VERT_4
+        part4_allowed[0] = partition_rect_allowed[0]
+            && all_4_rows_fit
+            && get_plane_block_size(horz4_subsize, env.ss_x, env.ss_y) != 255;
+        part4_allowed[1] = partition_rect_allowed[1]
+            && all_4_cols_fit
+            && get_plane_block_size(vert4_subsize, env.ss_x, env.ss_y) != 255;
+
+        // av1_ml_prune_4_partition (LIVE at speed 0 -- module docs on
+        // part4_prune.rs). Only runs when BOTH rect types were allowed
+        // (partition_search.c:4191-4193) -- matches the C's own extra gate.
+        if partition_rect_allowed[0] && partition_rect_allowed[1] {
+            const BLK_W: [usize; 22] = [
+                4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+            ];
+            const BLK_H: [usize; 22] = [
+                4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+            ];
+            let node_off_y = env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+            // pb_source_variance = x->source_variance: identical to the
+            // NONE-stage leaf's own value regardless of whether NONE ran
+            // (av1_get_perpixel_variance_facade is a pure fn of block
+            // origin+bsize -- module docs on av1_rd_pick_partition's
+            // pb_source_variance init/fallback, partition_search.c:4457/
+            // 5882-5885).
+            let pb_source_variance =
+                perpixel_variance_y(env.src_y, node_off_y, env.stride, bsize, env.bd);
+            let mut horz4_var = [0u32; 4];
+            let bh4 = BLK_H[horz4_subsize];
+            for (i, v) in horz4_var.iter_mut().enumerate() {
+                *v = perpixel_variance_y(
+                    env.src_y,
+                    node_off_y + i * bh4 * env.stride,
+                    env.stride,
+                    horz4_subsize,
+                    env.bd,
+                );
+            }
+            let mut vert4_var = [0u32; 4];
+            let bw4 = BLK_W[vert4_subsize];
+            for (i, v) in vert4_var.iter_mut().enumerate() {
+                *v = perpixel_variance_y(
+                    env.src_y,
+                    node_off_y + i * bw4,
+                    env.stride,
+                    vert4_subsize,
+                    env.bd,
+                );
+            }
+            // res_idx = is_480p_or_larger + is_720p_or_larger, from
+            // AOMMIN(cm->width, cm->height). Derived from mi_cols/mi_rows*4
+            // (the coded frame size) rather than a separate exact-pixel
+            // field -- exact for every case this port currently tests
+            // (SB-aligned frames); a frame whose true width/height sits
+            // strictly between its mi-rounded size and the 480/720
+            // boundary would misclassify (documented gap, not silently
+            // assumed away).
+            let frame_w_px = env.mi_cols * 4;
+            let frame_h_px = env.mi_rows * 4;
+            let min_dim = frame_w_px.min(frame_h_px);
+            let res_idx = usize::from(min_dim >= 480) + usize::from(min_dim >= 720);
+            let (h4, v4) = crate::part4_prune::predict_4partition_prune(
+                bsize,
+                pc_tree_partitioning,
+                best_rdc.rdcost,
+                rect_part_rd,
+                split_rd,
+                pb_source_variance,
+                horz4_var,
+                vert4_var,
+                res_idx,
+                part4_allowed[0],
+                part4_allowed[1],
+            );
+            part4_allowed[0] = h4;
+            part4_allowed[1] = v4;
+        }
+    }
+
+    if !terminate_partition_search {
+        let quarter_step = quarter_step_mi;
+        #[allow(clippy::needless_range_loop)]
+        // i selects HORZ4(0)/VERT4(1) throughout, not a simple iterate
+        for i in 0..2usize {
+            // PARTITION_VERT_4 also requires has_cols at the call site
+            // (:5936) -- already implied by partition4_allowed_base above
+            // (redundant in C too; kept for fidelity, module docs).
+            if !part4_allowed[i] || (i == 1 && !has_cols) {
+                continue;
+            }
+            let partition_type = 8 + i; // PARTITION_HORZ_4 / PARTITION_VERT_4
+            let subsize = get_partition_subsize(bsize, partition_type as i32) as usize;
+            let (sum_rdc, winners) = rd_pick_4partition(
+                env,
+                cfg,
+                tile,
+                grid,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                mi_row,
+                mi_col,
+                subsize,
+                partition_type,
+                i == 0,
+                quarter_step,
+                partition_cost,
+                &best_rdc,
+                visits,
+            );
+            if let Some(w) = winners {
+                best_rdc = sum_rdc;
+                found = true;
+                // Unread this chunk (AB, next, is what would read it) --
+                // kept live since it's exactly the AB chunk's `part_ctx`.
+                #[allow(unused_assignments)]
+                {
+                    pc_tree_partitioning = partition_type as i32;
+                }
+                best_tree = Some(if i == 0 {
+                    SbTree::Horz4(w)
+                } else {
+                    SbTree::Vert4(w)
+                });
+            }
+            restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+        }
+    }
 
     // ---- the winner encode (:5998-6026) ----
     if found {
@@ -1350,6 +1654,33 @@ fn stamp_grid_from_tree(
                     mi_rows,
                     mi_cols,
                 );
+            }
+        }
+        SbTree::Horz4(subs) => {
+            // PARTITION_HORZ_4: 4 strips at mi_row + i*quarter_step, i>0
+            // gated by the frame bound (module docs; matches encode_sb.rs's
+            // encode_sb_dry / pack.rs's pack_sb).
+            let sub = get_partition_subsize(bsize, 8) as usize;
+            let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
+            for (i, w) in subs.iter().enumerate() {
+                let this_mi_row = mi_row + (i as i32) * quarter_step;
+                if i > 0 && this_mi_row >= mi_rows {
+                    break;
+                }
+                grid.stamp(this_mi_row, mi_col, sub, w.mode as u8, mi_rows, mi_cols);
+            }
+        }
+        SbTree::Vert4(subs) => {
+            // PARTITION_VERT_4: 4 strips at mi_col + i*quarter_step, i>0
+            // gated by the frame bound.
+            let sub = get_partition_subsize(bsize, 9) as usize;
+            let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
+            for (i, w) in subs.iter().enumerate() {
+                let this_mi_col = mi_col + (i as i32) * quarter_step;
+                if i > 0 && this_mi_col >= mi_cols {
+                    break;
+                }
+                grid.stamp(mi_row, this_mi_col, sub, w.mode as u8, mi_rows, mi_cols);
             }
         }
     }

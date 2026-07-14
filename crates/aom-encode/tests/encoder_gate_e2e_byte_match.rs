@@ -38,18 +38,18 @@ use aom_encode::intra_uv_rd::UvLoopPolicy;
 use aom_encode::obu_assemble::assemble_frame_obu_payload_single_tile;
 use aom_encode::pack::pack_tile;
 use aom_encode::partition_pick::PickFrameCfg;
-use aom_encode::rd::{av1_compute_rd_mult_based_on_qindex, EncMode, FrameUpdateType, TuneMetric};
+use aom_encode::rd::{EncMode, FrameUpdateType, TuneMetric, av1_compute_rd_mult_based_on_qindex};
 use aom_encode::real_costs::derive_real_costs;
 use aom_encode::tx_search::TxTypeSearchPolicy;
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::header::{
-    read_sequence_header_obu, read_uncompressed_header, CdefHeader, FrameHeaderObu,
-    FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader, RestorationHeader, TileInfoHeader,
+    CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
+    RestorationHeader, TileInfoHeader, read_sequence_header_obu, read_uncompressed_header,
 };
 use aom_entropy::obu::read_obu_header;
 use aom_entropy::partition::KfFrameContext;
 use aom_entropy::rb::ReadBitBuffer;
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
 
 const OBU_SEQUENCE_HEADER: u32 = 1;
@@ -67,7 +67,10 @@ fn walk_obus(bytes: &[u8]) -> Vec<(u32, &[u8])> {
     while pos < bytes.len() {
         let hdr = read_obu_header(&bytes[pos..]).expect("valid OBU header");
         let after_header = pos + hdr.header_len;
-        assert!(hdr.obu_has_size_field, "shim_encode_av1_kf always sets has_size_field");
+        assert!(
+            hdr.obu_has_size_field,
+            "shim_encode_av1_kf always sets has_size_field"
+        );
         let (size, size_bytes) =
             aom_entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
         let payload_start = after_header + size_bytes;
@@ -125,7 +128,15 @@ const KF_MODE_DELTAS: [i8; 2] = [0, 0];
 /// cq_level) case with FLAT constant-128 source content. Returns `true` iff
 /// the assembled bytes matched the real stream byte-for-byte end to end.
 #[allow(clippy::too_many_arguments)]
-fn attempt_case(w: usize, h: usize, mono: bool, ss_x: usize, ss_y: usize, usage: u32, cq_level: i32) -> bool {
+fn attempt_case(
+    w: usize,
+    h: usize,
+    mono: bool,
+    ss_x: usize,
+    ss_y: usize,
+    usage: u32,
+    cq_level: i32,
+) -> bool {
     attempt_case_content(w, h, mono, ss_x, ss_y, usage, cq_level, |_r, _c| 128)
 }
 
@@ -155,15 +166,36 @@ fn attempt_case_content(
             y[r * w + col] = u16::from(content(r, col));
         }
     }
-    let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y) };
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
+    };
     let u = vec![128u16; cw * ch];
     let v = vec![128u16; cw * ch];
 
     let bytes = c::ref_encode_av1_kf(
-        &y, &u, &v, w, h, 8, mono, ss_x as i32, ss_y as i32, cq_level, 0, false, false, usage, 0,
+        &y,
+        &u,
+        &v,
+        w,
+        h,
+        8,
+        mono,
+        ss_x as i32,
+        ss_y as i32,
+        cq_level,
+        0,
+        false,
+        false,
+        usage,
+        0,
         false,
     );
-    assert!(!bytes.is_empty(), "shim_encode_av1_kf must produce a real stream");
+    assert!(
+        !bytes.is_empty(),
+        "shim_encode_av1_kf must produce a real stream"
+    );
 
     let obus = walk_obus(&bytes);
     let seq_payload = obus
@@ -179,7 +211,10 @@ fn attempt_case_content(
         .find(|(t, _)| *t == OBU_FRAME_HEADER || *t == OBU_FRAME)
         .map(|(t, p)| (*t, *p))
         .unwrap_or_else(|| panic!("no frame/frame-header OBU (w={w} h={h})"));
-    assert_eq!(frame_obu_type, OBU_FRAME, "w={w} h={h}: expected the combined num_tg==1 OBU_FRAME");
+    assert_eq!(
+        frame_obu_type, OBU_FRAME,
+        "w={w} h={h}: expected the combined num_tg==1 OBU_FRAME"
+    );
 
     let s = &seq.seq_header;
     let cc = &seq.color_config;
@@ -227,7 +262,10 @@ fn attempt_case_content(
             last_mode_deltas: KF_MODE_DELTAS,
             ..Default::default()
         },
-        cdef: CdefHeader { enable_cdef: s.enable_cdef, ..Default::default() },
+        cdef: CdefHeader {
+            enable_cdef: s.enable_cdef,
+            ..Default::default()
+        },
         restoration: RestorationHeader {
             enable_restoration: s.enable_restoration,
             sb_size_128: s.sb_size_128,
@@ -245,8 +283,14 @@ fn attempt_case_content(
     // etc. all come from real aomenc's OWN choice. See module docs.
     let p = read_uncompressed_header(&mut rb, &cfg);
     let real_bit_len = rb.bit_position();
-    assert!(!p.prefix.show_existing_frame, "w={w} h={h}: show_existing_frame unexpected");
-    assert_eq!(p.prefix.frame_type, 0, "w={w} h={h}: frame_type must be KEY");
+    assert!(
+        !p.prefix.show_existing_frame,
+        "w={w} h={h}: show_existing_frame unexpected"
+    );
+    assert_eq!(
+        p.prefix.frame_type, 0,
+        "w={w} h={h}: frame_type must be KEY"
+    );
 
     let tiles_log2 = p.tile_info.log2_cols + p.tile_info.log2_rows;
     let allintra = usage == 2;
@@ -290,7 +334,11 @@ fn attempt_case_content(
         FrameUpdateType::Kf,
         qindex,
         TuneMetric::Psnr,
-        if allintra { EncMode::Allintra } else { EncMode::Good },
+        if allintra {
+            EncMode::Allintra
+        } else {
+            EncMode::Good
+        },
     );
 
     const STRIDE: usize = 320;
@@ -353,7 +401,11 @@ fn attempt_case_content(
         tx_size_costs: &real.tx_size_costs,
         skip_costs: &real.skip_costs,
         tx_type_costs_y: &real.tx_type_costs_y,
-        pol: &if allintra { TxTypeSearchPolicy::speed0_allintra() } else { TxTypeSearchPolicy::speed0_good() },
+        pol: &if allintra {
+            TxTypeSearchPolicy::speed0_allintra()
+        } else {
+            TxTypeSearchPolicy::speed0_good()
+        },
         uv_lp: &UvLoopPolicy::speed0_allintra(),
         intra_uv_mode_cost: &real.mode_costs.intra_uv_mode_cost,
         cfl_costs: &real.cfl_costs,
@@ -369,6 +421,7 @@ fn attempt_case_content(
         less_rectangular_check_level: i32::from(allintra),
         max_partition_size: 15, // BLOCK_64X64 == sb_size for this envelope
         min_partition_size: 0,  // BLOCK_4X4: the true aomenc default (unset --min-partition-size)
+        enable_1to4_partitions: true, // the true aomenc default (unset --enable-1to4-partitions)
     };
     let pack_cfg = aom_encode::pack::PackCfg {
         enable_filter_intra: s.enable_filter_intra,
@@ -384,14 +437,29 @@ fn attempt_case_content(
     let mut enc = OdEcEnc::new();
     let n_sb = (mi_cols / SB_MI).max(1);
     let trees = pack_tile(
-        &mut enc, &env, &pick_cfg, &pack_cfg, &mut kf_write, &mut recon_y, &mut recon_u,
-        &mut recon_v, 0, 0, n_sb, n_sb, SB_MI, SB,
+        &mut enc,
+        &env,
+        &pick_cfg,
+        &pack_cfg,
+        &mut kf_write,
+        &mut recon_y,
+        &mut recon_u,
+        &mut recon_v,
+        0,
+        0,
+        n_sb,
+        n_sb,
+        SB_MI,
+        SB,
     );
-    assert_eq!(trees.len(), (n_sb * n_sb) as usize, "{ctx}: pack_tile must walk every SB");
+    assert_eq!(
+        trees.len(),
+        (n_sb * n_sb) as usize,
+        "{ctx}: pack_tile must walk every SB"
+    );
     let our_tile_bytes = enc.done().to_vec();
 
-    let our_payload =
-        assemble_frame_obu_payload_single_tile(&p, tiles_log2, &our_tile_bytes);
+    let our_payload = assemble_frame_obu_payload_single_tile(&p, tiles_log2, &our_tile_bytes);
 
     eprintln!(
         "{ctx}: real_tile_bytes.len()={} our_tile_bytes.len()={} real_payload.len()={} \
@@ -445,9 +513,9 @@ fn attempt_case_content(
 #[test]
 fn encoder_gate_e2e_attempt() {
     let cases: &[(usize, usize, bool, usize, usize, u32, i32)] = &[
-        (64, 64, true, 1, 1, 2, 32),   // mono, ALLINTRA -- simplest possible
-        (64, 64, false, 1, 1, 2, 32),  // 420, ALLINTRA
-        (64, 64, false, 1, 1, 0, 32),  // 420, GOOD
+        (64, 64, true, 1, 1, 2, 32),  // mono, ALLINTRA -- simplest possible
+        (64, 64, false, 1, 1, 2, 32), // 420, ALLINTRA
+        (64, 64, false, 1, 1, 0, 32), // 420, GOOD
     ];
     let mut matched = 0usize;
     for &(w, h, mono, ss_x, ss_y, usage, cq_level) in cases {
@@ -455,8 +523,15 @@ fn encoder_gate_e2e_attempt() {
             matched += 1;
         }
     }
-    eprintln!("encoder_gate_e2e_attempt: {matched}/{} cases byte-identical end-to-end", cases.len());
-    assert_eq!(matched, cases.len(), "the flat-content envelope must be fully derived");
+    eprintln!(
+        "encoder_gate_e2e_attempt: {matched}/{} cases byte-identical end-to-end",
+        cases.len()
+    );
+    assert_eq!(
+        matched,
+        cases.len(),
+        "the flat-content envelope must be fully derived"
+    );
 }
 
 /// Stretch goal beyond the trivial flat-content case above: genuinely
@@ -464,11 +539,21 @@ fn encoder_gate_e2e_attempt() {
 /// residual) coefficient coding and gives coeff-cost decision parity
 /// (Task 1) an actual chance to matter -- the flat case's near-empty
 /// 1-byte tile payload doesn't exercise the coefficient-cost tables at all
-/// (txb_skip=1 everywhere). Reported honestly: NOT asserted to succeed
-/// (this port's search omits AB/4-way partitions and doesn't replicate
-/// every candidate-order/pruning subtlety of real aomenc's RDO, so genuine
-/// divergence here is expected, not a bug), each case prints match/first-
-/// divergent-byte, and the final line states the honest fraction.
+/// (txb_skip=1 everywhere).
+///
+/// **VERIFIED 7/7, ASSERTED as a hard regression gate.** The "pseudo-random
+/// noise" case was the one exception (6/7) until the 4-way partition port
+/// (`PARTITION_HORZ_4`/`VERT_4` + the real `av1_ml_prune_4_partition` NN,
+/// `crates/aom-encode/src/partition_pick.rs` + `part4_prune.rs`):
+/// decode-diffing (`decode_diff_noise_case.rs`) isolated the divergence to
+/// (mi_row=8, mi_col=8, bsize=16x16) where real aomenc chose
+/// `PARTITION_VERT_4`, a type this port's search didn't have; with 4-way
+/// ported, all 7 cases (including noise) now byte-match end-to-end and
+/// `decode_diff_noise_case.rs` independently confirms the decoded partition
+/// trees AND every leaf's mode/tx fields are identical, not just the raw
+/// bytes. AB (`HORZ_A`/`HORZ_B`/`VERT_A`/`VERT_B`) is still unported --
+/// [`encoder_gate_e2e_ab_attempt`] is the honest, unasserted probe for
+/// content that needs it.
 #[test]
 fn encoder_gate_e2e_textured_attempt() {
     #[allow(clippy::type_complexity)]
@@ -476,16 +561,25 @@ fn encoder_gate_e2e_textured_attempt() {
         ("horizontal gradient", |r, _c| (96 + r) as u8),
         ("vertical gradient", |_r, c| (96 + c) as u8),
         ("diagonal ramp", |r, c| (64 + (r + c) / 2) as u8),
-        ("two-tone left/right split", |_r, c| if c < 32 { 90 } else { 160 }),
-        ("two-tone top/bottom split", |r, _c| if r < 32 { 90 } else { 160 }),
-        ("checkerboard (16px)", |r, c| if (r / 16 + c / 16) % 2 == 0 { 80 } else { 176 }),
+        (
+            "two-tone left/right split",
+            |_r, c| if c < 32 { 90 } else { 160 },
+        ),
+        (
+            "two-tone top/bottom split",
+            |r, _c| if r < 32 { 90 } else { 160 },
+        ),
+        ("checkerboard (16px)", |r, c| {
+            if (r / 16 + c / 16) % 2 == 0 { 80 } else { 176 }
+        }),
         // Deterministic pseudo-random "noise" (xorshift, no external RNG
         // dependency): the hardest case for decision parity -- forces many
         // small nonzero residuals across many txbs, maximizing the chance
         // that a candidate-order/pruning difference between this port's
         // search and real aomenc's actually surfaces.
         ("pseudo-random noise", |r, c| {
-            let mut x = (r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (c as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+            let mut x = (r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (c as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
             x ^= x >> 33;
             x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
             x ^= x >> 33;
@@ -500,8 +594,126 @@ fn encoder_gate_e2e_textured_attempt() {
         }
     }
     eprintln!(
-        "encoder_gate_e2e_textured_attempt: {matched}/{} textured cases byte-identical \
-         end-to-end (exploratory -- see module docs; not asserted)",
+        "encoder_gate_e2e_textured_attempt: {matched}/{} textured cases byte-identical end-to-end",
+        cases.len()
+    );
+    assert_eq!(
+        matched,
+        cases.len(),
+        "all 7 textured cases (incl. pseudo-random noise, which needs the 4-way partition port) \
+         must byte-match end-to-end -- see module docs for the VERT_4 finding this gate pins"
+    );
+}
+
+/// AB-partition probe (`PARTITION_HORZ_A`/`HORZ_B`/`VERT_A`/`VERT_B`, still
+/// unported -- see STATUS.md's MISSING list). Content is deliberately
+/// engineered to make an AB split RD-attractive: one half of a block is
+/// uniform (an AB type's "whole" side wants zero/near-zero residual, which
+/// only a genuinely flat region gives), the other half has TWO distinct
+/// sharp-edged sub-regions (the AB type's "split" side wants separate
+/// handling for each). E.g. `top_split_bottom_flat`: rows 0..32 hold a
+/// checkerboard on the left 32 cols and a different-frequency checkerboard
+/// on the right 32 cols (asymmetric detail -- rewards splitting the TOP
+/// into two quarters, i.e. HORZ_A's shape); rows 32..64 are flat.
+///
+/// Honestly NOT asserted (mission requirement: do not assert-pass a case
+/// that isn't proven byte-identical). Each case prints match / first-
+/// divergent-byte; the final line states the honest fraction. If a case
+/// diverges, that is EXPECTED (not a bug) until AB is ported -- this test
+/// exists to give forward visibility into whether real aomenc's own RDO
+/// actually picks an AB type on this content (via the SAME kind of
+/// decode-diff `decode_diff_noise_case.rs` used to find the VERT_4 gap),
+/// not to claim AB support that doesn't exist.
+///
+/// **CONFOUNDED, honestly reported: this specific content family does NOT
+/// currently isolate the AB question.** All 4 cases mismatch at byte 0 --
+/// inside the bootstrapped frame HEADER, before any partition/mode/
+/// coefficient data -- because this content's edge sharpness (even softened
+/// to the checkerboard-16px contrast that keeps the OTHER textured cases at
+/// `lf_level=[0,0]`) still pushes real aomenc's independent loop-filter
+/// search to a NONZERO level (`[7,8]..[8,16]` observed). This port's e2e
+/// pipeline bootstraps `lf_level` verbatim from the real parsed header (no
+/// LF-level search is ported -- see this file's module docs and STATUS.md's
+/// MISSING list: "every e2e case observed lf_level=[0,0] ... A nonzero-LF
+/// case is untested end-to-end"), so a header-assembly path that has NEVER
+/// been exercised end-to-end with nonzero lf_level is now confirmed broken
+/// somewhere in that untested path -- separate from, and prior to, whatever
+/// AB partitions would or wouldn't explain. Root-causing the nonzero-LF
+/// header path is out of THIS mission's scope (partition types); flagged
+/// here as a genuine, newly-confirmed gap for whichever session picks up
+/// loop-filter-level search next, not fixed or worked around.
+#[test]
+fn encoder_gate_e2e_ab_attempt() {
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, fn(usize, usize) -> u8)] = &[
+        // Detail split across the TOP two quadrants (different checkerboard
+        // periods left/right), uniform BOTTOM -- HORZ_A's shape (top-left +
+        // top-right split, bottom whole).
+        ("top split (2 freqs) / bottom flat", |r, c| {
+            if r < 32 {
+                let period = if c < 32 { 4 } else { 6 };
+                if (r / period + c / period) % 2 == 0 {
+                    80
+                } else {
+                    176
+                }
+            } else {
+                128
+            }
+        }),
+        // Mirror: uniform TOP, detail split across the BOTTOM two quadrants
+        // -- HORZ_B's shape.
+        ("top flat / bottom split (2 freqs)", |r, c| {
+            if r >= 32 {
+                let period = if c < 32 { 4 } else { 6 };
+                if (r / period + c / period) % 2 == 0 {
+                    80
+                } else {
+                    176
+                }
+            } else {
+                128
+            }
+        }),
+        // Detail split across the LEFT two quadrants, uniform RIGHT --
+        // VERT_A's shape.
+        ("left split (2 freqs) / right flat", |r, c| {
+            if c < 32 {
+                let period = if r < 32 { 4 } else { 6 };
+                if (r / period + c / period) % 2 == 0 {
+                    80
+                } else {
+                    176
+                }
+            } else {
+                128
+            }
+        }),
+        // Mirror: uniform LEFT, detail split across the RIGHT two quadrants
+        // -- VERT_B's shape.
+        ("left flat / right split (2 freqs)", |r, c| {
+            if c >= 32 {
+                let period = if r < 32 { 4 } else { 6 };
+                if (r / period + c / period) % 2 == 0 {
+                    80
+                } else {
+                    176
+                }
+            } else {
+                128
+            }
+        }),
+    ];
+    let mut matched = 0usize;
+    for &(name, content) in cases {
+        eprintln!("--- AB-probe case: {name} ---");
+        if attempt_case_content(64, 64, true, 1, 1, 2, 32, content) {
+            matched += 1;
+        }
+    }
+    eprintln!(
+        "encoder_gate_e2e_ab_attempt: {matched}/{} AB-probe cases byte-identical end-to-end \
+         (exploratory -- AB partitions unported, see module docs; not asserted)",
         cases.len()
     );
 }

@@ -979,6 +979,11 @@ fn stamp_grid(
                 }
             }
         }
+        SbTree::Horz4(_) | SbTree::Vert4(_) => {
+            panic!(
+                "partition_pick_diff.rs's NONE/SPLIT/HORZ/VERT-only harness never produces a 4-way tree"
+            )
+        }
     }
 }
 
@@ -1361,6 +1366,11 @@ fn rd_pick_partition_real_matches_c_recursion() {
             less_rectangular_check_level: if allintra { 1 } else { 0 },
             max_partition_size: 15, // BLOCK_128X128 (KEY default)
             min_partition_size: min_part,
+            // This harness's own tree-shape counters (`stamp_grid`/`count`
+            // above) are NONE/SPLIT/HORZ/VERT-only -- keep 4-way off so
+            // rd_pick_partition_real never produces a shape they can't
+            // handle. Not yet cross-checked against the C reference here.
+            enable_1to4_partitions: false,
         };
 
         // ---- Rust recursion ----
@@ -1525,6 +1535,9 @@ fn rd_pick_partition_real_matches_c_recursion() {
                 }
                 SbTree::Horz(_) => rect_n[0] += 1,
                 SbTree::Vert(_) => rect_n[1] += 1,
+                SbTree::Horz4(_) | SbTree::Vert4(_) => {
+                    panic!("this NONE/SPLIT/HORZ/VERT-only harness never produces a 4-way tree")
+                }
             }
         }
         let (mut n, mut s) = (0usize, 0usize);

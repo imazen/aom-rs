@@ -244,14 +244,26 @@ pub enum SbTree {
     Horz(Box<[LeafWinner; 2]>),
     /// PARTITION_VERT — `pc_tree->vertical[2]`: left + right sub-blocks.
     Vert(Box<[LeafWinner; 2]>),
+    /// PARTITION_HORZ_4 — `pc_tree->horizontal4[4]`: 4 equal-height
+    /// horizontal strips in top-to-bottom order (module docs on
+    /// [`crate::partition_pick::rd_pick_partition_real`]'s 4-way stage).
+    /// Interior envelope: all 4 present (a frame-edge HORZ_4 with fewer
+    /// than 4 coded strips is out of envelope, matching the existing
+    /// Horz/Vert interior-only scope).
+    Horz4(Box<[LeafWinner; 4]>),
+    /// PARTITION_VERT_4 — `pc_tree->vertical4[4]`: 4 equal-width vertical
+    /// strips in left-to-right order.
+    Vert4(Box<[LeafWinner; 4]>),
 }
 
 /// `PARTITION_NONE` / `PARTITION_HORZ` / `PARTITION_VERT` /
-/// `PARTITION_SPLIT` C values.
+/// `PARTITION_SPLIT` / `PARTITION_HORZ_4` / `PARTITION_VERT_4` C values.
 const PARTITION_NONE: i32 = 0;
 const PARTITION_HORZ: i32 = 1;
 const PARTITION_VERT: i32 = 2;
 const PARTITION_SPLIT: i32 = 3;
+const PARTITION_HORZ_4: i32 = 8;
+const PARTITION_VERT_4: i32 = 9;
 
 /// `get_partition_subsize(bsize, PARTITION_SPLIT)` for the square sizes.
 fn split_subsize(bsize: usize) -> usize {
@@ -586,6 +598,14 @@ pub fn encode_sb_dry(
             PARTITION_VERT,
             aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT) as usize,
         ),
+        SbTree::Horz4(_) => (
+            PARTITION_HORZ_4,
+            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_4) as usize,
+        ),
+        SbTree::Vert4(_) => (
+            PARTITION_VERT_4,
+            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_4) as usize,
+        ),
     };
     debug_assert_ne!(subsize, 255, "tree subsize is valid by construction");
     // !dry_run partition-CDF update: pack stage (skipped at DRY_RUN).
@@ -681,6 +701,56 @@ pub fn encode_sb_dry(
                     mi_row,
                     mi_col + hbs,
                     PARTITION_VERT as usize,
+                );
+                leaves.push(out);
+            }
+        }
+        SbTree::Horz4(subs) => {
+            // encode_sb PARTITION_HORZ_4 (:1690-1697): 4 strips at
+            // mi_row + i*quarter_step, i>0 gated by the frame bound.
+            let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
+            for (i, s) in subs.iter_mut().enumerate() {
+                let this_mi_row = mi_row + (i as i32) * quarter_step;
+                if i > 0 && this_mi_row >= env.mi_rows {
+                    break;
+                }
+                debug_assert_eq!(s.bsize, subsize, "horz4 winner bsize == subsize");
+                let out = encode_b_intra_dry(
+                    env,
+                    state,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    this_mi_row,
+                    mi_col,
+                    PARTITION_HORZ_4 as usize,
+                );
+                leaves.push(out);
+            }
+        }
+        SbTree::Vert4(subs) => {
+            // encode_sb PARTITION_VERT_4 (:1699-1705): 4 strips at
+            // mi_col + i*quarter_step, i>0 gated by the frame bound.
+            let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
+            for (i, s) in subs.iter_mut().enumerate() {
+                let this_mi_col = mi_col + (i as i32) * quarter_step;
+                if i > 0 && this_mi_col >= env.mi_cols {
+                    break;
+                }
+                debug_assert_eq!(s.bsize, subsize, "vert4 winner bsize == subsize");
+                let out = encode_b_intra_dry(
+                    env,
+                    state,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    mi_row,
+                    this_mi_col,
+                    PARTITION_VERT_4 as usize,
                 );
                 leaves.push(out);
             }

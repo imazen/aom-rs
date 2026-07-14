@@ -3121,6 +3121,10 @@ impl COracle<'_> {
             // REAL get_partition_subsize for the rect subsizes.
             SbTree::Horz(_) => (1i32, c::ref_get_partition_subsize(bsize as i32, 1) as usize),
             SbTree::Vert(_) => (2i32, c::ref_get_partition_subsize(bsize as i32, 2) as usize),
+            SbTree::Horz4(_) | SbTree::Vert4(_) => panic!(
+                "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
+                 every current caller passes enable_1to4_partitions: false"
+            ),
         };
         match tree {
             SbTree::Leaf(w) => {
@@ -3169,6 +3173,10 @@ impl COracle<'_> {
                     );
                 }
             }
+            SbTree::Horz4(_) | SbTree::Vert4(_) => panic!(
+                "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
+                 every current caller passes enable_1to4_partitions: false"
+            ),
         }
         // The REAL update_ext_partition_context (64-entry above window).
         let mut above64 = [0i8; 64];

@@ -75,6 +75,8 @@ const PARTITION_NONE: i32 = 0;
 const PARTITION_HORZ: i32 = 1;
 const PARTITION_VERT: i32 = 2;
 const PARTITION_SPLIT: i32 = 3;
+const PARTITION_HORZ_4: i32 = 8;
+const PARTITION_VERT_4: i32 = 9;
 
 /// Frame-level pack-stage constants beyond what [`SbEncodeEnv`] already
 /// carries for the residual recompute.
@@ -421,6 +423,14 @@ pub fn pack_sb(
             PARTITION_VERT,
             get_partition_subsize(bsize, PARTITION_VERT) as usize,
         ),
+        SbTree::Horz4(_) => (
+            PARTITION_HORZ_4,
+            get_partition_subsize(bsize, PARTITION_HORZ_4) as usize,
+        ),
+        SbTree::Vert4(_) => (
+            PARTITION_VERT_4,
+            get_partition_subsize(bsize, PARTITION_VERT_4) as usize,
+        ),
     };
 
     if bsize >= 3 {
@@ -552,6 +562,62 @@ pub fn pack_sb(
                     mi_row,
                     mi_col + hbs,
                     PARTITION_VERT as usize,
+                );
+            }
+        }
+        SbTree::Horz4(subs) => {
+            // encode_sb PARTITION_HORZ_4 (:1690-1697): 4 strips at
+            // mi_row + i*quarter_step, i>0 gated by the frame bound.
+            let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
+            for (i, s) in subs.iter_mut().enumerate() {
+                let this_mi_row = mi_row + (i as i32) * quarter_step;
+                if i > 0 && this_mi_row >= env.mi_rows {
+                    break;
+                }
+                pack_leaf(
+                    enc,
+                    env,
+                    cfg,
+                    kf,
+                    kfs,
+                    tile,
+                    nbr,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    this_mi_row,
+                    mi_col,
+                    PARTITION_HORZ_4 as usize,
+                );
+            }
+        }
+        SbTree::Vert4(subs) => {
+            // encode_sb PARTITION_VERT_4 (:1699-1705): 4 strips at
+            // mi_col + i*quarter_step, i>0 gated by the frame bound.
+            let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
+            for (i, s) in subs.iter_mut().enumerate() {
+                let this_mi_col = mi_col + (i as i32) * quarter_step;
+                if i > 0 && this_mi_col >= env.mi_cols {
+                    break;
+                }
+                pack_leaf(
+                    enc,
+                    env,
+                    cfg,
+                    kf,
+                    kfs,
+                    tile,
+                    nbr,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    mi_row,
+                    this_mi_col,
+                    PARTITION_VERT_4 as usize,
                 );
             }
         }

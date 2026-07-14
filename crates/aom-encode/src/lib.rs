@@ -21,6 +21,8 @@ pub mod intra_uv_rd;
 pub mod mode_costs;
 pub mod obu_assemble;
 pub mod pack;
+pub mod part4_nn_weights;
+pub mod part4_prune;
 pub mod partition;
 pub mod partition_pick;
 pub mod rd;
@@ -38,17 +40,22 @@ use aom_quant::{
 use aom_transform::inv_txfm2d::av1_inv_txfm2d_add;
 use aom_transform::txfm2d::av1_fwd_txfm2d;
 use aom_txb::{
-    dequant_txb, get_txb_ctx, optimize_txb, optimize_txb_qm, scan, txb_entropy_context, txb_high,
-    txb_wide, write_coeffs_txb, write_coeffs_txb_full, CoeffCostTables,
+    CoeffCostTables, dequant_txb, get_txb_ctx, optimize_txb, optimize_txb_qm, scan,
+    txb_entropy_context, txb_high, txb_wide, write_coeffs_txb, write_coeffs_txb_full,
 };
 
 /// Full (un-adjusted) transform width per `TX_SIZE` — the residual/coeff buffer
 /// dimensions the forward transform reads/writes before 64-point repacking.
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 /// `tx_size_2d[tx_size]` — full pel count, drives `av1_get_tx_scale` (log_scale).
-const TX_SIZE_2D: [i32; 19] =
-    [16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024];
+const TX_SIZE_2D: [i32; 19] = [
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+];
 
 /// `av1_get_tx_scale(tx_size)` = `(pels > 256) + (pels > 1024)`.
 #[inline]
@@ -104,9 +111,8 @@ impl<'a> QuantParams<'a> {
     ///
     /// `qm`/`iqm` start as `None` (flat); set them for the quant-matrix path.
     pub fn from_plane_rows(rows: &aom_quant::PlaneQuantRows<'a>, kind: QuantKind, bd: u8) -> Self {
-        let pair = |row: &'a [i16; 8]| -> &'a [i16; 2] {
-            row[..2].try_into().expect("row has 8 lanes")
-        };
+        let pair =
+            |row: &'a [i16; 8]| -> &'a [i16; 2] { row[..2].try_into().expect("row has 8 lanes") };
         let (quant, round) = match kind {
             QuantKind::Fp => (rows.quant_fp, rows.round_fp),
             QuantKind::B => (rows.quant, rows.round),
@@ -166,40 +172,122 @@ pub fn xform_quant(
     let hbd = qp.bd > 8;
     let eob = match (kind, qp.qm, qp.iqm, hbd) {
         (QuantKind::Fp, Some(qm), Some(iqm), false) => av1_quantize_fp_qm(
-            qp.round, qp.quant, qp.dequant, log_scale, qm, iqm, sc, src, &mut qcoeff, &mut dqcoeff,
+            qp.round,
+            qp.quant,
+            qp.dequant,
+            log_scale,
+            qm,
+            iqm,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         (QuantKind::Fp, Some(qm), Some(iqm), true) => av1_highbd_quantize_fp_qm(
-            qp.round, qp.quant, qp.dequant, log_scale, qm, iqm, sc, src, &mut qcoeff, &mut dqcoeff,
+            qp.round,
+            qp.quant,
+            qp.dequant,
+            log_scale,
+            qm,
+            iqm,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         (QuantKind::Fp, _, _, false) => av1_quantize_fp_no_qmatrix(
-            qp.quant, qp.dequant, qp.round, log_scale, sc, src, &mut qcoeff, &mut dqcoeff,
+            qp.quant,
+            qp.dequant,
+            qp.round,
+            log_scale,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         (QuantKind::Fp, _, _, true) => av1_highbd_quantize_fp_no_qmatrix(
-            qp.quant, qp.dequant, qp.round, log_scale, sc, src, &mut qcoeff, &mut dqcoeff,
+            qp.quant,
+            qp.dequant,
+            qp.round,
+            log_scale,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         (QuantKind::B, Some(qm), Some(iqm), false) => aom_quantize_b_qm(
-            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, qm, iqm, sc, src,
-            &mut qcoeff, &mut dqcoeff,
+            qp.zbin,
+            qp.round,
+            qp.quant,
+            qp.quant_shift,
+            qp.dequant,
+            log_scale,
+            qm,
+            iqm,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         (QuantKind::B, Some(qm), Some(iqm), true) => aom_highbd_quantize_b_qm(
-            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, qm, iqm, sc, src,
-            &mut qcoeff, &mut dqcoeff,
+            qp.zbin,
+            qp.round,
+            qp.quant,
+            qp.quant_shift,
+            qp.dequant,
+            log_scale,
+            qm,
+            iqm,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         (QuantKind::B, _, _, false) => aom_quantize_b_no_qmatrix(
-            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, sc, src,
-            &mut qcoeff, &mut dqcoeff,
+            qp.zbin,
+            qp.round,
+            qp.quant,
+            qp.quant_shift,
+            qp.dequant,
+            log_scale,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         (QuantKind::B, _, _, true) => aom_highbd_quantize_b_no_qmatrix(
-            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, sc, src,
-            &mut qcoeff, &mut dqcoeff,
+            qp.zbin,
+            qp.round,
+            qp.quant,
+            qp.quant_shift,
+            qp.dequant,
+            log_scale,
+            sc,
+            src,
+            &mut qcoeff,
+            &mut dqcoeff,
         ),
         // DC-only: the DC scalars (quant[0]/dequant[0]); qm/iqm handled internally.
         (QuantKind::Dc, _, _, false) => av1_quantize_dc(
-            qp.round, qp.quant[0], qp.dequant[0], log_scale, qp.qm, qp.iqm, src, &mut qcoeff,
+            qp.round,
+            qp.quant[0],
+            qp.dequant[0],
+            log_scale,
+            qp.qm,
+            qp.iqm,
+            src,
+            &mut qcoeff,
             &mut dqcoeff,
         ),
         (QuantKind::Dc, _, _, true) => av1_highbd_quantize_dc(
-            qp.round, qp.quant[0], qp.dequant[0], log_scale, qp.qm, qp.iqm, src, &mut qcoeff,
+            qp.round,
+            qp.quant[0],
+            qp.dequant[0],
+            log_scale,
+            qp.qm,
+            qp.iqm,
+            src,
+            &mut qcoeff,
             &mut dqcoeff,
         ),
     };
@@ -211,7 +299,13 @@ pub fn xform_quant(
         txb_entropy_context(&qcoeff, tx_size, tx_type, eob as usize)
     };
 
-    XformQuantResult { coeff, qcoeff, dqcoeff, eob, txb_entropy_ctx }
+    XformQuantResult {
+        coeff,
+        qcoeff,
+        dqcoeff,
+        eob,
+        txb_entropy_ctx,
+    }
 }
 
 /// Neighbour entropy contexts + plane geometry for `get_txb_ctx` (the block's
@@ -266,7 +360,13 @@ pub fn xform_quant_optimize(
 ) -> XformQuantOptResult {
     // av1_xform_quant with use_optimize_b: quantize but defer the entropy ctx.
     let xq = xform_quant(residual, tx_size, tx_type, kind, qp, true);
-    let XformQuantResult { coeff, mut qcoeff, mut dqcoeff, eob, .. } = xq;
+    let XformQuantResult {
+        coeff,
+        mut qcoeff,
+        mut dqcoeff,
+        eob,
+        ..
+    } = xq;
 
     // get_txb_ctx: neighbour contexts -> (txb_skip_ctx, dc_sign_ctx).
     let (txb_skip_ctx, dc_sign_ctx) =
@@ -294,12 +394,36 @@ pub fn xform_quant_optimize(
     let tcoeff = &coeff[..qcoeff.len()];
     let res = match (qp.qm, qp.iqm) {
         (Some(qm), Some(iqm)) => optimize_txb_qm(
-            tx_size, tx_type, &mut qcoeff, &mut dqcoeff, tcoeff, eob as usize, dequant, opt.rdmult,
-            dc_sign_ctx, txb_skip_ctx, opt.sharpness, sc, opt.cost, iqm, qm,
+            tx_size,
+            tx_type,
+            &mut qcoeff,
+            &mut dqcoeff,
+            tcoeff,
+            eob as usize,
+            dequant,
+            opt.rdmult,
+            dc_sign_ctx,
+            txb_skip_ctx,
+            opt.sharpness,
+            sc,
+            opt.cost,
+            iqm,
+            qm,
         ),
         _ => optimize_txb(
-            tx_size, tx_type, &mut qcoeff, &mut dqcoeff, tcoeff, eob as usize, dequant, opt.rdmult,
-            dc_sign_ctx, txb_skip_ctx, opt.sharpness, sc, opt.cost,
+            tx_size,
+            tx_type,
+            &mut qcoeff,
+            &mut dqcoeff,
+            tcoeff,
+            eob as usize,
+            dequant,
+            opt.rdmult,
+            dc_sign_ctx,
+            txb_skip_ctx,
+            opt.sharpness,
+            sc,
+            opt.cost,
         ),
     };
 
@@ -411,8 +535,12 @@ pub fn encode_block_coeffs_full(
 }
 
 // block_size_wide / block_size_high (pixels) for BLOCK_SIZES_ALL.
-const BLK_W: [usize; 22] = [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLK_H: [usize; 22] = [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const BLK_W: [usize; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BLK_H: [usize; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 // tx_size_wide_unit / high_unit (units of 4-pel MI).
 const TXU_W: [usize; 19] = [1, 2, 4, 8, 16, 1, 2, 2, 4, 4, 8, 8, 16, 1, 4, 2, 8, 4, 16];
 const TXU_H: [usize; 19] = [1, 2, 4, 8, 16, 2, 1, 4, 2, 8, 4, 16, 8, 4, 1, 8, 2, 16, 4];
@@ -453,7 +581,10 @@ pub fn encode_coding_block_plane(
     let uh = BLK_H[plane_bsize] >> 2;
     let txw = TXU_W[tx_size];
     let txh = TXU_H[tx_size];
-    assert!(uw.is_multiple_of(txw) && uh.is_multiple_of(txh), "tx_size must tile plane_bsize evenly");
+    assert!(
+        uw.is_multiple_of(txw) && uh.is_multiple_of(txh),
+        "tx_size must tile plane_bsize evenly"
+    );
     let mut above = vec![0i8; uw];
     let mut left = vec![0i8; uh];
 
@@ -470,8 +601,18 @@ pub fn encode_coding_block_plane(
                     plane_bsize,
                 };
                 let r = encode_block_coeffs_full(
-                    txb_residuals[idx], tx_size, tx_type, kind, qp, &bctx, opt, ttx, allow_update_cdf,
-                    enc, cdfs, ext_tx_cdf,
+                    txb_residuals[idx],
+                    tx_size,
+                    tx_type,
+                    kind,
+                    qp,
+                    &bctx,
+                    opt,
+                    ttx,
+                    allow_update_cdf,
+                    enc,
+                    cdfs,
+                    ext_tx_cdf,
                 );
                 r.txb_entropy_ctx as i8
             };
@@ -511,11 +652,7 @@ pub fn pixel_distortion(
 /// `n >= 0`, or a left shift by `-n` for `n < 0`.
 #[inline]
 fn right_signed_shift_i64(value: i64, n: i32) -> i64 {
-    if n < 0 {
-        value << (-n)
-    } else {
-        value >> n
-    }
+    if n < 0 { value << (-n) } else { value >> n }
 }
 
 /// `dist_block_tx_domain` non-QM path (av1/encoder/tx_search.c) — the
@@ -609,7 +746,10 @@ pub fn read_coding_block_plane(
     let uh = BLK_H[plane_bsize] >> 2;
     let txw = TXU_W[tx_size];
     let txh = TXU_H[tx_size];
-    assert!(uw.is_multiple_of(txw) && uh.is_multiple_of(txh), "tx_size must tile plane_bsize evenly");
+    assert!(
+        uw.is_multiple_of(txw) && uh.is_multiple_of(txh),
+        "tx_size must tile plane_bsize evenly"
+    );
     let area = aom_txb::txb_wide(tx_size) * aom_txb::txb_high(tx_size);
     let mut above = vec![0i8; uw];
     let mut left = vec![0i8; uh];
@@ -618,12 +758,27 @@ pub fn read_coding_block_plane(
     while blk_row < uh {
         let mut blk_col = 0;
         while blk_col < uw {
-            let (txb_skip_ctx, dc_sign_ctx) =
-                aom_txb::get_txb_ctx(plane_bsize, tx_size, plane, &above[blk_col..], &left[blk_row..]);
+            let (txb_skip_ctx, dc_sign_ctx) = aom_txb::get_txb_ctx(
+                plane_bsize,
+                tx_size,
+                plane,
+                &above[blk_col..],
+                &left[blk_row..],
+            );
             let mut tcoeff = vec![0i32; area];
             let (eob, tx_type) = aom_txb::read_coeffs_txb_full(
-                dec, cdfs, ext_tx_cdf, &mut tcoeff, tx_size, plane, txb_skip_ctx as usize,
-                dc_sign_ctx as usize, allow_update_cdf, ttx.is_inter, ttx.reduced, ttx.signal_gate,
+                dec,
+                cdfs,
+                ext_tx_cdf,
+                &mut tcoeff,
+                tx_size,
+                plane,
+                txb_skip_ctx as usize,
+                dc_sign_ctx as usize,
+                allow_update_cdf,
+                ttx.is_inter,
+                ttx.reduced,
+                ttx.signal_gate,
                 tx_type_chroma,
             );
             let cul = aom_txb::txb_entropy_context(&tcoeff, tx_size, tx_type, eob) as i8;

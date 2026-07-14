@@ -5,3 +5,4 @@
 .workongoing
 conformance/data/
 conformance/vectors.json
+__pycache__/
