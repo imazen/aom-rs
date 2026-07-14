@@ -20,13 +20,14 @@
  *     aom-entropy's KfFrameContext field order (coeff arena LAST, in aom-txb's
  *     CdfArena region layout). Total DUMP_KF_FC_LEN = 6431 u16.
  *
- *  3. shim_encode_av1_kf / shim_encode_av1_kf_sb128 / shim_decode_av1_kf —
- *     the REAL public codec API (aom_codec_av1_cx / aom_codec_av1_dx):
- *     produce a production KEY-frame bitstream in-process (the same
- *     library+path the aomenc CLI drives, at --sb-size=64 or =128) and the
- *     gold C-decoder pixel oracle for arbitrary AV1 bytes (SB size is a
- *     stream fact the real decoder reads itself — no sb-size-specific
- *     decode entry point is needed).
+ *  3. shim_encode_av1_kf / shim_encode_av1_kf_sb128 / shim_encode_av1_kf_tiles
+ *     / shim_decode_av1_kf — the REAL public codec API (aom_codec_av1_cx /
+ *     aom_codec_av1_dx): produce a production KEY-frame bitstream in-process
+ *     (the same library+path the aomenc CLI drives, at --sb-size=64 or =128,
+ *     optionally --tile-columns/--tile-rows) and the gold C-decoder pixel
+ *     oracle for arbitrary AV1 bytes (SB size / tile grid are stream facts
+ *     the real decoder reads itself — no sb-size- or tile-specific decode
+ *     entry point is needed).
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -359,7 +360,8 @@ int shim_dump_default_kf_fc(int base_qindex, uint16_t *out) {
 static long encode_kf_pass(aom_codec_iface_t *iface, aom_codec_enc_cfg_t *cfg,
                            int bd, int cq_level, int cpu_used, int enable_cdef,
                            int enable_restoration, int aq_mode,
-                           int sb_size_128, aom_image_t *img,
+                           int sb_size_128, int tile_columns_log2,
+                           int tile_rows_log2, aom_image_t *img,
                            int collect_stats, uint8_t *out, size_t out_cap) {
   aom_codec_ctx_t ctx;
   aom_codec_flags_t flags = bd > 8 ? AOM_CODEC_USE_HIGHBITDEPTH : 0;
@@ -378,6 +380,12 @@ static long encode_kf_pass(aom_codec_iface_t *iface, aom_codec_enc_cfg_t *cfg,
   TRYCTRL(AV1E_SET_ENABLE_RESTORATION, enable_restoration);
   TRYCTRL(AV1E_SET_SUPERBLOCK_SIZE, sb_size_128 ? AOM_SUPERBLOCK_SIZE_128X128
                                                 : AOM_SUPERBLOCK_SIZE_64X64);
+  /* --tile-columns=<log2> / --tile-rows=<log2> (av1_cx_iface.c): BOTH are the
+   * LOG2 tile count (a decoder-track multi-tile addition — 0 (default) is
+   * the pre-existing single-tile behavior, unchanged for the two callers
+   * below that pass 0,0). */
+  TRYCTRL(AV1E_SET_TILE_COLUMNS, tile_columns_log2);
+  TRYCTRL(AV1E_SET_TILE_ROWS, tile_rows_log2);
   TRYCTRL(AV1E_SET_DELTAQ_MODE, 0);
   /* aq_mode: 0 = off, 1 = VARIANCE_AQ, 2 = COMPLEXITY_VARIANCE_AQ, 3 =
    * CYCLIC_REFRESH_AQ. 1/2 enable SEGMENTATION on intra frames — 8 segments
@@ -424,11 +432,12 @@ static long encode_kf_pass(aom_codec_iface_t *iface, aom_codec_enc_cfg_t *cfg,
   return rc ? rc : total;
 }
 
-/* Shared implementation of shim_encode_av1_kf / shim_encode_av1_kf_sb128 (see
- * their doc comments below) — the REAL aom_codec_av1_cx public API, the same
- * encoder+path the aomenc CLI drives, with the CLI-flag-equivalent controls:
- * --cpu-used --end-usage=q --cq-level --enable-cdef --enable-restoration
- * --sb-size={64,128} --deltaq-mode=0 --aq-mode=<aq_mode> --enable-palette=0
+/* Shared implementation of shim_encode_av1_kf / shim_encode_av1_kf_sb128 /
+ * shim_encode_av1_kf_tiles (see their doc comments below) — the REAL
+ * aom_codec_av1_cx public API, the same encoder+path the aomenc CLI drives,
+ * with the CLI-flag-equivalent controls: --cpu-used --end-usage=q --cq-level
+ * --enable-cdef --enable-restoration --sb-size={64,128} --tile-columns=<log2>
+ * --tile-rows=<log2> --deltaq-mode=0 --aq-mode=<aq_mode> --enable-palette=0
  * --enable-intrabc=0 --passes=<1|2>. two_pass runs the full first-pass-stats
  * + last-pass sequence (rc_twopass_stats_in) — required for aq_mode 1/2 to
  * actually segment (see encode_kf_pass). Planes are u16 at every depth (bd=8
@@ -439,8 +448,9 @@ static long encode_av1_kf_impl(const uint16_t *y, const uint16_t *u,
                                int mono, int ss_x, int ss_y, int cq_level,
                                int cpu_used, int enable_cdef,
                                int enable_restoration, int usage, int aq_mode,
-                               int two_pass, int sb_size_128, uint8_t *out,
-                               size_t out_cap) {
+                               int two_pass, int sb_size_128,
+                               int tile_columns_log2, int tile_rows_log2,
+                               uint8_t *out, size_t out_cap) {
   aom_codec_iface_t *iface = aom_codec_av1_cx();
   aom_codec_enc_cfg_t cfg;
   /* usage: AOM_USAGE_GOOD_QUALITY (0) or AOM_USAGE_ALL_INTRA (2 — the
@@ -515,7 +525,8 @@ static long encode_av1_kf_impl(const uint16_t *y, const uint16_t *u,
     cfg.g_pass = AOM_RC_FIRST_PASS;
     long stats_len = encode_kf_pass(iface, &cfg, bd, cq_level, cpu_used,
                                     enable_cdef, enable_restoration, aq_mode,
-                                    sb_size_128, img, 1, stats, STATS_CAP);
+                                    sb_size_128, tile_columns_log2,
+                                    tile_rows_log2, img, 1, stats, STATS_CAP);
     if (stats_len <= 0) {
       free(stats);
       aom_img_free(img);
@@ -525,13 +536,15 @@ static long encode_av1_kf_impl(const uint16_t *y, const uint16_t *u,
     cfg.rc_twopass_stats_in.buf = stats;
     cfg.rc_twopass_stats_in.sz = (size_t)stats_len;
     total = encode_kf_pass(iface, &cfg, bd, cq_level, cpu_used, enable_cdef,
-                           enable_restoration, aq_mode, sb_size_128, img, 0,
-                           out, out_cap);
+                           enable_restoration, aq_mode, sb_size_128,
+                           tile_columns_log2, tile_rows_log2, img, 0, out,
+                           out_cap);
     free(stats);
   } else {
     total = encode_kf_pass(iface, &cfg, bd, cq_level, cpu_used, enable_cdef,
-                           enable_restoration, aq_mode, sb_size_128, img, 0,
-                           out, out_cap);
+                           enable_restoration, aq_mode, sb_size_128,
+                           tile_columns_log2, tile_rows_log2, img, 0, out,
+                           out_cap);
   }
   aom_img_free(img);
   return total;
@@ -549,8 +562,9 @@ long shim_encode_av1_kf(const uint16_t *y, const uint16_t *u,
                         size_t out_cap) {
   return encode_av1_kf_impl(y, u, v, w, h, bd, mono, ss_x, ss_y, cq_level,
                             cpu_used, enable_cdef, enable_restoration, usage,
-                            aq_mode, two_pass, /*sb_size_128=*/0, out,
-                            out_cap);
+                            aq_mode, two_pass, /*sb_size_128=*/0,
+                            /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
+                            out, out_cap);
 }
 
 /* SB128 variant of shim_encode_av1_kf: same controls plus explicit
@@ -567,7 +581,30 @@ long shim_encode_av1_kf_sb128(const uint16_t *y, const uint16_t *u,
                               size_t out_cap) {
   return encode_av1_kf_impl(y, u, v, w, h, bd, mono, ss_x, ss_y, cq_level,
                             cpu_used, enable_cdef, enable_restoration, usage,
-                            aq_mode, two_pass, sb_size_128, out, out_cap);
+                            aq_mode, two_pass, sb_size_128,
+                            /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
+                            out, out_cap);
+}
+
+/* Multi-tile variant of shim_encode_av1_kf: same controls plus explicit
+ * sb_size_128 AND tile_columns_log2/tile_rows_log2 (av1_cx_iface.c's
+ * AV1E_SET_TILE_COLUMNS/AV1E_SET_TILE_ROWS — the CODED value IS the log2 tile
+ * count: 0 = --tile-columns=0 -> 1 column (single-tile default, matching the
+ * two callers above), 1 = 2 columns, 2 = 4 columns, ...). See
+ * encode_av1_kf_impl's doc comment for the full control list. Decoder-track
+ * multi-tile work, append-only (shim_encode_av1_kf / _sb128 above untouched). */
+long shim_encode_av1_kf_tiles(const uint16_t *y, const uint16_t *u,
+                              const uint16_t *v, int w, int h, int bd,
+                              int mono, int ss_x, int ss_y, int cq_level,
+                              int cpu_used, int enable_cdef,
+                              int enable_restoration, int usage, int aq_mode,
+                              int two_pass, int sb_size_128,
+                              int tile_columns_log2, int tile_rows_log2,
+                              uint8_t *out, size_t out_cap) {
+  return encode_av1_kf_impl(y, u, v, w, h, bd, mono, ss_x, ss_y, cq_level,
+                            cpu_used, enable_cdef, enable_restoration, usage,
+                            aq_mode, two_pass, sb_size_128, tile_columns_log2,
+                            tile_rows_log2, out, out_cap);
 }
 
 /* Decode AV1 bytes through the REAL aom_codec_av1_dx public API and copy the
