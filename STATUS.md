@@ -774,12 +774,162 @@ coefficient bits, though validly-formed, won't match real aomenc's RDO
 choices) — so "bytes assemble correctly" and "decisions match aomenc" are
 two separate, both-still-open claims even after the tile-group piece lands.
 
+## Coefficient-cost decision parity — COMPLETE (2026-07-14, encoder track)
+
+**The reduced-fidelity gap the previous chunk left open is closed.** The search
+now reads REAL per-`(txs_ctx, eob_multi_size)` AV1 coefficient-coding cost tables
+at every txb — matching `av1_fill_coeff_costs` exactly (5 tx-size categories x
+2 plane types for `LV_MAP_COEFF_COST`, a SEPARATE 7-way `eob_multi_size` x 2
+plane axis for `LV_MAP_EOB_COST` — the two axes do NOT collapse to one: e.g.
+`TX_8X8`/`TX_4X8`/`TX_16X4` share `txs_ctx==1` but split across `eob_multi_size`
+1/2) — instead of one representative `txs_ctx` table shared across every tx size
+with zeroed eob-position costs.
+
+**aom-txb** (new, additive): `CoeffCostSet` (`by_txs_ctx: [LvMapCoeffCost; 5]` +
+`eob_by_multi_size: [[i32; 22]; 7]`) + `CoeffCostSet::tables(tx_size)` (the same
+two independent lookups `av1_cost_coeffs_txb`/`av1_write_coeffs_txb` perform) +
+`fill_eob_cost_from_arena` (derives `LV_MAP_EOB_COST` from the live
+coefficient-CDF arena's `eob_flag_cdf{16..1024}` regions — previously zeroed) +
+`fill_coeff_cost_set_from_arena` (the constructor). `LvMapCoeffCost` now derives
+`Clone`.
+
+**aom-encode** (architecture fix — the search now selects the cost table
+PER-CANDIDATE-tx_size, not once per frame): `real_costs::RealCosts` gains
+`coeff_costs_y`/`coeff_costs_uv: CoeffCostSet` (the actual `av1_fill_coeff_costs`
+equivalent). `SbEncodeEnv::coeff_costs_y`/`coeff_costs_uv`: `&CoeffCostTables` ->
+`&CoeffCostSet` (frame-level — spans every tx_size the recursive partition search
+visits; `encode_b_intra_dry` selects `.tables(winner.tx_size)`/`.tables(uv_tx)`
+once per leaf, a fixed size at that point). `tx_search::TxfmYrdEnv::coeff_costs`:
+same type change — the luma tx-size DEPTH SEARCH
+(`choose_tx_size_type_from_rd_intra`) tries multiple tx_size candidates against
+the SAME env, so the `.tables(tx_size)` lookup moved inside
+`txfm_rd_in_plane_intra`, keyed by the per-candidate parameter — this is the
+actual bias the previous chunk's single-table simplification introduced.
+`intra_uv_rd::UvRdEnv::coeff_costs` deliberately STAYS `&CoeffCostTables`:
+chroma has no tx-size depth search (`av1_get_tx_size_uv` is a pure function of
+bsize/lossless/subsampling), so the caller (`partition_pick::leaf_pick_sb_modes`)
+pre-selects the ONE table this env's whole lifetime uses. `rd_pick::
+rd_pick_intra_mode_sb`'s `coeff_costs_y` param: `&CoeffCostTables` ->
+`&CoeffCostSet` (the luma-winner CfL re-encode needs the table for `y.tx_size`,
+only known AFTER the sby search picks a winner inside this function).
+
+Verified: full aom-encode test suite green (67 tests, 0 failed — including
+`pack_tile_roundtrips_with_real_costs`, now FULLY real with the
+`REPRESENTATIVE_TXS_CTX` simplification and zeroed eob costs both dropped, and
+`pack_tile_roundtrips_true_corner`, the (0,0)-corner `wrapping_sub` regression,
+re-confirmed under the now-fully-real cost landscape) + aom-txb's own 24-test
+suite green.
+
+## Tile-group OBU assembly — COMPLETE and REAL-encoder-verified (2026-07-14, encoder track)
+
+**The last framing piece for a genuine minimal end-to-end byte match.** New
+`aom_encode::obu_assemble` module composing already-bit-exact pieces (all
+aom-entropy, decoder-owned but CALLED not modified: `write_frame_header_obu`,
+`write_tile_group_header`, `write_obu_header`, `leb128::uleb_encode`) into one
+real `OBU_FRAME` byte sequence, per the AV1 spec's `frame_obu(sz)`:
+`frame_header_obu(); byte_alignment(); tile_group_obu(sz)` — and
+`tile_group_obu`'s own header bits + its OWN `byte_alignment()` before the tile
+payload. `assemble_frame_obu_payload_single_tile`/`assemble_obu_frame_single_tile`:
+`num_tiles==1` only (`tiles_log2==0`, asserted) — `write_tile_group_header`'s
+own C twin hard-returns zero bits at `tiles_log2==0` (`av1/encoder/bitstream.c`),
+so this collapses to frame-header bits + one byte-align + the sole/last tile's
+raw bytes verbatim (no `tile_size_bytes` length prefix, matching the decoder's
+`split_tiles`). Multi-tile (length-prefixed non-last tiles) is NOT implemented —
+the next lift once the envelope needs more than one tile.
+
+**Verified against REAL aomenc output, not just constructed**:
+`tile_group_obu_matches_real_encoder.rs` extends `frame_header_matches_real_
+encoder.rs`'s exact setup one step further — extracts the REAL raw tile bytes
+following the real parsed frame header, explicitly verifies the frame header's
+trailing partial byte is zero-padded (not assumed), re-assembles via
+`assemble_frame_obu_payload_single_tile`, and asserts the result equals the
+COMPLETE real `OBU_FRAME` payload byte-for-byte. Passes on all 4 cases (64x64
+420/mono ALLINTRA, 64x64 420 GOOD, 128x64 2-SB-wide ALLINTRA — all genuinely
+`tiles_log2==0`, `frame_payload` 6-7 bytes). Assembly-verified (matches
+`frame_header_matches_real_encoder.rs`'s own honesty framing): proves the
+WRAPPING reproduces real aomenc's byte layout given the SAME header values and
+tile bytes, not that this port's own search DERIVES those tile bytes.
+
+## Full encoder-gate e2e byte match — the smallest frame TRUE-DERIVED end to end (2026-07-14, encoder track)
+
+**The headline encoder-gate deliverable: this port's OWN search + pack pipeline
+(not real aomenc's bytes copied back) produces byte-identical output to real
+aomenc, for the smallest single-SB all-intra frame.**
+`crates/aom-encode/tests/encoder_gate_e2e_byte_match.rs` drives
+`rd_pick_partition_real` + `pack_tile` (Task 1's now-full per-txs_ctx coeff
+costs) over the SAME source pixels real aomenc encoded, wraps the result via
+`obu_assemble`, and compares byte-for-byte against the complete real `OBU_FRAME`
+payload. Only the frame header is bootstrapped verbatim from the real parse
+(qindex, tile info, tx-mode-select, cdf-update flag, loop-filter level — no
+LF-level/CDEF-strength search is ported, matching `frame_header_matches_real_
+encoder.rs`'s already-documented boundary); every partition/mode/tx/coefficient
+decision and the resulting tile-group bytes are this port's own derivation.
+
+**`encoder_gate_e2e_attempt` (asserted, hard regression gate): 3/3 flat-content
+64x64 cases** (mono/4:2:0 ALLINTRA, 4:2:0 GOOD) **achieve a TRUE end-to-end byte
+match.** Honestly labelled as the SMALLEST possible case — a 1-byte tile payload
+(EOB=0/txb_skip=1 everywhere) that does not exercise the coefficient-cost tables
+at all.
+
+**`encoder_gate_e2e_textured_attempt` (exploratory, NOT asserted): 6 of 7
+genuinely textured 64x64 mono ALLINTRA cases ALSO byte-match end-to-end**
+(horizontal/vertical/diagonal gradients, two-tone left-right and top-bottom
+splits, a 16px checkerboard — up to 45 bytes of real, non-trivial
+coefficient-coded tile data, genuinely exercising the coeff-cost fix above —
+this is the substantive result, not the trivial flat case). The 7th,
+pseudo-random noise (the hardest case — forces many independent per-block RD
+decisions across the SB), DIVERGES: first mismatched byte at offset 1139 of
+~1520-1536 total tile-group bytes (i.e. roughly the first 1130+ bytes DO
+match), this port's encode 15 bytes SMALLER (1516 vs 1531 tile bytes) —
+consistent with a genuine RDO decision divergence somewhere deep in the SB's
+recursive search (missing AB/4-way partition types, or a search-order/pruning
+subtlety), not a wiring bug or crash (a bug would far more plausibly produce
+garbage/a crash than a smaller-but-still-valid, 1130-bytes-agreeing bitstream).
+**Root cause NOT isolated this session** — would need decode-both-and-diff-trees
+investigation (parse both bitstreams past byte 1139, compare the partition
+tree / mode / tx choices each side made) to pin down exactly which decision
+diverges and why.
+
+### MISSING (honest, as of this chunk)
+
+- **AB/4-way partition types** — `encode_sb`/`pack.rs`/`partition_pick` cover
+  4 of 10 partition types (NONE/SPLIT/HORZ/VERT); `HORZ_A`/`HORZ_B`/`VERT_A`/
+  `VERT_B`/`HORZ_4`/`VERT_4` are unported. Plausible contributor to the
+  pseudo-random-noise divergence above (more partition freedom = more chances
+  the real search's actual winner isn't in this port's candidate set at all).
+- **Loop-filter-level search** (`av1_pick_filter_level`) — every e2e case
+  observed `lf_level=[0,0]` (bootstrapped from the real parse, not derived);
+  unverified whether this port's LF search (ported for a different envelope —
+  see the "Deblocking applied" milestone) would independently derive 0 for
+  these specific inputs. A nonzero-LF case is untested end-to-end.
+- **CDEF-strength search** — sidestepped via `enable_cdef=false` throughout;
+  the CDEF-strength RD search itself is not part of this chunk.
+- **The qindex-from-cq-level / rate-control mapping** — this chunk always
+  reads `p.quant.base_qindex` from the REAL parsed header rather than deriving
+  it from `--cq-level`; the encoder-side rate-control/qindex-selection logic is
+  out of scope here.
+- **Multi-SB / multi-tile frames** — `obu_assemble` hard-asserts
+  `tiles_log2==0`; `pack_tile` itself supports multi-SB tiles (see the
+  pack-stage milestone) but the e2e byte-match harness here has only been run
+  at n_sb=1 (single 64x64 SB). The 128x64 (2-SB) case is verified for Task 2's
+  ASSEMBLY test (real tile bytes) but not attempted for Task 3's full
+  derivation.
+- **The exact root cause of the pseudo-random-noise divergence** — diagnosed
+  to "somewhere past byte 1139", not isolated to a specific partition/mode/
+  tx-type decision.
+
 ## Gate posture (honest)
 
 Real, verified, ratcheting progress across BOTH tracks — but still a fraction of
 the whole. Green so far: full transform subsystem, the *entire* scalar quantizer
 surface (fp+b, lowbd+highbd, QM+flat), the full coefficient trellis (QM+flat), and
-the entire symbol-coding stack (range coder + CDF adaptation). None of the four project
-gates (full-corpus correctness, ≤1.20× perf, full coverage, zenavif parity) is
+the entire symbol-coding stack (range coder + CDF adaptation). **The encoder-gate
+MVP milestone is reached**: this port's own search+pack pipeline produces a
+byte-identical AV1 bitstream to real aomenc for the smallest single-SB all-intra
+KEY frame (flat content, asserted) and for 6 of 7 genuinely-textured variants of
+it (exploratory) — the frame header is bootstrapped from the real parse
+(LF-level/CDEF-strength search unported), but every coded byte of the tile-group
+payload is this port's own derivation. None of the four project gates
+(full-corpus correctness, ≤1.20× perf, full coverage, zenavif parity) is
 satisfied yet; the machinery that makes each mechanically checkable is in place
 and every landed module is byte-exact vs C within it.
