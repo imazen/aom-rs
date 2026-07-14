@@ -22,10 +22,15 @@ fn cdef_find_dir_matches_c() {
     // Test 8/10/12-bit (coeff_shift 0/2/4) with matching pixel ranges.
     for &(coeff_shift, maxv) in &[(0i32, 255u64), (2, 1023), (4, 4095)] {
         for _ in 0..200_000 {
-            let img: Vec<u16> = (0..stride * 8).map(|_| (rng.next() % (maxv + 1)) as u16).collect();
+            let img: Vec<u16> = (0..stride * 8)
+                .map(|_| (rng.next() % (maxv + 1)) as u16)
+                .collect();
             let got = cdef_find_dir(&img, stride, coeff_shift);
             let want = c::ref_cdef_find_dir(&img, stride, coeff_shift);
-            assert_eq!(got, want, "cdef_find_dir divergence coeff_shift={coeff_shift}");
+            assert_eq!(
+                got, want,
+                "cdef_find_dir divergence coeff_shift={coeff_shift}"
+            );
         }
     }
 }

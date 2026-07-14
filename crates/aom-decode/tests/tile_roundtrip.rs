@@ -670,8 +670,7 @@ impl<'a> Mirror<'a> {
         // every block's mbmi then carries the (possibly unchanged) running
         // values — which is exactly what the decoder reports back.
         let sb_upper_left = (mi_row & 15) == 0 && (mi_col & 15) == 0;
-        let dq_coded =
-            cfg.delta_q_present && sb_upper_left && (bsize != BLOCK_64X64 || skip == 0);
+        let dq_coded = cfg.delta_q_present && sb_upper_left && (bsize != BLOCK_64X64 || skip == 0);
         let (cur_q, dlf, dlfb) = if !cfg.delta_q_present {
             (
                 cfg.base_qindex,
@@ -1899,11 +1898,12 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         }
         cov.dq_cdf_adapted |= dec_cdfs.delta_q != cdfs0.delta_q;
         cov.dlf_cdf_adapted |= dec_cdfs.delta_lf != cdfs0.delta_lf;
-        for (flag, (new, old)) in cov
-            .dlf_multi_adapted
-            .iter_mut()
-            .zip(dec_cdfs.delta_lf_multi.iter().zip(cdfs0.delta_lf_multi.iter()))
-        {
+        for (flag, (new, old)) in cov.dlf_multi_adapted.iter_mut().zip(
+            dec_cdfs
+                .delta_lf_multi
+                .iter()
+                .zip(cdfs0.delta_lf_multi.iter()),
+        ) {
             *flag |= new != old;
         }
     }
