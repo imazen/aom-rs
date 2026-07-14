@@ -819,3 +819,42 @@ pub fn build_directional_intra_high(
         p_angle, bd,
     );
 }
+
+/// Build the intra prediction for the filter-intra mode into `dst` — the
+/// `use_filter_intra` branch of libaom's directional-and-filter builder
+/// (reconintra.c): assemble the reference edges (above / left / corner all
+/// needed, via the archmage-vectorized [`assemble_dir_edges`]) then run the
+/// recursive [`filter_intra_predict_high`]. Filter-intra is luma-only for blocks
+/// `≤ 32×32`. `filter_intra_mode` is the `FILTER_INTRA_MODE` (0..5); availability
+/// counts are the decode driver's job.
+#[allow(clippy::too_many_arguments)]
+pub fn build_filter_intra_high(
+    recon: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    dst: &mut [u16],
+    dst_stride: usize,
+    filter_intra_mode: usize,
+    tx_size: usize,
+    n_top_px: usize,
+    n_topright_px: i32,
+    n_left_px: usize,
+    n_bottomleft_px: i32,
+    bd: i32,
+) {
+    let txwpx = TX_W[tx_size];
+    let txhpx = TX_H[tx_size];
+    let base = 128i32 << (bd - 8);
+    let mut above_data = [0u16; NUM_INTRA_NEIGHBOUR_PIXELS];
+    let mut left_data = [0u16; NUM_INTRA_NEIGHBOUR_PIXELS];
+    // Filter-intra needs above, left, and the corner (all-need); no early-out.
+    let g = DirEdge {
+        ref_off, ref_stride, txwpx, txhpx, n_top_px, n_topright_px, n_left_px, n_bottomleft_px,
+        need_above: true, need_left: true, need_above_left: true, base,
+    };
+    assemble_dir_edges(recon, &g, &mut above_data, &mut left_data);
+    filter_intra_predict_high(
+        dst, dst_stride, tx_size, &above_data[DIR_PAD - 1..], &left_data[DIR_PAD..DIR_PAD + txhpx],
+        filter_intra_mode, bd,
+    );
+}

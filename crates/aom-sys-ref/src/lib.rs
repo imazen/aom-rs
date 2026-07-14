@@ -2192,7 +2192,25 @@ pub fn ref_hbd_build_dir_intra(
     unsafe {
         shim_hbd_build_dir_intra(
             recon.as_ptr().add(ref_off), ref_stride as i32, p_angle, disable_edge_filter as i32, filt_type, tx_size as i32,
-            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, bd, dst.as_mut_ptr(), txw as i32,
+            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, 0, 0, bd, dst.as_mut_ptr(), txw as i32,
+        )
+    }
+    dst
+}
+
+/// Reference highbd filter-intra builder (`highbd_build_directional_and_filter_
+/// intra_predictors`, `use_filter_intra` branch): assemble the reference edges
+/// (all-need) then run the recursive filter-intra predictor `filter_intra_mode`.
+/// `recon[ref_off]` is the block top-left. Returns the `txw*txh` block.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_hbd_build_filter_intra(
+    recon: &[u16], ref_off: usize, ref_stride: usize, filter_intra_mode: i32, tx_size: usize, txw: usize, txh: usize, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; txw * txh];
+    unsafe {
+        shim_hbd_build_dir_intra(
+            recon.as_ptr().add(ref_off), ref_stride as i32, 90, 0, 0, tx_size as i32,
+            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, 1, filter_intra_mode, bd, dst.as_mut_ptr(), txw as i32,
         )
     }
     dst
@@ -2277,7 +2295,7 @@ extern "C" {
         dst: *mut u16, stride: isize, tx_size: i32, above: *const u16, left: *const u16, up_above: i32, up_left: i32, angle: i32, bd: i32,
     );
     fn shim_hbd_build_dir_intra(
-        r: *const u16, ref_stride: i32, p_angle: i32, disable_edge_filter: i32, filt_type: i32, tx_size: i32, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32, dst: *mut u16, dst_stride: i32,
+        r: *const u16, ref_stride: i32, p_angle: i32, disable_edge_filter: i32, filt_type: i32, tx_size: i32, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, use_filter_intra: i32, filter_intra_mode: i32, bd: i32, dst: *mut u16, dst_stride: i32,
     );
     fn shim_hbd_filter_intra_predict(
         dst: *mut u16, stride: isize, tx_size: i32, above: *const u16, left: *const u16, mode: i32, bd: i32,

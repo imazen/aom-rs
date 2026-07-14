@@ -509,10 +509,15 @@ int shim_use_intra_edge_upsample(int bs0, int bs1, int delta, int type);
 void av1_highbd_filter_intra_edge_c(uint16_t *p, int sz, int strength);
 void av1_highbd_upsample_intra_edge_c(uint16_t *p, int sz, int bd);
 
+void shim_hbd_filter_intra_predict(uint16_t *dst, ptrdiff_t stride, int tx_size,
+                                   const uint16_t *above, const uint16_t *left,
+                                   int mode, int bd);
+
 void shim_hbd_build_dir_intra(const uint16_t *ref, int ref_stride, int p_angle,
                               int disable_edge_filter, int filt_type, int tx_size,
                               int n_top_px, int n_topright_px, int n_left_px,
-                              int n_bottomleft_px, int bd, uint16_t *dst,
+                              int n_bottomleft_px, int use_filter_intra,
+                              int filter_intra_mode, int bd, uint16_t *dst,
                               int dst_stride) {
   static const int txw[19] = { 4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64 };
   static const int txh[19] = { 4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16 };
@@ -528,6 +533,7 @@ void shim_hbd_build_dir_intra(const uint16_t *ref, int ref_stride, int p_angle,
   if (p_angle <= 90) { need_above = 1; need_left = 0; need_above_left = 1; }
   else if (p_angle < 180) { need_above = 1; need_left = 1; need_above_left = 1; }
   else { need_above = 0; need_left = 1; need_above_left = 1; }
+  if (use_filter_intra) { need_above = need_left = need_above_left = 1; }
 
   for (int i = 0; i < 160; i++) {
     above_data[i] = (uint16_t)(base - 1);
@@ -577,6 +583,14 @@ void shim_hbd_build_dir_intra(const uint16_t *ref, int ref_stride, int p_angle,
     else if (n_left_px > 0) above_row[-1] = left_ref[0];
     else above_row[-1] = (uint16_t)base;
     left_col[-1] = above_row[-1];
+  }
+
+  if (use_filter_intra) {
+    /* above_row - 1 puts the corner at above[0] (shim_hbd_filter_intra_predict's
+     * [-1..] convention); left_col is left[0..bh]. */
+    shim_hbd_filter_intra_predict(dst, dst_stride, tx_size, above_row - 1, left_col,
+                                  filter_intra_mode, bd);
+    return;
   }
 
   int upsample_above = 0, upsample_left = 0;
