@@ -181,6 +181,7 @@ pub const TX_SIZE_HIGH_UNIT: [usize; 19] =
 
 pub const BLOCK_8X8: usize = 3;
 pub const BLOCK_64X64: usize = 12;
+pub const BLOCK_128X128: usize = 15;
 
 pub const PARTITION_NONE: usize = 0;
 pub const PARTITION_HORZ: usize = 1;
@@ -201,7 +202,10 @@ pub const UV_CFL_PRED: i32 = 13;
 /// `ANGLE_STEP`: coded angle deltas scale by 3 degrees.
 pub const ANGLE_STEP: i32 = 3;
 
-/// Superblock size fixed at 64x64 in this cut: 16 mi per SB side.
+/// The 64x64-superblock mi count (16 mi/side) — `mi_size_high[BLOCK_64X64]`.
+/// [`KfTileConfig::sb_size_128`] selects the LIVE per-tile value (16 or 32);
+/// this constant is the 64x64 default/fallback used where the config isn't
+/// in scope.
 const SB_MI: i32 = 16;
 
 // ---- chroma spec helpers (av1_common_int.h / blockd.h / reconintra.c) ------------
@@ -393,6 +397,19 @@ pub struct KfTileConfig {
     /// zero — `xd->lossless[i]`): that switches the C per-block transform
     /// path (forced TX_4X4 + WHT), which is out of scope (asserted).
     pub seg: Segmentation,
+    /// `seq_params->sb_size == BLOCK_128X128` (`use_128x128_superblock` from
+    /// the sequence header): `false` = 64x64 superblocks (`mib_size` = 16 mi
+    /// per side, partition tree roots at [`BLOCK_64X64`]); `true` = 128x128
+    /// (`mib_size` = 32, roots at [`BLOCK_128X128`]). Drives the tile SB
+    /// walk step, the partition-tree root bsize, the per-SB left-context
+    /// reset stride, [`aom_entropy::partition::read_cdef`]'s
+    /// `cdef_transmitted[4]` unit indexing (already generic on `sb_size`),
+    /// and the loop-restoration corners-in-sb SB extent
+    /// ([`aom_entropy::lr::lr_corners_in_sb`]'s `mi_size_wide`/`mi_size_high`
+    /// args). CDEF's own 64x64 filter-block granularity and restoration's
+    /// RU (unit) size are independent of this flag (spec-fixed / a separate
+    /// config axis, respectively).
+    pub sb_size_128: bool,
 }
 
 /// `av1_calculate_segdata` (av1/common/seg_common.c) — the derived
@@ -654,8 +671,16 @@ impl<'c> TileKf<'c> {
                 );
             }
         }
-        let aligned_mi_cols = (cfg.mi_cols as usize).div_ceil(SB_MI as usize) * SB_MI as usize;
-        let aligned_mi_rows = (cfg.mi_rows as usize).div_ceil(SB_MI as usize) * SB_MI as usize;
+        // `seq_params->sb_size`: mib_size = mi_size_high[sb_size] (16 or 32
+        // mi/side), sb_size_block = the partition-tree root BLOCK_SIZE.
+        let mib_size: i32 = if cfg.sb_size_128 { 2 * SB_MI } else { SB_MI };
+        let sb_size_block: usize = if cfg.sb_size_128 {
+            BLOCK_128X128
+        } else {
+            BLOCK_64X64
+        };
+        let aligned_mi_cols = (cfg.mi_cols as usize).div_ceil(mib_size as usize) * mib_size as usize;
+        let aligned_mi_rows = (cfg.mi_rows as usize).div_ceil(mib_size as usize) * mib_size as usize;
         let stride = aligned_mi_cols * 4;
         let stride_uv = if cfg.monochrome { 0 } else { stride >> ss_x };
         let uv_len = if cfg.monochrome {
@@ -675,9 +700,9 @@ impl<'c> TileKf<'c> {
             seg_skip_feature,
             mi_row: 0,
             mi_col: 0,
-            mib_size: SB_MI,
-            sb_size: BLOCK_64X64,
-            bsize: BLOCK_64X64,
+            mib_size,
+            sb_size: sb_size_block,
+            bsize: sb_size_block,
             coded_lossless: false,
             allow_intrabc: false,
             cdef_bits: cfg.cdef_bits,
@@ -1088,7 +1113,7 @@ impl<'c> TileKf<'c> {
 
                 // (2) intra prediction into the reconstruction plane.
                 let (n_top, n_tr, n_left, n_bl) = intra_avail(
-                    BLOCK_64X64,
+                    self.st.sb_size,
                     bsize,
                     mi_row,
                     mi_col,
@@ -1285,7 +1310,7 @@ impl<'c> TileKf<'c> {
                         // ordinary intra with mode = get_uv_mode(uv_mode) — DC for
                         // CfL — then the CfL AC contribution on top.
                         let (n_top, n_tr, n_left, n_bl) = intra_avail(
-                            BLOCK_64X64,
+                            self.st.sb_size,
                             bsize_uv,
                             adj_row,
                             adj_col,
@@ -1431,9 +1456,16 @@ impl<'c> TileKf<'c> {
             if frt == lr::RESTORE_NONE {
                 continue;
             }
-            let Some((rcol0, rcol1, rrow0, rrow1)) =
-                lr::lr_corners_in_sb(&self.cfg.lr, plane, ss_x, ss_y, mi_row, mi_col, 16, 16)
-            else {
+            let Some((rcol0, rcol1, rrow0, rrow1)) = lr::lr_corners_in_sb(
+                &self.cfg.lr,
+                plane,
+                ss_x,
+                ss_y,
+                mi_row,
+                mi_col,
+                self.st.mib_size,
+                self.st.mib_size,
+            ) else {
                 continue;
             };
             let (hu, _) = self.cfg.lr.plane_units(plane, ss_x, ss_y);
@@ -1474,8 +1506,10 @@ impl<'c> TileKf<'c> {
         // superblock root, the parameters of every restoration unit whose
         // top-left corner falls in this SB are coded here, per plane, before
         // the SB's first partition symbol (av1_loop_restoration_corners_in_sb
-        // returns 0 for any bsize below sb_size, so only the root fires).
-        if bsize == BLOCK_64X64 {
+        // returns 0 for any bsize != cm->seq_params->sb_size — the ACTUAL
+        // configured SB root, BLOCK_64X64 or BLOCK_128X128 — so only the
+        // root fires).
+        if bsize == self.st.sb_size {
             self.read_lr_units(dec, cdfs, mi_row, mi_col);
         }
         let hbs = MI_SIZE_WIDE[bsize] / 2;
@@ -1594,6 +1628,11 @@ pub fn decode_tile_kf(
     recon_init: u16,
 ) -> KfTileDecode {
     let mut t = TileKf::new(cfg, recon_init);
+    // The tile's actual SB geometry (`seq_params->sb_size`/`mib_size`), fixed
+    // by `TileKf::new` for the whole tile — read back rather than
+    // recomputed so this loop can never drift from `KfBlockState`'s value.
+    let sb_size = t.st.sb_size;
+    let mib_size = t.st.mib_size;
     let mut mi_row = 0;
     while mi_row < cfg.mi_rows {
         t.left_e = [[0; 32]; 3]; // av1_zero_left_context per SB row (all planes)
@@ -1601,10 +1640,10 @@ pub fn decode_tile_kf(
         t.left_t = [TXFM_CTX_INIT; 32]; // ..incl the left txfm-context bytes
         let mut mi_col = 0;
         while mi_col < cfg.mi_cols {
-            t.decode_partition(dec, cdfs, mi_row, mi_col, BLOCK_64X64);
-            mi_col += SB_MI;
+            t.decode_partition(dec, cdfs, mi_row, mi_col, sb_size);
+            mi_col += mib_size;
         }
-        mi_row += SB_MI;
+        mi_row += mib_size;
     }
     KfTileDecode {
         recon: t.recon,

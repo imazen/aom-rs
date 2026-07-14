@@ -1733,6 +1733,10 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         delta_lf_res: case.dlf.map_or(1, |(_, r)| r),
         lr: Default::default(),
         seg,
+        // This mirror encoder's own partition/CDEF/LR walk (below) is
+        // hardcoded to BLOCK_64X64/mib_size=16 — see the module doc. SB128
+        // coverage for the REAL encoder path lives in real_bitstream.rs.
+        sb_size_128: false,
     };
     let aligned_cols = (cfg.mi_cols as usize).div_ceil(16) * 16;
     let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;

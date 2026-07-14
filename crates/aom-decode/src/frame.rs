@@ -200,7 +200,9 @@ fn parse_frame_header(
     let s = &seq.seq_header;
     let c = &seq.color_config;
     let num_planes = if c.monochrome { 1 } else { 3 };
-    let mib_size_log2 = 4u32; // 64x64 superblocks (128 already rejected)
+    // `set_sb_size` (av1_common_int.h): mib_size_log2 = mi_size_wide_log2[sb_size]
+    // — 4 for BLOCK_64X64 (16 mi/side), 5 for BLOCK_128X128 (32 mi/side).
+    let mib_size_log2 = if s.sb_size_128 { 5u32 } else { 4u32 };
     let mi_cols = mi_dim(s.max_frame_width);
     let mi_rows = mi_dim(s.max_frame_height);
 
@@ -485,9 +487,6 @@ pub fn decode_frame_obus_prefilter(
                 let mut rb = ReadBitBuffer::new(payload);
                 let sh = read_sequence_header_obu(&mut rb);
                 let s = &sh.seq_header;
-                if s.sb_size_128 {
-                    return Err("128x128 superblocks".into());
-                }
                 if sh.film_grain_params_present {
                     return Err("film grain enabled (sequence)".into());
                 }
@@ -588,6 +587,7 @@ fn decode_tile_payload(
             crop_height: p.frame_size.superres_upscaled_height,
         },
         seg: bridge_segmentation(&p.segmentation),
+        sb_size_128: s.sb_size_128,
     };
     let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
     let mut dec = OdEcDec::new(tile_data);
