@@ -597,7 +597,15 @@ pub fn find_dv_ref_mvs(
     let width_mi = MI_SIZE_WIDE[bsize];
     let height_mi = MI_SIZE_HIGH[bsize];
     let bs = width_mi.max(height_mi);
-    let has_tr = mvref_has_top_right(mib_size, mi_row, mi_col, bs, width_mi, height_mi, own_partition);
+    let has_tr = mvref_has_top_right(
+        mib_size,
+        mi_row,
+        mi_col,
+        bs,
+        width_mi,
+        height_mi,
+        own_partition,
+    );
 
     let row_adj = (height_mi < MI_SIZE_HIGH[BLOCK_8X8]) && (mi_row & 1) != 0;
     let col_adj = (width_mi < MI_SIZE_WIDE[BLOCK_8X8]) && (mi_col & 1) != 0;
@@ -761,14 +769,18 @@ pub fn find_dv_ref_mvs(
     // the stack's storage capacity, a different constant
     // (`mvref_common.c`'s "Handle single reference frame extension" loops).
     let mut idx = 0;
-    while max_row_offset.abs() >= 1 && idx < mi_size && (refmv_count as usize) < MAX_MV_REF_CANDIDATES
+    while max_row_offset.abs() >= 1
+        && idx < mi_size
+        && (refmv_count as usize) < MAX_MV_REF_CANDIDATES
     {
         let candidate = grid.get(-1, idx);
         process_single_ref_mv_candidate(&candidate, &mut stack, &mut weight_arr, &mut refmv_count);
         idx += MI_SIZE_WIDE[candidate.bsize];
     }
     let mut idx = 0;
-    while max_col_offset.abs() >= 1 && idx < mi_size && (refmv_count as usize) < MAX_MV_REF_CANDIDATES
+    while max_col_offset.abs() >= 1
+        && idx < mi_size
+        && (refmv_count as usize) < MAX_MV_REF_CANDIDATES
     {
         let candidate = grid.get(idx, -1);
         process_single_ref_mv_candidate(&candidate, &mut stack, &mut weight_arr, &mut refmv_count);
@@ -935,7 +947,8 @@ pub fn is_dv_valid(
     // Wavefront constraint: use only the top-left area of the frame as reference.
     let gradient = 1 + INTRABC_DELAY_SB64 + (sb_size > 64) as i32;
     let wf_offset = gradient * (active_sb_row - src_sb_row);
-    if src_sb_row > active_sb_row || src_sb64_col >= active_sb64_col - INTRABC_DELAY_SB64 + wf_offset
+    if src_sb_row > active_sb_row
+        || src_sb64_col >= active_sb64_col - INTRABC_DELAY_SB64 + wf_offset
     {
         return false;
     }
@@ -974,7 +987,11 @@ pub fn assign_and_validate_dv(
     subsampling_y: i32,
 ) -> Option<(i32, i32)> {
     // `int_mv dv_ref = nearestmv.as_int == 0 ? nearmv : nearestmv;`
-    let mut dv_ref = if nearest_mv == (0, 0) { near_mv } else { nearest_mv };
+    let mut dv_ref = if nearest_mv == (0, 0) {
+        near_mv
+    } else {
+        nearest_mv
+    };
     if dv_ref == (0, 0) {
         dv_ref = find_ref_dv(tile_mi_row_start, mib_size, mi_row);
     }
@@ -1007,5 +1024,9 @@ pub fn assign_and_validate_dv(
             subsampling_y,
         );
 
-    if valid { Some((mv_row, mv_col)) } else { None }
+    if valid {
+        Some((mv_row, mv_col))
+    } else {
+        None
+    }
 }

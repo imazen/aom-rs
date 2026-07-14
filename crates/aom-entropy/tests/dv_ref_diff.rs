@@ -11,7 +11,9 @@
 //! function, so this cross-checks the WIRING between the three primitives
 //! independently of their own correctness.
 
-use aom_entropy::dv_ref::{DvNbr, DvTileBounds, assign_and_validate_dv, find_dv_ref_mvs, find_ref_dv, is_dv_valid};
+use aom_entropy::dv_ref::{
+    assign_and_validate_dv, find_dv_ref_mvs, find_ref_dv, is_dv_valid, DvNbr, DvTileBounds,
+};
 use aom_sys_ref::{self as c, RefDvNbr};
 
 struct Rng(u64);
@@ -71,7 +73,11 @@ fn random_grid(rng: &mut Rng) -> Vec<RefDvNbr> {
             // ported+verified anyway).
             cell.bsize = bsize;
             cell.ref_frame0 = rng.range(1, 8) as i8; // LAST_FRAME..ALTREF_FRAME
-            cell.ref_frame1 = if rng.next() % 2 == 0 { -1 } else { rng.range(1, 8) as i8 };
+            cell.ref_frame1 = if rng.next() % 2 == 0 {
+                -1
+            } else {
+                rng.range(1, 8) as i8
+            };
             cell.use_intrabc = false;
             cell.mode = rng.range(0, 22) as u8; // may include GLOBALMV(15)/GLOBAL_GLOBALMV(21)
             cell.mv0_row = (rng.range(-256, 256) * 8) as i16;
@@ -233,7 +239,8 @@ fn find_dv_ref_mvs_matches_c() {
     let cases_per_grid = 15;
     let mut total = 0u32;
     for g in 0..n_grids {
-        let mut grid_rng = Rng(0xbeef_cafe_0000_0001 ^ (g as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut grid_rng =
+            Rng(0xbeef_cafe_0000_0001 ^ (g as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let grid = random_grid(&mut grid_rng);
         for _ in 0..cases_per_grid {
             let case = random_case(&mut rng);
@@ -288,7 +295,10 @@ fn is_dv_valid_matches_c() {
         // comparison against Rust's untruncated `i32` — not a real
         // algorithmic input any real caller could produce).
         let (dv_row, dv_col) = if i % 5 == 0 {
-            (rng.range(-32000, 32000) as i32, rng.range(-32000, 32000) as i32)
+            (
+                rng.range(-32000, 32000) as i32,
+                rng.range(-32000, 32000) as i32,
+            )
         } else {
             (
                 (rng.range(-4000, 4000) * 8) as i32,
@@ -350,7 +360,8 @@ fn assign_and_validate_dv_matches_composed_c() {
     let cases_per_grid = 15;
     let mut total = 0u32;
     for g in 0..n_grids {
-        let mut grid_rng = Rng(0xa11a_0000_0000_0001 ^ (g as u64).wrapping_mul(0x1234_5678_9abc_def1));
+        let mut grid_rng =
+            Rng(0xa11a_0000_0000_0001 ^ (g as u64).wrapping_mul(0x1234_5678_9abc_def1));
         let grid = random_grid(&mut grid_rng);
         for _ in 0..cases_per_grid {
             let case = random_case(&mut rng);
@@ -379,9 +390,15 @@ fn assign_and_validate_dv_matches_composed_c() {
             // guarantee — see `assign_and_validate_dv`'s doc), occasionally
             // wild to exercise the `is_mv_valid` bound.
             let (diff_row, diff_col) = if rng.next() % 5 == 0 {
-                (rng.range(-40_000, 40_000) as i32, rng.range(-40_000, 40_000) as i32)
+                (
+                    rng.range(-40_000, 40_000) as i32,
+                    rng.range(-40_000, 40_000) as i32,
+                )
             } else {
-                ((rng.range(-2000, 2000) * 8) as i32, (rng.range(-2000, 2000) * 8) as i32)
+                (
+                    (rng.range(-2000, 2000) * 8) as i32,
+                    (rng.range(-2000, 2000) * 8) as i32,
+                )
             };
 
             let mib_size_log2 = if case.mib_size == 32 { 5 } else { 4 };
@@ -391,7 +408,11 @@ fn assign_and_validate_dv_matches_composed_c() {
             let ss_y = (rng.next() % 2) as i32;
 
             // Manual oracle, composed from the three verified C primitives.
-            let mut dv_ref = if (c_nr, c_nc) == (0, 0) { (c_rr, c_rc) } else { (c_nr, c_nc) };
+            let mut dv_ref = if (c_nr, c_nc) == (0, 0) {
+                (c_rr, c_rc)
+            } else {
+                (c_nr, c_nc)
+            };
             if dv_ref == (0, 0) {
                 dv_ref = c::ref_find_ref_dv(case.mi_row, case.mib_size, case.tile.mi_row_start);
             }
@@ -401,7 +422,8 @@ fn assign_and_validate_dv_matches_composed_c() {
             let mv_col = ((dv_ref.1 + diff_col) >> 3) * 8;
             const MV_UPP: i32 = 1 << 14;
             const MV_LOW: i32 = -(1 << 14);
-            let is_mv_valid = mv_row > MV_LOW && mv_row < MV_UPP && mv_col > MV_LOW && mv_col < MV_UPP;
+            let is_mv_valid =
+                mv_row > MV_LOW && mv_row < MV_UPP && mv_col > MV_LOW && mv_col < MV_UPP;
             let expected = if valid_dv_ref
                 && is_mv_valid
                 && c::ref_is_dv_valid(
@@ -450,5 +472,7 @@ fn assign_and_validate_dv_matches_composed_c() {
             total += 1;
         }
     }
-    eprintln!("assign_and_validate_dv_matches_composed_c: {total} cases matched the composed-C oracle");
+    eprintln!(
+        "assign_and_validate_dv_matches_composed_c: {total} cases matched the composed-C oracle"
+    );
 }
