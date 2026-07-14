@@ -59,7 +59,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
     let mut rng = Rng(0x2d91_c405_e6b3_7a18);
     // (bsize, ss_x, ss_y, mi_row, mi_col, mono)
     #[allow(clippy::type_complexity)]
-    let cases: [(usize, usize, usize, i32, i32, bool); 8] = [
+    let cases: [(usize, usize, usize, i32, i32, bool); 12] = [
         (3, 1, 1, 8, 8, false),  // 8x8 @420: store_y + uv + CfL
         (6, 1, 1, 8, 8, false),  // 16x16 @420
         (9, 0, 0, 8, 8, false),  // 32x32 @444 (still CfL-legal)
@@ -69,6 +69,17 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
         (4, 1, 1, 8, 8, false),  // 8x16 rect @420
         (6, 1, 0, 8, 8, false),  // 16x16 @422
         (3, 0, 0, 8, 8, true),   // 8x8 MONOCHROME: uv block never runs
+        // The rect-partition-stage leaf bsizes (HORZ/VERT subsizes of the
+        // 16..64 squares) — the rect-dims backstop for partition_pick_diff,
+        // whose leaf evaluator is the SAME ported code on both sides.
+        (5, 1, 1, 8, 8, false),  // 16x8 @420 (HORZ of 16x16)
+        (8, 0, 0, 8, 8, false), // 32x16 @444 (HORZ of 32x32; CfL-legal)
+        (7, 1, 1, 8, 8, false), // 16x32 @420 (VERT of 32x32)
+        (11, 1, 1, 16, 16, false), // 64x32 @420 (HORZ of 64x64; CfL-forbidden,
+                                   // the TX_64X32 tx64 chain) — SB-ALIGNED
+                                   // origin: a 64-wide block only exists at
+                                   // in-SB col 0 (the variance-factor cache
+                                   // indexes within one SB)
     ];
 
     let mut searched_uv = 0usize;

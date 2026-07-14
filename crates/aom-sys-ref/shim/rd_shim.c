@@ -1364,3 +1364,11 @@ int shim_log_sub_block_var(const uint16_t *src, int off, int stride, int bsize,
   *out_max = log1p(max_var_4x4 / 16.0);
   return 0;
 }
+
+/* The REAL av1_filter_intra_allowed_bsize (reconintra.h) as a standalone
+ * export — the rd_pick_filter_intra_sby call-site gate
+ * (intra_mode_search.c:1672), needed once leaf bsizes exceed 32x32 (the
+ * rect-partition 64x32/32x64 leaves). */
+int shim_filter_intra_allowed_bsize_x(int enable_filter_intra, int bsize) {
+  return sh_filter_intra_allowed_bsize(enable_filter_intra, bsize);
+}

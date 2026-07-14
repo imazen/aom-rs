@@ -10184,3 +10184,14 @@ pub fn ref_log_sub_block_var(
     assert!(r >= 0, "shim_log_sub_block_var alloc failed");
     (mn, mx)
 }
+
+unsafe extern "C" {
+    fn shim_filter_intra_allowed_bsize_x(enable_filter_intra: i32, bsize: i32) -> i32;
+}
+
+/// The REAL `av1_filter_intra_allowed_bsize` (reconintra.h) — the
+/// `rd_pick_filter_intra_sby` call-site gate (intra_mode_search.c:1672):
+/// seq enable AND both block dims <= 32.
+pub fn ref_filter_intra_allowed_bsize(enable_filter_intra: bool, bsize: usize) -> bool {
+    unsafe { shim_filter_intra_allowed_bsize_x(enable_filter_intra as i32, bsize as i32) != 0 }
+}

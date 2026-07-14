@@ -1679,12 +1679,13 @@ pub fn c_mode_loop(
     }
 
     // rd_pick_filter_intra_sby (intra_mode_search.c:1672 + 231): runs when a
-    // Y mode beat best_rd_in and filter-intra is allowed on this bsize (all
-    // harness bsizes are <= 32x32; enable_filter_intra on). mbmi carries the
-    // STALE angle_delta of loop index 60 (set_y_mode_and_delta_angle mutates
+    // Y mode beat best_rd_in AND av1_filter_intra_allowed_bsize (the REAL
+    // gate — both dims <= 32; kills the loop for the rect-partition
+    // 64x32/32x64 leaves; enable_filter_intra on). mbmi carries the STALE
+    // angle_delta of loop index 60 (set_y_mode_and_delta_angle mutates
     // before the gates) — mirrored via the last (mode, delta) pair.
     let stale_delta = c::ref_set_y_mode_and_delta_angle(60, false).1;
-    if best.is_some() {
+    if best.is_some() && c::ref_filter_intra_allowed_bsize(true, bsize) {
         let best_mode_so_far = best.as_ref().map_or(0, |b| b.0);
         let _ = best_mode_so_far; // prune_filter_intra_level = 0: no level-1 gate
         for fim in 0..5usize {
