@@ -34,10 +34,12 @@
 //!   [`aom_entropy::partition::decode_color_map_tokens`]) — reconstruction
 //!   bypasses ordinary intra prediction for a palette plane's tx blocks (the
 //!   map indexes the palette directly; residual add is unaffected). Intra
-//!   BLOCK COPY — the other screen-content tool `allow_screen_content_tools`
-//!   gates — stays OUT of the envelope: `p.allow_intrabc` (only ever true
-//!   when screen-content-tools is also on) is still a hard reject, so this is
-//!   a clean palette-only envelope.
+//!   BLOCK COPY — the OTHER screen-content tool `allow_screen_content_tools`
+//!   gates — IS ALSO in the envelope (monochrome and colour): `p.allow_intrabc`
+//!   is threaded into the tile driver, block vectors are read at
+//!   `MV_SUBPEL_NONE`, and luma/chroma reconstruct via an integer block copy (a
+//!   2-tap intrabc bilinear at half-pel on a subsampled chroma axis). Gated by
+//!   `intrabc_{monochrome,colour}_streams_decode_byte_identical_to_c`.
 //! - film grain disabled at the sequence level; superres not scaled; no
 //!   frame-size override (frame == sequence max dims).
 //! - loop restoration IS applied ([`aom_restore::frame`], C-diffed against
@@ -418,14 +420,14 @@ fn parse_frame_header(
     if p.prefix.disable_cdf_update {
         return Err("disable_cdf_update (driver always adapts)".into());
     }
-    // `allow_screen_content_tools` (PALETTE mode) is in the envelope; intra block
-    // copy — the OTHER screen-content tool it gates — stays rejected below via
-    // `p.allow_intrabc` (the per-frame syntax flag; the spec only ever reads it
-    // when `allow_screen_content_tools` holds — see `read_uncompressed_header`,
-    // `p.allow_intrabc = p.prefix.allow_screen_content_tools && !cfg.superres_scaled
-    // && rb.read_bit() != 0`). That single check is a clean palette-only envelope:
-    // it can never be true unless screen-content-tools is also on, so accepting
-    // palette streams here does not admit any intrabc stream.
+    // `allow_screen_content_tools` gates BOTH screen-content tools that ARE in
+    // the envelope: PALETTE mode and intra block copy. `p.allow_intrabc` (the
+    // per-frame syntax flag the spec reads only when `allow_screen_content_tools`
+    // holds — `p.allow_intrabc = p.prefix.allow_screen_content_tools &&
+    // !cfg.superres_scaled && rb.read_bit() != 0`) is threaded into the tile
+    // driver (see `allow_intrabc` in the KfTileConfig below), not rejected:
+    // intrabc luma is an integer block copy from the already-decoded region and
+    // chroma reuses the scaled DV (integer copy or a 2-tap bilinear at half-pel).
     if p.frame_size.superres_upscaled_width != s.max_frame_width
         || p.frame_size.superres_upscaled_height != s.max_frame_height
     {

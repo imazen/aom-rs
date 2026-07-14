@@ -1109,8 +1109,9 @@ fn garbage_input_errors_cleanly() {
 // few-colour, sharp-edged content (the kind palette actually targets:
 // rendered UI, icons, text) so `--enable-palette=1` genuinely exercises the
 // palette coding path instead of silently coding everything through ordinary
-// intra prediction. `--enable-intrabc` stays 0 throughout (out of scope —
-// frame.rs still hard-rejects `p.allow_intrabc`).
+// intra prediction. `--enable-intrabc` stays 0 throughout for THIS palette
+// section (intrabc is in the decode envelope and has its own coverage in the
+// intrabc_{monochrome,colour}_streams_decode_byte_identical_to_c gates below).
 
 /// Screen-content-like synthetic content: `TILE`-pixel super-tiles, each a
 /// simple stripe pattern over a small (2..=5) local colour set. The local set
