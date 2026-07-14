@@ -35,6 +35,7 @@
 use aom_encode::encode_intra::TrellisOptType;
 use aom_encode::encode_sb::SbEncodeEnv;
 use aom_encode::intra_uv_rd::UvLoopPolicy;
+use aom_encode::lf_search::{LfSearchFrame, build_lf_mi_grid, pick_filter_level};
 use aom_encode::obu_assemble::assemble_frame_obu_payload_single_tile;
 use aom_encode::pack::pack_tile;
 use aom_encode::partition_pick::PickFrameCfg;
@@ -278,9 +279,13 @@ fn attempt_case_content(
     };
 
     let mut rb = ReadBitBuffer::new(frame_payload);
-    // p: the REAL frame header, BOOTSTRAPPED (not derived) -- qindex,
-    // loop-filter level/deltas, tile info, tx-mode-select, cdf-update flag,
-    // etc. all come from real aomenc's OWN choice. See module docs.
+    // p: the REAL frame header, BOOTSTRAPPED (not derived) -- qindex, tile
+    // info, tx-mode-select, cdf-update flag, etc. all come from real
+    // aomenc's OWN choice. loop-filter LEVEL is overwritten below with this
+    // port's own derivation (`pick_filter_level`) once the reconstruction is
+    // available; every other loopfilter field (sharpness/deltas) stays
+    // bootstrapped (out of this mission's scope, and already correct for
+    // this envelope -- see `lf_search.rs` module docs).
     let p = read_uncompressed_header(&mut rb, &cfg);
     let real_bit_len = rb.bit_position();
     assert!(
@@ -300,6 +305,17 @@ fn attempt_case_content(
         p.quant.base_qindex, p.loopfilter.filter_level, p.tx_mode_select, p.coded_lossless,
     );
     eprintln!("{ctx}");
+    if std::env::var("DUMP_HDR").is_ok() {
+        eprintln!(
+            "{ctx}: DUMP prefix.allow_screen_content_tools={} outer.allow_screen_content_tools={} \
+             superres_scaled={} allow_intrabc={} frame_size={:?}",
+            p.prefix.allow_screen_content_tools,
+            p.allow_screen_content_tools,
+            p.superres_scaled,
+            p.allow_intrabc,
+            p.frame_size,
+        );
+    }
     assert_eq!(tiles_log2, 0, "{ctx}: single-tile envelope only");
 
     let tile_data_start = real_bit_len.div_ceil(8);
@@ -458,6 +474,57 @@ fn attempt_case_content(
         "{ctx}: pack_tile must walk every SB"
     );
     let our_tile_bytes = enc.done().to_vec();
+
+    // ---- loop-filter-level: TRUE DERIVATION from OUR OWN reconstruction +
+    //      the original source, via `pick_filter_level` (lf_search.rs) --
+    //      replaces the bootstrapped `p.loopfilter.filter_level*` with this
+    //      port's own av1_pick_filter_level-equivalent search. Every other
+    //      loopfilter field (sharpness/deltas) stays bootstrapped -- see
+    //      lf_search.rs module docs for why that's correct in this envelope. ----
+    let mi_grid = build_lf_mi_grid(&trees, mi_rows, mi_cols, n_sb, SB_MI, SB);
+    let lf_frame = LfSearchFrame {
+        recon_y: &recon_y,
+        recon_u: &recon_u,
+        recon_v: &recon_v,
+        src_y: &src_y_strided,
+        src_u: &src_u_strided,
+        src_v: &src_v_strided,
+        stride: STRIDE,
+        crop_width: w as u32,
+        crop_height: h as u32,
+        ss_x,
+        ss_y,
+        bd: i32::from(bd),
+        monochrome: mono,
+        mi: &mi_grid,
+        mi_rows,
+        mi_cols,
+    };
+    let derived_lf = pick_filter_level(&lf_frame, allintra, 0);
+    eprintln!(
+        "{ctx}: DERIVED lf_level={:?} lf_u={} lf_v={} sharpness={} -- REAL(bootstrapped) \
+         lf_level={:?} lf_u={} lf_v={} sharpness={} -- {}",
+        derived_lf.filter_level,
+        derived_lf.filter_level_u,
+        derived_lf.filter_level_v,
+        derived_lf.sharpness,
+        p.loopfilter.filter_level,
+        p.loopfilter.filter_level_u,
+        p.loopfilter.filter_level_v,
+        p.loopfilter.sharpness_level,
+        if derived_lf.filter_level == p.loopfilter.filter_level
+            && derived_lf.filter_level_u == p.loopfilter.filter_level_u
+            && derived_lf.filter_level_v == p.loopfilter.filter_level_v
+        {
+            "LF-LEVEL AGREES"
+        } else {
+            "LF-LEVEL DISAGREES"
+        }
+    );
+    let mut p = p;
+    p.loopfilter.filter_level = derived_lf.filter_level;
+    p.loopfilter.filter_level_u = derived_lf.filter_level_u;
+    p.loopfilter.filter_level_v = derived_lf.filter_level_v;
 
     let our_payload = assemble_frame_obu_payload_single_tile(&p, tiles_log2, &our_tile_bytes);
 

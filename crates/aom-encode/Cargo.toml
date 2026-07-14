@@ -13,6 +13,11 @@ aom-txb = { path = "../aom-txb" }
 aom-entropy = { path = "../aom-entropy" }
 aom-dist = { path = "../aom-dist" }
 aom-intra = { path = "../aom-intra" }
+# lf_search.rs reuses the already bit-exact deblock-filter APPLICATION
+# (aom_loopfilter::frame::loop_filter_frame) as the trial-filter primitive
+# for the loop-filter-level RD search (av1_pick_filter_level) -- never
+# reimplemented, per the mission's "reuse, don't re-port the kernel" rule.
+aom-loopfilter = { path = "../aom-loopfilter" }
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }

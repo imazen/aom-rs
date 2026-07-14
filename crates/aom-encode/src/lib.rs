@@ -18,6 +18,7 @@ pub mod encode_sb;
 pub mod hog;
 pub mod intra_rd;
 pub mod intra_uv_rd;
+pub mod lf_search;
 pub mod mode_costs;
 pub mod obu_assemble;
 pub mod pack;
