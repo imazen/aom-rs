@@ -9568,3 +9568,46 @@ pub fn ref_update_txk_array(
     };
     assert!(r == 0, "shim_update_txk_array alloc failed");
 }
+
+// ---- partition RDO primitives (REAL rd.h static inlines) ---------------------
+
+extern "C" {
+    fn shim_rd_cost_update(mult: i32, rate: *mut i32, dist: *mut i64, rdcost: *mut i64);
+    #[allow(clippy::too_many_arguments)]
+    fn shim_rd_stats_subtraction(
+        mult: i32,
+        l_rate: i32,
+        l_dist: i64,
+        l_rdcost: i64,
+        r_rate: i32,
+        r_dist: i64,
+        r_rdcost: i64,
+        o_rate: *mut i32,
+        o_dist: *mut i64,
+        o_rdcost: *mut i64,
+    );
+}
+
+/// The REAL `av1_rd_cost_update` (rd.h:201) on a `(rate, dist, rdcost)`
+/// slice.
+pub fn ref_rd_cost_update(mult: i32, rate: i32, dist: i64, rdcost: i64) -> (i32, i64, i64) {
+    let (mut r, mut d, mut c) = (rate, dist, rdcost);
+    unsafe { shim_rd_cost_update(mult, &mut r, &mut d, &mut c) };
+    (r, d, c)
+}
+
+/// The REAL `av1_rd_stats_subtraction` (rd.h:210).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_rd_stats_subtraction(
+    mult: i32,
+    left: (i32, i64, i64),
+    right: (i32, i64, i64),
+) -> (i32, i64, i64) {
+    let (mut r, mut d, mut c) = (0i32, 0i64, 0i64);
+    unsafe {
+        shim_rd_stats_subtraction(
+            mult, left.0, left.1, left.2, right.0, right.1, right.2, &mut r, &mut d, &mut c,
+        )
+    };
+    (r, d, c)
+}

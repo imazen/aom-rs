@@ -1196,3 +1196,42 @@ int shim_update_txk_array(uint8_t *tx_type_map, int map_stride, int blk_row,
   free(xd);
   return 0;
 }
+
+/* ---- partition RDO primitives: the REAL rd.h static inlines ---------------
+ * av1_rd_cost_update (rd.h:201) + av1_rd_stats_subtraction (rd.h:210) over
+ * marshalled RD_STATS rate/dist/rdcost slices (av1_init_rd_stats fills the
+ * remaining fields; only these three participate). av1_calculate_rd_cost's
+ * negative-rate RDCOST_NEG_R arm is reached through both. */
+void shim_rd_cost_update(int mult, int32_t *rate, int64_t *dist,
+                         int64_t *rdcost) {
+  RD_STATS s;
+  av1_init_rd_stats(&s);
+  s.rate = *rate;
+  s.dist = *dist;
+  s.rdcost = *rdcost;
+  av1_rd_cost_update(mult, &s);
+  *rate = s.rate;
+  *dist = s.dist;
+  *rdcost = s.rdcost;
+}
+
+void shim_rd_stats_subtraction(int mult, int32_t l_rate, int64_t l_dist,
+                               int64_t l_rdcost, int32_t r_rate,
+                               int64_t r_dist, int64_t r_rdcost,
+                               int32_t *o_rate, int64_t *o_dist,
+                               int64_t *o_rdcost) {
+  RD_STATS left, right, out;
+  av1_init_rd_stats(&left);
+  av1_init_rd_stats(&right);
+  av1_init_rd_stats(&out);
+  left.rate = l_rate;
+  left.dist = l_dist;
+  left.rdcost = l_rdcost;
+  right.rate = r_rate;
+  right.dist = r_dist;
+  right.rdcost = r_rdcost;
+  av1_rd_stats_subtraction(mult, &left, &right, &out);
+  *o_rate = out.rate;
+  *o_dist = out.dist;
+  *o_rdcost = out.rdcost;
+}
