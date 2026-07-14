@@ -3218,3 +3218,52 @@ pub fn ref_dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, 
     unsafe { shim_dist_block_tx_domain(coeff.as_ptr(), dqcoeff.as_ptr(), tx_size as i32, bd as i32, &mut d, &mut s) };
     (d, s)
 }
+
+// ---- av1_build_quantizer oracle (rd_shim.c) ---------------------------------
+
+extern "C" {
+    fn shim_build_quantizer(
+        bit_depth: i32,
+        y_dc_delta_q: i32,
+        u_dc_delta_q: i32,
+        u_ac_delta_q: i32,
+        v_dc_delta_q: i32,
+        v_ac_delta_q: i32,
+        sharpness: i32,
+        out: *mut i16,
+    ) -> i32;
+}
+
+/// Number of `i16` values written by [`ref_build_quantizer`]: 21 tables x
+/// `QINDEX_RANGE` (256) x 8 SIMD lanes.
+pub const BUILD_QUANTIZER_OUT_LEN: usize = 21 * 256 * 8;
+
+/// Reference `av1_build_quantizer` (av1/encoder/av1_quantize.c — the REAL
+/// exported function, no transcription). Fills `out` with the 21 quantizer
+/// tables flattened in declaration order; see rd_shim.c for the index map.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_build_quantizer(
+    bit_depth: i32,
+    y_dc_delta_q: i32,
+    u_dc_delta_q: i32,
+    u_ac_delta_q: i32,
+    v_dc_delta_q: i32,
+    v_ac_delta_q: i32,
+    sharpness: i32,
+    out: &mut [i16],
+) {
+    assert_eq!(out.len(), BUILD_QUANTIZER_OUT_LEN);
+    let rc = unsafe {
+        shim_build_quantizer(
+            bit_depth,
+            y_dc_delta_q,
+            u_dc_delta_q,
+            u_ac_delta_q,
+            v_dc_delta_q,
+            v_ac_delta_q,
+            sharpness,
+            out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc, 0, "shim_build_quantizer allocation failed");
+}

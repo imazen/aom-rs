@@ -9,8 +9,11 @@
  * from the real header, so any misreading shows up as a value mismatch in the
  * differential harness. Pure integer/table/float math — no RTCD needed. */
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include "av1/common/quant_common.h"
 #include "av1/common/idct.h" /* MAX_TX_SCALE, av1_get_tx_scale */
+#include "av1/encoder/av1_quantize.h" /* QUANTS, Dequants, av1_build_quantizer */
 #include "av1/encoder/rd.h"
 #include "aom_ports/mem.h" /* RIGHT_SIGNED_SHIFT */
 
@@ -72,4 +75,53 @@ void shim_dist_block_tx_domain(const int32_t *coeff, const int32_t *dqcoeff,
   }
   *out_dist = RIGHT_SIGNED_SHIFT(dist, shift);
   *out_sse = RIGHT_SIGNED_SHIFT(sse, shift);
+}
+
+/* ---- av1_build_quantizer oracle --------------------------------------------
+ * Marshals the REAL exported av1_build_quantizer (av1/encoder/av1_quantize.c)
+ * into one flat int16 buffer so the Rust harness needs no C struct layout
+ * knowledge. Output layout: 21 tables x QINDEX_RANGE x 8 lanes, QUANTS
+ * declaration order then Dequants declaration order:
+ *   [ 0] y_quant        [ 1] y_quant_shift   [ 2] y_zbin        [ 3] y_round
+ *   [ 4] y_quant_fp     [ 5] u_quant_fp      [ 6] v_quant_fp
+ *   [ 7] y_round_fp     [ 8] u_round_fp      [ 9] v_round_fp
+ *   [10] u_quant        [11] v_quant         [12] u_quant_shift [13] v_quant_shift
+ *   [14] u_zbin         [15] v_zbin          [16] u_round       [17] v_round
+ *   [18] y_dequant_QTX  [19] u_dequant_QTX   [20] v_dequant_QTX
+ * Returns 0 on success, -1 on allocation failure. */
+int shim_build_quantizer(int bit_depth, int y_dc_delta_q, int u_dc_delta_q,
+                         int u_ac_delta_q, int v_dc_delta_q, int v_ac_delta_q,
+                         int sharpness, int16_t *out) {
+  QUANTS *quants = (QUANTS *)malloc(sizeof(QUANTS));
+  Dequants *deq = (Dequants *)malloc(sizeof(Dequants));
+  if (!quants || !deq) {
+    free(quants);
+    free(deq);
+    return -1;
+  }
+  av1_build_quantizer((aom_bit_depth_t)bit_depth, y_dc_delta_q, u_dc_delta_q,
+                      u_ac_delta_q, v_dc_delta_q, v_ac_delta_q, quants, deq,
+                      sharpness);
+  {
+    const size_t n = QINDEX_RANGE * 8;
+    const int16_t *src[21] = {
+      &quants->y_quant[0][0],       &quants->y_quant_shift[0][0],
+      &quants->y_zbin[0][0],        &quants->y_round[0][0],
+      &quants->y_quant_fp[0][0],    &quants->u_quant_fp[0][0],
+      &quants->v_quant_fp[0][0],    &quants->y_round_fp[0][0],
+      &quants->u_round_fp[0][0],    &quants->v_round_fp[0][0],
+      &quants->u_quant[0][0],       &quants->v_quant[0][0],
+      &quants->u_quant_shift[0][0], &quants->v_quant_shift[0][0],
+      &quants->u_zbin[0][0],        &quants->v_zbin[0][0],
+      &quants->u_round[0][0],       &quants->v_round[0][0],
+      &deq->y_dequant_QTX[0][0],    &deq->u_dequant_QTX[0][0],
+      &deq->v_dequant_QTX[0][0],
+    };
+    for (int a = 0; a < 21; ++a) {
+      memcpy(out + (size_t)a * n, src[a], n * sizeof(int16_t));
+    }
+  }
+  free(quants);
+  free(deq);
+  return 0;
 }

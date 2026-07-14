@@ -8,13 +8,15 @@
 
 #![forbid(unsafe_code)]
 
+mod build_quantizer;
 mod quant_common;
+pub use build_quantizer::{av1_build_quantizer, Dequants, Quants, QINDEX_RANGE};
 pub use quant_common::{av1_ac_quant_qtx, av1_dc_quant_qtx};
 
 /// `ROUND_POWER_OF_TWO(value, n)` from `aom_ports/mem.h` — bit-exact.
 /// Note `(1<<n)>>1` yields 0 at n=0, so this is well-defined for `log_scale==0`.
 #[inline]
-fn round_power_of_two(value: i32, n: i32) -> i32 {
+pub(crate) fn round_power_of_two(value: i32, n: i32) -> i32 {
     (value + ((1 << n) >> 1)) >> n
 }
 
