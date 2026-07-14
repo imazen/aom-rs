@@ -1416,6 +1416,24 @@ for whoever investigates that gap next — it is NOT an AB/4-way/partition-
 type-coverage issue (case 1 proves this directly: real's tree has no AB
 anywhere and still diverges the same way).
 
+A bounded (temporary, reverted, not committed) instrumentation pass at
+`rd_pick_partition_real`'s NONE/SPLIT win checks (`partition_pick.rs`,
+around the `if this_rdc.rdcost < best_rdc.rdcost` / `if reached_last_index
+&& sum_rdc.rdcost < best_rdc.rdcost` sites) narrowed this further for a
+future session: for "top split/bottom flat" specifically, the NONE stage at
+(0,8,32x32) does not merely lose to SPLIT on cost — it produces NO valid
+result at all (`this_rdc.rate == i32::MAX`, no leaf found), with the
+`best_rdc` budget entering this node still `i64::MAX` (unbounded) at that
+point. That points upstream, to how budget propagates down from the SB
+root's own recursion (the outer (0,0,64x64) node's own NONE/rect stages)
+rather than to anything local to (0,8,32x32) itself — worth starting there,
+not re-deriving this narrowing from scratch. For "left flat/right split",
+by contrast, NONE DOES succeed at this node (`rdcost=76062038`) and SPLIT's
+own accumulated cost (`75392074`) is genuinely lower by a real ~0.9%
+margin — a normal, close RD comparison, not a failure — so the two probe
+cases may not even share the SAME root cause despite sharing the same
+divergence position; treat them as two leads, not one.
+
 **The AB port itself is complete and independently verified working**,
 despite not closing the specific probe cases above (which were always known
 to be confounded, per the 4-way chunk's own honest labelling). Ported (every
