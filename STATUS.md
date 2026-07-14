@@ -427,7 +427,7 @@ real gate caught (synthetic diff could not): aligned-vs-crop dims passed as the
 `max_txsize_rect_lookup[BLOCK_INVALID=255]` OOB for tall blocks at ss=(1,0) —
 NDEBUG production build; not portable). 4:2:2 luma-only IS in envelope. Next
 envelope tools: CDEF (kernels partial), segmentation, palette, SB128, multi-tile,
-loop restoration, superres, intrabc.
+superres, intrabc (loop restoration landed 2026-07-14 — see below).
 
 ## CDEF applied — enable_cdef envelope constraint DROPPED (2026-07-14, decoder track)
 
@@ -462,6 +462,57 @@ cq-52 bd8 arms chain deblock+CDEF. Envelope after this chunk: loop
 restoration, film grain, segmentation, palette/screen-content, SB128,
 multi-tile, superres, qm, lossless, intrabc, 4:2:2-chroma-deblock still
 rejected; CDEF has no residual constraint.
+
+## Loop restoration applied — enable_restoration constraint DROPPED (2026-07-14, decoder track)
+
+**The third (and last) post-filter is in** (ec0cfbd syntax, df2f893 tile parse,
+6296d65 kernels, 7ee08bc walk, 52615ce wiring+gate). Four layers, each C-diffed:
+
+- **RU-params syntax** (`aom_entropy::lr`): `read_primitive_{quniform,subexpfin,
+  refsubexpfin}` + `inv_recenter` on the od_ec decoder; `read_wiener_filter` /
+  `read_sgrproj_filter` / `read_lr_unit` with per-tile reference chaining
+  (`av1_reset_loop_restoration` defaults); 3 new LR CDFs in `KfFrameContext`
+  (dump-diff extended to 6431 u16, green all bands). Oracle: REAL exported
+  `aom_write/read_primitive_refsubexpfin` + `aom_write/read_symbol` roundtrip
+  (`shim_lr_units_roundtrip`) — values + adapted CDFs identical, 400 cases.
+- **Tile parse** (aom-decode): `decode_partition` runs the
+  `loop_restoration_read_sb_coeffs` reads at the 64x64 SB root (parse arm,
+  decodeframe.c:1325-1343) over the `av1_loop_restoration_corners_in_sb`
+  rectangle — THE RU PARAMS ARE INTERLEAVED IN THE TILE DATA before each SB's
+  first partition symbol. Geometry (`lr_count_units`/`lr_corners_in_sb`) diffed
+  vs REAL `av1_alloc_restoration_struct` + corners fn incl. an exactly-once
+  RU coverage proof. 624-tile synthetic roundtrip unchanged (no-LR streams).
+- **Kernels** (NEW crate `aom-restore`): `wiener_convolve_add_src` =
+  `av1_[highbd_]wiener_convolve_add_src_c` (fixed 8-tap separable, u16
+  intermediate, `get_conv_params_wiener` rounding, h+7 intermediate rows —
+  the highbd h+8th is dead work, verified against both C variants); `sgr` =
+  `av1_[apply_]selfguided_restoration_c` (boxsums, A/B intermediate with u32
+  wrapping muls, r=2 fast + r=1 full passes, `av1_decode_xq`, i16-narrowed
+  projection). Diffed vs the REAL `_c` exports — bd 8 through the production
+  LOWBD u8 kernels — over 12/11 dim sets x 3 bd x taps/eps sweeps.
+- **Frame walk** (`aom_restore::frame`): `av1_loop_restoration_filter_frame` +
+  `av1_loop_restoration_save_boundary_lines` in the decoder's ordering:
+  after_cdef=0 saves DEBLOCKED (pre-CDEF) rows as internal stripe-boundary
+  context, after_cdef=1 saves CDEF rows at frame edges; per-stripe context-row
+  swap with save/restore; the `optimized_lr` no-CDEF arm (no saves, ±3rd row
+  duplicated from ±2nd); 150%-last-unit tiling, 8px stripe voffset, Wiener
+  chunk widths rounded to 16 (dead over-writes, like C). Oracle: REAL exported
+  save+filter over real bordered YV12 buffers (`shim_lr_filter_frame`), both
+  arms, adversarially-unrelated deblocked-vs-current content — byte-identical.
+
+`decode_frame_obus` mirrors decodeframe.c:5404-5482: deblock → snapshot →
+cdef → restoration; rejection dropped. **GATE: 234 real cpu-used=0 KEY streams
+byte-identical vs the C decoder** — 126 prior stay green + 108 restoration
+arms (optimized-GOOD, boundary-swap-GOOD, ALLINTRA x both, bd8 cq52
+deblock+CDEF+LR chains). Probed: 71 arms carry LR syntax, ALL 71 genuinely
+change pixels, RU populations 44 wiener + 85 sgrproj. **54 arms are
+`usage=2` (AOM_USAGE_ALL_INTRA)** — the zenavif/avifenc still-image mode, per
+the ALLINTRA-primary directive (encoder header deltas verified from
+av1_cx_iface.c: kf_max_dist=0 required, enable_cdef defaulted off for
+allintra but explicit control overrides, enable_qm stays 0 without TUNE_IQ).
+Envelope after this chunk: film grain, segmentation, palette/screen-content,
+SB128, multi-tile, superres, qm, lossless, intrabc, 4:2:2-chroma-deblock
+still rejected; restoration has NO residual constraint.
 
 ## Perf gate honest number
 
