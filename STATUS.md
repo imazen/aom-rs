@@ -1506,11 +1506,20 @@ piece cross-referenced against libaom v3.14.1 `partition_search.c`/
   (`VERT_B`) winning at multiple nodes across this exact case, with the
   final assembled bitstream STILL byte-identical to real aomenc's own —
   i.e. this port's own AB decisions are bit-exact on a real, exercised case,
-  not merely "compiles and doesn't crash." `HORZ_A` (type 0) was not
-  observed winning in this session's testing — a real, honest gap in this
-  chunk's own verification (structurally identical code path to the other
-  3 types, same C source, but not yet caught in the act on any tested
-  content; flagged for whoever finds/adds a HORZ_A-favoring case next).
+  not merely "compiles and doesn't crash."
+- **HORZ_A observation gap now CLOSED (2026-07-14).** The one AB type the
+  landing chunk had not caught winning — `HORZ_A` (type 0) — is now confirmed
+  byte-exact by the same method. An env-gated AB-win print (added, verified,
+  reverted — NOT committed) run over `encoder_gate_e2e_nonzero_lf_sweep`
+  single-threaded (so per-case attribution is deterministic) observed all 4 AB
+  types winning (HORZ_A 14x, HORZ_B 8x, VERT_A 9x, VERT_B 6x across the sweep),
+  and in **2 independent cases HORZ_A won AND the frame is a TRUE END-TO-END
+  BYTE MATCH vs real aomenc**: HORZ_A at (mi_row=0,mi_col=8,BLOCK_16X16) on the
+  64x64 mono cq48 screen-content case, and at (8,12,BLOCK_16X16) on the 64x64
+  mono cq60 case. So the `HORZ_A` pack path is bit-exact where exercised, not
+  just structurally present — all 4 AB types now have direct positive
+  byte-match evidence. (The other 3 HORZ_A-winning sweep cases mismatch, but on
+  the separately-tracked header/LF or deep-RD gaps, not on the HORZ_A leaf.)
 
 **10 of 10 `PARTITION_*` types are now structurally ported** (NONE/SPLIT/
 HORZ/VERT/HORZ_4/VERT_4/HORZ_A/HORZ_B/VERT_A/VERT_B), each independently
