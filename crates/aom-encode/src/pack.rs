@@ -75,6 +75,10 @@ const PARTITION_NONE: i32 = 0;
 const PARTITION_HORZ: i32 = 1;
 const PARTITION_VERT: i32 = 2;
 const PARTITION_SPLIT: i32 = 3;
+const PARTITION_HORZ_A: i32 = 4;
+const PARTITION_HORZ_B: i32 = 5;
+const PARTITION_VERT_A: i32 = 6;
+const PARTITION_VERT_B: i32 = 7;
 const PARTITION_HORZ_4: i32 = 8;
 const PARTITION_VERT_4: i32 = 9;
 
@@ -431,6 +435,22 @@ pub fn pack_sb(
             PARTITION_VERT_4,
             get_partition_subsize(bsize, PARTITION_VERT_4) as usize,
         ),
+        SbTree::HorzA(_) => (
+            PARTITION_HORZ_A,
+            get_partition_subsize(bsize, PARTITION_HORZ_A) as usize,
+        ),
+        SbTree::HorzB(_) => (
+            PARTITION_HORZ_B,
+            get_partition_subsize(bsize, PARTITION_HORZ_B) as usize,
+        ),
+        SbTree::VertA(_) => (
+            PARTITION_VERT_A,
+            get_partition_subsize(bsize, PARTITION_VERT_A) as usize,
+        ),
+        SbTree::VertB(_) => (
+            PARTITION_VERT_B,
+            get_partition_subsize(bsize, PARTITION_VERT_B) as usize,
+        ),
     };
 
     if bsize >= 3 {
@@ -618,6 +638,118 @@ pub fn pack_sb(
                     mi_row,
                     this_mi_col,
                     PARTITION_VERT_4 as usize,
+                );
+            }
+        }
+        SbTree::HorzA(subs) => {
+            // encode_sb PARTITION_HORZ_A (:1652-1660): interior-only, no
+            // frame-bound gating on any of the 3 sub-blocks (module docs on
+            // encode_sb.rs's SbTree::HorzA).
+            let [s0, s1, s2] = &mut **subs;
+            for (s, r, c) in [
+                (s0, mi_row, mi_col),
+                (s1, mi_row, mi_col + hbs),
+                (s2, mi_row + hbs, mi_col),
+            ] {
+                pack_leaf(
+                    enc,
+                    env,
+                    cfg,
+                    kf,
+                    kfs,
+                    tile,
+                    nbr,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    r,
+                    c,
+                    PARTITION_HORZ_A as usize,
+                );
+            }
+        }
+        SbTree::HorzB(subs) => {
+            // encode_sb PARTITION_HORZ_B (:1661-1667).
+            let [s0, s1, s2] = &mut **subs;
+            for (s, r, c) in [
+                (s0, mi_row, mi_col),
+                (s1, mi_row + hbs, mi_col),
+                (s2, mi_row + hbs, mi_col + hbs),
+            ] {
+                pack_leaf(
+                    enc,
+                    env,
+                    cfg,
+                    kf,
+                    kfs,
+                    tile,
+                    nbr,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    r,
+                    c,
+                    PARTITION_HORZ_B as usize,
+                );
+            }
+        }
+        SbTree::VertA(subs) => {
+            // encode_sb PARTITION_VERT_A (:1668-1676): column-axis mirror of
+            // HORZ_A.
+            let [s0, s1, s2] = &mut **subs;
+            for (s, r, c) in [
+                (s0, mi_row, mi_col),
+                (s1, mi_row + hbs, mi_col),
+                (s2, mi_row, mi_col + hbs),
+            ] {
+                pack_leaf(
+                    enc,
+                    env,
+                    cfg,
+                    kf,
+                    kfs,
+                    tile,
+                    nbr,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    r,
+                    c,
+                    PARTITION_VERT_A as usize,
+                );
+            }
+        }
+        SbTree::VertB(subs) => {
+            // encode_sb PARTITION_VERT_B (:1677-1684): column-axis mirror of
+            // HORZ_B.
+            let [s0, s1, s2] = &mut **subs;
+            for (s, r, c) in [
+                (s0, mi_row, mi_col),
+                (s1, mi_row, mi_col + hbs),
+                (s2, mi_row + hbs, mi_col + hbs),
+            ] {
+                pack_leaf(
+                    enc,
+                    env,
+                    cfg,
+                    kf,
+                    kfs,
+                    tile,
+                    nbr,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s,
+                    r,
+                    c,
+                    PARTITION_VERT_B as usize,
                 );
             }
         }

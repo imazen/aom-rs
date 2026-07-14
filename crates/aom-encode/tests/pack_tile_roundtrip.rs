@@ -861,6 +861,15 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
                          rd_pick_partition_real must never produce a 4-way tree here"
                     )
                 }
+                aom_encode::encode_sb::SbTree::HorzA(_)
+                | aom_encode::encode_sb::SbTree::HorzB(_)
+                | aom_encode::encode_sb::SbTree::VertA(_)
+                | aom_encode::encode_sb::SbTree::VertB(_) => {
+                    panic!(
+                        "this harness passes enable_ab_partitions: false -- \
+                         rd_pick_partition_real must never produce an AB tree here"
+                    )
+                }
             }
         }
         let mut expect = ExpectStats::default();

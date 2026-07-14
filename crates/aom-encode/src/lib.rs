@@ -13,6 +13,8 @@
 //! forward transform lands.
 #![forbid(unsafe_code)]
 
+pub mod ab_nn_prune;
+pub mod ab_nn_weights;
 pub mod encode_intra;
 pub mod encode_sb;
 pub mod hog;

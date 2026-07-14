@@ -1002,6 +1002,272 @@ fn rd_pick_4partition(
     (sum_rdc, Some(Box::new(arr)))
 }
 
+/// `allow_ab_partition_search` (partition_search.c:3992-4020): simplifies at
+/// speed 0 KEY to `do_rectangular_split && bsize > BLOCK_8X8 && has_rows &&
+/// has_cols` — `ab_bsize_thresh` stays its `BLOCK_8X8` default
+/// (`ext_part_eval_based_on_cur_best` is 0 at speed 0 both usages, already
+/// established via the 4-way port's own module docs on
+/// `partition4_allowed_base`), and `prune_ext_part_state`
+/// (`prune_ext_part_none_skippable`) requires `skip_non_sq_part_based_on_
+/// none >= 1`, the SAME sf already established dead at speed 0 in the
+/// rect-stage module docs — so `!prune_ext_part_state` is always true and
+/// omitted.
+fn allow_ab_partition_search(
+    bsize: usize,
+    do_rectangular_split: bool,
+    has_rows: bool,
+    has_cols: bool,
+    best_rdcost: i64,
+) -> bool {
+    // Do not prune if there is no valid partition (:4002).
+    if best_rdcost == i64::MAX {
+        return true;
+    }
+    const BLK_1D: [usize; 22] = [
+        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+    ];
+    do_rectangular_split && BLK_1D[bsize] > BLK_1D[3] && has_rows && has_cols
+}
+
+/// `av1_prune_ab_partitions` (partition_strategy.c:1901-2029): the AB gating
+/// pipeline — base gate, RD-ratio structural pruning
+/// (`prune_ext_partition_types_search_level == 1`, LIVE at speed 0 both
+/// usages — STATUS.md's AB plan point 3, unlike 4-way's own consumption of
+/// the SAME sf at `== 2` which is dead), then `ml_prune_ab_partition` (LIVE,
+/// same `ml_prune_partition` sf 4-way already established live, gated on
+/// BOTH rect types being allowed — matches the C's own extra gate).
+/// `evaluate_ab_partition_based_on_split` (:2009-2028) is DEAD
+/// (`prune_ext_part_using_split_info >= 2`, established 0 at speed 0 in the
+/// 4-way chunk) — omitted. `x_source_variance` is the STALE
+/// `x->source_variance` (gotcha #1) fed ONLY to the NN, never the
+/// structural pruning (which correctly uses `pb_source_variance`).
+#[allow(clippy::too_many_arguments)]
+fn prune_ab_partitions(
+    ext_partition_allowed: bool,
+    enable_ab_partitions: bool,
+    partition_rect_allowed: [bool; 2],
+    pc_tree_partitioning: i32,
+    pb_source_variance: u32,
+    x_source_variance: u32,
+    best_rdcost: i64,
+    rect_part_rd: [[i64; 2]; 2],
+    split_rd_in: [i64; 4],
+    bsize: usize,
+) -> [bool; 4] {
+    let mut horzab = ext_partition_allowed && enable_ab_partitions && partition_rect_allowed[0];
+    let mut vertab = ext_partition_allowed && enable_ab_partitions && partition_rect_allowed[1];
+
+    // level == 1 (LIVE at speed 0 both usages, :1924-1934).
+    horzab &= pc_tree_partitioning == 1 // PARTITION_HORZ
+        || (pc_tree_partitioning == 0 && pb_source_variance < 32) // NONE
+        || pc_tree_partitioning == 3; // SPLIT
+    vertab &= pc_tree_partitioning == 2 // PARTITION_VERT
+        || (pc_tree_partitioning == 0 && pb_source_variance < 32)
+        || pc_tree_partitioning == 3;
+
+    // horz_rd[0]=(horz_rd[0]<INT64_MAX?horz_rd[0]:0) etc (:1941-1948) --
+    // MUTATES the underlying rect_part_rd/split_rd storage in the C (the
+    // locals there are pointers into part_state's own fields), so the LATER
+    // ml_prune_ab_partition call sees these SAME clamped values too, not the
+    // raw ones -- replicated here by passing the clamped locals to BOTH the
+    // structural pruning below AND predict_ab_partition_prune.
+    let clamp = |v: i64| if v < i64::MAX { v } else { 0 };
+    let horz_rd = [clamp(rect_part_rd[0][0]), clamp(rect_part_rd[0][1])];
+    let vert_rd = [clamp(rect_part_rd[1][0]), clamp(rect_part_rd[1][1])];
+    let split_rd = [
+        clamp(split_rd_in[0]),
+        clamp(split_rd_in[1]),
+        clamp(split_rd_in[2]),
+        clamp(split_rd_in[3]),
+    ];
+
+    let mut allowed = [false; 4]; // [HORZ_A, HORZ_B, VERT_A, VERT_B]
+    allowed[0] = horzab;
+    allowed[1] = horzab;
+    let horz_a_rd = horz_rd[1] + split_rd[0] + split_rd[1];
+    let horz_b_rd = horz_rd[0] + split_rd[2] + split_rd[3];
+    // case 1 (level == 1): /16*14 (:1961-1962).
+    allowed[0] &= horz_a_rd / 16 * 14 < best_rdcost;
+    allowed[1] &= horz_b_rd / 16 * 14 < best_rdcost;
+
+    allowed[2] = vertab;
+    allowed[3] = vertab;
+    let vert_a_rd = vert_rd[1] + split_rd[0] + split_rd[2];
+    let vert_b_rd = vert_rd[0] + split_rd[1] + split_rd[3];
+    allowed[2] &= vert_a_rd / 16 * 14 < best_rdcost;
+    allowed[3] &= vert_b_rd / 16 * 14 < best_rdcost;
+
+    // ml_prune_ab_partition (:1995-2004): only when BOTH rect types allowed.
+    if enable_ab_partitions && ext_partition_allowed && partition_rect_allowed[0] && partition_rect_allowed[1] {
+        allowed = crate::ab_nn_prune::predict_ab_partition_prune(
+            bsize,
+            pc_tree_partitioning,
+            x_source_variance,
+            best_rdcost,
+            [horz_rd, vert_rd],
+            split_rd,
+            allowed,
+        );
+    }
+    allowed
+}
+
+/// `rd_pick_ab_part` + `rd_test_partition3` (partition_search.c:3650-3692,
+/// 3177-3221) fused: evaluate ONE AB partition type's 3 sub-blocks, reusing
+/// [`rd_pick_rect_partition`] as the per-subblock primitive (STATUS.md's AB
+/// plan) — early-bail after EVERY sub-block (not just the last), dry-run
+/// propagation after sub-blocks 0 and 1 (not 2, the last). `ab_type`:
+/// 0=HORZ_A, 1=HORZ_B, 2=VERT_A, 3=VERT_B (`AB_PART_TYPE` order;
+/// `PARTITION_TYPE` value = `ab_type + 4`). `reuse[i]`: `Some(winner)` when
+/// `reuse_prev_rd_results_for_part_ab` applies to sub-block `i` (only i=0/1
+/// are ever reused, matching the C's own `is_ctx_ready[..][0/1]` shape;
+/// sub-block 2 is NEVER reused) — copies `winner.raw_rdstats` verbatim into
+/// the accumulation instead of running a fresh search (`pick_sb_modes`'s
+/// `rd_mode_is_ready` early-return, partition_search.c:854-861: no budget
+/// re-check, the caller's own accumulate-then-compare-to-best_rdc is what
+/// decides if it still fits) and does NOT touch `x->source_variance` (the
+/// C's own early return skips the assignment that lives later in
+/// `pick_sb_modes` — gotcha #1's mechanism doesn't fire for a reused
+/// sub-block).
+#[allow(clippy::too_many_arguments)]
+fn rd_pick_ab_part(
+    env: &SbEncodeEnv,
+    cfg: &PickFrameCfg,
+    tile: &mut TileCtxState,
+    grid: &mut ModeGrid,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    cfl: &mut CflCtx,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    ab_type: usize,
+    partition_cost: &[i32; 10],
+    best_rdc: &PartRdStats,
+    visits: &mut Vec<LeafVisit>,
+    last_source_variance: &mut u32,
+    reuse: [Option<&LeafWinner>; 2],
+) -> (PartRdStats, Option<Box<[LeafWinner; 3]>>) {
+    let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+    let bsize2 = split_subsize(bsize);
+    let partition_type = 4 + ab_type; // PARTITION_HORZ_A..VERT_B
+    let subsize = get_partition_subsize(bsize, partition_type as i32) as usize;
+
+    // ab_subsize/ab_mi_pos (partition_search.c:3805-3831).
+    let (positions, sizes): ([(i32, i32); 3], [usize; 3]) = match ab_type {
+        0 => (
+            // HORZ_A: top-left quarter, top-right quarter, bottom half.
+            [(mi_row, mi_col), (mi_row, mi_col + hbs), (mi_row + hbs, mi_col)],
+            [bsize2, bsize2, subsize],
+        ),
+        1 => (
+            // HORZ_B: top half, bottom-left quarter, bottom-right quarter.
+            [
+                (mi_row, mi_col),
+                (mi_row + hbs, mi_col),
+                (mi_row + hbs, mi_col + hbs),
+            ],
+            [subsize, bsize2, bsize2],
+        ),
+        2 => (
+            // VERT_A: top-left quarter, bottom-left quarter, right half.
+            [(mi_row, mi_col), (mi_row + hbs, mi_col), (mi_row, mi_col + hbs)],
+            [bsize2, bsize2, subsize],
+        ),
+        3 => (
+            // VERT_B: left half, top-right quarter, bottom-right quarter.
+            [
+                (mi_row, mi_col),
+                (mi_row, mi_col + hbs),
+                (mi_row + hbs, mi_col + hbs),
+            ],
+            [subsize, bsize2, bsize2],
+        ),
+        _ => unreachable!("ab_type is 0..4"),
+    };
+
+    let mut sum_rdc = PartRdStats::init();
+    sum_rdc.rate = partition_cost[partition_type];
+    sum_rdc.rdcost = crate::rd::rdcost(env.rdmult, sum_rdc.rate, 0);
+
+    let mut w: [Option<LeafWinner>; 3] = [None, None, None];
+    for i in 0..3usize {
+        let (r, c) = positions[i];
+        let sz = sizes[i];
+        let winner = if i < 2 && reuse[i].is_some() {
+            let reused = reuse[i].expect("checked Some above");
+            let this_rdc = reused.raw_rdstats;
+            if this_rdc.rate == i32::MAX {
+                sum_rdc.rdcost = i64::MAX;
+            } else {
+                sum_rdc.rate += this_rdc.rate;
+                sum_rdc.dist += this_rdc.dist;
+                rd_cost_update(env.rdmult, &mut sum_rdc);
+            }
+            visits.push(LeafVisit {
+                mi_row: r,
+                mi_col: c,
+                bsize: sz,
+                budget: 0, // reused: no budget was computed (module docs)
+                rate: this_rdc.rate,
+                dist: this_rdc.dist,
+                rdcost: this_rdc.rdcost,
+            });
+            Some(reused.clone())
+        } else {
+            let (_rd_i, winner, source_variance) = rd_pick_rect_partition(
+                env,
+                cfg,
+                tile,
+                grid,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                r,
+                c,
+                sz,
+                partition_type,
+                best_rdc,
+                &mut sum_rdc,
+                visits,
+            );
+            *last_source_variance = source_variance;
+            winner
+        };
+        w[i] = winner;
+        // rd_try_subblock's own early-bail (:3161-3164), checked after
+        // EVERY sub-block (not just the last).
+        if sum_rdc.rdcost >= best_rdc.rdcost {
+            return (PartRdStats::invalid(), None);
+        }
+        if i < 2 {
+            // Dry-run propagation after sub-blocks 0 and 1 (not 2, the
+            // last) -- even for a REUSED sub-block: the C's own
+            // rd_try_subblock calls av1_update_state+encode_superblock
+            // unconditionally when `!is_last`, regardless of whether
+            // pick_sb_modes took the reuse early-return (module docs).
+            let wi = w[i].as_mut().expect("valid sum implies a winner");
+            let _ = crate::encode_sb::encode_b_intra_dry(
+                env, tile, recon_y, recon_u, recon_v, cfl, wi, r, c, partition_type,
+            );
+            grid.stamp(r, c, sz, wi.mode as u8, env.mi_rows, env.mi_cols);
+        }
+    }
+    // Calculate the total cost and update the best partition (:3211-3218;
+    // matches rd_pick_4partition's own single-check precedent for this
+    // "double check" the C's rd_test_partition3 itself performs — both
+    // checks compare the SAME av1_rd_cost_update-derived value in this
+    // non-negative-accumulated-rate context, so they're not independent).
+    rd_cost_update(env.rdmult, &mut sum_rdc);
+    if sum_rdc.rdcost >= best_rdc.rdcost {
+        return (PartRdStats::invalid(), None);
+    }
+    let arr: [LeafWinner; 3] = w.map(|x| x.expect("valid sum implies a winner"));
+    (sum_rdc, Some(Box::new(arr)))
+}
+
 /// `av1_rd_pick_partition` with REAL leaves, NONE + SPLIT + HORZ + VERT —
 /// see the module docs for the exact C sequence. `none_rd_out` mirrors the
 /// C's `none_rd` out-pointer (the parent's `split_rd[idx]` slot; consumed
@@ -1211,6 +1477,14 @@ pub fn rd_pick_partition_real(
     // 4-way ML prune below when SPLIT doesn't run, exactly matching
     // split_partition_search's own early return leaving it untouched).
     let mut split_rd = [0i64; 4];
+    // is_split_ctx_is_ready[0]/[1] + the children's own winner (AB-stage
+    // inputs, partition_search.c:4598-4608): survive past this `if
+    // do_square_split` block regardless of whether SPLIT ultimately becomes
+    // the OVERALL winner (the C sets this bookkeeping unconditionally inside
+    // the per-child loop, not gated on SPLIT's own eventual best_rdc
+    // comparison).
+    let mut is_split_ctx_is_ready = [false; 2];
+    let mut split_child_leaf_for_reuse: [Option<LeafWinner>; 2] = [None, None];
     // ---- PARTITION_SPLIT stage ----
     if do_square_split {
         let subsize = split_subsize(bsize);
@@ -1255,6 +1529,26 @@ pub fn rd_pick_partition_real(
             sum_rdc.rate += child_rdc.rate;
             sum_rdc.dist += child_rdc.dist;
             rd_cost_update(env.rdmult, &mut sum_rdc);
+            // Set split ctx as ready for use (:4598-4608).
+            //
+            // C: `bsize <= BLOCK_8X8 || pc_tree->split[idx]->partitioning ==
+            // PARTITION_NONE` -- the `bsize<=BLOCK_8X8` disjunct only
+            // matters when THIS SPLIT's own parent bsize is 8x8 (children
+            // 4x4, which structurally can ONLY ever be NONE -- no partition
+            // type exists below BLOCK_4X4), so it's equivalent to (not an
+            // approximation of) `SbTree::Leaf` alone: whenever the
+            // disjunct's left side would fire, the right side (`==
+            // PARTITION_NONE`, i.e. `SbTree::Leaf`) is ALREADY
+            // unconditionally true for that same child. AB itself never
+            // reads this state at a bsize<=8x8 parent anyway
+            // (allow_ab_partition_search requires bsize > BLOCK_8X8).
+            if idx <= 1
+                && let Some(SbTree::Leaf(w)) = child_tree.as_ref()
+                && w.uv_mode != UV_CFL_PRED
+            {
+                is_split_ctx_is_ready[idx] = true;
+                split_child_leaf_for_reuse[idx] = Some(w.clone());
+            }
             children.push(child_tree);
             idx += 1;
         }
@@ -1302,6 +1596,13 @@ pub fn rd_pick_partition_real(
     // (entirely !frame_is_intra_only-gated) — verified no-ops (module docs).
     let mut rect_part_rd = [[0i64; 2]; 2]; // :3368 — an AB-stage input.
     let mut is_rect_ctx_is_ready = [false; 2]; // :3373 — an AB-stage input.
+    // The rect stage's own sub-0 winner, captured whenever
+    // is_rect_ctx_is_ready[i] gets set -- HORZ_B/VERT_B's own reuse input
+    // (`mode_srch_ctx[HORZ_B][0] = &pc_tree->horizontal[0]` unconditionally
+    // in the C's `set_mode_search_ctx`, partition_search.c:3698-3699; ACTUAL
+    // use still gated by is_rect_ctx_is_ready[i] at the AB stage, matching
+    // the C's own `is_ctx_ready[ab_part_type][0]` guard).
+    let mut rect_sub0_for_reuse: [Option<LeafWinner>; 2] = [None, None];
     for i in 0..2usize {
         // is_rect_part_allowed (:3506) with av1_active_h/v_edge at the
         // one-pass shape (encodeframe_utils.c:787/817): active iff the
@@ -1356,6 +1657,7 @@ pub fn rd_pick_partition_real(
             // try_palette off) and uv_mode != UV_CFL_PRED.
             if w0.uv_mode != UV_CFL_PRED {
                 is_rect_ctx_is_ready[i] = true;
+                rect_sub0_for_reuse[i] = Some(w0.clone());
             }
             // av1_update_state + encode_superblock(DRY_RUN_NORMAL)
             // (:3613-3616) — the MID-STAGE propagation: sub 1 reads sub 0's
@@ -1437,10 +1739,140 @@ pub fn rd_pick_partition_real(
         // sub-0 encode debris restored before VERT evaluates.
         restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
     }
-    // is_rect_ctx_is_ready: an AB-stage input (non-NULL only under a SPLIT
-    // parent's recursion); next chunk. rect_part_rd is consumed below by
-    // the 4-way ML prune.
-    let _ = is_rect_ctx_is_ready;
+    // is_rect_ctx_is_ready + rect_sub0_for_reuse: consumed by the AB stage
+    // below (HORZ_B/VERT_B's own reuse input). rect_part_rd is ALSO consumed
+    // by the 4-way ML prune further down.
+
+    // ---- AB partition stage (ab_partitions_search, partition_search.c:
+    // 3762-3885; wired :5895-5906) ----
+    //
+    // Real control-flow position: BETWEEN rect and 4-way (rectangular_
+    // partition_search -> pb_source_variance -> allow_ab_partition_search ->
+    // ab_partitions_search -> prune_4_way_partition_search -> rd_pick_
+    // 4partition, partition_search.c:5875-5946) -- placed here, before the
+    // existing 4-way stage below, to match.
+    if cfg.enable_ab_partitions && !terminate_partition_search {
+        // pb_source_variance (:5882-5885): a pure fn of block origin+bsize
+        // (av1_get_perpixel_variance_facade) -- identical to the NONE
+        // stage's own value and to the 4-way stage's own local computation
+        // further down; recomputed here rather than hoisted+shared, to
+        // avoid touching the already-shipped 4-way stage's own code
+        // (harmless duplication, matches this crate's established per-site
+        // convention for small helper computations -- e.g. pack.rs's own
+        // PARTITION_* const duplication, module docs).
+        let ab_node_off_y = env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+        let pb_source_variance =
+            perpixel_variance_y(env.src_y, ab_node_off_y, env.stride, bsize, env.bd);
+
+        // prune_ext_part_state (prune_ext_part_none_skippable, :3979-3989):
+        // requires sf skip_non_sq_part_based_on_none >= 1, established 0 at
+        // speed 0 both usages (SAME sf the rect-stage module docs already
+        // verified dead) -- always false, omitted from the gate below.
+        let ext_partition_allowed = allow_ab_partition_search(
+            bsize,
+            do_rectangular_split,
+            has_rows,
+            has_cols,
+            best_rdc.rdcost,
+        );
+
+        let ab_partitions_allowed = prune_ab_partitions(
+            ext_partition_allowed,
+            cfg.enable_ab_partitions,
+            partition_rect_allowed,
+            pc_tree_partitioning,
+            pb_source_variance,
+            *last_source_variance,
+            best_rdc.rdcost,
+            rect_part_rd,
+            split_rd,
+            bsize,
+        );
+
+        #[allow(clippy::needless_range_loop)]
+        // ab_type selects HORZ_A/HORZ_B/VERT_A/VERT_B throughout (partition
+        // type, reuse-source array, SbTree variant), not a simple iterate
+        // over ab_partitions_allowed alone.
+        for ab_type in 0..4usize {
+            if !ab_partitions_allowed[ab_type] {
+                continue;
+            }
+            // is_ctx_ready / set_mode_search_ctx (partition_search.c:
+            // 3785-3802, 3695-3709) -- reuse_prev_rd_results_for_part_ab is
+            // LIVE unconditionally at speed 0 both usages (STATUS.md plan
+            // point 5), so no runtime sf check is needed here (matches the
+            // established "hardcode known-always-true sf" convention this
+            // file already uses elsewhere, e.g. ml_prune_partition).
+            let reuse: [Option<&LeafWinner>; 2] = match ab_type {
+                0 => [
+                    // HORZ_A
+                    is_split_ctx_is_ready[0]
+                        .then(|| split_child_leaf_for_reuse[0].as_ref())
+                        .flatten(),
+                    is_split_ctx_is_ready[1]
+                        .then(|| split_child_leaf_for_reuse[1].as_ref())
+                        .flatten(),
+                ],
+                1 => [
+                    // HORZ_B
+                    is_rect_ctx_is_ready[0]
+                        .then(|| rect_sub0_for_reuse[0].as_ref())
+                        .flatten(),
+                    None,
+                ],
+                2 => [
+                    // VERT_A
+                    is_split_ctx_is_ready[0]
+                        .then(|| split_child_leaf_for_reuse[0].as_ref())
+                        .flatten(),
+                    None,
+                ],
+                3 => [
+                    // VERT_B
+                    is_rect_ctx_is_ready[1]
+                        .then(|| rect_sub0_for_reuse[1].as_ref())
+                        .flatten(),
+                    None,
+                ],
+                _ => unreachable!("ab_type is 0..4"),
+            };
+            let (sum_rdc, winners) = rd_pick_ab_part(
+                env,
+                cfg,
+                tile,
+                grid,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                mi_row,
+                mi_col,
+                bsize,
+                ab_type,
+                partition_cost,
+                &best_rdc,
+                visits,
+                last_source_variance,
+                reuse,
+            );
+            if let Some(w) = winners {
+                best_rdc = sum_rdc;
+                found = true;
+                pc_tree_partitioning = (4 + ab_type) as i32;
+                best_tree = Some(match ab_type {
+                    0 => SbTree::HorzA(w),
+                    1 => SbTree::HorzB(w),
+                    2 => SbTree::VertA(w),
+                    3 => SbTree::VertB(w),
+                    _ => unreachable!("ab_type is 0..4"),
+                });
+            }
+            // av1_restore_context at rd_pick_ab_part's OWN tail
+            // (partition_search.c:3691), unconditionally per type attempted
+            // -- matches the rect stage's own per-type restore.
+            restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+        }
+    }
 
     // ---- 4-way partition stage (rd_pick_4partition / prune_4_way_
     // partition_search, partition_search.c:3919/4120; wired :5911-5936) ----
@@ -1734,6 +2166,97 @@ fn stamp_grid_from_tree(
                 }
                 grid.stamp(mi_row, this_mi_col, sub, w.mode as u8, mi_rows, mi_cols);
             }
+        }
+        SbTree::HorzA(subs) => {
+            // PARTITION_HORZ_A: interior-only, no frame-bound gating on any
+            // of the 3 sub-blocks (module docs on encode_sb.rs's
+            // SbTree::HorzA).
+            let bsize2 = split_subsize(bsize);
+            let sub = get_partition_subsize(bsize, 4) as usize; // PARTITION_HORZ_A
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            grid.stamp(mi_row, mi_col, bsize2, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(
+                mi_row,
+                mi_col + hbs,
+                bsize2,
+                subs[1].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
+            grid.stamp(
+                mi_row + hbs,
+                mi_col,
+                sub,
+                subs[2].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
+        }
+        SbTree::HorzB(subs) => {
+            let bsize2 = split_subsize(bsize);
+            let sub = get_partition_subsize(bsize, 5) as usize; // PARTITION_HORZ_B
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(
+                mi_row + hbs,
+                mi_col,
+                bsize2,
+                subs[1].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
+            grid.stamp(
+                mi_row + hbs,
+                mi_col + hbs,
+                bsize2,
+                subs[2].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
+        }
+        SbTree::VertA(subs) => {
+            let bsize2 = split_subsize(bsize);
+            let sub = get_partition_subsize(bsize, 6) as usize; // PARTITION_VERT_A
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            grid.stamp(mi_row, mi_col, bsize2, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(
+                mi_row + hbs,
+                mi_col,
+                bsize2,
+                subs[1].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
+            grid.stamp(
+                mi_row,
+                mi_col + hbs,
+                sub,
+                subs[2].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
+        }
+        SbTree::VertB(subs) => {
+            let bsize2 = split_subsize(bsize);
+            let sub = get_partition_subsize(bsize, 7) as usize; // PARTITION_VERT_B
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(
+                mi_row,
+                mi_col + hbs,
+                bsize2,
+                subs[1].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
+            grid.stamp(
+                mi_row + hbs,
+                mi_col + hbs,
+                bsize2,
+                subs[2].mode as u8,
+                mi_rows,
+                mi_cols,
+            );
         }
     }
 }

@@ -479,6 +479,10 @@ fn stamp_lf(
 /// see e.g. `pack.rs`'s own copies).
 const PARTITION_HORZ: i32 = 1;
 const PARTITION_VERT: i32 = 2;
+const PARTITION_HORZ_A: i32 = 4;
+const PARTITION_HORZ_B: i32 = 5;
+const PARTITION_VERT_A: i32 = 6;
+const PARTITION_VERT_B: i32 = 7;
 const PARTITION_HORZ_4: i32 = 8;
 const PARTITION_VERT_4: i32 = 9;
 
@@ -575,6 +579,116 @@ fn stamp_lf_tree(
                 }
                 stamp_lf(mi, stride, mi_row, this_mi_col, sub, w, mi_rows, mi_cols);
             }
+        }
+        SbTree::HorzA(subs) => {
+            // AB is interior-only (module docs on encode_sb.rs's SbTree::
+            // HorzA) -- no frame-bound gating on any of the 3 sub-blocks.
+            let bsize2 = crate::partition::split_subsize(bsize);
+            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_A)
+                as usize;
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            stamp_lf(mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi,
+                stride,
+                mi_row,
+                mi_col + hbs,
+                bsize2,
+                &subs[1],
+                mi_rows,
+                mi_cols,
+            );
+            stamp_lf(
+                mi,
+                stride,
+                mi_row + hbs,
+                mi_col,
+                subsize,
+                &subs[2],
+                mi_rows,
+                mi_cols,
+            );
+        }
+        SbTree::HorzB(subs) => {
+            let bsize2 = crate::partition::split_subsize(bsize);
+            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_B)
+                as usize;
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            stamp_lf(mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi,
+                stride,
+                mi_row + hbs,
+                mi_col,
+                bsize2,
+                &subs[1],
+                mi_rows,
+                mi_cols,
+            );
+            stamp_lf(
+                mi,
+                stride,
+                mi_row + hbs,
+                mi_col + hbs,
+                bsize2,
+                &subs[2],
+                mi_rows,
+                mi_cols,
+            );
+        }
+        SbTree::VertA(subs) => {
+            let bsize2 = crate::partition::split_subsize(bsize);
+            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_A)
+                as usize;
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            stamp_lf(mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi,
+                stride,
+                mi_row + hbs,
+                mi_col,
+                bsize2,
+                &subs[1],
+                mi_rows,
+                mi_cols,
+            );
+            stamp_lf(
+                mi,
+                stride,
+                mi_row,
+                mi_col + hbs,
+                subsize,
+                &subs[2],
+                mi_rows,
+                mi_cols,
+            );
+        }
+        SbTree::VertB(subs) => {
+            let bsize2 = crate::partition::split_subsize(bsize);
+            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B)
+                as usize;
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            stamp_lf(mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi,
+                stride,
+                mi_row,
+                mi_col + hbs,
+                bsize2,
+                &subs[1],
+                mi_rows,
+                mi_cols,
+            );
+            stamp_lf(
+                mi,
+                stride,
+                mi_row + hbs,
+                mi_col + hbs,
+                bsize2,
+                &subs[2],
+                mi_rows,
+                mi_cols,
+            );
         }
     }
 }

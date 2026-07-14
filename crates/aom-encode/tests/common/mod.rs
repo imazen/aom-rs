@@ -3125,6 +3125,10 @@ impl COracle<'_> {
                 "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
                  every current caller passes enable_1to4_partitions: false"
             ),
+            SbTree::HorzA(_) | SbTree::HorzB(_) | SbTree::VertA(_) | SbTree::VertB(_) => panic!(
+                "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
+                 every current caller passes enable_ab_partitions: false"
+            ),
         };
         match tree {
             SbTree::Leaf(w) => {
@@ -3176,6 +3180,10 @@ impl COracle<'_> {
             SbTree::Horz4(_) | SbTree::Vert4(_) => panic!(
                 "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
                  every current caller passes enable_1to4_partitions: false"
+            ),
+            SbTree::HorzA(_) | SbTree::HorzB(_) | SbTree::VertA(_) | SbTree::VertB(_) => panic!(
+                "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
+                 every current caller passes enable_ab_partitions: false"
             ),
         }
         // The REAL update_ext_partition_context (64-entry above window).

@@ -985,6 +985,11 @@ fn stamp_grid(
                 "partition_pick_diff.rs's NONE/SPLIT/HORZ/VERT-only harness never produces a 4-way tree"
             )
         }
+        SbTree::HorzA(_) | SbTree::HorzB(_) | SbTree::VertA(_) | SbTree::VertB(_) => {
+            panic!(
+                "partition_pick_diff.rs's NONE/SPLIT/HORZ/VERT-only harness never produces an AB tree"
+            )
+        }
     }
 }
 
@@ -1542,6 +1547,9 @@ fn rd_pick_partition_real_matches_c_recursion() {
                 SbTree::Vert(_) => rect_n[1] += 1,
                 SbTree::Horz4(_) | SbTree::Vert4(_) => {
                     panic!("this NONE/SPLIT/HORZ/VERT-only harness never produces a 4-way tree")
+                }
+                SbTree::HorzA(_) | SbTree::HorzB(_) | SbTree::VertA(_) | SbTree::VertB(_) => {
+                    panic!("this NONE/SPLIT/HORZ/VERT-only harness never produces an AB tree")
                 }
             }
         }
