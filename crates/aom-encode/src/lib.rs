@@ -13,6 +13,7 @@
 //! forward transform lands.
 #![forbid(unsafe_code)]
 
+pub mod intra_rd;
 pub mod mode_costs;
 pub mod rd;
 
@@ -188,6 +189,9 @@ pub struct OptimizeInputs<'a> {
 /// Output of [`xform_quant_optimize`]: the final (trellis-optimized) block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct XformQuantOptResult {
+    /// Forward-transform coefficients (pre-quantization) — the transform-domain
+    /// distortion reference `dist_block_tx_domain` compares `dqcoeff` against.
+    pub coeff: Vec<i32>,
     pub qcoeff: Vec<i32>,
     pub dqcoeff: Vec<i32>,
     pub eob: u16,
@@ -227,6 +231,7 @@ pub fn xform_quant_optimize(
     if eob == 0 {
         let rate = opt.cost.txb_skip[txb_skip_ctx * 2 + 1];
         return XformQuantOptResult {
+            coeff,
             qcoeff,
             dqcoeff,
             eob: 0,
@@ -254,6 +259,7 @@ pub fn xform_quant_optimize(
     // Trellis tail: entropy ctx from the *optimized* qcoeff / eob.
     let txb_entropy_ctx = txb_entropy_context(&qcoeff, tx_size, tx_type, res.eob);
     XformQuantOptResult {
+        coeff,
         qcoeff,
         dqcoeff,
         eob: res.eob as u16,

@@ -12,6 +12,7 @@ aom-quant = { path = "../aom-quant" }
 aom-txb = { path = "../aom-txb" }
 aom-entropy = { path = "../aom-entropy" }
 aom-dist = { path = "../aom-dist" }
+aom-intra = { path = "../aom-intra" }
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }
