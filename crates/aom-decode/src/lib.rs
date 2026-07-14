@@ -841,6 +841,79 @@ fn read_tx_size_vartx(
     }
 }
 
+/// Intra-block-copy chroma prediction: copy a `w x h` block from `src_plane`
+/// at the DV-derived integer position `src_off`, applying the 2-tap intrabc
+/// bilinear filter when the (subsampled) chroma DV lands at half-pel. libaom's
+/// `av1_intrabc_bilinear_filter` is `{128,0}` at full-pel and `{64,64}` at
+/// half-pel; across all four subpel cases the `av1_highbd_convolve_*_sr_intrabc`
+/// kernels reduce to these closed forms, bit-identical at every bit depth (the
+/// FILTER_BITS=7 rounding collapses to a simple average). `subpel_x`/`subpel_y`
+/// are each 0 (full) or 8 (half); the half-pel axes read one extra column/row,
+/// which DV validity guarantees is already reconstructed.
+#[allow(clippy::too_many_arguments)]
+fn intrabc_chroma_predict(
+    src_plane: &[u16],
+    src_off: usize,
+    stride: usize,
+    dst: &mut [u16],
+    dst_stride: usize,
+    w: usize,
+    h: usize,
+    subpel_x: i32,
+    subpel_y: i32,
+    bd: i32,
+) {
+    let max = (1i32 << bd) - 1;
+    let clip = |v: i32| v.clamp(0, max) as u16;
+    match (subpel_x != 0, subpel_y != 0) {
+        (false, false) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                dst[d..d + w].copy_from_slice(&src_plane[s..s + w]);
+            }
+        }
+        (true, false) => {
+            // horizontal half-pel: (a + b + 1) >> 1
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                for c in 0..w {
+                    let a = src_plane[s + c] as i32;
+                    let b = src_plane[s + c + 1] as i32;
+                    dst[d + c] = clip((a + b + 1) >> 1);
+                }
+            }
+        }
+        (false, true) => {
+            // vertical half-pel: (a + b + 1) >> 1
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                for c in 0..w {
+                    let a = src_plane[s + c] as i32;
+                    let b = src_plane[s + c + stride] as i32;
+                    dst[d + c] = clip((a + b + 1) >> 1);
+                }
+            }
+        }
+        (true, true) => {
+            // both half-pel: (a00 + a01 + a10 + a11 + 2) >> 2
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                for c in 0..w {
+                    let a00 = src_plane[s + c] as i32;
+                    let a01 = src_plane[s + c + 1] as i32;
+                    let a10 = src_plane[s + c + stride] as i32;
+                    let a11 = src_plane[s + c + stride + 1] as i32;
+                    dst[d + c] = clip((a00 + a01 + a10 + a11 + 2) >> 2);
+                }
+            }
+        }
+    }
+}
+
 struct TileKf<'c> {
     cfg: &'c KfTileConfig,
     /// Luma reconstruction plane, SB-aligned, `stride` = aligned width in px.
@@ -887,6 +960,15 @@ struct TileKf<'c> {
     /// is a non-intrabc DC default until an intrabc block stamps its DV. Also
     /// carries the neighbour `is_inter_block`/`bsize` `get_tx_size_context` reads.
     mi_dv: Vec<DvNbr>,
+    /// Per-mi luma transform-type grid (`cm->tx_type_map`, mi granularity): the
+    /// luma tx-type each 4x4 unit resolved to, stamped over every luma txb's mi
+    /// footprint. Read only by colour intrabc chroma reconstruction, where the
+    /// chroma tx-type is the CO-LOCATED luma tx-type (`av1_get_tx_type`,
+    /// `is_inter_block` chroma branch) rather than a UV-mode-derived one — the
+    /// co-location can reach a sibling block in a shared sub-8x8 chroma group,
+    /// so this must be tile-wide, not per-block. Empty (never indexed) unless
+    /// the frame is colour AND allows intrabc, so ordinary frames pay nothing.
+    luma_tt: Vec<u8>,
     /// Per-mi UV-mode grid (same frame-cropped stamps): what the chroma
     /// `get_filt_type` reads through `xd->chroma_above_mbmi` /
     /// `xd->chroma_left_mbmi` (`is_smooth(mbmi, plane > 0)` checks the
@@ -1065,6 +1147,11 @@ impl<'c> TileKf<'c> {
                 (cfg.mi_rows * cfg.mi_cols) as usize
             ],
             mi_dv: vec![DvNbr::default(); (cfg.mi_rows * cfg.mi_cols) as usize],
+            luma_tt: if cfg.allow_intrabc && !cfg.monochrome {
+                vec![0u8; (cfg.mi_rows * cfg.mi_cols) as usize]
+            } else {
+                Vec::new()
+            },
             mi_uv: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
             mi_palette: if cfg.allow_screen_content_tools {
                 vec![PaletteNbrKf::default(); (cfg.mi_rows * cfg.mi_cols) as usize]
@@ -1840,6 +1927,34 @@ impl<'c> TileKf<'c> {
                     (0, 0)
                 };
 
+                // Record the luma tx-type in `cm->tx_type_map` (mi granularity)
+                // exactly as C's `update_txk_array`: the txb's TOP-LEFT mi cell
+                // only; a 64-level transform (a 64px side => 16 mi units)
+                // additionally stamps every 16x16 (4-mi) unit of its footprint.
+                // Cells left unwritten stay DCT_DCT (the zeroed map). Colour
+                // intrabc chroma reads the co-located luma tx-type from here;
+                // empty (skipped) on monochrome / non-intrabc frames. Skip blocks
+                // stamp DCT_DCT (0), matching C.
+                if !self.luma_tt.is_empty() {
+                    let cols = cfg.mi_cols as usize;
+                    let r0 = mi_row as usize + blk_row;
+                    let c0 = mi_col as usize + blk_col;
+                    self.luma_tt[r0 * cols + c0] = tx_type as u8;
+                    if txw == 16 || txh == 16 {
+                        let rmax = txh.min(max_blocks_high - blk_row);
+                        let cmax = txw.min(max_blocks_wide - blk_col);
+                        let mut idy = 0;
+                        while idy < rmax {
+                            let mut idx = 0;
+                            while idx < cmax {
+                                self.luma_tt[(r0 + idy) * cols + c0 + idx] = tx_type as u8;
+                                idx += 4;
+                            }
+                            idy += 4;
+                        }
+                    }
+                }
+
                 // (2) intra prediction into the reconstruction plane.
                 let (n_top, n_tr, n_left, n_bl) = intra_avail(
                     self.st.sb_size,
@@ -2032,6 +2147,29 @@ impl<'c> TileKf<'c> {
                 while blk_row < unit_height {
                     let mut blk_col = 0usize;
                     while blk_col < unit_width {
+                        // Chroma tx-type: for intrabc (is_inter) it is the
+                        // CO-LOCATED luma tx-type (av1_get_tx_type inter branch),
+                        // read from the luma tx_type_map at (mi_row+(blk_row<<ss_y),
+                        // mi_col+(blk_col<<ss_x)) — the block's OWN mi origin, not
+                        // the shared-group base — then re-validated against the
+                        // inter ext-tx set for uv_tx and demoted to DCT_DCT if
+                        // unused. Ordinary intra chroma uses the block-level
+                        // uv_tx_type computed above.
+                        let tt_uv_eff = if info.use_intrabc != 0 {
+                            let lr = mi_row as usize + (blk_row << ss_y);
+                            let lc = mi_col as usize + (blk_col << ss_x);
+                            let luma_tt = self.luma_tt[lr * cfg.mi_cols as usize + lc] as usize;
+                            if ext_tx_derive(uv_tx, true, cfg.reduced_tx_set, luma_tt, false, 0, 0)
+                                .used
+                                == 1
+                            {
+                                luma_tt
+                            } else {
+                                0
+                            }
+                        } else {
+                            tt_uv
+                        };
                         // (1) chroma coefficients (read_coeffs_tx_intra_block).
                         let eob = if info.skip == 0 {
                             let (tsc, dsc) = get_txb_ctx(
@@ -2054,9 +2192,9 @@ impl<'c> TileKf<'c> {
                                 false,
                                 cfg.reduced_tx_set,
                                 false,
-                                tt_uv,
+                                tt_uv_eff,
                             );
-                            let cul = txb_entropy_context(&tcoeff_uv, uv_tx, tt_uv, eob) as i8;
+                            let cul = txb_entropy_context(&tcoeff_uv, uv_tx, tt_uv_eff, eob) as i8;
                             self.set_entropy_ctx(
                                 plane,
                                 cul,
@@ -2103,7 +2241,39 @@ impl<'c> TileKf<'c> {
                             false,
                         );
                         let off_uv = uv_org + (blk_row * 4) * self.stride_uv + blk_col * 4;
-                        if info.palette_size[1] > 0 {
+                        if info.use_intrabc != 0 {
+                            // Intra block copy, chroma: reuse the luma DV, scaled
+                            // by subsampling. mv_q4 = dv << (1-ss) is in 1/16
+                            // chroma-pel; the integer chroma-pixel offset is
+                            // mv_q4>>4 and the 2-tap intrabc bilinear fires when
+                            // mv_q4&15 == 8 (only when the integer-luma-pel DV is
+                            // odd on a subsampled axis — 4:4:4 is always a copy).
+                            // Source is this block's own chroma recon plane, which
+                            // DV validity keeps already-decoded.
+                            let mvq4_row = info.dv_row << (1 - ss_y as i32);
+                            let mvq4_col = info.dv_col << (1 - ss_x as i32);
+                            let src = (off_uv as isize
+                                + (mvq4_row >> 4) as isize * self.stride_uv as isize
+                                + (mvq4_col >> 4) as isize)
+                                as usize;
+                            let plane_recon = if plane == 1 {
+                                &self.recon_u
+                            } else {
+                                &self.recon_v
+                            };
+                            intrabc_chroma_predict(
+                                plane_recon,
+                                src,
+                                self.stride_uv,
+                                &mut scratch_uv,
+                                uv_txwpx,
+                                uv_txwpx,
+                                uv_txhpx,
+                                mvq4_col & 15,
+                                mvq4_row & 15,
+                                cfg.bd,
+                            );
+                        } else if info.palette_size[1] > 0 {
                             // av1_predict_intra_block's palette branch, chroma: ONE
                             // shared colour-index map for U and V (uv_map_wpx-strided,
                             // from av1_get_block_dimensions(bsize, plane=1, ...)),
@@ -2145,7 +2315,7 @@ impl<'c> TileKf<'c> {
                                 cfg.bd,
                             );
                         }
-                        if info.uv_mode == UV_CFL_PRED {
+                        if info.uv_mode == UV_CFL_PRED && info.use_intrabc == 0 {
                             cfl_predict_block(
                                 &mut self.cfl,
                                 &mut scratch_uv,
@@ -2176,7 +2346,7 @@ impl<'c> TileKf<'c> {
                                     &mut plane_recon[off_uv..],
                                     self.stride_uv,
                                     uv_tx,
-                                    tt_uv,
+                                    tt_uv_eff,
                                     &tcoeff_uv,
                                     self.dequants[plane],
                                     None,
@@ -2184,7 +2354,7 @@ impl<'c> TileKf<'c> {
                                 );
                             }
                         }
-                        txbs_uv.push(if eob > 0 { (eob, tt_uv) } else { (0, 0) });
+                        txbs_uv.push(if eob > 0 { (eob, tt_uv_eff) } else { (0, 0) });
                         blk_col += uv_txw;
                     }
                     blk_row += uv_txh;

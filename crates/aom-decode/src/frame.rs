@@ -434,14 +434,10 @@ fn parse_frame_header(
     if p.frame_size.scale_denominator != 8 {
         return Err("superres scaled".into());
     }
-    // Intra block copy: monochrome intrabc KEY frames are in the envelope
-    // (luma is an integer block copy from the already-decoded region). Colour
-    // intrabc stays rejected pending chroma reconstruction (the chroma DV is
-    // luma-derived and can land at half-pel, needing the 2-tap intrabc
-    // convolve + the co-located-luma chroma tx-type).
-    if p.allow_intrabc && !c.monochrome {
-        return Err("intrabc (colour; chroma reconstruction pending)".into());
-    }
+    // Intra block copy (monochrome and colour): luma is an integer block copy
+    // from the already-decoded region; chroma reuses the luma DV scaled by
+    // subsampling, an integer copy or a 2-tap intrabc bilinear at half-pel, with
+    // the chroma tx-type taken from the co-located luma tx_type_map.
     if p.quant.using_qmatrix {
         return Err("quantization matrices".into());
     }

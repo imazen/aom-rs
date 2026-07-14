@@ -1554,3 +1554,167 @@ fn intrabc_monochrome_streams_decode_byte_identical_to_c() {
          --enable-intrabc=1 wiring is broken"
     );
 }
+
+/// Colour intra-block-copy: REAL-C-encoded screen-content KEY streams with
+/// `--enable-intrabc=1` across 4:2:0, 4:4:4 and 4:2:2 must decode byte-identical
+/// to the REAL C decoder on ALL THREE planes. This exercises chroma intrabc: the
+/// luma-DV-derived chroma block copy (integer for 4:4:4, and half-pel via the
+/// 2-tap intrabc bilinear when the luma-pel DV is odd on a subsampled axis) plus
+/// the co-located-luma chroma tx-type.
+#[test]
+fn intrabc_colour_streams_decode_byte_identical_to_c() {
+    struct IbcCfg {
+        w: usize,
+        h: usize,
+        bd: i32,
+        cq: i32,
+        usage: u32,
+        ss_x: i32,
+        ss_y: i32,
+    }
+    let cfgs = [
+        // 4:2:0 — chroma can land at half-pel on either axis.
+        IbcCfg {
+            w: 256,
+            h: 128,
+            bd: 8,
+            cq: 24,
+            usage: 2,
+            ss_x: 1,
+            ss_y: 1,
+        },
+        IbcCfg {
+            w: 160,
+            h: 96,
+            bd: 8,
+            cq: 40,
+            usage: 0,
+            ss_x: 1,
+            ss_y: 1,
+        },
+        IbcCfg {
+            w: 256,
+            h: 128,
+            bd: 8,
+            cq: 32,
+            usage: 0,
+            ss_x: 1,
+            ss_y: 1,
+        },
+        IbcCfg {
+            w: 128,
+            h: 128,
+            bd: 10,
+            cq: 20,
+            usage: 2,
+            ss_x: 1,
+            ss_y: 1,
+        },
+        // 4:4:4 — chroma DV is always integer (a plain copy).
+        IbcCfg {
+            w: 256,
+            h: 128,
+            bd: 8,
+            cq: 24,
+            usage: 2,
+            ss_x: 0,
+            ss_y: 0,
+        },
+        IbcCfg {
+            w: 160,
+            h: 96,
+            bd: 8,
+            cq: 40,
+            usage: 0,
+            ss_x: 0,
+            ss_y: 0,
+        },
+        // 4:2:2 — horizontal axis can be half-pel, vertical always integer.
+        IbcCfg {
+            w: 256,
+            h: 128,
+            bd: 8,
+            cq: 24,
+            usage: 2,
+            ss_x: 1,
+            ss_y: 0,
+        },
+    ];
+    let mut total_arms = 0usize;
+    let mut intrabc_arms = 0usize;
+    let mut halfpel_blocks = 0usize;
+    for c in &cfgs {
+        total_arms += 1;
+        let seed = ((c.w as u64) << 32)
+            ^ ((c.h as u64) << 24)
+            ^ ((c.cq as u64) << 12)
+            ^ ((c.bd as u64) << 6)
+            ^ ((c.usage as u64) << 3)
+            ^ ((c.ss_x as u64) << 1)
+            ^ c.ss_y as u64;
+        let y = gen_plane_screen_content(c.w, c.h, c.bd, seed ^ 0x1a1b);
+        let (cw, ch) = ((c.w >> c.ss_x), (c.h >> c.ss_y));
+        let u = gen_plane_screen_content(cw, ch, c.bd, seed ^ 0x2c2d);
+        let v = gen_plane_screen_content(cw, ch, c.bd, seed ^ 0x3e3f);
+        let bytes = c::ref_encode_av1_kf_screen_content(
+            &y, &u, &v, c.w, c.h, c.bd, /* mono */ false, c.ss_x, c.ss_y, c.cq,
+            /* cpu_used */ 0, /* enable_cdef */ true, /* enable_restoration */ true,
+            c.usage, /* aq_mode */ 0, /* two_pass */ false,
+            /* enable_palette */ false, /* enable_intrabc */ true,
+        );
+
+        let rust = decode_frame_obus(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "decode_frame_obus rejected colour intrabc {}x{} bd{} ss=({},{}) cq={} usage={}: {e}",
+                c.w, c.h, c.bd, c.ss_x, c.ss_y, c.cq, c.usage
+            )
+        });
+        let cref = c::ref_decode_av1_kf(&bytes, c.w, c.h);
+        let ctx = format!(
+            "colour intrabc {}x{} bd{} ss=({},{}) cq={} usage={}",
+            c.w, c.h, c.bd, c.ss_x, c.ss_y, c.cq, c.usage
+        );
+        assert_eq!(rust.y, cref.y, "LUMA mismatch {ctx}");
+        assert_eq!(rust.u, cref.u, "U mismatch {ctx}");
+        assert_eq!(rust.v, cref.v, "V mismatch {ctx}");
+
+        let (t, _tcfg, _header) = decode_frame_obus_prefilter(&bytes).unwrap();
+        let ibc_blocks = t.blocks.iter().filter(|b| b.info.use_intrabc != 0).count();
+        // Half-pel chroma occurs when the integer-luma-pel DV is odd on a
+        // subsampled axis (mv_q4 & 15 == 8) — exercising the 2-tap intrabc
+        // bilinear rather than a plain copy. dv is a multiple of 8, so odd D
+        // <=> (dv & 8) != 0.
+        let hp = t
+            .blocks
+            .iter()
+            .filter(|b| {
+                b.info.use_intrabc != 0
+                    && ((c.ss_x == 1 && (b.info.dv_col & 8) != 0)
+                        || (c.ss_y == 1 && (b.info.dv_row & 8) != 0))
+            })
+            .count();
+        halfpel_blocks += hp;
+        println!(
+            "{ctx}: {} bytes, {} blocks, {} intrabc blocks ({} half-pel chroma)",
+            bytes.len(),
+            t.blocks.len(),
+            ibc_blocks,
+            hp
+        );
+        if ibc_blocks > 0 {
+            intrabc_arms += 1;
+        }
+    }
+    println!(
+        "colour intrabc gate summary: {total_arms} arms, {intrabc_arms} carrying >=1 intrabc block, {halfpel_blocks} half-pel chroma blocks"
+    );
+    assert!(
+        intrabc_arms > 0,
+        "NO colour arm actually exercised intrabc — generator or wiring is broken"
+    );
+    assert!(
+        halfpel_blocks > 0,
+        "no half-pel chroma intrabc block exercised — the 2-tap intrabc convolve \
+         path is untested; add a config whose DVs land at odd luma offsets"
+    );
+}
