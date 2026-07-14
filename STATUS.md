@@ -1000,13 +1000,157 @@ the first time in this test family, hitting the separate pre-existing gap
 now documented above. Does not (yet) give a clean read on AB need
 specifically.
 
-**AB (`HORZ_A`/`HORZ_B`/`VERT_A`/`VERT_B`) is NOT ported this chunk** — see
-the MISSING section above for exactly what's needed (the
-`reuse_prev_rd_results_for_part_ab` context-copy mechanism, LIVE at speed 0
-unlike its mode-cache-only cousin which is dead, plus AB's own NN prune).
+**AB (`HORZ_A`/`HORZ_B`/`VERT_A`/`VERT_B`) is NOT ported this chunk.**
 Commits: `756dfa1` (decode-diff investigation), `ae19fe6` (pre-existing fmt
-drift, separated), then the 4-way port itself (this session — see `git log`
-for the exact SHA landed after this doc update).
+drift, separated), `9cbc11a` (the 4-way port).
+
+### AB partition NEXT-CHUNK plan (traced this session, not yet implemented)
+
+Full C read completed (partition_search.c:3175-4023 + partition_strategy.c
+:1223-2029), so this is a precise implementation plan, not a re-derivation
+task. AB is genuinely a comparable-or-larger unit of work than 4-way was —
+it has its OWN NN (different shape/weights than 4-way's) plus a correctness-
+critical mutable-state subtlety in the C reference that must be threaded
+through several ALREADY-SHIPPED, verified function signatures. Decomposed
+here so a future session can move directly to implementation.
+
+**1. Structural leaf search** (`crates/aom-encode/src/partition_pick.rs`):
+- `rd_test_partition3` (partition_search.c:3177): loop over 3 sub-blocks
+  (`SUB_PARTITIONS_AB`), each a `rd_try_subblock` call — reuse
+  [`rd_pick_rect_partition`] as the per-leaf primitive exactly like the
+  4-way port did (same budget-subtract + accumulate-or-invalidate shape;
+  early-bail after EVERY sub-block, not just the last).
+- `ab_subsize`/`ab_mi_pos` tables per AB type (partition_search.c
+  :3805-3831): HORZ_A = `{split_bsize2@origin, split_bsize2@(mi_row,
+  mi_col_edge), horz_subsize@(mi_row_edge, mi_col)}`; HORZ_B =
+  `{horz_subsize@origin, split_bsize2@(mi_row_edge, mi_col),
+  split_bsize2@(mi_row_edge, mi_col_edge)}`; VERT_A/VERT_B mirrored on the
+  column axis. `split_bsize2 = get_partition_subsize(bsize, SPLIT)`.
+- Dry-run propagation after sub-blocks 0 and 1 (not 2, the last) — same
+  `encode_b_intra_dry` + `grid.stamp` pattern as 4-way's loop.
+- New `SbTree::HorzA/HorzB/VertA/VertB(Box<[LeafWinner; 3]>)` variants +
+  matching arms in `encode_sb.rs::encode_sb_dry`, `pack.rs::pack_sb`,
+  `partition_pick.rs::stamp_grid_from_tree` — mirror `encode_sb`'s own
+  `PARTITION_HORZ_A/HORZ_B/VERT_A/VERT_B` arms (partition_search.c
+  :1652-1673) exactly (already cross-referenced against the decoder's
+  matching `decode_partition` arms, `aom-decode/src/lib.rs:1916-1935`).
+
+**2. `allow_ab_partition_search`** (partition_search.c:3992): same shape as
+4-way's `partition4_allowed_base` gate (`do_rectangular_split && bsize >
+BLOCK_8X8 && has_rows && has_cols`; `ext_part_eval_based_on_cur_best`
+branch verified dead at speed 0 both usages, same as 4-way — omit).
+
+**3. `av1_prune_ab_partitions`** (partition_strategy.c:1901) — MORE gating
+than 4-way had, because `prune_ext_partition_types_search_level == 1`
+(nonzero) is LIVE at speed 0 both usages (unlike 4-way's own consumption of
+the SAME sf at `== 2`, which is dead) — so ALL of this runs, not just the
+NN:
+  - `horzab_partition_allowed`/`vertab_partition_allowed` base gate:
+    `ext_partition_allowed && enable_ab_partitions (default true, same
+    pattern as enable_1to4_partitions/enable_rect_partitions —
+    `disable_ab_partition_type == 0`) && partition_rect_allowed[HORZ/VERT]`.
+  - `level == 1` branch (:1924-1934): kills horzab/vertab unless
+    `pc_tree->partitioning` (this port's `pc_tree_partitioning`, ALREADY
+    tracked as of the 4-way chunk) is HORZ/SPLIT (or NONE with
+    `pb_source_variance < 32`) — vertab mirrors on VERT.
+  - RD-ratio pruning (:1956-1970, `case 1` branch since level==1):
+    `ab_partitions_allowed[HORZ_A] &= (horz_rd[1]+split_rd[0]+split_rd[1])
+    /16*14 < best_rdcost` (HORZ_B/VERT_A/VERT_B mirrored per
+    :1957-1990's exact index pairing) — `rect_part_rd`/`split_rd` are
+    ALREADY threaded (4-way chunk), just need the `< INT64_MAX ? : 0`
+    clamp at :1941-1948 applied first.
+  - `ml_prune_ab_partition` (below) gated by `ml_prune_partition` (already
+    established LIVE at speed 0 both usages) `&& partition_rect_allowed
+    [HORZ] && [VERT]`.
+  - `evaluate_ab_partition_based_on_split` (:2009-2028): gated by
+    `prune_ext_part_using_split_info >= 2`, which is 0 at speed 0 both
+    usages (established in the 4-way chunk) — DEAD, omit.
+
+**4. `ml_prune_ab_partition`** (partition_strategy.c:1223) — a SEPARATE,
+SIMPLER NN than 4-way's (no mean/std normalization, no softmax — same
+`int_score = 100*score`, `thresh = max_score - bsize_offset`, 16-way
+bitmask decode pattern as 4-way's DEAD `ml_model_index==0` branch, except
+here it's the ONLY variant and it's LIVE). 10 features (`part_ctx`,
+`get_unsigned_bits(x->source_variance)` — NOT `pb_source_variance`, see
+gotcha #1 below —, 8 RD-ratio features from `rect_part_rd`/`split_rd`
+identical in shape to 4-way's first 10). Weight tables: `av1_ab_partition_
+nnconfig_{16,32,64,128}` in `partition_model_weights.h:332/654/976/1298`
+(4 bsizes, note 128 IS reachable for AB unlike 4-way's 16/32/64-only) — a
+NEW `xtask/transcribe_ab_nn.py` following the EXACT pattern of
+`transcribe_part4_nn.py` (regex-parse, re-emit Rust, verify via the same
+f64-round-trip spot-check) is the fastest, safest way to get these in.
+`ext_ml_model_decision_after_rect` (the external-model hook) is dead for
+the same reason 4-way's `ext_ml_model_decision_after_part_ab` was
+(`!frame_is_intra_only` required, always false here).
+
+**5. `reuse_prev_rd_results_for_part_ab`** (LIVE at speed 0 both usages,
+unconditional at the top of both allintra/good speed-feature setters —
+verified this session) — the FULL PICK_MODE_CONTEXT copy-not-research
+mechanism (`pick_sb_modes`'s `rd_mode_is_ready` early-return,
+partition_search.c:854-855, currently dead in this port — module docs on
+`leaf_pick_sb_modes` already flagged this as "dead until the AB chunk").
+Needs, PER AB SUB-BLOCK POSITION THAT GEOMETRICALLY COINCIDES with an
+earlier stage's OWN leaf:
+  - `is_split_ctx_is_ready[0]`/`[1]` (SPLIT children 0/1 only,
+    partition_search.c:4599-4608): true iff that child's OWN top-level
+    winning partition was NONE (or `bsize <= BLOCK_8X8`) AND its winning
+    leaf is palette-free (always true, palette unsearched) AND
+    `uv_mode != UV_CFL_PRED`. Requires the SPLIT stage to EXPOSE each
+    child's `(is_none_leaf: bool, leaf: LeafWinner)` up to the caller —
+    currently `rd_pick_partition_real`'s SPLIT-stage recursion only
+    returns the whole subtree (`SbTree`), so this needs either a
+    `matches!(child_tree, SbTree::Leaf(_))` check on the ALREADY-RETURNED
+    `SbTree::Split` children (the tree shape alone tells you if a child
+    was a NONE leaf — no new state needed, just pattern-match) — simpler
+    than it first looks.
+  - `is_rect_ctx_is_ready[HORZ]`/`[VERT]` (ALREADY tracked since the
+    original HORZ/VERT port) feeds HORZ_B/VERT_B's first sub-block.
+  - When ready, HORZ_A/VERT_A's first 1-2 sub-blocks and HORZ_B/VERT_B's
+    first sub-block reuse the EARLIER stage's `LeafWinner` + `PartRdStats`
+    VERBATIM (no re-search) instead of calling `leaf_pick_sb_modes` fresh
+    — this is NOT equivalent to re-searching (the budget available differs
+    between when the original stage ran and now), so it must be an actual
+    copy-and-skip, not a "should give the same answer anyway" shortcut.
+  - `reuse_best_prediction_for_part_ab` (the OTHER reuse mechanism,
+    `x->use_mb_mode_cache`) is confirmed DEAD at speed 0 both usages (only
+    set at `speed >= 1` allintra / `speed >= 2` good) — do NOT implement
+    the mode-cache shortcut in `pick_sb_modes`/`av1_rd_pick_intra_mode_sb`,
+    it is unreachable in this envelope.
+
+**Gotcha #1 (correctness-critical, easy to get wrong): `x->source_variance`
+staleness.** `ml_prune_ab_partition` reads `x->source_variance` — a
+MACROBLOCK-level field every `pick_sb_modes` call overwrites unconditionally
+(win or lose) — NOT `pb_source_variance` (the snapshotted once-per-node
+value the 4-way NN correctly uses). The C's own comment flags this as
+imprecise ("TODO: may not be the current block's variance... need to
+retrain to fix it") but it is what real aomenc ACTUALLY runs, so bit-exact
+parity requires replicating the staleness, not the "intended" behavior. By
+the time `av1_prune_ab_partitions` runs (after SPLIT + HORZ + VERT), this
+holds whatever the LAST leaf search set it to (VERT's sub-block 1 if VERT
+ran, else HORZ's sub-block 1, else whatever SPLIT's last recursive leaf
+touched). Implementation: thread a `last_source_variance: u32` through
+`rd_pick_partition_real`'s scope, updated unconditionally after EVERY
+`leaf_pick_sb_modes` call (win or lose) — requires widening
+`leaf_pick_sb_modes` and `rd_pick_rect_partition`'s return tuples to also
+carry `source_variance` (currently computed locally inside
+`leaf_pick_sb_modes` and discarded). Touches 3 already-shipped, verified
+functions (`leaf_pick_sb_modes`, `rd_pick_rect_partition`, and by
+extension `rd_pick_4partition` which calls `rd_pick_rect_partition`) —
+budget real regression-test time for this refactor, don't rush it.
+
+**Gotcha #2:** `pc_tree->partitioning` (this port's `pc_tree_partitioning`)
+must reflect the 4-way stage's own win too by the time a PARENT node's own
+AB stage reads it — already correctly threaded as of the 4-way chunk (the
+4-way win site sets it), so this is just a note that the plumbing already
+exists, not new work.
+
+**Suggested verification path once implemented:** re-run
+`encoder_gate_e2e_ab_attempt` (currently 0/4, confounded by the unrelated
+nonzero-LF gap — fix or route around that first, e.g. by tuning content
+contrast down further, to get a clean AB-specific read) and extend
+`decode_diff_noise_case.rs`'s pattern (tree-diff against the real decode)
+to any case that still doesn't match, to keep the same "confirm or refute
+with the dump" discipline this session used for VERT_4.
 
 ## Gate posture (honest)
 
