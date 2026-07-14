@@ -88,8 +88,8 @@ fn get_model_rd_index_for_pruning_matches_c() {
         let qindex = (rng.next() as i32).rem_euclid(256);
         let cnt = 1 + (rng.next() as i32).rem_euclid(4); // 1..=4
         let adapt = case % 2 == 1;
-        let left = if rng.next() % 3 == 0 { None } else { Some((rng.next() as usize) % 13) };
-        let above = if rng.next() % 3 == 0 { None } else { Some((rng.next() as usize) % 13) };
+        let left = if rng.next().is_multiple_of(3) { None } else { Some((rng.next() as usize) % 13) };
+        let above = if rng.next().is_multiple_of(3) { None } else { Some((rng.next() as usize) % 13) };
         let got =
             get_model_rd_index_for_pruning(cur_mode, qindex, cnt, adapt, left, above);
         let want =
