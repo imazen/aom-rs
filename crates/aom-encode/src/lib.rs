@@ -16,6 +16,7 @@
 pub mod intra_rd;
 pub mod mode_costs;
 pub mod rd;
+pub mod tx_search;
 
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;

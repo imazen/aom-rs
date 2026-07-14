@@ -591,3 +591,102 @@ int shim_prune_odd_delta(int mode, int luma_delta_angle,
          intra_modes_rd_cost[luma_delta_angle + MAX_ANGLE_DELTA + 2] >
              rd_thresh;
 }
+
+/* ---- search_tx_type building blocks -----------------------------------------
+ * (1) shim_get_tx_mask_intra: transcribes the LUMA INTRA arm of get_tx_mask
+ *     (av1/encoder/tx_search.c, static) over the REAL exported
+ *     av1_get_ext_tx_set_type and the REAL blockd.h tables
+ *     (av1_ext_tx_used_flag / av1_reduced_intra_tx_used_flag /
+ *     av1_derived_intra_tx_used_flag / fimode_to_intradir — header statics =
+ *     pristine C recompiled). Structurally-off arms (inter forcing, stats
+ *     prune, est-rd prune, prune_tx_2D, use_default_intra_tx_type,
+ *     LOW_TXFM_RD) are omitted per the speed-0 intra contract.
+ *     Returns the mask; *out_txk_allowed = TX_TYPES or the single type.
+ * (2) shim_pixel_diff_dist: the REAL EXPORTED av1_pixel_diff_dist over a
+ *     calloc'd MACROBLOCK (pure marshalling: src_diff pointer, frame-edge
+ *     fields, plane subsampling). aom_sum_squares_2d_i16 is RTCD-dispatched:
+ *     call ref_init() first. */
+int shim_get_tx_mask_intra(int tx_size, int mode, int use_filter_intra,
+                           int filter_intra_mode, int lossless,
+                           int reduced_tx_set_used,
+                           int use_reduced_intra_txset,
+                           int use_derived_intra_tx_type_set,
+                           int enable_flip_idtx, int use_intra_dct_only,
+                           int *out_txk_allowed) {
+  TX_TYPE txk_allowed = TX_TYPES;
+  const TxSetType tx_set_type = av1_get_ext_tx_set_type(
+      (TX_SIZE)tx_size, /*is_inter=*/0, reduced_tx_set_used);
+
+  PREDICTION_MODE intra_dir;
+  if (use_filter_intra)
+    intra_dir = fimode_to_intradir[filter_intra_mode];
+  else
+    intra_dir = (PREDICTION_MODE)mode;
+  uint16_t ext_tx_used_flag =
+      use_reduced_intra_txset != 0 && tx_set_type == EXT_TX_SET_DTT4_IDTX_1DDCT
+          ? av1_reduced_intra_tx_used_flag[intra_dir]
+          : av1_ext_tx_used_flag[tx_set_type];
+  if (use_reduced_intra_txset == 2)
+    ext_tx_used_flag &= av1_derived_intra_tx_used_flag[intra_dir];
+
+  if (lossless || txsize_sqr_up_map[tx_size] > TX_32X32 ||
+      ext_tx_used_flag == 0x0001 || use_intra_dct_only) {
+    txk_allowed = DCT_DCT;
+  }
+  if (enable_flip_idtx == 0) ext_tx_used_flag &= DCT_ADST_TX_MASK;
+
+  uint16_t allowed_tx_mask = 0;
+  if (txk_allowed < TX_TYPES) {
+    allowed_tx_mask = 1 << txk_allowed;
+    allowed_tx_mask &= ext_tx_used_flag;
+  } else if (use_derived_intra_tx_type_set) {
+    allowed_tx_mask = av1_derived_intra_tx_used_flag[intra_dir];
+    allowed_tx_mask &= ext_tx_used_flag;
+  } else {
+    allowed_tx_mask = ext_tx_used_flag;
+  }
+
+  if (allowed_tx_mask == 0) {
+    txk_allowed = DCT_DCT;
+    allowed_tx_mask = (1 << txk_allowed);
+  }
+  *out_txk_allowed = txk_allowed;
+  return allowed_tx_mask;
+}
+
+int64_t av1_pixel_diff_dist(const MACROBLOCK *x, int plane, int blk_row,
+                            int blk_col, const BLOCK_SIZE plane_bsize,
+                            const BLOCK_SIZE tx_bsize,
+                            unsigned int *block_mse_q8);
+
+int64_t shim_pixel_diff_dist(const int16_t *src_diff, int n_diff,
+                             int plane_bsize, int tx_bsize, int blk_row,
+                             int blk_col, int mb_to_right_edge,
+                             int mb_to_bottom_edge, int subsampling_x,
+                             int subsampling_y, uint32_t *out_mse_q8) {
+  MACROBLOCK *x = (MACROBLOCK *)calloc(1, sizeof(MACROBLOCK));
+  /* libaom's src_diff lives in a DECLARE_ALIGNED(32) buffer and the SSE2
+   * sum-squares kernel uses ALIGNED loads (xx_load_128) — bounce through a
+   * 32-byte-aligned copy so the caller's buffer can have any alignment. */
+  const size_t bytes = ((size_t)n_diff * sizeof(int16_t) + 31) & ~(size_t)31;
+  int16_t *adiff = (int16_t *)aligned_alloc(32, bytes);
+  if (!x || !adiff) {
+    free(x);
+    free(adiff);
+    return -1;
+  }
+  memcpy(adiff, src_diff, (size_t)n_diff * sizeof(int16_t));
+  x->plane[0].src_diff = adiff;
+  x->e_mbd.mb_to_right_edge = mb_to_right_edge;
+  x->e_mbd.mb_to_bottom_edge = mb_to_bottom_edge;
+  x->e_mbd.plane[0].subsampling_x = subsampling_x;
+  x->e_mbd.plane[0].subsampling_y = subsampling_y;
+  unsigned int mse = 0;
+  int64_t sse =
+      av1_pixel_diff_dist(x, /*plane=*/0, blk_row, blk_col,
+                          (BLOCK_SIZE)plane_bsize, (BLOCK_SIZE)tx_bsize, &mse);
+  *out_mse_q8 = mse;
+  free(adiff);
+  free(x);
+  return sse;
+}

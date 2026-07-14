@@ -3749,3 +3749,107 @@ pub fn ref_prune_odd_delta(
         ) != 0
     }
 }
+
+// ---------------------------------------------------------------------------
+// search_tx_type building blocks (rd_shim.c)
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" {
+    fn shim_get_tx_mask_intra(
+        tx_size: i32,
+        mode: i32,
+        use_filter_intra: i32,
+        filter_intra_mode: i32,
+        lossless: i32,
+        reduced_tx_set_used: i32,
+        use_reduced_intra_txset: i32,
+        use_derived_intra_tx_type_set: i32,
+        enable_flip_idtx: i32,
+        use_intra_dct_only: i32,
+        out_txk_allowed: *mut i32,
+    ) -> i32;
+    fn shim_pixel_diff_dist(
+        src_diff: *const i16,
+        n_diff: i32,
+        plane_bsize: i32,
+        tx_bsize: i32,
+        blk_row: i32,
+        blk_col: i32,
+        mb_to_right_edge: i32,
+        mb_to_bottom_edge: i32,
+        subsampling_x: i32,
+        subsampling_y: i32,
+        out_mse_q8: *mut u32,
+    ) -> i64;
+}
+
+/// Reference `get_tx_mask` LUMA-INTRA arm (transcription over the REAL
+/// `av1_get_ext_tx_set_type` + REAL blockd.h used-flag tables). Returns
+/// `(allowed_tx_mask, txk_allowed)` with `txk_allowed == 16` meaning "all".
+#[allow(clippy::too_many_arguments)]
+pub fn ref_get_tx_mask_intra(
+    tx_size: i32,
+    mode: i32,
+    use_filter_intra: bool,
+    filter_intra_mode: i32,
+    lossless: bool,
+    reduced_tx_set_used: bool,
+    use_reduced_intra_txset: i32,
+    use_derived_intra_tx_type_set: bool,
+    enable_flip_idtx: bool,
+    use_intra_dct_only: bool,
+) -> (u16, i32) {
+    let mut txk = 0i32;
+    let mask = unsafe {
+        shim_get_tx_mask_intra(
+            tx_size,
+            mode,
+            use_filter_intra as i32,
+            filter_intra_mode,
+            lossless as i32,
+            reduced_tx_set_used as i32,
+            use_reduced_intra_txset,
+            use_derived_intra_tx_type_set as i32,
+            enable_flip_idtx as i32,
+            use_intra_dct_only as i32,
+            &mut txk,
+        )
+    };
+    (mask as u16, txk)
+}
+
+/// The REAL EXPORTED `av1_pixel_diff_dist` (tx_search.c) over a marshalled
+/// MACROBLOCK. `src_diff` is the plane-block residual (stride = plane block
+/// width). Call [`ref_init`] first (`aom_sum_squares_2d_i16` is RTCD).
+/// Returns `(sse, block_mse_q8)`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_pixel_diff_dist(
+    src_diff: &[i16],
+    plane_bsize: i32,
+    tx_bsize: i32,
+    blk_row: i32,
+    blk_col: i32,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    subsampling_x: i32,
+    subsampling_y: i32,
+) -> (i64, u32) {
+    let mut mse = 0u32;
+    let sse = unsafe {
+        shim_pixel_diff_dist(
+            src_diff.as_ptr(),
+            src_diff.len() as i32,
+            plane_bsize,
+            tx_bsize,
+            blk_row,
+            blk_col,
+            mb_to_right_edge,
+            mb_to_bottom_edge,
+            subsampling_x,
+            subsampling_y,
+            &mut mse,
+        )
+    };
+    assert!(sse >= 0, "shim_pixel_diff_dist allocation failed");
+    (sse, mse)
+}
