@@ -337,3 +337,213 @@ fn film_grain_y_only_matches_c() {
     assert!(total >= 500, "expected a broad sweep, got {total} trials");
     eprintln!("film_grain_y_only: {total} trials byte-identical, {changed_trials} altered pixels");
 }
+
+// ---------------------------------------------------------------------------
+// END-TO-END gate: REAL film-grain streams decode byte-identical to the C
+// decoder WITH grain applied.
+//
+// Encode a KEY frame with AV1E_SET_FILM_GRAIN_TEST_VECTOR (built-in grain param
+// sets from libaom's grain_test_vectors.h), then compare `decode_frame_obus`
+// (grain synthesized post-reconstruction) BYTE-IDENTICALLY against the REAL C
+// decoder aom_codec_av1_dx (which applies grain by default in
+// aom_codec_get_frame). This proves the whole chain: seq/frame film-grain
+// parse -> synthesis wiring -> byte-exact pixels, AND that grain is genuinely
+// applied (an ungrained reconstruction of the same stream differs).
+// ---------------------------------------------------------------------------
+use aom_decode::frame::{
+    apply_cdef, apply_deblock, apply_restoration, decode_frame_obus, decode_frame_obus_prefilter,
+};
+use aom_sys_ref::{ref_decode_av1_kf, ref_encode_av1_kf_film_grain};
+
+/// Photographic-ish content (smooth gradient + sinusoid + noise) that stays in
+/// the decode envelope (not synthetic-few-colours, which could trip the
+/// encoder's screen-content path). Mirrors real_bitstream.rs::gen_plane.
+fn gen_photo_plane(w: usize, h: usize, bd: i32, seed: u64, chroma: bool) -> Vec<u16> {
+    let mut rng = Rng::new(seed | 1);
+    let maxv = (1i64 << bd) - 1;
+    let mut p = vec![0u16; w * h];
+    for r in 0..h {
+        for col in 0..w {
+            let fx = col as f64 / w.max(1) as f64;
+            let fy = r as f64 / h.max(1) as f64;
+            let base = 0.25 + 0.5 * (0.6 * fx + 0.4 * fy);
+            let wave = 0.12 * ((fx * 9.0).sin() * (fy * 7.0).cos());
+            let noise = ((rng.next_u64() >> 40) as i64 % 33 - 16) as f64 / maxv as f64;
+            let mut val = base + wave + noise * if chroma { 2.0 } else { 4.0 };
+            val = val.clamp(0.0, 1.0);
+            p[r * w + col] = (val * maxv as f64).round() as u16;
+        }
+    }
+    p
+}
+
+/// Reconstruct the CROPPED display planes of `bytes` WITHOUT film grain, by
+/// replaying `decode_frame_obus`'s exact filter chain (deblock -> CDEF ->
+/// restoration) and cropping — the pre-grain reference for the anti-vacuous
+/// "grain changed pixels" check.
+fn ungrained_planes(
+    bytes: &[u8],
+    w: usize,
+    h: usize,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
+    let (mut t, cfg, header) = decode_frame_obus_prefilter(bytes).unwrap();
+    if header.loopfilter.filter_level != [0, 0] {
+        apply_deblock(&mut t, &cfg, &header);
+    }
+    let cd = &header.cdef;
+    let do_cdef = cd.cdef_bits != 0 || cd.cdef_strengths[0] != 0 || cd.cdef_uv_strengths[0] != 0;
+    let do_lr = cfg.lr.any_enabled();
+    let optimized_lr = !do_cdef;
+    let pre_cdef =
+        (do_lr && !optimized_lr).then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
+    if do_cdef {
+        apply_cdef(&mut t, &cfg, &header);
+    }
+    if do_lr {
+        apply_restoration(&mut t, &cfg, pre_cdef.as_ref(), optimized_lr);
+    }
+    let mut y = vec![0u16; w * h];
+    for r in 0..h {
+        y[r * w..(r + 1) * w].copy_from_slice(&t.recon[r * t.stride..r * t.stride + w]);
+    }
+    if mono {
+        return (y, Vec::new(), Vec::new());
+    }
+    let cw = (w + ss_x as usize) >> ss_x;
+    let ch = (h + ss_y as usize) >> ss_y;
+    let mut u = vec![0u16; cw * ch];
+    let mut v = vec![0u16; cw * ch];
+    for r in 0..ch {
+        u[r * cw..(r + 1) * cw]
+            .copy_from_slice(&t.recon_u[r * t.stride_uv..r * t.stride_uv + cw]);
+        v[r * cw..(r + 1) * cw]
+            .copy_from_slice(&t.recon_v[r * t.stride_uv..r * t.stride_uv + cw]);
+    }
+    (y, u, v)
+}
+
+#[test]
+fn film_grain_streams_decode_byte_identical_to_c() {
+    // Grain test vectors (grain_test_vectors.h): 1 = rich chroma, no overlap;
+    // 2 = ar_coeff_lag 3, overlap; 15 = chroma_scaling_from_luma (cfl), overlap.
+    let vectors = [1i32, 2, 15];
+    // (bd, (ss_x, ss_y), mono): 8/10-bit x 4:2:0/4:4:4 + monochrome.
+    let formats: &[(i32, (i32, i32), bool)] = &[
+        (8, (1, 1), false),
+        (8, (0, 0), false),
+        (8, (1, 1), true),
+        (10, (1, 1), false),
+        (10, (0, 0), false),
+    ];
+    let sizes = [(64usize, 64usize), (96, 80)];
+
+    let mut total = 0u32;
+    let mut chroma_grain_seen = 0u32;
+    let mut cfl_seen = 0u32;
+    let mut chroma_changed = 0u32;
+
+    for &gv in &vectors {
+        for &(bd, (ss_x, ss_y), mono) in formats {
+            for &(w, h) in &sizes {
+                let (cw, ch) = if mono {
+                    (0, 0)
+                } else {
+                    ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+                };
+                let seed = ((w as u64) << 40)
+                    ^ ((h as u64) << 24)
+                    ^ ((bd as u64) << 12)
+                    ^ ((gv as u64) << 4)
+                    ^ (mono as u64);
+                let y = gen_photo_plane(w, h, bd, seed ^ 0x1111, false);
+                let u = gen_photo_plane(cw, ch, bd, seed ^ 0x2222, true);
+                let v = gen_photo_plane(cw, ch, bd, seed ^ 0x3333, true);
+
+                // REAL encoder bytes carrying film grain (cpu-used=0, GOOD).
+                let bytes = ref_encode_av1_kf_film_grain(
+                    &y, &u, &v, w, h, bd, mono, ss_x, ss_y, 32, 0, 0, gv,
+                );
+
+                // Rust decode (grain synthesized). Hard-error => test fails.
+                let rust = decode_frame_obus(&bytes).unwrap_or_else(|e| {
+                    panic!(
+                        "decode_frame_obus rejected grain stream gv={gv} {w}x{h} \
+                         bd{bd} mono={mono} ss=({ss_x},{ss_y}): {e}"
+                    )
+                });
+
+                // Anti-vacuous: the stream really signals + applies grain.
+                let (_t, _cfg, header) = decode_frame_obus_prefilter(&bytes).unwrap();
+                assert!(
+                    header.film_grain_params_present,
+                    "gv={gv}: seq film_grain_params_present not set"
+                );
+                assert!(header.film_grain.apply_grain, "gv={gv}: apply_grain=0");
+                assert!(
+                    header.film_grain.num_y_points > 0,
+                    "gv={gv}: num_y_points=0 (would be a vacuous grain)"
+                );
+
+                // Gold oracle: REAL C decoder on the same bytes (grain applied).
+                let cref = ref_decode_av1_kf(&bytes, w, h);
+                assert_eq!(cref.info[0], bd);
+                assert_eq!(cref.info[1] != 0, mono);
+                assert_eq!(
+                    rust.y, cref.y,
+                    "LUMA mismatch gv={gv} {w}x{h} bd{bd} mono={mono} ss=({ss_x},{ss_y})"
+                );
+                if mono {
+                    assert!(rust.u.is_empty() && rust.v.is_empty());
+                } else {
+                    assert_eq!(
+                        rust.u, cref.u,
+                        "U mismatch gv={gv} {w}x{h} bd{bd} ss=({ss_x},{ss_y})"
+                    );
+                    assert_eq!(
+                        rust.v, cref.v,
+                        "V mismatch gv={gv} {w}x{h} bd{bd} ss=({ss_x},{ss_y})"
+                    );
+                }
+
+                // Anti-vacuous: grain genuinely changed pixels (an ungrained
+                // reconstruction of the SAME stream differs). Because rust==cref,
+                // this also proves the C decoder APPLIED grain (didn't skip).
+                let (uy, uu, uv) = ungrained_planes(&bytes, w, h, mono, ss_x, ss_y);
+                assert_ne!(
+                    rust.y, uy,
+                    "grain did not change luma (C skipped grain?) gv={gv} {w}x{h} bd{bd}"
+                );
+
+                if !mono {
+                    if header.film_grain.num_cb_points > 0
+                        || header.film_grain.chroma_scaling_from_luma
+                    {
+                        chroma_grain_seen += 1;
+                    }
+                    if header.film_grain.chroma_scaling_from_luma {
+                        cfl_seen += 1;
+                    }
+                    if rust.u != uu || rust.v != uv {
+                        chroma_changed += 1;
+                    }
+                }
+                total += 1;
+            }
+        }
+    }
+
+    assert!(total >= 8, "need >=8 real grain streams, got {total}");
+    assert!(chroma_grain_seen > 0, "no chroma-grain stream decoded");
+    assert!(cfl_seen > 0, "no chroma-from-luma (cfl) stream decoded");
+    assert!(
+        chroma_changed > 0,
+        "chroma grain never changed chroma pixels (vacuous)"
+    );
+    eprintln!(
+        "film_grain e2e: {total} REAL streams byte-identical vs C (grain applied); \
+         chroma_grain={chroma_grain_seen} cfl={cfl_seen} chroma_changed={chroma_changed}"
+    );
+}

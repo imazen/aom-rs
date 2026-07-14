@@ -90,9 +90,9 @@ use crate::{
     decode_frame_tiles_kf,
 };
 use aom_entropy::header::{
-    CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
-    RestorationHeader, SequenceHeaderObu, TileInfoHeader, read_sequence_header_obu,
-    read_tile_group_header, read_uncompressed_header,
+    CdefHeader, FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
+    LoopfilterHeader, RestorationHeader, SequenceHeaderObu, TileInfoHeader,
+    read_sequence_header_obu, read_tile_group_header, read_uncompressed_header,
 };
 use aom_entropy::leb128::uleb_decode;
 use aom_entropy::obu::read_obu_header;
@@ -429,6 +429,14 @@ fn parse_frame_header(
             ..Default::default()
         },
         film_grain_params_present: seq.film_grain_params_present,
+        // Reader context for `read_film_grain_params`: the chroma-absent gate
+        // reads monochrome + subsampling from the color config.
+        film_grain: FilmGrainParams {
+            monochrome: c.monochrome,
+            subsampling_x: c.subsampling_x,
+            subsampling_y: c.subsampling_y,
+            ..Default::default()
+        },
         // coded_lossless / all_lossless are inputs to this writer-mirror
         // reader but are stream facts on the decode side: the probe pass below
         // parses as non-lossless (correct for the quant + segmentation, which
@@ -595,7 +603,32 @@ pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, String> {
     if do_lr {
         apply_restoration(&mut t, &cfg, pre_cdef.as_ref(), optimized_lr);
     }
-    Ok(finish_frame(t, &cfg, &header))
+    let mut fd = finish_frame(t, &cfg, &header);
+    // Film grain is applied at the decoder as the final post-reconstruction
+    // output stage (av1_add_film_grain), on the cropped display planes, exactly
+    // as `aom_codec_get_frame` does. Byte-identical to C (film_grain_diff.rs).
+    if header.film_grain_params_present && header.film_grain.apply_grain {
+        // AOM_CICP_MC_IDENTITY (0) selects the luma legal range for chroma
+        // under clip_to_restricted_range.
+        let mc_identity = cfg.matrix_coefficients == 0;
+        let (gy, gu, gv) = crate::film_grain::add_film_grain(
+            &header.film_grain,
+            fd.bit_depth,
+            fd.monochrome,
+            cfg.subsampling_x as i32,
+            cfg.subsampling_y as i32,
+            mc_identity,
+            fd.width,
+            fd.height,
+            &fd.y,
+            &fd.u,
+            &fd.v,
+        );
+        fd.y = gy;
+        fd.u = gu;
+        fd.v = gv;
+    }
+    Ok(fd)
 }
 
 /// Run [`aom_restore::frame::loop_restoration_filter_frame`] over the
@@ -681,9 +714,12 @@ pub fn decode_frame_obus_prefilter(
                 let mut rb = ReadBitBuffer::new(payload);
                 let sh = read_sequence_header_obu(&mut rb);
                 let s = &sh.seq_header;
-                if sh.film_grain_params_present {
-                    return Err("film grain enabled (sequence)".into());
-                }
+                // Film grain IS in the envelope: `film_grain_params_present`
+                // enables the per-frame grain params (parsed in the frame
+                // header) and byte-exact post-reconstruction synthesis
+                // ([`crate::film_grain::add_film_grain`], applied in
+                // [`decode_frame_obus`]). Gated by
+                // `film_grain_streams_decode_byte_identical_to_c`.
                 if s.force_screen_content_tools == 1 {
                     return Err("screen content tools forced on (sequence)".into());
                 }
@@ -757,6 +793,7 @@ fn decode_tile_payload(
         monochrome: c.monochrome,
         subsampling_x: ss_x,
         subsampling_y: ss_y,
+        matrix_coefficients: c.matrix_coefficients,
         cdef_bits: p.cdef.cdef_bits as u32,
         disable_edge_filter: !s.enable_intra_edge_filter,
         enable_filter_intra: s.enable_filter_intra,

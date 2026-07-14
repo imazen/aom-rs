@@ -11103,3 +11103,84 @@ pub fn ref_add_film_grain(
     assert_eq!(rc, 0, "shim_add_film_grain failed ({rc})");
     (out_y, out_u, out_v)
 }
+
+// ---------------------------------------------------------------------------
+// dec_shim.c (append-only addition): shim_encode_av1_kf_film_grain — the REAL
+// aom_codec_av1_cx public API with AV1E_SET_FILM_GRAIN_TEST_VECTOR set, to
+// produce a KEY stream carrying film_grain_params_present=1 + per-frame grain
+// params. Everything above is UNCHANGED.
+// ---------------------------------------------------------------------------
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_av1_kf_film_grain(
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        usage: i32,
+        grain_test_vector: i32,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
+}
+
+/// Encode a single KEY frame WITH film grain via the REAL `aom_codec_av1_cx`
+/// (dec_shim.c `shim_encode_av1_kf_film_grain`): sets
+/// `AV1E_SET_FILM_GRAIN_TEST_VECTOR = grain_test_vector` (1..=16, an index into
+/// libaom's built-in `film_grain_test_vectors[]`), so the stream carries
+/// `film_grain_params_present=1` + per-frame grain params. Planes are `u16`
+/// row-major tight. Returns the bitstream bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_av1_kf_film_grain(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    usage: u32,
+    grain_test_vector: i32,
+) -> Vec<u8> {
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+    };
+    assert_eq!(y.len(), w * h);
+    assert!(mono || (u.len() == cw * ch && v.len() == cw * ch));
+    let mut out = vec![0u8; w * h * 8 + 65536];
+    let n = unsafe {
+        shim_encode_av1_kf_film_grain(
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            usage as i32,
+            grain_test_vector,
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    };
+    assert!(n > 0, "shim_encode_av1_kf_film_grain failed ({n})");
+    out.truncate(n as usize);
+    out
+}

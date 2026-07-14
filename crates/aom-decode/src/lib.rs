@@ -391,6 +391,10 @@ pub struct KfTileConfig {
     /// the frame edge).
     pub subsampling_x: usize,
     pub subsampling_y: usize,
+    /// `seq_params->color_config.matrix_coefficients` (CICP). Only needed for
+    /// film-grain synthesis: `AOM_CICP_MC_IDENTITY` (0) selects the luma legal
+    /// range for chroma under `clip_to_restricted_range`.
+    pub matrix_coefficients: i32,
     /// `cdef_info.cdef_bits` (0..=3): per-64x64 CDEF strength literal width.
     pub cdef_bits: u32,
     /// `!seq_params->enable_intra_edge_filter`.

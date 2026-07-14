@@ -1718,6 +1718,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         monochrome: case.monochrome,
         subsampling_x: case.ss_x,
         subsampling_y: case.ss_y,
+        matrix_coefficients: 2, // AOM_CICP_MC_UNSPECIFIED (no grain in these tests)
         cdef_bits: case.cdef_bits,
         disable_edge_filter: case.disable_edge_filter,
         enable_filter_intra: case.enable_filter_intra,
