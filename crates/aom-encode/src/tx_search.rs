@@ -157,6 +157,7 @@ pub fn get_tx_mask_intra(
 /// txb's pixels clipped to the frame boundary. `mb_to_right_edge` /
 /// `mb_to_bottom_edge` are the MACROBLOCKD edge fields (1/8-pel units,
 /// negative when the block overhangs), `subsampling` the plane's.
+#[allow(clippy::too_many_arguments)] // mirrors the C signature
 pub fn get_txb_visible_dimensions(
     plane_bsize_w: usize,
     plane_bsize_h: usize,
