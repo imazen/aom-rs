@@ -1,6 +1,12 @@
-//! Rate-distortion model primitives (libaom `av1/encoder/rd.c`). Fixed-point,
-//! bit-exact — the model the encoder's fast RD search uses to estimate a
-//! transform block's rate and distortion from its variance and quantizer step.
+//! Rate-distortion model primitives (libaom `av1/encoder/rd.c` + `rd.h`).
+//! Fixed-point, bit-exact:
+//! - the Laplacian `(rate, dist)` model the fast RD search uses
+//!   ([`model_rd_from_var_lapndz`]);
+//! - the exact RD cost macros ([`rdcost`], [`rdcost_neg_r`]);
+//! - the qindex → RD-multiplier (lambda) derivation
+//!   ([`av1_compute_rd_mult_based_on_qindex`], [`av1_compute_rd_mult`]).
+
+use aom_quant::av1_dc_quant_qtx;
 
 // Generated from av1/encoder/rd.c model_rd_norm tables (104 entries each).
 const RATE_TAB_Q10: [i32; 104] = [
@@ -59,4 +65,196 @@ pub fn model_rd_from_var_lapndz(var: i64, n_log2: u32, qstep: u32) -> (i32, i64)
     let rate = ((((r_q10 as i64) << n_log2) + (1 << (shift - 1))) >> shift) as i32;
     let dist = (var * d_q10 as i64 + 512) >> 10;
     (rate, dist)
+}
+
+// ---------------------------------------------------------------------------
+// RD cost macros (av1/encoder/rd.h)
+// ---------------------------------------------------------------------------
+
+/// `RDDIV_BITS` (av1/encoder/rd.h): distortion is weighted by `1 << RDDIV_BITS`.
+const RDDIV_BITS: u32 = 7;
+
+/// `ROUND_POWER_OF_TWO(value, n)` (`aom_ports/mem.h`) on a 64-bit value.
+/// `(1 << n) >> 1` is 0 at `n == 0`, so this is well-defined there.
+#[inline]
+fn round_power_of_two_i64(value: i64, n: u32) -> i64 {
+    (value + ((1i64 << n) >> 1)) >> n
+}
+
+/// `RDCOST(RM, R, D)` (av1/encoder/rd.h) — the exact rate-distortion cost.
+///
+/// `rm` is the RD multiplier (lambda), `rate` the rate in AV1's
+/// `AV1_PROB_COST`-scaled units (`1 << 9` per bit), and `dist` the distortion.
+/// Bit-exact integer form:
+/// `ROUND_POWER_OF_TWO((i64)rate * rm, 9) + (dist << RDDIV_BITS)`.
+#[inline]
+pub fn rdcost(rm: i32, rate: i32, dist: i64) -> i64 {
+    round_power_of_two_i64((rate as i64) * (rm as i64), AV1_PROB_COST_SHIFT)
+        + (dist * (1 << RDDIV_BITS))
+}
+
+/// `RDCOST_NEG_R(RM, R, D)` (av1/encoder/rd.h) — the RD cost when the rate term
+/// is subtracted (used where a candidate *saves* rate).
+#[inline]
+pub fn rdcost_neg_r(rm: i32, rate: i32, dist: i64) -> i64 {
+    (dist * (1 << RDDIV_BITS))
+        - round_power_of_two_i64((rate as i64) * (rm as i64), AV1_PROB_COST_SHIFT)
+}
+
+// ---------------------------------------------------------------------------
+// RD multiplier / lambda from qindex (av1/encoder/rd.c)
+// ---------------------------------------------------------------------------
+
+/// `FRAME_UPDATE_TYPE` (av1/encoder/ratectrl.h) — a frame's role in the GOP.
+/// The RD multiplier only distinguishes `Kf` vs `Gf`/`Arf` vs everything else,
+/// but the full enum is modelled for fidelity. Discriminants match C.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameUpdateType {
+    /// `KF_UPDATE` — key frame.
+    Kf = 0,
+    /// `LF_UPDATE` — leaf (normal inter) frame.
+    Lf = 1,
+    /// `GF_UPDATE` — golden frame.
+    Gf = 2,
+    /// `ARF_UPDATE` — alt-ref frame.
+    Arf = 3,
+    /// `OVERLAY_UPDATE`.
+    Overlay = 4,
+    /// `INTNL_OVERLAY_UPDATE`.
+    IntnlOverlay = 5,
+    /// `INTNL_ARF_UPDATE`.
+    IntnlArf = 6,
+}
+
+/// The `aom_tune_metric` values (av1/aomcx.h) that change the RD multiplier.
+/// Every other tuning takes the same path as [`TuneMetric::Psnr`] (the default).
+/// Discriminants match the C enum values used by `av1_compute_rd_mult_*`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuneMetric {
+    /// `AOM_TUNE_PSNR` (and any tuning that is neither `Iq` nor `Ssimulacra2`).
+    Psnr = 0,
+    /// `AOM_TUNE_IQ`.
+    Iq = 10,
+    /// `AOM_TUNE_SSIMULACRA2`.
+    Ssimulacra2 = 11,
+}
+
+/// `MODE` (av1/encoder/enc_enums.h) — the encode mode. Only `Realtime` changes
+/// the RD-multiplier tuning weight. Discriminants match C.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncMode {
+    /// `GOOD` — good-quality (non-realtime) mode.
+    Good = 0,
+    /// `REALTIME`.
+    Realtime = 1,
+    /// `ALLINTRA`.
+    Allintra = 2,
+}
+
+/// `FRAME_TYPE` (av1/common/enums.h) as far as [`av1_compute_rd_mult`] reads it:
+/// it only branches on `!= KEY_FRAME`. Discriminants match C.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameType {
+    /// `KEY_FRAME`.
+    Key = 0,
+    /// Any non-key frame (`INTER_FRAME` / `INTRA_ONLY_FRAME` / `S_FRAME`).
+    NonKey = 1,
+}
+
+/// `rd_boost_factor[16]` (av1/encoder/rd.c).
+const RD_BOOST_FACTOR: [i64; 16] = [64, 32, 32, 32, 24, 16, 12, 12, 8, 8, 4, 4, 2, 2, 1, 0];
+/// `rd_layer_depth_factor[7]` (av1/encoder/rd.c).
+const RD_LAYER_DEPTH_FACTOR: [i64; 7] = [160, 160, 160, 160, 192, 208, 224];
+
+/// `def_kf_rd_multiplier` (av1/encoder/rd.c). `q` is the DC quantizer step.
+#[inline]
+fn def_kf_rd_multiplier(q: i32) -> f64 {
+    3.3 + 0.0015 * q as f64
+}
+/// `def_arf_rd_multiplier` (av1/encoder/rd.c).
+#[inline]
+fn def_arf_rd_multiplier(q: i32) -> f64 {
+    3.25 + 0.0015 * q as f64
+}
+/// `def_inter_rd_multiplier` (av1/encoder/rd.c).
+#[inline]
+fn def_inter_rd_multiplier(q: i32) -> f64 {
+    3.2 + 0.0015 * q as f64
+}
+
+/// `av1_compute_rd_mult_based_on_qindex` (av1/encoder/rd.c) — the base RD
+/// multiplier (lambda) for a given qindex, bit-exact vs C.
+///
+/// `bit_depth` is 8/10/12. Uses IEEE-754 `f64` in the same op order as C; the
+/// reference build has no FMA (no `-mfma`), so the separate multiply/add match
+/// Rust's strict-FP `*`/`+`. Returns a value in `[1, i32::MAX]`.
+pub fn av1_compute_rd_mult_based_on_qindex(
+    bit_depth: u8,
+    update_type: FrameUpdateType,
+    qindex: i32,
+    tuning: TuneMetric,
+    mode: EncMode,
+) -> i32 {
+    let q = av1_dc_quant_qtx(qindex, 0, bit_depth) as i32;
+    // C: `int64_t rdmult = q * q;` (fits in `int` for every valid qindex).
+    let mut rdmult: i64 = (q as i64) * (q as i64);
+    let def_rd_q_mult = match update_type {
+        FrameUpdateType::Kf => def_kf_rd_multiplier(q),
+        FrameUpdateType::Gf | FrameUpdateType::Arf => def_arf_rd_multiplier(q),
+        _ => def_inter_rd_multiplier(q),
+    };
+    rdmult = (rdmult as f64 * def_rd_q_mult) as i64;
+
+    if matches!(tuning, TuneMetric::Iq | TuneMetric::Ssimulacra2) {
+        let weight: i32 = if mode == EncMode::Realtime {
+            32
+        } else {
+            (((255 - qindex) * 3) / 4).clamp(0, 72) + 128
+        };
+        rdmult = (rdmult as f64 * weight as f64 / 128.0) as i64;
+    }
+
+    match bit_depth {
+        8 => {}
+        10 => rdmult = round_power_of_two_i64(rdmult, 4),
+        12 => rdmult = round_power_of_two_i64(rdmult, 8),
+        _ => return -1,
+    }
+    if rdmult > 0 {
+        rdmult.min(i32::MAX as i64) as i32
+    } else {
+        1
+    }
+}
+
+/// `av1_compute_rd_mult` (av1/encoder/rd.c) — [`av1_compute_rd_mult_based_on_qindex`]
+/// plus the two-pass layer-depth / ARF-boost adjustment, bit-exact vs C.
+///
+/// The adjustment only fires when `is_stat_consumption_stage`,
+/// `!use_fixed_qp_offsets`, and `frame_type != Key`. `layer_depth` indexes
+/// `rd_layer_depth_factor[0..7]`; `boost_index` indexes `rd_boost_factor[0..16]`.
+#[allow(clippy::too_many_arguments)]
+pub fn av1_compute_rd_mult(
+    qindex: i32,
+    bit_depth: u8,
+    update_type: FrameUpdateType,
+    layer_depth: i32,
+    boost_index: i32,
+    frame_type: FrameType,
+    use_fixed_qp_offsets: bool,
+    is_stat_consumption_stage: bool,
+    tuning: TuneMetric,
+    mode: EncMode,
+) -> i32 {
+    let mut rdmult =
+        av1_compute_rd_mult_based_on_qindex(bit_depth, update_type, qindex, tuning, mode) as i64;
+    if is_stat_consumption_stage && !use_fixed_qp_offsets && frame_type != FrameType::Key {
+        rdmult = (rdmult * RD_LAYER_DEPTH_FACTOR[layer_depth as usize]) >> 7;
+        rdmult += (rdmult * RD_BOOST_FACTOR[boost_index as usize]) >> 7;
+    }
+    if rdmult > 0 {
+        rdmult.min(i32::MAX as i64) as i32
+    } else {
+        1
+    }
 }
