@@ -30,15 +30,19 @@
 //!   the complete frame reconstruction for a real AV1 configuration; with
 //!   `monochrome = false` (4:4:4) the chroma *mode-info symbols* are decoded but
 //!   chroma planes are not reconstructed (CfL prediction is not ported).
-//! - **`TX_MODE_LARGEST`**: per-block `tx_size = max_txsize_rect_lookup[bsize]`,
-//!   which codes no tx-size bits — matching the landed KEY-frame mode path
-//!   ([`MbModeInfoKf`] carries no tx size; `TX_MODE_SELECT` needs the
-//!   `get_tx_size_context` neighbour facade, which is not ported — the
-//!   `tx_size_cdf` array is held in [`KfFrameContext`] but never selected).
-//!   Consequence: blocks ≤ 64x64 have exactly one luma txb, so the
-//!   *within-block* multi-txb interleave is structurally present but
-//!   degenerate; the *across-block* reconstruction feedback and
-//!   entropy-context threading are fully exercised.
+//! - **Frame tx mode ([`KfTileConfig::tx_mode`])**: `TX_MODE_LARGEST` (per-block
+//!   `tx_size = max_txsize_rect_lookup[bsize]`, no tx-size bits) **and**
+//!   `TX_MODE_SELECT` — the per-block tx-size depth symbol on
+//!   `tx_size_cdf[bsize_to_tx_size_cat][get_tx_size_context]` (`read_tx_size` →
+//!   `read_selected_tx_size`, `decodeframe.c`; intra blocks code it even when
+//!   skipped), with the `above_txfm_context`/`left_txfm_context` byte arrays
+//!   (init 64 per tile / per SB row, stamped full-footprint by `set_txfm_ctxs`
+//!   after every block, `parse_decode_block` order). Under SELECT a block's tx
+//!   grid is real: the within-block multi-txb interleave (later txbs predict
+//!   from earlier txbs' reconstruction *inside* the block) is exercised
+//!   non-degenerately. `ONLY_4X4` is out of scope: in C it only arises with
+//!   `coded_lossless` (off in this cut), where `read_tx_size`'s lossless
+//!   branch — not modelled here — is what produces TX_4X4 everywhere.
 //! - **Full FRAME_CONTEXT context selection** for every symbol this path codes:
 //!   the driver keeps a per-mi mode-info grid ([`MiNbrKf`]: y mode +
 //!   skip_txfm, stamped over each block's frame-cropped footprint like the C
@@ -78,9 +82,11 @@
 use aom_encode::reconstruct_txb;
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::partition::{
-    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, get_partition_subsize, intra_avail,
-    is_cfl_allowed, partition_cdf_length, partition_plane_context, read_mb_modes_kf_fc,
-    read_partition, update_ext_partition_context,
+    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, TXFM_CTX_INIT, TxMode,
+    bsize_to_max_depth, bsize_to_tx_size_cat, depth_to_tx_size, get_partition_subsize,
+    get_tx_size_context, intra_avail, is_cfl_allowed, partition_cdf_length,
+    partition_plane_context, read_mb_modes_kf_fc, read_partition, read_selected_tx_size,
+    set_txfm_ctxs, tx_size_from_tx_mode, update_ext_partition_context,
 };
 use aom_intra::predict_intra_high;
 use aom_txb::{
@@ -170,6 +176,10 @@ pub struct KfTileConfig {
     pub disable_edge_filter: bool,
     /// `seq_params->enable_filter_intra` (the bsize/mode gates are per block).
     pub enable_filter_intra: bool,
+    /// `features.tx_mode`: `TX_MODE_LARGEST` (no tx-size bits) or
+    /// `TX_MODE_SELECT` (per-block tx-size depth symbols). `ONLY_4X4` requires
+    /// `coded_lossless`, which is out of scope.
+    pub tx_mode: TxMode,
     /// `features.reduced_tx_set_used`.
     pub reduced_tx_set: bool,
     /// The `qindex > 0` term of the tx-type signalling gate
@@ -278,6 +288,13 @@ struct TileKf<'c> {
     /// Partition contexts with the same lifetimes/indexing.
     above_p: Vec<i8>,
     left_p: [i8; 32],
+    /// Txfm contexts (`above_txfm_context` / `left_txfm_context_buffer`): one
+    /// byte per mi holding the neighbouring transform's pixel width (above) /
+    /// height (left), reset to [`TXFM_CTX_INIT`] (=64) per tile / per SB row
+    /// and stamped by `set_txfm_ctxs` after every block's tx size resolves.
+    /// Feeds `get_tx_size_context` under `TX_MODE_SELECT`.
+    above_t: Vec<u8>,
+    left_t: [u8; 32],
     /// Per-mi mode-info grid (frame-cropped stamps, like the C mi grid): the
     /// [`MiNbrKf`] projection (`y_mode` + `skip_txfm`) every context selection
     /// reads through `xd->above_mbmi` / `xd->left_mbmi`, and which also feeds
@@ -341,6 +358,8 @@ impl<'c> TileKf<'c> {
             left_e: [0; 32],
             above_p: vec![0; aligned_mi_cols],
             left_p: [0; 32],
+            above_t: vec![TXFM_CTX_INIT; aligned_mi_cols],
+            left_t: [TXFM_CTX_INIT; 32],
             mi: vec![
                 MiNbrKf {
                     y_mode: 0,
@@ -446,9 +465,55 @@ impl<'c> TileKf<'c> {
             left,
         );
 
-        // --- parse_decode_block tail: skip blocks reset their entropy context ---
+        // --- parse_decode_block: the block's transform size (read_tx_size) +
+        // txfm-context stamp, in the C statement order (after the mode info /
+        // palette tokens, before the skip entropy reset) ---
         let bw = MI_SIZE_WIDE[bsize] as usize;
         let bh = MI_SIZE_HIGH[bsize] as usize;
+        // read_tx_size (decodeframe.c), intra: coded_lossless (TX_4X4
+        // preemption) is off in this scope; a signalling block (bsize >
+        // BLOCK_4X4) under TX_MODE_SELECT codes its tx-size depth — intra
+        // blocks code it even when skip_txfm is set (`!is_inter ||
+        // allow_select_inter` is true for intra) — else the tx_mode fallback.
+        let tx_size = if bsize > 0 {
+            // block_signals_txsize
+            if cfg.tx_mode == TxMode::Select {
+                let cat = bsize_to_tx_size_cat(bsize) as usize;
+                let ctx = get_tx_size_context(
+                    bsize,
+                    self.above_t[mi_col as usize],
+                    self.left_t[(mi_row & 31) as usize],
+                    up_available,
+                    left_available,
+                    None, // KEY frame, intrabc off: neighbours are never inter
+                    None,
+                );
+                let depth = read_selected_tx_size(
+                    dec,
+                    &mut cdfs.tx_size[cat][ctx],
+                    bsize,
+                    bsize_to_max_depth(bsize),
+                );
+                depth_to_tx_size(depth, bsize)
+            } else {
+                tx_size_from_tx_mode(bsize, cfg.tx_mode)
+            }
+        } else {
+            MAX_TXSIZE_RECT_LOOKUP[bsize]
+        };
+        // set_txfm_ctxs(tx_size, xd->width, xd->height, skip && is_inter, xd):
+        // full (not frame-clipped) footprint; the skip arg is always 0 for
+        // intra blocks, so a skipped intra block still stamps its tx dims.
+        set_txfm_ctxs(
+            &mut self.above_t[mi_col as usize..],
+            &mut self.left_t[(mi_row & 31) as usize..],
+            tx_size,
+            bw,
+            bh,
+            false,
+        );
+
+        // --- parse_decode_block tail: skip blocks reset their entropy context ---
         if info.skip != 0 {
             let a0 = mi_col as usize;
             self.above_e[a0..a0 + bw].fill(0);
@@ -457,7 +522,6 @@ impl<'c> TileKf<'c> {
         }
 
         // --- decode_token_recon_block (intra): per-txb read -> predict -> recon ---
-        let tx_size = MAX_TXSIZE_RECT_LOOKUP[bsize]; // TX_MODE_LARGEST, no bits
         let (txw, txh) = (TX_SIZE_WIDE_UNIT[tx_size], TX_SIZE_HIGH_UNIT[tx_size]);
         let (txwpx, txhpx) = (TX_SIZE_WIDE[tx_size], TX_SIZE_HIGH[tx_size]);
         let mb_to_right_edge = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 32;
@@ -758,6 +822,7 @@ pub fn decode_tile_kf(
     while mi_row < cfg.mi_rows {
         t.left_e = [0; 32]; // av1_zero_left_context per SB row
         t.left_p = [0; 32];
+        t.left_t = [TXFM_CTX_INIT; 32]; // ..incl the left txfm-context bytes
         let mut mi_col = 0;
         while mi_col < cfg.mi_cols {
             t.decode_partition(dec, cdfs, mi_row, mi_col, BLOCK_64X64);

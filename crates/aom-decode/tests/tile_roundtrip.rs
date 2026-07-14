@@ -27,9 +27,16 @@
 //! partial superblocks / 3x3 SBs with a fully-interior SB) × 6 configs
 //! (monochrome + 4:4:4, bd 8/10/12, filter intra on/off, intra edge filter
 //! on/off, reduced tx set, tx-type gate off,
-//! cdef bits 0..3) × 6 seeds, with pseudo-random partition trees over all 10
-//! partition types, all 13 intra modes, angle deltas, filter-intra, and skip
-//! blocks; coverage of each is asserted at the end.
+//! cdef bits 0..3) × 6 seeds × 2 frame tx modes (`TX_MODE_LARGEST` — the
+//! original 144-tile sweep, no tx-size bits — and `TX_MODE_SELECT`, where the
+//! mirror codes a pseudo-random tx-size depth per signalling block through
+//! `write_selected_tx_size` on the `get_tx_size_context`-selected CDF and the
+//! decoder must reproduce it, driving real multi-txb grids whose later txbs
+//! predict from earlier txbs' reconstruction *inside* the block), with
+//! pseudo-random partition trees over all 10 partition types, all 13 intra
+//! modes, angle deltas, filter-intra, and skip blocks; coverage of each is
+//! asserted at the end (including distinct-tx-size, multi-txb-grid, and
+//! tx_size_cdf cell-diversity floors).
 
 use aom_decode::{
     ANGLE_STEP, BLOCK_8X8, BLOCK_64X64, BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, DecodedBlockKf,
@@ -41,10 +48,12 @@ use aom_encode::{QuantKind, QuantParams, xform_quant};
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::partition::{
-    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, filter_intra_allowed,
-    get_partition_subsize, get_uv_mode, intra_avail, is_cfl_allowed, is_directional_mode,
-    partition_cdf_length, partition_plane_context, update_ext_partition_context, use_angle_delta,
-    write_mb_modes_kf_fc, write_partition,
+    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, TXFM_CTX_INIT, TxMode,
+    bsize_to_max_depth, bsize_to_tx_size_cat, depth_to_tx_size, filter_intra_allowed,
+    get_partition_subsize, get_tx_size_context, get_uv_mode, intra_avail, is_cfl_allowed,
+    is_directional_mode, partition_cdf_length, partition_plane_context, set_txfm_ctxs,
+    tx_size_from_tx_mode, tx_size_to_depth, update_ext_partition_context, use_angle_delta,
+    write_mb_modes_kf_fc, write_partition, write_selected_tx_size,
 };
 use aom_intra::predict_intra_high;
 use aom_txb::{CDF_ARENA_LEN, ext_tx_set_type, get_txb_ctx, write_coeffs_txb_full};
@@ -170,9 +179,12 @@ fn mk_frame_ctx(rng: &mut Rng) -> KfFrameContext {
     mk_ns_cdf(rng, 4, &mut f.ndvc_joints);
     f.ndvc_comp0 = mk_comp(rng);
     f.ndvc_comp1 = mk_comp(rng);
-    for cat in f.tx_size.iter_mut() {
-        for c in cat.iter_mut() {
-            mk_ns_cdf(rng, 3, c);
+    for (cat, cells) in f.tx_size.iter_mut().enumerate() {
+        // Per-category symbol count (matches C default_tx_size_cdf shapes):
+        // cat 0 codes max_depth+1 = 2 symbols, cats 1..=3 code 3.
+        let ns = if cat == 0 { 2 } else { 3 };
+        for c in cells.iter_mut() {
+            mk_ns_cdf(rng, ns, &mut c[..ns + 1]);
         }
     }
     for sq in f.ext_tx_1ddct.iter_mut() {
@@ -290,6 +302,15 @@ struct Coverage {
     ext7_signaled: usize,
     dct_only_txbs: usize,
     edge_clipped_txb_blocks: usize,
+    // TX_MODE_SELECT accounting (from the DECODER's output): which of the 19
+    // tx sizes were actually decoded, how many blocks decoded a non-max depth,
+    // and how many blocks ran a real multi-txb grid (>1 txb).
+    tx_sizes_decoded: [bool; 19],
+    tx_depth_nonzero: usize,
+    multi_txb_blocks: usize,
+    max_txbs_in_block: usize,
+    // tx_size_cdf (cat, ctx) instances that adapted anywhere in the sweep.
+    tx_cells: [[bool; 3]; 4],
     // FRAME_CONTEXT selection diversity: which context instances adapted
     // (final decoder CDFs differ from the initial fill) anywhere in the sweep.
     kf_y_cells: [[bool; 5]; 5],
@@ -312,6 +333,10 @@ struct Mirror<'a> {
     left_e: [i8; 32],
     above_p: Vec<i8>,
     left_p: [i8; 32],
+    /// Txfm-context byte arrays (`above_txfm_context`/`left_txfm_context`),
+    /// mirroring the decoder's: init 64, stamped by `set_txfm_ctxs` per block.
+    above_t: Vec<u8>,
+    left_t: [u8; 32],
     /// Per-mi mode-info grid — the encoder's own `xd->above_mbmi/left_mbmi`
     /// source for every context selection (mirrors the decoder's grid).
     mi: Vec<MiNbrKf>,
@@ -375,6 +400,8 @@ impl<'a> Mirror<'a> {
             left_e: [0; 32],
             above_p: vec![0; stride / 4],
             left_p: [0; 32],
+            above_t: vec![TXFM_CTX_INIT; stride / 4],
+            left_t: [TXFM_CTX_INIT; 32],
             mi: vec![
                 MiNbrKf {
                     y_mode: 0,
@@ -557,9 +584,56 @@ impl<'a> Mirror<'a> {
             -1
         };
 
-        // --- skip blocks reset their entropy-context footprint ---
+        // --- choose + write the block's transform size (write_modes_b order:
+        // after the mode info, before any coefficient symbols); intra blocks
+        // write it even when skipped (`!(is_inter_tx && skip_txfm)`) ---
         let bw = MI_SIZE_WIDE[bsize] as usize;
         let bh = MI_SIZE_HIGH[bsize] as usize;
+        let tx_size = if bsize > 0 {
+            // block_signals_txsize
+            if cfg.tx_mode == TxMode::Select {
+                let max_depths = bsize_to_max_depth(bsize);
+                // pseudo-random depth drives varied per-block tx sizes
+                let depth = (rng.next() % (max_depths as u64 + 1)) as i32;
+                let tx = depth_to_tx_size(depth, bsize);
+                let cat = bsize_to_tx_size_cat(bsize) as usize;
+                let ctx = get_tx_size_context(
+                    bsize,
+                    self.above_t[mi_col as usize],
+                    self.left_t[(mi_row & 31) as usize],
+                    up_available,
+                    left_available,
+                    None,
+                    None,
+                );
+                // write_selected_tx_size (bitstream.c): the encoder-side
+                // depth recomputation (tx_size_to_depth) round-trips the choice
+                write_selected_tx_size(
+                    enc,
+                    &mut cdfs.tx_size[cat][ctx],
+                    bsize,
+                    tx_size_to_depth(tx, bsize),
+                    max_depths,
+                );
+                tx
+            } else {
+                tx_size_from_tx_mode(bsize, cfg.tx_mode)
+            }
+        } else {
+            MAX_TXSIZE_RECT_LOOKUP[bsize]
+        };
+        // set_txfm_ctxs, skip arg 0 for intra (C passes literal 0 on the
+        // write_selected_tx_size path and `skip && is_inter` on the other).
+        set_txfm_ctxs(
+            &mut self.above_t[mi_col as usize..],
+            &mut self.left_t[(mi_row & 31) as usize..],
+            tx_size,
+            bw,
+            bh,
+            false,
+        );
+
+        // --- skip blocks reset their entropy-context footprint ---
         if skip != 0 {
             let a0 = mi_col as usize;
             self.above_e[a0..a0 + bw].fill(0);
@@ -568,7 +642,6 @@ impl<'a> Mirror<'a> {
         }
 
         // --- per-txb: predict -> residual -> quantize -> write -> reconstruct ---
-        let tx_size = MAX_TXSIZE_RECT_LOOKUP[bsize];
         let (txw, txh) = (TX_SIZE_WIDE_UNIT[tx_size], TX_SIZE_HIGH_UNIT[tx_size]);
         let (txwpx, txhpx) = (TX_SIZE_WIDE[tx_size], TX_SIZE_HIGH[tx_size]);
         let mb_to_right_edge = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 32;
@@ -942,6 +1015,7 @@ impl<'a> Mirror<'a> {
         while mi_row < self.cfg.mi_rows {
             self.left_e = [0; 32];
             self.left_p = [0; 32];
+            self.left_t = [TXFM_CTX_INIT; 32];
             let mut mi_col = 0;
             while mi_col < self.cfg.mi_cols {
                 // new SB: cdef strength not yet transmitted for it
@@ -972,6 +1046,7 @@ struct SweepCase {
     enable_filter_intra: bool,
     reduced_tx_set: bool,
     base_qindex_gt0: bool,
+    tx_mode: TxMode,
 }
 
 fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
@@ -985,6 +1060,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         cdef_bits: case.cdef_bits,
         disable_edge_filter: case.disable_edge_filter,
         enable_filter_intra: case.enable_filter_intra,
+        tx_mode: case.tx_mode,
         reduced_tx_set: case.reduced_tx_set,
         base_qindex_gt0: case.base_qindex_gt0,
         dequant,
@@ -1024,7 +1100,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     let got = decode_tile_kf(&mut dec, &cfg, &mut dec_cdfs, mask as u16);
 
     let what = format!(
-        "case mi={}x{} bd={} mono={} cdef={} fi={} reduced={} gate={} seed={seed:#x}",
+        "case mi={}x{} bd={} mono={} cdef={} fi={} reduced={} gate={} tx={:?} seed={seed:#x}",
         case.mi_rows,
         case.mi_cols,
         case.bd,
@@ -1033,6 +1109,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         case.enable_filter_intra,
         case.reduced_tx_set,
         case.base_qindex_gt0,
+        case.tx_mode,
     );
     // (a) partition tree + per-leaf decode records (mode info, per-txb eob/tx_type)
     assert_eq!(got.tree, mirror.tree, "{what}: partition tree");
@@ -1108,6 +1185,30 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     {
         *flag |= new != old;
     }
+    // TX_MODE_SELECT accounting, from the DECODER's records: distinct decoded
+    // tx sizes, blocks whose coded depth left the max-rect default, and blocks
+    // whose txb grid was genuinely multi-txb (the within-block interleave).
+    if case.tx_mode == TxMode::Select {
+        for b in &got.blocks {
+            cov.tx_sizes_decoded[b.tx_size] = true;
+            if b.tx_size != MAX_TXSIZE_RECT_LOOKUP[b.bsize] {
+                cov.tx_depth_nonzero += 1;
+            }
+            if b.txbs.len() > 1 {
+                cov.multi_txb_blocks += 1;
+            }
+            cov.max_txbs_in_block = cov.max_txbs_in_block.max(b.txbs.len());
+        }
+    }
+    for ((flag, new), old) in cov
+        .tx_cells
+        .iter_mut()
+        .flatten()
+        .zip(dec_cdfs.tx_size.iter().flatten())
+        .zip(cdfs0.tx_size.iter().flatten())
+    {
+        *flag |= new != old;
+    }
 }
 
 #[test]
@@ -1128,6 +1229,7 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
         },
         SweepCase {
             mi_rows: 0,
@@ -1139,6 +1241,7 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
         },
         SweepCase {
             mi_rows: 0,
@@ -1150,6 +1253,7 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: false,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
         },
         SweepCase {
             mi_rows: 0,
@@ -1161,6 +1265,7 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: true,
             base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
         },
         SweepCase {
             mi_rows: 0,
@@ -1172,6 +1277,7 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: false,
+            tx_mode: TxMode::Largest,
         },
         SweepCase {
             mi_rows: 0,
@@ -1183,6 +1289,7 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
         },
     ];
     let seeds: [u64; 6] = [
@@ -1198,12 +1305,18 @@ fn kf_luma_tile_roundtrips() {
     for c in &configs {
         for &(mi_rows, mi_cols) in &sizes {
             for &seed in &seeds {
-                let case = SweepCase {
-                    mi_rows,
-                    mi_cols,
-                    ..*c
-                };
-                run_roundtrip(&case, seed, &mut cov);
+                // Every config runs under BOTH frame tx modes: LARGEST keeps
+                // the original 144-tile sweep green (no tx-size bits), SELECT
+                // adds per-block tx-size signalling + real multi-txb grids.
+                for tx_mode in [TxMode::Largest, TxMode::Select] {
+                    let case = SweepCase {
+                        mi_rows,
+                        mi_cols,
+                        tx_mode,
+                        ..*c
+                    };
+                    run_roundtrip(&case, seed, &mut cov);
+                }
             }
         }
     }
@@ -1261,4 +1374,43 @@ fn kf_luma_tile_roundtrips() {
     assert!(fi_n >= 4, "filter_intra bsize diversity too low: {fi_n}/22");
     assert!(ext7_n >= 10, "ext-tx 7-symbol cell diversity too low: {ext7_n}/52");
     assert!(ext5_n >= 10, "ext-tx 5-symbol cell diversity too low: {ext5_n}/52");
+
+    // TX_MODE_SELECT: the sweep must have decoded genuinely varied tx sizes,
+    // exercised the within-block multi-txb interleave, and adapted the
+    // (category, context)-selected tx_size_cdf instances.
+    let tx_distinct = cov.tx_sizes_decoded.iter().filter(|&&x| x).count();
+    let tx_cells_n: usize = cov.tx_cells.iter().flatten().filter(|&&x| x).count();
+    eprintln!(
+        "tx-size: {tx_distinct}/19 distinct sizes decoded, {} non-max-depth blocks, \
+         {} multi-txb blocks (max {} txbs/block), tx_size_cdf cells {tx_cells_n}/12",
+        cov.tx_depth_nonzero, cov.multi_txb_blocks, cov.max_txbs_in_block
+    );
+    // Floors set from the deterministic sweep (observed: 19/19 distinct,
+    // 4210 non-max-depth, 4210 multi-txb, max grid 16, 12/12 cells) with
+    // headroom only where a minor sweep edit could legitimately shave counts.
+    assert!(
+        tx_distinct >= 16,
+        "too few distinct tx sizes decoded under SELECT: {tx_distinct}/19"
+    );
+    assert!(
+        cov.tx_depth_nonzero >= 1000,
+        "too few non-max tx depths decoded (SELECT barely varied): {}",
+        cov.tx_depth_nonzero
+    );
+    assert!(
+        cov.multi_txb_blocks >= 1000,
+        "too few within-block multi-txb grids: {}",
+        cov.multi_txb_blocks
+    );
+    // 16 = the structural max for this scope: a 64x64 block at depth 2
+    // (TX_16X16) is a 4x4 txb grid; the sweep must reach it.
+    assert!(
+        cov.max_txbs_in_block >= 16,
+        "largest decoded txb grid too small: {} txbs",
+        cov.max_txbs_in_block
+    );
+    assert!(
+        tx_cells_n == 12,
+        "every tx_size_cdf (cat, ctx) instance must adapt: {tx_cells_n}/12"
+    );
 }
