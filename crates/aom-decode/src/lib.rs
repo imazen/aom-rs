@@ -141,7 +141,9 @@
 pub mod frame;
 
 use aom_encode::reconstruct_txb;
+use aom_entropy::cdf::read_symbol;
 use aom_entropy::dec::OdEcDec;
+use aom_entropy::dv_ref::{DvGrid, DvNbr, DvTileBounds, assign_and_validate_dv, find_dv_ref_mvs};
 use aom_entropy::partition::{
     KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, PaletteNbrKf, TXFM_CTX_INIT, TxMode,
     allow_palette as av1_allow_palette, bsize_to_max_depth, bsize_to_tx_size_cat,
@@ -149,7 +151,7 @@ use aom_entropy::partition::{
     get_plane_block_size, get_tx_size_context, get_uv_mode, intra_avail, is_cfl_allowed,
     partition_cdf_length, partition_plane_context, read_mb_modes_kf_fc, read_partition,
     read_selected_tx_size, set_txfm_ctxs, spatial_seg_pred, tx_size_from_tx_mode,
-    update_ext_partition_context,
+    txfm_partition_context, txfm_partition_update, update_ext_partition_context,
 };
 use aom_intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_intra::predict_intra_high;
@@ -432,10 +434,13 @@ pub struct KfTileConfig {
     /// `features.allow_screen_content_tools` (frame header): gates PALETTE mode
     /// per-block (`av1_allow_palette`, [`allow_palette`] — also needs the
     /// block's own bsize <= 64x64). Intra block copy (`allow_intrabc`) is the
-    /// OTHER screen-content tool this flag enables in C; it stays out of scope
-    /// here (rejected upstream in `frame.rs`, so `KfBlockState::allow_intrabc`
-    /// is always false regardless of this flag).
+    /// OTHER screen-content tool this flag enables in C.
     pub allow_screen_content_tools: bool,
+    /// `p.allow_intrabc` (frame header): intra block copy. Monochrome intrabc
+    /// KEY frames are in the envelope; colour intrabc is still rejected upstream
+    /// in `frame.rs` pending chroma reconstruction. Drives
+    /// [`KfBlockState::allow_intrabc`].
+    pub allow_intrabc: bool,
 }
 
 /// `av1_calculate_segdata` (av1/common/seg_common.c) — the derived
@@ -620,7 +625,221 @@ pub fn intra_ext_tx_cdf<'a>(
     }
 }
 
+/// `av1_read_tx_type`'s INTER CDF selection for an intra-block-copy block:
+/// `inter_ext_tx_cdf[eset][square_tx_size]` out of the frame context's padded
+/// `[EXT_TX_SETS_INTER][EXT_TX_SIZES][CDF_SIZE(TX_TYPES)]` table. Intrabc is
+/// `is_inter_block`, so `ext_tx_derive(is_inter = true)` picks the inter set; the
+/// intra-direction / filter-intra arguments are unused on the inter path.
+/// eset 0 (DCT-only) codes nothing — any slot satisfies the unused argument.
+pub fn inter_ext_tx_cdf(
+    inter_ext_tx: &mut [[[u16; 17]; 4]; 4],
+    tx_size: usize,
+    reduced_tx_set: bool,
+) -> &mut [u16] {
+    let d = ext_tx_derive(tx_size, true, reduced_tx_set, 0, false, 0, 0);
+    &mut inter_ext_tx[d.eset as usize][d.square as usize]
+}
+
 // ---- the driver -----------------------------------------------------------------
+
+/// A [`DvGrid`] view over the decode driver's per-mi block-vector grid
+/// (`TileKf::mi_dv`), addressed by offset from the current block's
+/// `(mi_row, mi_col)`. `av1_find_mv_refs`'s own tile-bounds `is_inside` gate
+/// filters candidates, so out-of-frame offsets return a non-contributing
+/// default cell.
+struct MiDvGrid<'a> {
+    mi_dv: &'a [DvNbr],
+    cols: i32,
+    rows: i32,
+    mi_row: i32,
+    mi_col: i32,
+}
+
+impl DvGrid for MiDvGrid<'_> {
+    fn get(&self, row_offset: i32, col_offset: i32) -> DvNbr {
+        let r = self.mi_row + row_offset;
+        let c = self.mi_col + col_offset;
+        if r >= 0 && r < self.rows && c >= 0 && c < self.cols {
+            self.mi_dv[(r * self.cols + c) as usize]
+        } else {
+            DvNbr::default()
+        }
+    }
+}
+
+/// `TXFM_PARTITION_CONTEXTS` = `(TX_SIZES - TX_8X8) * 6 - 3` = 21 (`enums.h`):
+/// the number of var-tx split-flag CDF contexts.
+const TXFM_PARTITION_CONTEXTS: usize = 21;
+
+/// `default_txfm_partition_cdf` (`av1/common/entropymode.c`): the fixed default
+/// var-tx split-flag CDF — one `AOM_CDF2(x)` per context, stored as
+/// `[32768 - x, 0, 0]` (matching every other 2-symbol default, e.g.
+/// `DEFAULT_INTRABC`). Copied verbatim into the frame context at setup (NOT
+/// qindex-selected), then adapted per read.
+///
+/// FORK NOTE: this CDF logically belongs inside
+/// [`aom_entropy::partition::KfFrameContext`] alongside every other frame CDF,
+/// but that struct is outside this fork's edit scope, so the decoder hosts it on
+/// [`TileKf`] as per-tile state (reset in [`TileKf::start_tile`] like the
+/// per-tile `KfFrameContext`). For a KEY frame this is byte-identical — the
+/// context always loads from this fixed default and there is no cross-frame CDF
+/// carry (`primary_ref_frame == PRIMARY_REF_NONE`). Relocate into
+/// `KfFrameContext` when integrating.
+const DEFAULT_TXFM_PARTITION_CDF: [[u16; 3]; TXFM_PARTITION_CONTEXTS] = [
+    [4187, 0, 0],
+    [8922, 0, 0],
+    [11921, 0, 0],
+    [8453, 0, 0],
+    [14572, 0, 0],
+    [20635, 0, 0],
+    [13977, 0, 0],
+    [21881, 0, 0],
+    [21763, 0, 0],
+    [5589, 0, 0],
+    [12764, 0, 0],
+    [21487, 0, 0],
+    [6219, 0, 0],
+    [13460, 0, 0],
+    [18544, 0, 0],
+    [4753, 0, 0],
+    [11222, 0, 0],
+    [18368, 0, 0],
+    [4603, 0, 0],
+    [10367, 0, 0],
+    [16680, 0, 0],
+];
+
+/// `sub_tx_size_map[TX_SIZES_ALL]` (`common_data.h`): one var-tx quadtree split step.
+const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
+/// `MAX_VARTX_DEPTH` (`enums.h`).
+const VARTX_MAX_DEPTH: i32 = 2;
+/// `TX_4X4` transform-size index — the var-tx recursion's terminal size.
+const TX_4X4_IDX: usize = 0;
+
+/// `max_block_wide` (`av1_common_int.h`) for luma (plane 0, subsampling 0): the
+/// block's transform-unit width, clipped to the frame's right edge via the
+/// 1/8-pel `mb_to_right_edge`.
+fn max_block_wide_luma(bsize: usize, mb_to_right_edge: i32) -> i32 {
+    let mut w = BLOCK_SIZE_WIDE[bsize];
+    if mb_to_right_edge < 0 {
+        w += mb_to_right_edge >> 3; // 3 + subsampling_x(=0)
+    }
+    w >> 2 // MI_SIZE_LOG2
+}
+
+/// `max_block_high` (`av1_common_int.h`) for luma (plane 0, subsampling 0).
+fn max_block_high_luma(bsize: usize, mb_to_bottom_edge: i32) -> i32 {
+    let mut h = BLOCK_SIZE_HIGH[bsize];
+    if mb_to_bottom_edge < 0 {
+        h += mb_to_bottom_edge >> 3; // 3 + subsampling_y(=0)
+    }
+    h >> 2 // MI_SIZE_LOG2
+}
+
+/// Record a var-tx leaf tx size for the uniformity guard: the first leaf sets
+/// the reference size; any later leaf of a different size flags the partition
+/// non-uniform (see [`read_tx_size_vartx`]).
+fn vartx_record_leaf(first_leaf: &mut i32, non_uniform: &mut bool, leaf: usize) {
+    if *first_leaf < 0 {
+        *first_leaf = leaf as i32;
+    } else if *first_leaf != leaf as i32 {
+        *non_uniform = true;
+    }
+}
+
+/// `read_tx_size_vartx` (`av1/decoder/decodeframe.c`): the recursive
+/// variable-transform-size split READER for an inter / intrabc block, the exact
+/// inverse of the encoder's [`aom_entropy::partition::write_tx_size_vartx`]. At
+/// each quadtree node it reads a split flag from `txfm_partition_cdf[ctx]` (2
+/// symbols), stamps the neighbour txfm-context arrays via
+/// [`txfm_partition_update`], and recurses into the `sub_tx_size_map` children
+/// down to `MAX_VARTX_DEPTH`. `tx_size_out` receives C's `mbmi->tx_size` — set at
+/// exactly the leaves where C sets it (an out-of-bounds child leaves the running
+/// value untouched, matching C's early `return`).
+///
+/// The residual coefficient loop consumes only this scalar `tx_size_out`, so a
+/// block whose var-tx partition is NON-uniform (distinct tx sizes per txb — only
+/// possible for blocks taller/wider than 2 tx units) would still need the full
+/// `inter_tx_size[]` walk in the coeff reader. The KEY-frame intrabc streams this
+/// path serves only produce uniform partitions (BLOCK_4X8 → one split flag →
+/// either TX_4X8 or TX_4X4, both uniform), for which the scalar is exact.
+#[allow(clippy::too_many_arguments)]
+fn read_tx_size_vartx(
+    dec: &mut OdEcDec,
+    txfm_partition_cdf: &mut [[u16; 3]; TXFM_PARTITION_CONTEXTS],
+    above_ctx: &mut [u8],
+    left_ctx: &mut [u8],
+    bsize: usize,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    tx_size: usize,
+    depth: i32,
+    blk_row: i32,
+    blk_col: i32,
+    tx_size_out: &mut usize,
+    // Uniformity guard: `first_leaf` is the first leaf tx size seen (-1 = none
+    // yet); `non_uniform` is set if any later leaf differs. The residual coeff
+    // loop consumes only the scalar `tx_size_out`, which is exact ONLY when the
+    // whole block tiles uniformly — so the caller rejects a non-uniform read
+    // (rather than silently mis-tiling the coefficients and desyncing).
+    first_leaf: &mut i32,
+    non_uniform: &mut bool,
+) {
+    let max_blocks_high = max_block_high_luma(bsize, mb_to_bottom_edge);
+    let max_blocks_wide = max_block_wide_luma(bsize, mb_to_right_edge);
+    if blk_row >= max_blocks_high || blk_col >= max_blocks_wide {
+        return;
+    }
+    let (bc, br) = (blk_col as usize, blk_row as usize);
+    if depth == VARTX_MAX_DEPTH {
+        *tx_size_out = tx_size;
+        vartx_record_leaf(first_leaf, non_uniform, tx_size);
+        txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], tx_size, tx_size);
+        return;
+    }
+
+    let ctx = txfm_partition_context(above_ctx[bc], left_ctx[br], bsize, tx_size);
+    let is_split = read_symbol(dec, &mut txfm_partition_cdf[ctx], 2);
+    if is_split != 0 {
+        let sub_txs = SUB_TX_SIZE_MAP[tx_size];
+        if sub_txs == TX_4X4_IDX {
+            *tx_size_out = sub_txs;
+            vartx_record_leaf(first_leaf, non_uniform, sub_txs);
+            txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], sub_txs, tx_size);
+            return;
+        }
+        let bsw = TX_SIZE_WIDE_UNIT[sub_txs] as i32;
+        let bsh = TX_SIZE_HIGH_UNIT[sub_txs] as i32;
+        let mut row = 0;
+        while row < TX_SIZE_HIGH_UNIT[tx_size] as i32 {
+            let mut col = 0;
+            while col < TX_SIZE_WIDE_UNIT[tx_size] as i32 {
+                read_tx_size_vartx(
+                    dec,
+                    txfm_partition_cdf,
+                    above_ctx,
+                    left_ctx,
+                    bsize,
+                    mb_to_right_edge,
+                    mb_to_bottom_edge,
+                    sub_txs,
+                    depth + 1,
+                    blk_row + row,
+                    blk_col + col,
+                    tx_size_out,
+                    first_leaf,
+                    non_uniform,
+                );
+                col += bsw;
+            }
+            row += bsh;
+        }
+    } else {
+        *tx_size_out = tx_size;
+        vartx_record_leaf(first_leaf, non_uniform, tx_size);
+        txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], tx_size, tx_size);
+    }
+}
 
 struct TileKf<'c> {
     cfg: &'c KfTileConfig,
@@ -649,12 +868,25 @@ struct TileKf<'c> {
     /// Feeds `get_tx_size_context` under `TX_MODE_SELECT`.
     above_t: Vec<u8>,
     left_t: [u8; 32],
+    /// Var-tx split-flag CDF (`txfm_partition_cdf[TXFM_PARTITION_CONTEXTS]`),
+    /// read by intrabc (is_inter) blocks that signal their transform size via
+    /// [`read_tx_size_vartx`]. Hosted here rather than in the shared
+    /// [`KfFrameContext`] (see [`DEFAULT_TXFM_PARTITION_CDF`]); reset to the
+    /// fixed default per tile in [`TileKf::start_tile`], adapts within a tile.
+    txfm_partition: [[u16; 3]; TXFM_PARTITION_CONTEXTS],
     /// Per-mi mode-info grid (frame-cropped stamps, like the C mi grid): the
     /// [`MiNbrKf`] projection (`y_mode` + `skip_txfm`) every context selection
     /// reads through `xd->above_mbmi` / `xd->left_mbmi`, and which also feeds
     /// `get_filt_type` (edge-filter type 1 when a neighbour's y mode is
     /// SMOOTH/SMOOTH_V/SMOOTH_H).
     mi: Vec<MiNbrKf>,
+    /// Per-mi block-vector grid: the intrabc projection of `xd->mi[]` that
+    /// `av1_find_mv_refs(INTRA_FRAME)` scans (`use_intrabc`, own `bsize`, and the
+    /// block's DV `mv[0]`), kept parallel to `mi` rather than fattening the
+    /// encode-shared [`MiNbrKf`]. Frame-cropped stamps (like `mi`); every cell
+    /// is a non-intrabc DC default until an intrabc block stamps its DV. Also
+    /// carries the neighbour `is_inter_block`/`bsize` `get_tx_size_context` reads.
+    mi_dv: Vec<DvNbr>,
     /// Per-mi UV-mode grid (same frame-cropped stamps): what the chroma
     /// `get_filt_type` reads through `xd->chroma_above_mbmi` /
     /// `xd->chroma_left_mbmi` (`is_smooth(mbmi, plane > 0)` checks the
@@ -780,7 +1012,7 @@ impl<'c> TileKf<'c> {
             sb_size: sb_size_block,
             bsize: sb_size_block,
             coded_lossless: false,
-            allow_intrabc: false,
+            allow_intrabc: cfg.allow_intrabc,
             cdef_bits: cfg.cdef_bits,
             dq_present: cfg.delta_q_present,
             dlf_present: cfg.delta_lf_present,
@@ -824,6 +1056,7 @@ impl<'c> TileKf<'c> {
             left_p: [0; 32],
             above_t: vec![TXFM_CTX_INIT; aligned_mi_cols],
             left_t: [TXFM_CTX_INIT; 32],
+            txfm_partition: DEFAULT_TXFM_PARTITION_CDF,
             mi: vec![
                 MiNbrKf {
                     y_mode: 0,
@@ -831,6 +1064,7 @@ impl<'c> TileKf<'c> {
                 };
                 (cfg.mi_rows * cfg.mi_cols) as usize
             ],
+            mi_dv: vec![DvNbr::default(); (cfg.mi_rows * cfg.mi_cols) as usize],
             mi_uv: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
             mi_palette: if cfg.allow_screen_content_tools {
                 vec![PaletteNbrKf::default(); (cfg.mi_rows * cfg.mi_cols) as usize]
@@ -903,6 +1137,9 @@ impl<'c> TileKf<'c> {
         }
         self.above_p[a0..a0 + aligned_width].fill(0);
         self.above_t[a0..a0 + aligned_width].fill(TXFM_CTX_INIT);
+        // Per-tile fresh var-tx CDF, mirroring the per-tile `KfFrameContext`
+        // reload (`tile_data->tctx = *cm->fc`); adapts within the tile only.
+        self.txfm_partition = DEFAULT_TXFM_PARTITION_CDF;
 
         self.cfl = CflCtx::new(ss_x as i32, ss_y as i32);
         self.lr_refs = aom_entropy::lr::LrRefState::default();
@@ -997,6 +1234,18 @@ impl<'c> TileKf<'c> {
         for r in 0..y_mis {
             let base = ((mi_row + r) * self.cfg.mi_cols + mi_col) as usize;
             self.mi[base..base + x_mis as usize].fill(cell);
+        }
+    }
+
+    /// [`Self::stamp_mi`]'s block-vector twin: stamp the intrabc projection
+    /// ([`DvNbr`]) over the block's frame-cropped mi footprint so later blocks'
+    /// `av1_find_mv_refs` scans and `get_tx_size_context` inter checks see it.
+    fn stamp_dv(&mut self, mi_row: i32, mi_col: i32, bsize: usize, cell: DvNbr) {
+        let x_mis = MI_SIZE_WIDE[bsize].min(self.cfg.mi_cols - mi_col);
+        let y_mis = MI_SIZE_HIGH[bsize].min(self.cfg.mi_rows - mi_row);
+        for r in 0..y_mis {
+            let base = ((mi_row + r) * self.cfg.mi_cols + mi_col) as usize;
+            self.mi_dv[base..base + x_mis as usize].fill(cell);
         }
     }
 
@@ -1135,7 +1384,7 @@ impl<'c> TileKf<'c> {
             self.st.seg_pred = pred;
             self.st.seg_cdf_num = cdf_num;
         }
-        let info = read_mb_modes_kf_fc(
+        let mut info = read_mb_modes_kf_fc(
             dec,
             cdfs,
             &mut self.st,
@@ -1145,6 +1394,63 @@ impl<'c> TileKf<'c> {
             above_palette,
             left_palette,
         );
+        // Intra block copy: read_mb_modes_kf_fc has already read use_intrabc and,
+        // when set, the RAW block-vector difference into info.dv_row/dv_col.
+        // Resolve the final DV here — the predictor scan (av1_find_mv_refs at
+        // INTRA_FRAME + av1_find_best_ref_mvs, then av1_find_ref_dv / assign_dv)
+        // reads the decoded-so-far mi grid, which the driver owns (not the
+        // entropy layer). The C bitstream order is preserved: the use_intrabc
+        // symbol and the mv-diff were read in read_intrabc_info; the predictor
+        // derivation here reads no bits.
+        if info.use_intrabc != 0 {
+            let dv_tile = DvTileBounds {
+                mi_row_start: self.tile.mi_row_start,
+                mi_row_end: self.tile.mi_row_end,
+                mi_col_start: self.tile.mi_col_start,
+                mi_col_end: self.tile.mi_col_end,
+            };
+            let mib_size = self.st.mib_size;
+            let grid = MiDvGrid {
+                mi_dv: &self.mi_dv,
+                cols: cfg.mi_cols,
+                rows: cfg.mi_rows,
+                mi_row,
+                mi_col,
+            };
+            let (nearest_r, nearest_c, near_r, near_c) = find_dv_ref_mvs(
+                mi_row,
+                mi_col,
+                bsize,
+                partition,
+                up_available,
+                left_available,
+                dv_tile,
+                cfg.mi_rows,
+                cfg.mi_cols,
+                mib_size,
+                grid,
+            );
+            let (dv_row, dv_col) = assign_and_validate_dv(
+                (nearest_r, nearest_c),
+                (near_r, near_c),
+                info.dv_row,
+                info.dv_col,
+                self.tile.mi_row_start,
+                mib_size,
+                mi_row,
+                mi_col,
+                bsize,
+                dv_tile,
+                mib_size.trailing_zeros() as i32,
+                chroma_ref,
+                self.st.num_planes,
+                ss_x as i32,
+                ss_y as i32,
+            )
+            .expect("intrabc DV failed validity (non-conformant stream)");
+            info.dv_row = dv_row;
+            info.dv_col = dv_col;
+        }
         // Stamp this block's palette facts over its footprint — matches stamp_mi's
         // placement, right after the mode-info read (subsequent blocks' above/left
         // palette-cache lookups must see it).
@@ -1238,18 +1544,112 @@ impl<'c> TileKf<'c> {
         // (bsize > BLOCK_4X4) under TX_MODE_SELECT codes its tx-size depth —
         // intra blocks code it even when skip_txfm is set (`!is_inter ||
         // allow_select_inter` is true for intra) — else the tx_mode fallback.
-        let tx_size = if bsize > 0 {
-            // block_signals_txsize
-            if cfg.tx_mode == TxMode::Select {
+        let a_off = mi_col as usize;
+        let l_off = (mi_row & 31) as usize;
+        let tx_size = if info.use_intrabc != 0 {
+            // Intrabc is `is_inter_block`, so `inter_block_tx` is set and the tx
+            // size follows the INTER path (decodeframe.c:1179-1198):
+            //  - TX_MODE_SELECT && block_signals_txsize && !skip  → the var-tx
+            //    quadtree (`read_tx_size_vartx`, `txfm_partition_cdf` — NOT the
+            //    intra `tx_size_cdf`). It stamps the txfm-context arrays itself
+            //    via `txfm_partition_update`, so no `set_txfm_ctxs` here.
+            //  - otherwise → `read_tx_size(is_inter=true, allow_select=!skip)`:
+            //    with `is_inter` the `read_selected` arm needs
+            //    `allow_select && select && signalling`, which is exactly the
+            //    var-tx case above, so this always resolves to the fallback
+            //    (`tx_size_from_tx_mode` when signalling, else max rect) — no
+            //    tx-size symbol — then `set_txfm_ctxs(skip && is_inter = skip)`.
+            if cfg.tx_mode == TxMode::Select && bsize > 0 && info.skip == 0 {
+                let max_tx = MAX_TXSIZE_RECT_LOOKUP[bsize];
+                let bw_u = TX_SIZE_WIDE_UNIT[max_tx] as i32;
+                let bh_u = TX_SIZE_HIGH_UNIT[max_tx] as i32;
+                let width_u = MI_SIZE_WIDE[bsize];
+                let height_u = MI_SIZE_HIGH[bsize];
+                let mb_to_right_edge = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 32;
+                let mb_to_bottom_edge = (cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 32;
+                let mut vartx_tx = max_tx;
+                let mut first_leaf = -1i32;
+                let mut non_uniform = false;
+                let mut idy = 0;
+                while idy < height_u {
+                    let mut idx = 0;
+                    while idx < width_u {
+                        read_tx_size_vartx(
+                            dec,
+                            &mut self.txfm_partition,
+                            &mut self.above_t[a_off..],
+                            &mut self.left_t[l_off..],
+                            bsize,
+                            mb_to_right_edge,
+                            mb_to_bottom_edge,
+                            max_tx,
+                            0,
+                            idy,
+                            idx,
+                            &mut vartx_tx,
+                            &mut first_leaf,
+                            &mut non_uniform,
+                        );
+                        idx += bw_u;
+                    }
+                    idy += bh_u;
+                }
+                // The coeff loop tiles the whole block with this one scalar
+                // tx_size, exact only for a UNIFORM var-tx partition. A
+                // non-uniform intrabc partition (possible only for blocks >2 tx
+                // units in a dim) would need the per-txb inter_tx_size[] walk;
+                // reject rather than silently mis-tile the coefficients. The
+                // KEY-frame intrabc screen-content streams verified here only
+                // produce uniform partitions, so this never fires on them.
+                assert!(
+                    !non_uniform,
+                    "non-uniform intrabc var-tx partition not supported \
+                     (mi=({mi_row},{mi_col}) bsize={bsize}); would desync the coeff walk"
+                );
+                vartx_tx
+            } else {
+                let ts = if bsize > 0 {
+                    tx_size_from_tx_mode(bsize, cfg.tx_mode)
+                } else {
+                    MAX_TXSIZE_RECT_LOOKUP[bsize]
+                };
+                set_txfm_ctxs(
+                    &mut self.above_t[a_off..],
+                    &mut self.left_t[l_off..],
+                    ts,
+                    bw,
+                    bh,
+                    info.skip != 0,
+                );
+                ts
+            }
+        } else if bsize > 0 {
+            // Intra, block_signals_txsize: read_tx_size(is_inter=false,
+            // allow_select=!skip). `!is_inter` makes `(!is_inter || …)` true, so a
+            // signalling block under TX_MODE_SELECT codes its tx-size depth
+            // (intra codes it even when skip_txfm is set) — else the tx_mode
+            // fallback. set_txfm_ctxs' skip arg is `skip && is_inter` = 0.
+            let tx_size = if cfg.tx_mode == TxMode::Select {
                 let cat = bsize_to_tx_size_cat(bsize) as usize;
+                // get_tx_size_context reads is_inter_block(above/left_mbmi); on a
+                // KEY frame that is true only for an intrabc neighbour, whose
+                // block_size_wide/high then drives the context (else None).
+                let above_inter_bsize = up_available
+                    .then(|| self.mi_dv[((mi_row - 1) * cfg.mi_cols + mi_col) as usize])
+                    .filter(|d| d.use_intrabc)
+                    .map(|d| d.bsize);
+                let left_inter_bsize = left_available
+                    .then(|| self.mi_dv[(mi_row * cfg.mi_cols + mi_col - 1) as usize])
+                    .filter(|d| d.use_intrabc)
+                    .map(|d| d.bsize);
                 let ctx = get_tx_size_context(
                     bsize,
-                    self.above_t[mi_col as usize],
-                    self.left_t[(mi_row & 31) as usize],
+                    self.above_t[a_off],
+                    self.left_t[l_off],
                     up_available,
                     left_available,
-                    None, // KEY frame, intrabc off: neighbours are never inter
-                    None,
+                    above_inter_bsize,
+                    left_inter_bsize,
                 );
                 let depth = read_selected_tx_size(
                     dec,
@@ -1260,21 +1660,29 @@ impl<'c> TileKf<'c> {
                 depth_to_tx_size(depth, bsize)
             } else {
                 tx_size_from_tx_mode(bsize, cfg.tx_mode)
-            }
+            };
+            set_txfm_ctxs(
+                &mut self.above_t[a_off..],
+                &mut self.left_t[l_off..],
+                tx_size,
+                bw,
+                bh,
+                false,
+            );
+            tx_size
         } else {
-            MAX_TXSIZE_RECT_LOOKUP[bsize]
+            // Intra, non-signalling (BLOCK_4X4): max rect (TX_4X4), no symbol.
+            let tx_size = MAX_TXSIZE_RECT_LOOKUP[bsize];
+            set_txfm_ctxs(
+                &mut self.above_t[a_off..],
+                &mut self.left_t[l_off..],
+                tx_size,
+                bw,
+                bh,
+                false,
+            );
+            tx_size
         };
-        // set_txfm_ctxs(tx_size, xd->width, xd->height, skip && is_inter, xd):
-        // full (not frame-clipped) footprint; the skip arg is always 0 for
-        // intra blocks, so a skipped intra block still stamps its tx dims.
-        set_txfm_ctxs(
-            &mut self.above_t[mi_col as usize..],
-            &mut self.left_t[(mi_row & 31) as usize..],
-            tx_size,
-            bw,
-            bh,
-            false,
-        );
 
         // parse_decode_block (decodeframe.c): with delta-q present, every
         // block's dequant is recomputed from the running current_base_qindex
@@ -1380,15 +1788,23 @@ impl<'c> TileKf<'c> {
                         &self.above_e[0][a0..],
                         &self.left_e[0][l0..],
                     );
-                    let ext = intra_ext_tx_cdf(
-                        &mut cdfs.ext_tx_1ddct,
-                        &mut cdfs.ext_tx_dtt4,
-                        tx_size,
-                        cfg.reduced_tx_set,
-                        info.use_filter_intra != 0,
-                        info.filter_intra_mode as usize,
-                        info.y_mode as usize,
-                    );
+                    // Intrabc is is_inter_block, so av1_read_tx_type selects the
+                    // tx-type CDF from inter_ext_tx_cdf (and maps the symbol with
+                    // the inter set type); a normal intra block uses the intra
+                    // ext-tx sets keyed on (square tx size, intra direction).
+                    let ext = if info.use_intrabc != 0 {
+                        inter_ext_tx_cdf(&mut cdfs.inter_ext_tx, tx_size, cfg.reduced_tx_set)
+                    } else {
+                        intra_ext_tx_cdf(
+                            &mut cdfs.ext_tx_1ddct,
+                            &mut cdfs.ext_tx_dtt4,
+                            tx_size,
+                            cfg.reduced_tx_set,
+                            info.use_filter_intra != 0,
+                            info.filter_intra_mode as usize,
+                            info.y_mode as usize,
+                        )
+                    };
                     let (eob, tt) = read_coeffs_txb_full(
                         dec,
                         &mut cdfs.coeff,
@@ -1399,7 +1815,7 @@ impl<'c> TileKf<'c> {
                         tsc as usize,
                         dsc as usize,
                         true,
-                        false,
+                        info.use_intrabc != 0,
                         cfg.reduced_tx_set,
                         signal_gate,
                         0,
@@ -1451,7 +1867,24 @@ impl<'c> TileKf<'c> {
                 let off = ((mi_row * 4) as usize + blk_row * 4) * self.stride
                     + (mi_col * 4) as usize
                     + blk_col * 4;
-                if info.palette_size[0] > 0 {
+                if info.use_intrabc != 0 {
+                    // Intra block copy, luma: an integer block copy from the
+                    // DV-referenced region of the SAME reconstruction plane. The
+                    // DV is read at MV_SUBPEL_NONE (full-pel) and validated by
+                    // av1_is_dv_valid to reference only already-decoded pixels, so
+                    // the source (off shifted by dv/8) is always reconstructed and
+                    // never overlaps this block's pending tx units. Luma needs no
+                    // interpolation (av1_dc_128... the intrabc convolve collapses
+                    // to a copy at integer positions).
+                    let src = (off as i32
+                        + (info.dv_row >> 3) * self.stride as i32
+                        + (info.dv_col >> 3)) as usize;
+                    for r in 0..txhpx {
+                        let s = src + r * self.stride;
+                        scratch[r * txwpx..(r + 1) * txwpx]
+                            .copy_from_slice(&self.recon[s..s + txwpx]);
+                    }
+                } else if info.palette_size[0] > 0 {
                     // av1_predict_intra_block's palette branch (reconintra.c): pixels
                     // come directly from the colour-index map + palette LUT — no
                     // directional/DC prediction math (the surrounding residual
@@ -1766,6 +2199,27 @@ impl<'c> TileKf<'c> {
             MiNbrKf {
                 y_mode: info.y_mode,
                 skip_txfm: info.skip,
+            },
+        );
+        // Block-vector grid stamp (intrabc projection of xd->mi): on a KEY frame
+        // ref_frame[0] is always INTRA_FRAME and ref_frame[1] NONE_FRAME; only
+        // use_intrabc + the block's own DV (mv[0]) and bsize are consulted by the
+        // next block's av1_find_mv_refs / get_tx_size_context. `mode` is read only
+        // by is_global_mv_block (never a match on KEY frames), so it stays 0.
+        self.stamp_dv(
+            mi_row,
+            mi_col,
+            bsize,
+            DvNbr {
+                bsize,
+                ref_frame0: 0,
+                ref_frame1: -1,
+                use_intrabc: info.use_intrabc != 0,
+                mode: 0,
+                mv0_row: info.dv_row,
+                mv0_col: info.dv_col,
+                mv1_row: 0,
+                mv1_col: 0,
             },
         );
         // The uv-mode grid stamp: non-chroma-reference blocks carry UV_DC_PRED

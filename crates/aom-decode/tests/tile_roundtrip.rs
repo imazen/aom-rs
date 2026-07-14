@@ -1743,6 +1743,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         // This mirror encoder doesn't choose palette colours/maps (no RDO
         // search) — palette coverage is real_bitstream.rs's REAL-encoder gate.
         allow_screen_content_tools: false,
+        allow_intrabc: false,
     };
     let aligned_cols = (cfg.mi_cols as usize).div_ceil(16) * 16;
     let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;

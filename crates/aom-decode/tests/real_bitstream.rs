@@ -1422,3 +1422,135 @@ fn palette_streams_decode_byte_identical_to_c() {
         "NO ALL_INTRA arm exercised palette (usage=2 is the primary zenavif path)"
     );
 }
+
+// ---- INTRABC gate: --enable-intrabc=1 monochrome KEY frames ----
+//
+// Intra block copy is the OTHER `allow_screen_content_tools` tool. Monochrome
+// intrabc is in the decode envelope: the block vector is read at MV_SUBPEL_NONE
+// (full-pel luma), predicted via av1_find_mv_refs(INTRA_FRAME) + av1_find_ref_dv
+// and validated by av1_is_dv_valid, then luma reconstruction is an integer block
+// copy from the already-decoded region. Verified byte-identical to the C
+// decoder here. Colour intrabc is still rejected in frame.rs pending chroma
+// reconstruction (luma-derived DV can land at chroma half-pel), so this sweep is
+// monochrome only. Uses gen_plane_screen_content (repeated stripe super-tiles)
+// so `--enable-intrabc=1` genuinely finds block matches.
+
+#[test]
+fn intrabc_monochrome_streams_decode_byte_identical_to_c() {
+    struct IbcCfg {
+        w: usize,
+        h: usize,
+        bd: i32,
+        cq: i32,
+        usage: u32,
+    }
+    let cfgs = [
+        IbcCfg {
+            w: 128,
+            h: 128,
+            bd: 8,
+            cq: 12,
+            usage: 2,
+        },
+        IbcCfg {
+            w: 128,
+            h: 128,
+            bd: 8,
+            cq: 32,
+            usage: 2,
+        },
+        IbcCfg {
+            w: 128,
+            h: 128,
+            bd: 8,
+            cq: 55,
+            usage: 2,
+        },
+        IbcCfg {
+            w: 128,
+            h: 128,
+            bd: 8,
+            cq: 63,
+            usage: 2,
+        },
+        IbcCfg {
+            w: 128,
+            h: 128,
+            bd: 10,
+            cq: 20,
+            usage: 2,
+        },
+        IbcCfg {
+            w: 160,
+            h: 96,
+            bd: 8,
+            cq: 40,
+            usage: 0,
+        },
+        IbcCfg {
+            w: 256,
+            h: 128,
+            bd: 8,
+            cq: 24,
+            usage: 2,
+        },
+    ];
+    let mut total_arms = 0usize;
+    let mut intrabc_arms = 0usize;
+    for c in &cfgs {
+        total_arms += 1;
+        let seed = ((c.w as u64) << 32)
+            ^ ((c.h as u64) << 24)
+            ^ ((c.cq as u64) << 12)
+            ^ ((c.bd as u64) << 4)
+            ^ c.usage as u64;
+        let y = gen_plane_screen_content(c.w, c.h, c.bd, seed ^ 0x1a1b);
+        let empty: Vec<u16> = Vec::new();
+        let bytes = c::ref_encode_av1_kf_screen_content(
+            &y, &empty, &empty, c.w, c.h, c.bd, /* mono */ true, /* ss_x */ 1,
+            /* ss_y */ 1, c.cq, /* cpu_used */ 0, /* enable_cdef */ true,
+            /* enable_restoration */ true, c.usage, /* aq_mode */ 0,
+            /* two_pass */ false, /* enable_palette */ false,
+            /* enable_intrabc */ true,
+        );
+
+        // Byte-identity: our decode vs the REAL C decoder, same bytes.
+        let rust = decode_frame_obus(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "decode_frame_obus rejected intrabc mono stream {}x{} bd{} cq={} usage={}: {e}",
+                c.w, c.h, c.bd, c.cq, c.usage
+            )
+        });
+        let cref = c::ref_decode_av1_kf(&bytes, c.w, c.h);
+        assert_eq!(
+            rust.y, cref.y,
+            "LUMA mismatch intrabc mono {}x{} bd{} cq={} usage={}",
+            c.w, c.h, c.bd, c.cq, c.usage
+        );
+
+        // intrabc-usage introspection via the prefilter entry point
+        // (DecodedBlockKf.info.use_intrabc is not on FrameDecode's surface).
+        let (t, _tcfg, _header) = decode_frame_obus_prefilter(&bytes).unwrap();
+        let ibc_blocks = t.blocks.iter().filter(|b| b.info.use_intrabc != 0).count();
+        println!(
+            "intrabc arm {}x{} bd{} cq={} usage={}: {} bytes, {} blocks, {} intrabc blocks",
+            c.w,
+            c.h,
+            c.bd,
+            c.cq,
+            c.usage,
+            bytes.len(),
+            t.blocks.len(),
+            ibc_blocks
+        );
+        if ibc_blocks > 0 {
+            intrabc_arms += 1;
+        }
+    }
+    println!("intrabc gate summary: {total_arms} arms, {intrabc_arms} carrying >=1 intrabc block");
+    assert!(
+        intrabc_arms > 0,
+        "NO arm actually exercised intrabc — screen-content generator or \
+         --enable-intrabc=1 wiring is broken"
+    );
+}
