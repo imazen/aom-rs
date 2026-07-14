@@ -792,44 +792,62 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
         }
     }
 
-    match first_divergence {
-        None if real_seq.len() == ours_seq.len() => {
-            eprintln!(
-                "{name}: NO partition-tree divergence found -- trees are IDENTICAL. Any \
-                 remaining byte mismatch (if present) must come from leaf mode/tx/coefficient \
-                 data, not partition choice."
-            );
-        }
-        None => {
-            eprintln!(
-                "{name}: partition VALUES agree on the shared prefix but tree LENGTH differs \
-                 (real_seq.len()={} ours_seq.len()={}) -- one side's tree is a strict subset \
-                 (recursion depth differs without a value divergence being visible in this \
-                 replay -- inspect raw tree arrays directly).",
-                real_seq.len(),
-                ours_seq.len()
-            );
-        }
-        Some((mi_row, mi_col, bsize, p_real, p_ours)) => {
-            eprintln!(
-                "{name}: FIRST DIVERGENCE at (mi_row={mi_row}, mi_col={mi_col}, bsize={bsize}): \
-                 real aomenc chose PARTITION_{} ({p_real}), ours chose PARTITION_{} ({p_ours}).",
-                PARTITION_NAMES[p_real as usize], PARTITION_NAMES[p_ours as usize]
-            );
-        }
+    if let Some((mi_row, mi_col, bsize, p_real, p_ours)) = first_divergence {
+        eprintln!(
+            "{name}: FIRST DIVERGENCE at (mi_row={mi_row}, mi_col={mi_col}, bsize={bsize}): \
+             real aomenc chose PARTITION_{} ({p_real}), ours chose PARTITION_{} ({p_ours}).",
+            PARTITION_NAMES[p_real as usize], PARTITION_NAMES[p_ours as usize]
+        );
+    } else if real_seq.len() != ours_seq.len() {
+        eprintln!(
+            "{name}: partition VALUES agree on the shared prefix but tree LENGTH differs \
+             (real_seq.len()={} ours_seq.len()={}).",
+            real_seq.len(),
+            ours_seq.len()
+        );
     }
+
+    // PORT-VS-REAL FULL-TREE GATE (ratcheted 2026-07-14). Both LF-clean AB-probe
+    // cases now produce a partition tree BYTE-FOR-STRUCTURE identical to real
+    // aomenc's. This asserts it permanently: the fix was the intra tx-size
+    // search's `recon_intra` guard (tx_search.rs -- reconstruct a txb into the
+    // recon plane ONLY when it is NOT the last/bottom-right txb, matching C's
+    // `recon_intra` at tx_search.c:930-932). Leaving the LAST txb as the raw
+    // PREDICTION (not the reconstruction) is what the ALLINTRA
+    // `intra_rd_variance_factor` reads: for a DC-predicted (flat) small block it
+    // makes the recon variance read as ~0 -> factor up to 3.0, inflating that
+    // leaf's rd exactly as C does. Pre-fix the port read the reconstruction
+    // (high variance -> factor 1.0), under-costing small screen-content leaves
+    // and over-selecting HORZ over NONE/SPLIT at (2,12,BLOCK_8X8) (case 1, real
+    // NONE) and (8,12,BLOCK_16X16) (case 2, real SPLIT). If this fires, that
+    // small-block screen-content RD parity regressed.
+    assert_eq!(
+        ours_seq,
+        real_seq,
+        "{name}: PORT-VS-REAL partition tree must match real aomenc exactly \
+         (recon_intra last-txb variance-factor parity). ours.len={} real.len={}",
+        ours_seq.len(),
+        real_seq.len()
+    );
 }
 
-/// ASSERTS self-consistency (the port's bytes decode back to the port's own
-/// search tree) for both LF-clean AB-probe cases -- the permanent regression
-/// for the palette-usage-flag desync that made (0,8,BLOCK_32X32) read as NONE.
+/// ASSERTS, for both LF-clean AB-probe cases, BOTH:
+/// 1. self-consistency (the port's bytes decode back to the port's own search
+///    tree) -- the permanent regression for the palette-usage-flag desync that
+///    made (0,8,BLOCK_32X32) read as NONE; and
+/// 2. FULL port-vs-real-aomenc partition-tree equality (`ours_seq ==
+///    real_seq`).
 ///
-/// The port-vs-REAL-aomenc comparison stays diagnostic-only: after the desync
-/// fix the trees agree with real down to ~node 10, then diverge at DEEP nodes
-/// (top-split: (2,12,8x8) real=NONE/ours=HORZ; left-flat: (8,12,16x16)
-/// real=SPLIT/ours=HORZ). Those are genuine deep RD-parity differences, not
-/// desyncs, and are tracked separately -- so this test prints that first
-/// divergence but does not assert on it.
+/// (2) was diagnostic-only until 2026-07-14, when the trees still diverged at
+/// DEEP small-block nodes (top-split: (2,12,8x8) real=NONE/ours=HORZ; left-flat:
+/// (8,12,16x16) real=SPLIT/ours=HORZ). Root cause: the intra tx-size search
+/// reconstructed EVERY txb into the recon plane, but C's `recon_intra`
+/// (tx_search.c:930-932) leaves the LAST/bottom-right txb as the raw prediction.
+/// The ALLINTRA `intra_rd_variance_factor` reads that plane; on a flat DC small
+/// block the leftover reconstruction (vs C's flat prediction) collapsed the
+/// factor from ~3.0 to 1.0, under-costing small screen-content leaves. With the
+/// guard added (tx_search.rs) both cases' trees now match real aomenc exactly,
+/// so this is a hard gate.
 #[test]
 fn decode_diff_ab_probe_clean_cases() {
     run_one("top split (2 freqs) / bottom flat", top_split_bottom_flat);
