@@ -1628,6 +1628,11 @@ unchanged (`encoder_gate_e2e_attempt` 3/3, `encoder_gate_e2e_textured_attempt`
 7/7; `encoder_gate_e2e_ab_attempt` + both `nonzero_lf` sweeps all ok). Commits
 verified on `origin/main`: `2237b9b` (style: cargo fmt), `5e3e5c7` (the fix).
 
+**[SUPERSEDED 2026-07-14 — RESOLVED below in "the (2,12,BLOCK_8X8) small-block
+screen-content divergence was a `recon_intra` last-txb variance-factor bug". Both
+cases now match real aomenc's tree exactly; the AB-probe is a full port-vs-real
+tree gate. Kept for the localization record.]**
+
 **Honest remaining gap — the AB-probe is NOT a full port-vs-real tree match
 yet.** With the desync gone, the trees agree with real down to ~node 10, then
 diverge at DEEP small-block nodes:
@@ -1673,6 +1678,61 @@ divergence is in a per-node cost/context term that only a C-side dump can pin
 down. The `x->source_variance` / entropy-context state feeding these leaves (all
 correct-by-construction since the tree matches real to node 10) is the first
 suspect for a context-carried difference.
+
+## RESOLVED: the (2,12,BLOCK_8X8) small-block screen-content divergence was a `recon_intra` last-txb variance-factor bug — FIXED (2026-07-14, encoder track)
+
+**Both AB-probe cases now produce partition trees byte-for-structure IDENTICAL to
+real aomenc** (`decode_diff_ab_probe` ratcheted from diagnostic-only to a hard
+`ours_seq == real_seq` gate — commit `335c1c9`). The "Concrete next attempt"
+above was carried out: a per-node C rdcost trace (gdb over a `-O0 -g` debug
+libaom build; integer RD decisions are `-O`-independent, so decisions match the
+Release oracle) localized the divergence term-by-term.
+
+**Root cause (not a cost-table / budget / partition-signaling issue — a
+recon-plane side-effect the ALLINTRA variance factor reads).** At (mi_row=2,
+mi_col=12, BLOCK_8X8), C evaluates NONE/SPLIT/HORZ/VERT and finds NONE the ONLY
+viable candidate — SPLIT/HORZ/VERT each fail because one sub-block's mode search
+returns INT_MAX (its best mode's rd exceeds the RD budget). The port instead
+found HORZ viable and it won. The trace showed the HORZ bottom 8x4 (3,12): C's DC
+leaf gets `intra_rd_variance_factor` = **2.999999** (pre_rd 3,309,769 → post_rd
+9,929,305 ≫ budget 3,515,356 → rejected), but the port got factor **1.0**
+(post_rd ≈ 3.31M < budget → accepted).
+
+The factor divergence traced to the RECON PLANE the factor reads
+(`xd->plane[0].dst.buf`). C's `dist_block_px_domain` (tx_search.c:1042-1064)
+reconstructs into a **temp** buffer, and `recon_intra` (tx_search.c:930-932)
+writes the reconstruction back into the dst plane **only for non-last txbs**
+(guard `blk_row + txh_unit < mi_high || blk_col + txw_unit < mi_wide`) — the
+LAST/bottom-right txb keeps the raw PREDICTION (nothing chains from it). So for a
+flat DC block the dst reads as per-4x4-constant (variance ~0 → factor up to 3.0).
+The port's `txfm_rd_in_plane_intra` reconstructed **every** txb, so the last txb
+held the high-variance reconstruction → factor 1.0. Direct recon-plane dump: C =
+`[81,81,81,81,104,104,104,104]` (flat), port (pre-fix) =
+`[81,81,81,81,82,79,176,171]` (reconstruction); post-fix the port matches C
+byte-for-byte and factor = 2.999999.
+
+**Fix (`f5ffa70`, `crates/aom-encode/src/tx_search.rs`):** guard the
+`recon_intra` reconstruction on `win.best_eob > 0 && (blk_row + txh_unit <
+max_blocks_high || blk_col + txw_unit < max_blocks_wide)`. Only the recon-plane
+CONTENT of the last txb changes (its rate/dist/rdcost were already computed by
+`search_tx_type_intra`; nothing else in the RD search reads the last-txb recon —
+the committed recon comes from the separate winner re-encode, unchanged). Case 2
+(8,12,BLOCK_16X16, real=SPLIT) resolved with the SAME fix — it was the same root
+term, as predicted.
+
+**Two differential C-reference oracles had the identical missing guard** (which
+is why they matched the pre-fix port): `common::c_uniform_txfm_yrd` and the
+`uniform_txfm_yrd_diff` inlined walk both reconstructed the last txb. Both got
+the same guard so they stay faithful to the real encoder (confirmed against the
+real encoder by gdb: BLOCK_4X4 DC leaves flat prediction 128/152/177/105 in dst).
+This is oracle correction, NOT test weakening — the fixed port matches real
+aomenc (AB-probe + all e2e gates), and the oracles now match real aomenc too.
+
+**Verification (evidence):** full `cargo test -p aom-encode --all-targets
+--no-fail-fast` green — **73 tests, 0 failed**. Hard e2e gates unchanged
+(`encoder_gate_e2e_attempt` 3/3, `encoder_gate_e2e_textured_attempt` 7/7,
+`encoder_gate_e2e_ab_attempt`, both `nonzero_lf` sweeps ok). Commits verified on
+`origin/main`: `f5ffa70` (fix + oracle corrections), `335c1c9` (ratcheted gate).
 
 ## Gate posture (honest)
 
