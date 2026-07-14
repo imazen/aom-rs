@@ -235,6 +235,10 @@ pub fn pack_leaf(
         cfl_joint_sign: winner.cfl_alpha_signs,
         angle_delta_uv: winner.angle_delta_uv,
         palette_size: [0, 0],
+        // No palette in this envelope (module docs: "no palette") -- all-zero
+        // colors, matching palette_size == [0, 0] (3 * PALETTE_MAX_SIZE == 24,
+        // PALETTE_MAX_SIZE == 8 is aom-entropy-private).
+        palette_colors: [0u16; 24],
         use_filter_intra: i32::from(winner.use_filter_intra),
         filter_intra_mode: winner.filter_intra_mode as i32,
     };
@@ -253,6 +257,9 @@ pub fn pack_leaf(
         cfg.enable_filter_intra,
         above_nbr,
         left_nbr,
+        // No palette in this envelope -- no palette neighbour context either.
+        None,
+        None,
     );
 
     // ---- 2. tx_size symbol (write_selected_tx_size), gated exactly as
