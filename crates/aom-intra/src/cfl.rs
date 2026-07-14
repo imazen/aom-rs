@@ -118,7 +118,7 @@ const BLK_H: [i32; 22] = [
 /// `cfl_luma_subsampling_420_hbd_c`: each output Q3 sample is the sum of a 2x2
 /// luma quad, `<< 1` (·8 total). Output rows advance one `CFL_BUF_LINE` per
 /// *pair* of luma rows.
-fn subsample_420_hbd(
+pub fn subsample_420_hbd(
     input: &[u16],
     mut in_off: usize,
     in_stride: usize,
@@ -147,7 +147,7 @@ fn subsample_420_hbd(
 }
 
 /// `cfl_luma_subsampling_422_hbd_c`: horizontal pair sum `<< 2`.
-fn subsample_422_hbd(
+pub fn subsample_422_hbd(
     input: &[u16],
     mut in_off: usize,
     in_stride: usize,
@@ -169,7 +169,7 @@ fn subsample_422_hbd(
 }
 
 /// `cfl_luma_subsampling_444_hbd_c`: straight copy `<< 3`.
-fn subsample_444_hbd(
+pub fn subsample_444_hbd(
     input: &[u16],
     mut in_off: usize,
     in_stride: usize,
@@ -224,7 +224,7 @@ fn cfl_pad(cfl: &mut CflCtx, width: i32, height: i32) {
 /// size-specific C wrappers pass `round_offset = (width*height)/2` and
 /// `num_pel_log2 = log2(width*height)` (`CFL_SUB_AVG_FN` table, verified for
 /// all 14 CfL sizes).
-fn subtract_average(
+pub fn subtract_average(
     src: &[u16; CFL_BUF_SQUARE],
     dst: &mut [i16; CFL_BUF_SQUARE],
     width: usize,
@@ -305,7 +305,7 @@ fn clip_pixel_highbd(val: i32, bd: i32) -> u16 {
 /// `cfl_predict_hbd_c`: `dst = clip(dst + scaled_ac)` per sample — `dst` must
 /// already hold the DC prediction.
 #[allow(clippy::too_many_arguments)]
-fn cfl_predict_hbd(
+pub fn cfl_predict_hbd(
     ac_buf_q3: &[i16; CFL_BUF_SQUARE],
     dst: &mut [u16],
     mut dst_off: usize,
