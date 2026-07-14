@@ -24,26 +24,34 @@
 //! availability bug becomes a hard plane mismatch instead of silently agreeing.
 //!
 //! Sweep: 4 frame sizes (one SB / 2x2 SBs / non-multiple-of-SB 80x96 px with
-//! partial superblocks / 3x3 SBs with a fully-interior SB) × 6 configs
-//! (monochrome + 4:4:4, bd 8/10/12, filter intra on/off, intra edge filter
-//! on/off, reduced tx set, tx-type gate off,
-//! cdef bits 0..3) × 6 seeds × 2 frame tx modes (`TX_MODE_LARGEST` — the
-//! original 144-tile sweep, no tx-size bits — and `TX_MODE_SELECT`, where the
-//! mirror codes a pseudo-random tx-size depth per signalling block through
-//! `write_selected_tx_size` on the `get_tx_size_context`-selected CDF and the
-//! decoder must reproduce it, driving real multi-txb grids whose later txbs
-//! predict from earlier txbs' reconstruction *inside* the block), with
-//! pseudo-random partition trees over all 10 partition types, all 13 intra
-//! modes, angle deltas, filter-intra, and skip blocks; coverage of each is
-//! asserted at the end (including distinct-tx-size, multi-txb-grid, and
-//! tx_size_cdf cell-diversity floors).
+//! partial superblocks / 3x3 SBs with a fully-interior SB) × 13 configs
+//! (monochrome + 4:4:4 + 4:2:0 + 4:2:2, bd 8/10/12, filter intra on/off,
+//! intra edge filter on/off, reduced tx set, tx-type gate off, cdef bits
+//! 0..3, per-plane dc/ac dequant deltas, and **delta-q** — 4 configs with
+//! `delta_q_present` at `delta_q_res` 1/2/4/8, where the mirror decides a
+//! per-SB `current_qindex` target, codes the reduced delta at each SB's
+//! upper-left coded block, and both sides recompute every block's per-plane
+//! dequant rows from the running carry exactly as `parse_decode_block`
+//! does; two of them also code **delta-lf** — multi per-plane and single
+//! from-base, carried per block with no reconstruction effect) × 6 seeds × 2
+//! frame tx modes (`TX_MODE_LARGEST` — the original sweep, no tx-size bits —
+//! and `TX_MODE_SELECT`, where the mirror codes a pseudo-random tx-size
+//! depth per signalling block through `write_selected_tx_size` on the
+//! `get_tx_size_context`-selected CDF and the decoder must reproduce it,
+//! driving real multi-txb grids whose later txbs predict from earlier txbs'
+//! reconstruction *inside* the block), with pseudo-random partition trees
+//! over all 10 partition types, all 13 intra modes, angle deltas,
+//! filter-intra, and skip blocks; coverage of each is asserted at the end
+//! (including distinct-tx-size, multi-txb-grid, tx_size_cdf cell-diversity,
+//! distinct-effective-qindex, and delta-sign/exp-Golomb floors).
 
 use aom_decode::{
     ANGLE_STEP, BLOCK_8X8, BLOCK_64X64, BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, DecodedBlockKf,
     KfTileConfig, MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH, MI_SIZE_WIDE, PARTITION_HORZ,
     PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, TX_SIZE_HIGH, TX_SIZE_HIGH_UNIT, TX_SIZE_WIDE,
     TX_SIZE_WIDE_UNIT, UV_CFL_PRED, decode_tile_kf, intra_ext_tx_cdf, is_chroma_reference,
-    max_block_units, max_block_units_ss, max_uv_txsize, scale_chroma_bsize, uv_tx_type,
+    max_block_units, max_block_units_ss, max_uv_txsize, plane_dequants, scale_chroma_bsize,
+    uv_tx_type,
 };
 use aom_encode::{QuantKind, QuantParams, xform_quant};
 use aom_entropy::dec::OdEcDec;
@@ -294,6 +302,36 @@ fn invert_quant(d: i32) -> (i16, i16) {
     ((m - (1 << 16)) as i16, (1i32 << (16 - l)) as i16)
 }
 
+/// A B-quant parameter row derived from a `[dc, ac]` dequant pair (the
+/// mirror's synthetic-but-valid quantizer: `invert_quant` reciprocals plus
+/// simple round/zbin). With delta-q the mirror recomputes this per block from
+/// its live dequant rows, so the quantize and the decoder's dequant always
+/// use the same block-effective steps.
+#[derive(Clone, Copy)]
+struct BQuant {
+    quant: [i16; 2],
+    quant_shift: [i16; 2],
+    round: [i16; 2],
+    zbin: [i16; 2],
+}
+
+fn bquant_for(dequant: [i16; 2]) -> BQuant {
+    let mut q = BQuant {
+        quant: [0; 2],
+        quant_shift: [0; 2],
+        round: [0; 2],
+        zbin: [0; 2],
+    };
+    for (i, &d) in dequant.iter().enumerate() {
+        let (qq, qs) = invert_quant(d as i32);
+        q.quant[i] = qq;
+        q.quant_shift[i] = qs;
+        q.round[i] = d / 8 + 1;
+        q.zbin[i] = d / 2 + 1;
+    }
+    q
+}
+
 /// The used tx_types of the two intra ext-tx sets (av1_ext_tx_used):
 /// DTT4_IDTX (5): DCT_DCT/ADST_DCT/DCT_ADST/ADST_ADST/IDTX;
 /// DTT4_IDTX_1DDCT (7): + V_DCT/H_DCT.
@@ -342,6 +380,24 @@ struct Coverage {
     max_txbs_in_block: usize,
     // tx_size_cdf (cat, ctx) instances that adapted anywhere in the sweep.
     tx_cells: [[bool; 3]; 4],
+    // Delta-q accounting (delta-q sweep cases only, from the DECODER's
+    // records): distinct effective qindexes decoded; distinct effective
+    // qindexes among blocks that actually reconstructed luma coefficients
+    // (different dequant rows genuinely exercised in the recon); written
+    // reduced-delta stats (both signs + the |reduced| >= 3 exp-Golomb
+    // remainder path); the sb-sized-skip gate-out arm; delta CDF adaptation;
+    // non-zero delta-lf carries observed.
+    /// 256-entry bitsets over observed effective qindex values.
+    dq_qindex_seen: [u64; 4],
+    dq_qindex_recon_seen: [u64; 4],
+    dq_pos: usize,
+    dq_neg: usize,
+    dq_golomb: usize,
+    dq_gated_sb_skip: usize,
+    dq_cdf_adapted: bool,
+    dlf_cdf_adapted: bool,
+    dlf_multi_adapted: [bool; 4],
+    dlf_nonzero_carries: usize,
     // FRAME_CONTEXT selection diversity: which context instances adapted
     // (final decoder CDFs differ from the initial fill) anywhere in the sweep.
     kf_y_cells: [[bool; 5]; 5],
@@ -381,15 +437,18 @@ struct Mirror<'a> {
     /// The mirror's own CfL store, fed from ITS reconstruction feedback.
     cfl: CflCtx,
     st: KfBlockState,
-    quant: [i16; 2],
-    quant_shift: [i16; 2],
-    round: [i16; 2],
-    zbin: [i16; 2],
-    /// Per-chroma-plane B-quant parameter rows derived from `dequant_uv`.
-    quant_uv: [[i16; 2]; 2],
-    quant_shift_uv: [[i16; 2]; 2],
-    round_uv: [[i16; 2]; 2],
-    zbin_uv: [[i16; 2]; 2],
+    /// The live per-plane `[dc, ac]` dequant rows (segment 0) — the mirror's
+    /// counterpart of the decoder's `parse_decode_block` recompute: frame
+    /// constant from `base_qindex` without delta-q, else refreshed per block
+    /// from the write-side `current_base_qindex` carry.
+    dequants: [[i16; 2]; 3],
+    /// The SB-level delta-q target the mirror decided for the current
+    /// superblock (`mbmi->current_qindex` of every block in it whose delta
+    /// gate fires; the C encoder decides it once per SB in setup_delta_q).
+    sb_target_qindex: i32,
+    /// Per-SB delta-lf targets (multi per-plane + single from-base).
+    sb_target_lf: [i32; 4],
+    sb_target_lf_base: i32,
     sb_cdef_strength: i32,
     sb_cdef_done: bool,
     tree: Vec<i8>,
@@ -407,22 +466,6 @@ impl<'a> Mirror<'a> {
         recon_init: u16,
     ) -> Self {
         let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;
-        let (q0, s0) = invert_quant(cfg.dequant[0] as i32);
-        let (q1, s1) = invert_quant(cfg.dequant[1] as i32);
-        let mut quant_uv = [[0i16; 2]; 2];
-        let mut quant_shift_uv = [[0i16; 2]; 2];
-        let mut round_uv = [[0i16; 2]; 2];
-        let mut zbin_uv = [[0i16; 2]; 2];
-        for p in 0..2 {
-            for i in 0..2 {
-                let d = cfg.dequant_uv[p][i];
-                let (q, s) = invert_quant(d as i32);
-                quant_uv[p][i] = q;
-                quant_shift_uv[p][i] = s;
-                round_uv[p][i] = d / 8 + 1;
-                zbin_uv[p][i] = d / 2 + 1;
-            }
-        }
         let stride_uv = if cfg.monochrome {
             0
         } else {
@@ -448,12 +491,12 @@ impl<'a> Mirror<'a> {
             coded_lossless: false,
             allow_intrabc: false,
             cdef_bits: cfg.cdef_bits,
-            dq_present: false,
-            dlf_present: false,
-            dlf_multi: false,
+            dq_present: cfg.delta_q_present,
+            dlf_present: cfg.delta_lf_present,
+            dlf_multi: cfg.delta_lf_multi,
             num_planes: if cfg.monochrome { 1 } else { 3 },
-            dq_res: 1,
-            dlf_res: 1,
+            dq_res: cfg.delta_q_res,
+            dlf_res: cfg.delta_lf_res,
             monochrome: cfg.monochrome,
             is_chroma_ref: !cfg.monochrome,
             cfl_allowed: false,
@@ -464,7 +507,7 @@ impl<'a> Mirror<'a> {
             has_above: false,
             has_left: false,
             cdef_transmitted: [false; 4],
-            current_base_qindex: 0,
+            current_base_qindex: cfg.base_qindex,
             xd_delta_lf: [0; 4],
             xd_delta_lf_from_base: 0,
         };
@@ -498,14 +541,10 @@ impl<'a> Mirror<'a> {
             mi_uv: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
             cfl: CflCtx::new(cfg.subsampling_x as i32, cfg.subsampling_y as i32),
             st,
-            quant: [q0, q1],
-            quant_shift: [s0, s1],
-            round: [cfg.dequant[0] / 8 + 1, cfg.dequant[1] / 8 + 1],
-            zbin: [cfg.dequant[0] / 2 + 1, cfg.dequant[1] / 2 + 1],
-            quant_uv,
-            quant_shift_uv,
-            round_uv,
-            zbin_uv,
+            dequants: plane_dequants(cfg, cfg.base_qindex),
+            sb_target_qindex: cfg.base_qindex,
+            sb_target_lf: [0; 4],
+            sb_target_lf_base: 0,
             sb_cdef_strength: 0,
             sb_cdef_done: false,
             tree: Vec::new(),
@@ -619,13 +658,59 @@ impl<'a> Mirror<'a> {
         } else {
             0
         };
+        // write_delta_q_params gate (bitstream.c): the SB-upper-left block
+        // codes the SB's delta targets unless it is an sb-sized skip block;
+        // every block's mbmi then carries the (possibly unchanged) running
+        // values — which is exactly what the decoder reports back.
+        let sb_upper_left = (mi_row & 15) == 0 && (mi_col & 15) == 0;
+        let dq_coded =
+            cfg.delta_q_present && sb_upper_left && (bsize != BLOCK_64X64 || skip == 0);
+        let (cur_q, dlf, dlfb) = if !cfg.delta_q_present {
+            (
+                cfg.base_qindex,
+                self.st.xd_delta_lf,
+                self.st.xd_delta_lf_from_base,
+            )
+        } else if dq_coded {
+            let reduced = (self.sb_target_qindex - self.st.current_base_qindex) / cfg.delta_q_res;
+            if reduced >= 3 || reduced <= -3 {
+                cov.dq_golomb += 1;
+            }
+            if reduced > 0 {
+                cov.dq_pos += 1;
+            } else if reduced < 0 {
+                cov.dq_neg += 1;
+            }
+            (
+                self.sb_target_qindex,
+                if cfg.delta_lf_present && cfg.delta_lf_multi {
+                    self.sb_target_lf
+                } else {
+                    self.st.xd_delta_lf
+                },
+                if cfg.delta_lf_present && !cfg.delta_lf_multi {
+                    self.sb_target_lf_base
+                } else {
+                    self.st.xd_delta_lf_from_base
+                },
+            )
+        } else {
+            if cfg.delta_q_present && sb_upper_left {
+                cov.dq_gated_sb_skip += 1; // sb-sized skip block: nothing coded
+            }
+            (
+                self.st.current_base_qindex,
+                self.st.xd_delta_lf,
+                self.st.xd_delta_lf_from_base,
+            )
+        };
         let info = MbModeInfoKf {
             segment_id: 0,
             skip,
             cdef_strength: self.sb_cdef_strength,
-            current_qindex: 0,
-            delta_lf: [0; 4],
-            delta_lf_from_base: 0,
+            current_qindex: cur_q,
+            delta_lf: dlf,
+            delta_lf_from_base: dlfb,
             use_intrabc: 0,
             dv_row: 0,
             dv_col: 0,
@@ -672,6 +757,14 @@ impl<'a> Mirror<'a> {
             above,
             left,
         );
+        // parse_decode_block counterpart: with delta-q present, refresh the
+        // live per-plane dequant rows from the (possibly just advanced)
+        // current_base_qindex carry — the quantize AND the reconstruction
+        // below both use the block-effective steps, like the decoder.
+        if cfg.delta_q_present {
+            debug_assert_eq!(self.st.current_base_qindex, cur_q);
+            self.dequants = plane_dequants(cfg, self.st.current_base_qindex);
+        }
         // What the decoder will report for cdef: coded at the first non-skip
         // block of the SB, -1 elsewhere (write_cdef threads cdef_transmitted).
         let cdef_coded = skip == 0;
@@ -780,21 +873,19 @@ impl<'a> Mirror<'a> {
         // get_filt_type from the same neighbours the mode contexts used.
         let is_smooth = |m: Option<MiNbrKf>| m.is_some_and(|n| (9..=11).contains(&n.y_mode));
         let filt_type = (is_smooth(above) || is_smooth(left)) as i32;
-        let signal_gate = cfg.base_qindex_gt0 && skip == 0;
+        // av1_read_tx_type gate: the FRAME-level qindex (not the delta-q carry).
+        let signal_gate = cfg.base_qindex > 0 && skip == 0;
         let set_type = ext_tx_set_type(tx_size, false, cfg.reduced_tx_set);
         let mut scratch = vec![0u16; txwpx * txhpx];
         let mut residual = vec![0i16; txwpx * txhpx];
         let mut txbs = Vec::new();
-        let quant = self.quant;
-        let quant_shift = self.quant_shift;
-        let round = self.round;
-        let zbin = self.zbin;
-        let dequant = cfg.dequant;
+        let dequant = self.dequants[0];
+        let bq = bquant_for(dequant);
         let qp = QuantParams {
-            zbin: &zbin,
-            round: &round,
-            quant: &quant,
-            quant_shift: &quant_shift,
+            zbin: &bq.zbin,
+            round: &bq.round,
+            quant: &bq.quant,
+            quant_shift: &bq.quant_shift,
             dequant: &dequant,
             qm: None,
             iqm: None,
@@ -942,7 +1033,7 @@ impl<'a> Mirror<'a> {
                             tx_size,
                             tx_type,
                             &r.qcoeff,
-                            cfg.dequant,
+                            dequant,
                             None,
                             cfg.bd,
                         );
@@ -1037,16 +1128,13 @@ impl<'a> Mirror<'a> {
             }
 
             for plane in 1..=2usize {
-                let dequant_p = cfg.dequant_uv[plane - 1];
-                let quant = self.quant_uv[plane - 1];
-                let quant_shift = self.quant_shift_uv[plane - 1];
-                let round = self.round_uv[plane - 1];
-                let zbin = self.zbin_uv[plane - 1];
+                let dequant_p = self.dequants[plane];
+                let bq_uv = bquant_for(dequant_p);
                 let qp_uv = QuantParams {
-                    zbin: &zbin,
-                    round: &round,
-                    quant: &quant,
-                    quant_shift: &quant_shift,
+                    zbin: &bq_uv.zbin,
+                    round: &bq_uv.round,
+                    quant: &bq_uv.quant,
+                    quant_shift: &bq_uv.quant_shift,
                     dequant: &dequant_p,
                     qm: None,
                     iqm: None,
@@ -1467,6 +1555,42 @@ impl<'a> Mirror<'a> {
                 } else {
                     0
                 };
+                // New SB: decide its delta-q/delta-lf targets (the C encoder
+                // decides once per SB in setup_delta_q). Encoder-valid only:
+                // carry + k*res kept inside [1, 255] / [-63, 63] by clamping
+                // k, mirroring av1_adjust_q_from_delta_q_res's alignment —
+                // the decoder's normative clamps stay no-ops and the carries
+                // lockstep. |k| >= 3 exercises the exp-Golomb remainder path.
+                if self.cfg.delta_q_present {
+                    let res = self.cfg.delta_q_res;
+                    let carry = self.st.current_base_qindex;
+                    let k = ((rng.next() % 41) as i32 - 20)
+                        .clamp(-((carry - 1) / res), (255 - carry) / res);
+                    self.sb_target_qindex = carry + k * res;
+                    if self.cfg.delta_lf_present {
+                        let lres = self.cfg.delta_lf_res;
+                        if self.cfg.delta_lf_multi {
+                            // frame_lf_count ids are coded; the rest must
+                            // report the untouched carries.
+                            let n = if self.cfg.monochrome { 2 } else { 4 };
+                            for id in 0..4 {
+                                let c = self.st.xd_delta_lf[id];
+                                self.sb_target_lf[id] = if id < n {
+                                    let k = ((rng.next() % 11) as i32 - 5)
+                                        .clamp(-((63 + c) / lres), (63 - c) / lres);
+                                    c + k * lres
+                                } else {
+                                    c
+                                };
+                            }
+                        } else {
+                            let c = self.st.xd_delta_lf_from_base;
+                            let k = ((rng.next() % 11) as i32 - 5)
+                                .clamp(-((63 + c) / lres), (63 - c) / lres);
+                            self.sb_target_lf_base = c + k * lres;
+                        }
+                    }
+                }
                 self.encode_partition(enc, cdfs, rng, cov, mi_row, mi_col, BLOCK_64X64);
                 mi_col += 16;
             }
@@ -1489,18 +1613,47 @@ struct SweepCase {
     disable_edge_filter: bool,
     enable_filter_intra: bool,
     reduced_tx_set: bool,
+    /// `base_qindex > 0` (the tx-type signalling gate): true derives a
+    /// per-seed base qindex in [20, 250]; false uses base_qindex = 0 (the
+    /// gate-off path — combined with a non-zero y_dc delta so the frame is
+    /// not coded_lossless in C terms).
     base_qindex_gt0: bool,
+    /// Derive per-seed non-zero per-plane dc/ac deltas (y_dc; u_dc/u_ac;
+    /// v_dc/v_ac — clearly distinct U vs V so a plane swap or shared-dequant
+    /// bug hard-fails, as the old independent random dequants did).
+    plane_deltas: bool,
+    /// 0 = delta-q off; 1/2/4/8 = delta_q_present with this delta_q_res.
+    dq_res: i32,
+    /// Delta-lf (multi, res); requires dq_res > 0. No reconstruction effect
+    /// (no loop filters) — validates the coded symbols + carried values.
+    dlf: Option<(bool, i32)>,
     tx_mode: TxMode,
 }
 
 fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     let mut rng = Rng(seed);
-    let dequant = [rng.range(4, 800) as i16, rng.range(4, 800) as i16];
-    // Distinct U/V dequants so a plane swap or shared-dequant bug hard-fails.
-    let dequant_uv = [
-        [rng.range(4, 800) as i16, rng.range(4, 800) as i16],
-        [rng.range(4, 800) as i16, rng.range(4, 800) as i16],
-    ];
+    // Per-seed frame quant point: base qindex + per-plane dc/ac deltas
+    // (dequants now DERIVE from these through av1_{dc,ac}_quant_QTX, as in
+    // C). U and V deltas are drawn from disjoint sign/magnitude bands so a
+    // plane swap or shared-dequant bug hard-fails; y_dc is non-zero whenever
+    // plane deltas are on (keeps the base_qindex = 0 gate-off configs out of
+    // C's coded_lossless condition).
+    let base_qindex = if case.base_qindex_gt0 {
+        rng.range(20, 251) as i32
+    } else {
+        0
+    };
+    let deltas = if case.plane_deltas {
+        [
+            (rng.range(1, 25) as i32) * if rng.next() & 1 == 1 { 1 } else { -1 }, // y_dc
+            -(rng.range(8, 40) as i32),                                           // u_dc
+            rng.range(8, 40) as i32,                                              // u_ac
+            rng.range(41, 63) as i32,                                             // v_dc
+            -(rng.range(41, 63) as i32),                                          // v_ac
+        ]
+    } else {
+        [0; 5]
+    };
     let cfg = KfTileConfig {
         mi_rows: case.mi_rows,
         mi_cols: case.mi_cols,
@@ -1513,9 +1666,17 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         enable_filter_intra: case.enable_filter_intra,
         tx_mode: case.tx_mode,
         reduced_tx_set: case.reduced_tx_set,
-        base_qindex_gt0: case.base_qindex_gt0,
-        dequant,
-        dequant_uv,
+        base_qindex,
+        y_dc_delta_q: deltas[0],
+        u_dc_delta_q: deltas[1],
+        u_ac_delta_q: deltas[2],
+        v_dc_delta_q: deltas[3],
+        v_ac_delta_q: deltas[4],
+        delta_q_present: case.dq_res > 0,
+        delta_q_res: case.dq_res.max(1),
+        delta_lf_present: case.dlf.is_some(),
+        delta_lf_multi: case.dlf.is_some_and(|(m, _)| m),
+        delta_lf_res: case.dlf.map_or(1, |(_, r)| r),
     };
     let aligned_cols = (cfg.mi_cols as usize).div_ceil(16) * 16;
     let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;
@@ -1573,7 +1734,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     let got = decode_tile_kf(&mut dec, &cfg, &mut dec_cdfs, mask as u16);
 
     let what = format!(
-        "case mi={}x{} bd={} mono={} ss={}{} cdef={} fi={} reduced={} gate={} tx={:?} seed={seed:#x}",
+        "case mi={}x{} bd={} mono={} ss={}{} cdef={} fi={} reduced={} q={base_qindex} dq_res={} dlf={:?} tx={:?} seed={seed:#x}",
         case.mi_rows,
         case.mi_cols,
         case.bd,
@@ -1583,7 +1744,8 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         case.cdef_bits,
         case.enable_filter_intra,
         case.reduced_tx_set,
-        case.base_qindex_gt0,
+        case.dq_res,
+        case.dlf,
         case.tx_mode,
     );
     // (a) partition tree + per-leaf decode records (mode info, per-txb eob/tx_type)
@@ -1713,6 +1875,31 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     {
         *flag |= new != old;
     }
+    // Delta-q accounting from the DECODER's records: which effective
+    // qindexes were decoded, which of them reconstructed real luma
+    // coefficients (their per-block dequant rows demonstrably drove the
+    // byte-identical recon), delta CDF adaptation, delta-lf carries.
+    if cfg.delta_q_present {
+        for b in &got.blocks {
+            let q = b.info.current_qindex;
+            cov.dq_qindex_seen[(q >> 6) as usize] |= 1u64 << (q & 63);
+            if b.txbs.iter().any(|&(eob, _)| eob > 0) {
+                cov.dq_qindex_recon_seen[(q >> 6) as usize] |= 1u64 << (q & 63);
+            }
+            if b.info.delta_lf_from_base != 0 || b.info.delta_lf.iter().any(|&x| x != 0) {
+                cov.dlf_nonzero_carries += 1;
+            }
+        }
+        cov.dq_cdf_adapted |= dec_cdfs.delta_q != cdfs0.delta_q;
+        cov.dlf_cdf_adapted |= dec_cdfs.delta_lf != cdfs0.delta_lf;
+        for (flag, (new, old)) in cov
+            .dlf_multi_adapted
+            .iter_mut()
+            .zip(dec_cdfs.delta_lf_multi.iter().zip(cdfs0.delta_lf_multi.iter()))
+        {
+            *flag |= new != old;
+        }
+    }
 }
 
 #[test]
@@ -1721,6 +1908,11 @@ fn kf_luma_tile_roundtrips() {
     // (partial SBs on the right and bottom edges); 3x3 SBs (a fully-interior
     // superblock, exercising cross-SB top-right availability).
     let sizes = [(16, 16), (32, 32), (20, 24), (48, 48)];
+    // The delta-q-off axes keep the original 432-tile sweep semantics; chroma
+    // configs derive distinct-band per-plane deltas so U/V dequants stay
+    // clearly distinct (plane-swap hard-fail, as the old independent random
+    // dequants gave). The gate-off config carries a non-zero y_dc delta so
+    // base_qindex = 0 is not C's coded_lossless.
     let configs = [
         // bd, mono, cdef, edge_off, fi, reduced, gate
         SweepCase {
@@ -1735,6 +1927,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            plane_deltas: false,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         SweepCase {
@@ -1749,6 +1944,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         SweepCase {
@@ -1763,6 +1961,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: false,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            plane_deltas: false,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         SweepCase {
@@ -1777,6 +1978,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: true,
             base_qindex_gt0: true,
+            plane_deltas: false,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         SweepCase {
@@ -1791,6 +1995,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: false,
+            plane_deltas: true,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         SweepCase {
@@ -1805,6 +2012,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         // 4:2:0 — shared sub-8x8 chroma rules + 420 CfL subsampling.
@@ -1820,6 +2030,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         // 4:2:0 high bit depth + reduced tx set (chroma tx-type demotion).
@@ -1835,6 +2048,9 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: true,
             base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 0,
+            dlf: None,
             tx_mode: TxMode::Largest,
         },
         // 4:2:2 — horizontal-only subsampling (tall shapes are non-conformant
@@ -1851,6 +2067,84 @@ fn kf_luma_tile_roundtrips() {
             enable_filter_intra: true,
             reduced_tx_set: false,
             base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 0,
+            dlf: None,
+            tx_mode: TxMode::Largest,
+        },
+        // ---- delta-q present: per-SB qindex deltas drive per-block dequant
+        // recompute (decodeframe.c parse_decode_block). ----
+        // res 1, monochrome: pure luma delta-q, finest step.
+        SweepCase {
+            mi_rows: 0,
+            mi_cols: 0,
+            bd: 8,
+            monochrome: true,
+            ss_x: 0,
+            ss_y: 0,
+            cdef_bits: 1,
+            disable_edge_filter: false,
+            enable_filter_intra: true,
+            reduced_tx_set: false,
+            base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 1,
+            dlf: None,
+            tx_mode: TxMode::Largest,
+        },
+        // res 4 + multi delta-lf (all 4 lf ids), 4:2:0 bd10: chroma dequant
+        // rows recomputed with per-plane deltas folded in.
+        SweepCase {
+            mi_rows: 0,
+            mi_cols: 0,
+            bd: 10,
+            monochrome: false,
+            ss_x: 1,
+            ss_y: 1,
+            cdef_bits: 2,
+            disable_edge_filter: false,
+            enable_filter_intra: true,
+            reduced_tx_set: false,
+            base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 4,
+            dlf: Some((true, 2)),
+            tx_mode: TxMode::Largest,
+        },
+        // res 8 + single from-base delta-lf, 4:4:4 bd12 reduced set.
+        SweepCase {
+            mi_rows: 0,
+            mi_cols: 0,
+            bd: 12,
+            monochrome: false,
+            ss_x: 0,
+            ss_y: 0,
+            cdef_bits: 0,
+            disable_edge_filter: false,
+            enable_filter_intra: true,
+            reduced_tx_set: true,
+            base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 8,
+            dlf: Some((false, 4)),
+            tx_mode: TxMode::Largest,
+        },
+        // res 2 + multi delta-lf on monochrome (the FRAME_LF_COUNT - 2 arm).
+        SweepCase {
+            mi_rows: 0,
+            mi_cols: 0,
+            bd: 8,
+            monochrome: true,
+            ss_x: 0,
+            ss_y: 0,
+            cdef_bits: 3,
+            disable_edge_filter: false,
+            enable_filter_intra: false,
+            reduced_tx_set: false,
+            base_qindex_gt0: true,
+            plane_deltas: true,
+            dq_res: 2,
+            dlf: Some((true, 8)),
             tx_mode: TxMode::Largest,
         },
     ];
@@ -2022,5 +2316,69 @@ fn kf_luma_tile_roundtrips() {
     assert!(
         tx_cells_n == 12,
         "every tx_size_cdf (cat, ctx) instance must adapt: {tx_cells_n}/12"
+    );
+
+    // Delta-q: the sweep must have decoded genuinely varied effective
+    // qindexes (floor >= 3 distinct, per the chunk spec — observed far more),
+    // and blocks with DIFFERENT effective qindexes must have reconstructed
+    // real luma coefficients (their recomputed dequant rows drove the
+    // byte-identical reconstruction, so a dequant-recompute bug cannot hide
+    // behind skip/eob-0 blocks). Both delta signs, the |reduced| >= 3
+    // exp-Golomb remainder path, and the sb-sized-skip gate-out arm must
+    // occur; the delta-q/delta-lf CDFs must adapt (they are also asserted in
+    // lockstep per tile by assert_fc_eq); multi-mode must adapt every lf id
+    // and non-zero delta-lf carries must reach the block records.
+    let dq_distinct: u32 = cov.dq_qindex_seen.iter().map(|w| w.count_ones()).sum();
+    let dq_recon_distinct: u32 = cov
+        .dq_qindex_recon_seen
+        .iter()
+        .map(|w| w.count_ones())
+        .sum();
+    let dlf_ids = cov.dlf_multi_adapted.iter().filter(|&&x| x).count();
+    eprintln!(
+        "delta-q: {dq_distinct} distinct effective qindexes ({dq_recon_distinct} with \
+         reconstructed luma coeffs), reduced-delta pos {} / neg {} / golomb {}, \
+         sb-skip-gated {}, dq cdf adapted {}, dlf cdf adapted {} (multi ids {dlf_ids}/4), \
+         nonzero dlf carries {}",
+        cov.dq_pos,
+        cov.dq_neg,
+        cov.dq_golomb,
+        cov.dq_gated_sb_skip,
+        cov.dq_cdf_adapted,
+        cov.dlf_cdf_adapted,
+        cov.dlf_nonzero_carries,
+    );
+    assert!(
+        dq_distinct >= 3,
+        "too few distinct effective qindexes decoded: {dq_distinct}"
+    );
+    assert!(
+        dq_recon_distinct >= 3,
+        "too few distinct effective qindexes among blocks with reconstructed \
+         luma coefficients: {dq_recon_distinct}"
+    );
+    assert!(
+        cov.dq_pos > 0 && cov.dq_neg > 0,
+        "both delta-q signs must be written (pos {}, neg {})",
+        cov.dq_pos,
+        cov.dq_neg
+    );
+    assert!(
+        cov.dq_golomb > 0,
+        "no |reduced| >= 3 delta-q (exp-Golomb remainder path never exercised)"
+    );
+    assert!(
+        cov.dq_gated_sb_skip > 0,
+        "no sb-sized skip block skipped the delta-q read (gate arm never exercised)"
+    );
+    assert!(cov.dq_cdf_adapted, "delta_q cdf never adapted");
+    assert!(cov.dlf_cdf_adapted, "single delta_lf cdf never adapted");
+    assert!(
+        dlf_ids == 4,
+        "every delta_lf_multi id must adapt (4:2:0 multi codes all 4): {dlf_ids}/4"
+    );
+    assert!(
+        cov.dlf_nonzero_carries > 0,
+        "no non-zero delta-lf carries reached the block records"
     );
 }

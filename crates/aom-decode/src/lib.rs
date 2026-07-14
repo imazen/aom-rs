@@ -68,13 +68,32 @@
 //!   luma tx-type CDF is selected per txb as
 //!   `intra_ext_tx_cdf[eset][square_tx_size][intra_dir]` (`av1_read_tx_type`),
 //!   with `intra_dir = fimode_to_intradir[..]` for filter-intra blocks.
+//! - **Delta-q ([`KfTileConfig::delta_q_present`])**: the per-superblock
+//!   delta-qindex is decoded at each SB's upper-left coded block
+//!   (`read_delta_qindex` inside the mode-info read, with the normative
+//!   `clamp(base + reduced * delta_q_res, 1, MAXQ)` carry update of
+//!   `read_delta_q_params`, decodemv.c), and every coded block's dequant is
+//!   then recomputed from the running `current_base_qindex` exactly as
+//!   `parse_decode_block` does (decodeframe.c): per plane,
+//!   `[av1_dc_quant_QTX(cur_q, dc_delta, bd), av1_ac_quant_QTX(cur_q,
+//!   ac_delta, bd)]` with the frame's per-plane dc/ac deltas
+//!   (`y_dc_delta_q`; `u_dc/u_ac`; `v_dc/v_ac` — Y's AC never takes a delta)
+//!   via [`plane_dequants`]. Without delta-q the same formula runs once at
+//!   the frame level (`setup_segmentation_dequant`, segment 0). The tx-type
+//!   signalling gate stays frame-level (`av1_read_tx_type` reads
+//!   `xd->qindex[segment_id]`, not the delta-modified carry). Delta-LF
+//!   ([`KfTileConfig::delta_lf_present`], single or multi) is decoded and its
+//!   clamped carries are threaded through every block's mode info, but has
+//!   no reconstruction effect here — loop filters are not applied (the same
+//!   holds in C until the filter stage reads `delta_lf_from_base`/
+//!   `delta_lf[]` from the mi grid).
 //! - **Off / fixed in this cut**: segmentation, palette, intra block copy,
-//!   delta-q / delta-lf (so the dequant step is frame-constant; per-block
-//!   `av1_dc/ac_quant_QTX` recompute is not wired), quantization matrices
-//!   (flat dequant), superblock size 64x64 (no 128x128), CDF update always on
-//!   (`disable_cdf_update` unsupported — the mode-symbol readers adapt
-//!   unconditionally), and no loop filters (deblock/CDEF/restoration are not
-//!   applied to the reconstruction; CDEF *strengths* are entropy-decoded).
+//!   quantization matrices (flat dequant), superblock size 64x64 (no
+//!   128x128), CDF update always on (`disable_cdf_update` unsupported — the
+//!   mode-symbol readers adapt unconditionally), and no loop filters
+//!   (deblock/CDEF/restoration are not applied to the reconstruction; CDEF
+//!   *strengths* are entropy-decoded, and delta-LF levels are carried as
+//!   documented above).
 //! - Frame dimensions are whole mode-info (4px) units; non-multiple-of-SB sizes
 //!   are supported (partition edge gathers + `max_block_wide/high` txb clipping
 //!   + `av1_set_entropy_contexts` edge zeroing).
@@ -101,6 +120,7 @@ use aom_entropy::partition::{
 };
 use aom_intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_intra::predict_intra_high;
+use aom_quant::{av1_ac_quant_qtx, av1_dc_quant_qtx};
 use aom_txb::{
     ext_tx_derive, get_txb_ctx, read_coeffs_txb_full, txb_entropy_context, txb_high, txb_wide,
 };
@@ -314,15 +334,58 @@ pub struct KfTileConfig {
     pub tx_mode: TxMode,
     /// `features.reduced_tx_set_used`.
     pub reduced_tx_set: bool,
-    /// The `qindex > 0` term of the tx-type signalling gate
-    /// (`av1_read_tx_type`: tx types are only coded when the frame qindex is
-    /// non-zero; segmentation is off so there is one frame qindex).
-    pub base_qindex_gt0: bool,
-    /// Frame-constant `[dc, ac]` dequant steps (`seg_dequant_QTX[0]`, flat/no QM).
-    pub dequant: [i16; 2],
-    /// Frame-constant `[dc, ac]` chroma dequant steps: `[0]` = U
-    /// (`u_dequant_QTX`), `[1]` = V (`v_dequant_QTX`).
-    pub dequant_uv: [[i16; 2]; 2],
+    /// `quant_params.base_qindex` (the frame base; segmentation is off so
+    /// there is one frame qindex). Also the tx-type signalling gate:
+    /// `av1_read_tx_type` codes tx types only when `xd->qindex[segment_id]`
+    /// — the FRAME-level qindex, not the delta-q-modified carry — is
+    /// non-zero. `base_qindex == 0` with all plane deltas zero would be
+    /// `coded_lossless` in C (a different decode path, out of scope): give a
+    /// zero-base config a non-zero plane delta.
+    pub base_qindex: i32,
+    /// `quant_params.y_dc_delta_q` / `u_dc_delta_q` / `u_ac_delta_q` /
+    /// `v_dc_delta_q` / `v_ac_delta_q` (read_quantization; each in
+    /// `[-63, 63]`). Y's AC has no delta — `base_qindex` is the Y AC point.
+    pub y_dc_delta_q: i32,
+    pub u_dc_delta_q: i32,
+    pub u_ac_delta_q: i32,
+    pub v_dc_delta_q: i32,
+    pub v_ac_delta_q: i32,
+    /// `delta_q_info.delta_q_present_flag` (requires `base_qindex > 0`, as
+    /// the C frame header only codes it then) + `delta_q_res` (1/2/4/8).
+    pub delta_q_present: bool,
+    pub delta_q_res: i32,
+    /// `delta_q_info.delta_lf_present_flag` / `delta_lf_multi` /
+    /// `delta_lf_res` (1/2/4/8). Only codable when `delta_q_present` (the C
+    /// frame header nests it there). Decoded + carried per block; no
+    /// reconstruction effect (loop filters are not applied in this cut).
+    pub delta_lf_present: bool,
+    pub delta_lf_multi: bool,
+    pub delta_lf_res: i32,
+}
+
+/// The per-plane `[dc, ac]` dequant steps for an effective qindex — the shared
+/// formula of `setup_segmentation_dequant` (frame level, decodeframe.c) and
+/// the per-block delta-q recompute in `parse_decode_block`: per plane the
+/// frame's dc/ac deltas fold in via `av1_{dc,ac}_quant_QTX` (which clamp
+/// `qindex + delta` to `[0, MAXQ]`); Y's AC delta is always 0. Segmentation is
+/// off in this scope, so this is the `segment_id = 0` row of
+/// `seg_dequant_QTX` (`av1_get_qindex` is the identity without `SEG_LVL_ALT_Q`).
+pub fn plane_dequants(cfg: &KfTileConfig, qindex: i32) -> [[i16; 2]; 3] {
+    let bd = cfg.bd as u8;
+    [
+        [
+            av1_dc_quant_qtx(qindex, cfg.y_dc_delta_q, bd),
+            av1_ac_quant_qtx(qindex, 0, bd),
+        ],
+        [
+            av1_dc_quant_qtx(qindex, cfg.u_dc_delta_q, bd),
+            av1_ac_quant_qtx(qindex, cfg.u_ac_delta_q, bd),
+        ],
+        [
+            av1_dc_quant_qtx(qindex, cfg.v_dc_delta_q, bd),
+            av1_ac_quant_qtx(qindex, cfg.v_ac_delta_q, bd),
+        ],
+    ]
 }
 
 // The tile's CDF state is libaom's FRAME_CONTEXT itself —
@@ -462,6 +525,11 @@ struct TileKf<'c> {
     /// The CfL luma store (one per tile, like `xd->cfl`): sub-8x8 members of a
     /// shared-chroma group accumulate into it across blocks.
     cfl: CflCtx,
+    /// The live per-plane `[dc, ac]` dequant rows (`pd->seg_dequant_QTX[0]`,
+    /// segment 0): frame-constant from `base_qindex` without delta-q,
+    /// recomputed per coded block from the running `current_base_qindex`
+    /// carry when `delta_q_present` (`parse_decode_block`, decodeframe.c).
+    dequants: [[i16; 2]; 3],
     st: KfBlockState,
     tree: Vec<i8>,
     blocks: Vec<DecodedBlockKf>,
@@ -475,6 +543,14 @@ impl<'c> TileKf<'c> {
         assert!(
             ss_x < 2 && ss_y < 2 && (ss_x, ss_y) != (0, 1),
             "(0,1) is 4:4:0 — not an AV1 config"
+        );
+        assert!(
+            !cfg.delta_q_present || cfg.base_qindex > 0,
+            "delta_q_present requires base_qindex > 0 (the C frame header only codes it then)"
+        );
+        assert!(
+            !cfg.delta_lf_present || cfg.delta_q_present,
+            "delta_lf_present is nested inside delta_q_present in the C frame header"
         );
         if !cfg.monochrome {
             // C set_mb_mi aligns frame mi dims to 8 px, so a subsampled axis is
@@ -509,12 +585,12 @@ impl<'c> TileKf<'c> {
             coded_lossless: false,
             allow_intrabc: false,
             cdef_bits: cfg.cdef_bits,
-            dq_present: false,
-            dlf_present: false,
-            dlf_multi: false,
+            dq_present: cfg.delta_q_present,
+            dlf_present: cfg.delta_lf_present,
+            dlf_multi: cfg.delta_lf_multi,
             num_planes: if cfg.monochrome { 1 } else { 3 },
-            dq_res: 1,
-            dlf_res: 1,
+            dq_res: cfg.delta_q_res,
+            dlf_res: cfg.delta_lf_res,
             monochrome: cfg.monochrome,
             is_chroma_ref: !cfg.monochrome, // 4:4:4 when chroma is modelled
             cfl_allowed: false,
@@ -527,7 +603,10 @@ impl<'c> TileKf<'c> {
             has_above: false,
             has_left: false,
             cdef_transmitted: [false; 4],
-            current_base_qindex: 0,
+            // xd->current_base_qindex = quant_params.base_qindex per tile
+            // (decode_tile setup, decodeframe.c); the delta-lf carries start
+            // at zero (av1_reset_loop_filter_delta).
+            current_base_qindex: cfg.base_qindex,
             xd_delta_lf: [0; 4],
             xd_delta_lf_from_base: 0,
         };
@@ -557,6 +636,9 @@ impl<'c> TileKf<'c> {
             ],
             mi_uv: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
             cfl: CflCtx::new(ss_x as i32, ss_y as i32),
+            // setup_segmentation_dequant: the frame-level dequant rows from
+            // base_qindex (the live values until a per-block recompute).
+            dequants: plane_dequants(cfg, cfg.base_qindex),
             st,
             tree: Vec::new(),
             blocks: Vec::new(),
@@ -723,6 +805,18 @@ impl<'c> TileKf<'c> {
             false,
         );
 
+        // parse_decode_block (decodeframe.c): with delta-q present, every
+        // block's dequant is recomputed from the running current_base_qindex
+        // (already advanced by this block's SB-level delta read inside the
+        // mode-info decode — mbmi->current_qindex == the carry). C refills
+        // all MAX_SEGMENTS rows; segmentation is off here, so only the
+        // segment-0 row is live. The per-plane dc/ac deltas fold in through
+        // av1_{dc,ac}_quant_QTX.
+        if cfg.delta_q_present {
+            debug_assert_eq!(self.st.current_base_qindex, info.current_qindex);
+            self.dequants = plane_dequants(cfg, self.st.current_base_qindex);
+        }
+
         // The chroma-side geometry (used by the skip reset, the chroma txb
         // loop, and CfL): the plane origin is the shared-chroma group's — a
         // sub-8x8 dimension at an odd mi position on a subsampled axis shifts
@@ -776,8 +870,10 @@ impl<'c> TileKf<'c> {
             m.is_some_and(|n| (SMOOTH_PRED..=SMOOTH_H_PRED).contains(&n.y_mode))
         };
         let filt_type = (is_smooth(above) || is_smooth(left)) as i32;
-        // av1_read_tx_type gate: !skip_txfm && !seg-skip && qindex > 0.
-        let signal_gate = cfg.base_qindex_gt0 && info.skip == 0;
+        // av1_read_tx_type gate: !skip_txfm && !seg-skip && qindex > 0 —
+        // xd->qindex[segment_id], the FRAME-level qindex (not the delta-q
+        // carry), so the gate is frame-constant with segmentation off.
+        let signal_gate = cfg.base_qindex > 0 && info.skip == 0;
         let area = txb_wide(tx_size) * txb_high(tx_size);
         let mut tcoeff = vec![0i32; area];
         let mut scratch = vec![0u16; txwpx * txhpx];
@@ -894,7 +990,8 @@ impl<'c> TileKf<'c> {
                     self.recon[d..d + txwpx].copy_from_slice(&scratch[r * txwpx..(r + 1) * txwpx]);
                 }
 
-                // (3) dequant + inverse transform + add (only when residual exists).
+                // (3) dequant + inverse transform + add (only when residual
+                // exists) — the block-effective luma dequant row.
                 if info.skip == 0 && eob > 0 {
                     reconstruct_txb(
                         &mut self.recon[off..],
@@ -902,7 +999,7 @@ impl<'c> TileKf<'c> {
                         tx_size,
                         tx_type,
                         &tcoeff,
-                        cfg.dequant,
+                        self.dequants[0],
                         None,
                         cfg.bd,
                     );
@@ -1114,7 +1211,8 @@ impl<'c> TileKf<'c> {
                                 plane_recon[d..d + uv_txwpx]
                                     .copy_from_slice(&scratch_uv[r * uv_txwpx..(r + 1) * uv_txwpx]);
                             }
-                            // (3) dequant + inverse transform + add.
+                            // (3) dequant + inverse transform + add — the
+                            // block-effective dequant row of this plane.
                             if info.skip == 0 && eob > 0 {
                                 reconstruct_txb(
                                     &mut plane_recon[off_uv..],
@@ -1122,7 +1220,7 @@ impl<'c> TileKf<'c> {
                                     uv_tx,
                                     tt_uv,
                                     &tcoeff_uv,
-                                    cfg.dequant_uv[plane - 1],
+                                    self.dequants[plane],
                                     None,
                                     cfg.bd,
                                 );

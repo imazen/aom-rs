@@ -9,5 +9,6 @@ publish = false
 [dependencies]
 aom-entropy = { path = "../aom-entropy" }
 aom-intra = { path = "../aom-intra" }
+aom-quant = { path = "../aom-quant" }
 aom-txb = { path = "../aom-txb" }
 aom-encode = { path = "../aom-encode" }

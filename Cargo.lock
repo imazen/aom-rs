@@ -23,6 +23,7 @@ dependencies = [
  "aom-encode",
  "aom-entropy",
  "aom-intra",
+ "aom-quant",
  "aom-txb",
 ]
 
