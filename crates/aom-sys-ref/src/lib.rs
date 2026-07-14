@@ -4330,3 +4330,289 @@ pub fn ref_prune_intra_mode_with_hog_y(
     };
     mask.map(|b| b != 0)
 }
+
+// ---- chroma intra RD oracles (rd_shim.c) -------------------------------------
+
+extern "C" {
+    fn shim_get_tx_type_uv_intra(
+        uv_mode: i32,
+        lossless: i32,
+        tx_size: i32,
+        reduced_tx_set_used: i32,
+    ) -> i32;
+    fn shim_get_tx_mask_uv_intra(
+        tx_size: i32,
+        uv_mode: i32,
+        luma_mode: i32,
+        luma_use_filter_intra: i32,
+        luma_filter_intra_mode: i32,
+        lossless: i32,
+        reduced_tx_set_used: i32,
+        use_reduced_intra_txset: i32,
+        enable_flip_idtx: i32,
+        use_intra_dct_only: i32,
+        out_txk_allowed: *mut i32,
+    ) -> i32;
+    fn shim_fill_cfl_costs(cfl_sign_cdf: *const u16, cfl_alpha_cdf: *const u16, out: *mut i32);
+    fn shim_fill_palette_uv_mode_costs(palette_uv_mode_cdf: *const u16, out: *mut i32);
+    fn shim_intra_mode_info_cost_uv(
+        angle_delta_cost: *const i32,
+        palette_uv_mode_cost: *const i32,
+        mode_cost: i32,
+        uv_mode: i32,
+        bsize: i32,
+        angle_delta_uv: i32,
+        try_palette: i32,
+        y_palette_active: i32,
+    ) -> i32;
+    fn shim_cfl_store_tx(
+        luma: *const u16,
+        block_off: i32,
+        stride: i32,
+        row: i32,
+        col: i32,
+        tx_size: i32,
+        bsize: i32,
+        mi_row: i32,
+        mi_col: i32,
+        ss_x: i32,
+        ss_y: i32,
+        bd: i32,
+        recon_q3: *mut u16,
+        buf_w: *mut i32,
+        buf_h: *mut i32,
+        params_computed: *mut i32,
+    );
+    fn shim_cfl_predict_block(
+        recon_q3: *mut u16,
+        ac_q3: *mut i16,
+        buf_w: *mut i32,
+        buf_h: *mut i32,
+        params_computed: *mut i32,
+        dst: *mut u16,
+        dst_off: i32,
+        dst_stride: i32,
+        tx_size: i32,
+        plane: i32,
+        cfl_alpha_idx: i32,
+        cfl_alpha_signs: i32,
+        bsize: i32,
+        lossless: i32,
+        ss_x: i32,
+        ss_y: i32,
+        bd: i32,
+    );
+}
+
+/// The REAL `av1_get_tx_type` (blockd.h) for `PLANE_TYPE_UV` on an INTRA
+/// block over a stack MACROBLOCKD stub (uv_mode + lossless marshalled).
+pub fn ref_get_tx_type_uv_intra(
+    uv_mode: usize,
+    lossless: bool,
+    tx_size: usize,
+    reduced: bool,
+) -> usize {
+    let t = unsafe {
+        shim_get_tx_type_uv_intra(uv_mode as i32, lossless as i32, tx_size as i32, reduced as i32)
+    };
+    assert!(t >= 0, "shim_get_tx_type_uv_intra alloc failed");
+    t as usize
+}
+
+/// Reference chroma-intra arm of `get_tx_mask` (tx_search.c) — transcription
+/// over the REAL `av1_get_tx_type` + real header statics. Returns
+/// `(mask, txk_allowed)`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_get_tx_mask_uv_intra(
+    tx_size: usize,
+    uv_mode: usize,
+    luma_mode: usize,
+    luma_use_filter_intra: bool,
+    luma_filter_intra_mode: usize,
+    lossless: bool,
+    reduced: bool,
+    use_reduced_intra_txset: u8,
+    enable_flip_idtx: bool,
+    use_intra_dct_only: bool,
+) -> (u16, usize) {
+    let mut txk: i32 = -1;
+    let mask = unsafe {
+        shim_get_tx_mask_uv_intra(
+            tx_size as i32,
+            uv_mode as i32,
+            luma_mode as i32,
+            luma_use_filter_intra as i32,
+            luma_filter_intra_mode as i32,
+            lossless as i32,
+            reduced as i32,
+            use_reduced_intra_txset as i32,
+            enable_flip_idtx as i32,
+            use_intra_dct_only as i32,
+            &mut txk,
+        )
+    };
+    (mask as u16, txk as usize)
+}
+
+/// Reference CfL slice of `av1_fill_mode_rates` (rd.c): flat
+/// `[8][2][16]` costs from one padded sign row (9) + flat `[6][17]` alpha
+/// CDFs, via the REAL `av1_cost_tokens_from_cdf` + real `CFL_*` macros.
+pub fn ref_fill_cfl_costs(cfl_sign_cdf: &[u16], cfl_alpha_cdf: &[u16]) -> Vec<i32> {
+    assert_eq!(cfl_sign_cdf.len(), 9);
+    assert_eq!(cfl_alpha_cdf.len(), 6 * 17);
+    let mut out = vec![0i32; 8 * 2 * 16];
+    unsafe {
+        shim_fill_cfl_costs(cfl_sign_cdf.as_ptr(), cfl_alpha_cdf.as_ptr(), out.as_mut_ptr())
+    };
+    out
+}
+
+/// Reference palette-UV-flag cost fill (rd.c): flat `[2][2]` from `[2][3]`.
+pub fn ref_fill_palette_uv_mode_costs(palette_uv_mode_cdf: &[u16]) -> Vec<i32> {
+    assert_eq!(palette_uv_mode_cdf.len(), 2 * 3);
+    let mut out = vec![0i32; 2 * 2];
+    unsafe { shim_fill_palette_uv_mode_costs(palette_uv_mode_cdf.as_ptr(), out.as_mut_ptr()) };
+    out
+}
+
+/// Reference `intra_mode_info_cost_uv` (intra_mode_search_utils.h,
+/// `palette_size[1] == 0` path) over the REAL header gates. Cost tables flat
+/// (`angle_delta [8][7]`, `palette_uv_mode [2][2]`).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_intra_mode_info_cost_uv(
+    angle_delta_cost: &[i32],
+    palette_uv_mode_cost: &[i32],
+    mode_cost: i32,
+    uv_mode: usize,
+    bsize: usize,
+    angle_delta_uv: i32,
+    try_palette: bool,
+    y_palette_active: bool,
+) -> i32 {
+    assert_eq!(angle_delta_cost.len(), 8 * 7);
+    assert_eq!(palette_uv_mode_cost.len(), 4);
+    unsafe {
+        shim_intra_mode_info_cost_uv(
+            angle_delta_cost.as_ptr(),
+            palette_uv_mode_cost.as_ptr(),
+            mode_cost,
+            uv_mode as i32,
+            bsize as i32,
+            angle_delta_uv,
+            try_palette as i32,
+            y_palette_active as i32,
+        )
+    }
+}
+
+/// CfL context state threaded through the REAL encoder-side CfL facades:
+/// `(recon_buf_q3, ac_buf_q3, buf_width, buf_height, are_parameters_computed)`.
+pub struct RefCflState {
+    pub recon_q3: [u16; 1024],
+    pub ac_q3: [i16; 1024],
+    pub buf_w: i32,
+    pub buf_h: i32,
+    pub params_computed: bool,
+}
+
+impl Default for RefCflState {
+    fn default() -> Self {
+        RefCflState {
+            recon_q3: [0; 1024],
+            ac_q3: [0; 1024],
+            buf_w: 0,
+            buf_h: 0,
+            params_computed: false,
+        }
+    }
+}
+
+/// The REAL exported `cfl_store_tx` (cfl.c): subsample one reconstructed luma
+/// tx block into the CfL Q3 buffer (production RTCD subsampling kernels),
+/// tracking the written surface + invalidating the AC parameters. `luma` is a
+/// u16 plane at any bit depth; `(row, col)` the txb offset in luma mi units;
+/// `mi_row`/`mi_col` the block position (sub-8x8 shared-chroma adjustment).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_cfl_store_tx(
+    st: &mut RefCflState,
+    luma: &[u16],
+    block_off: usize,
+    stride: usize,
+    row: i32,
+    col: i32,
+    tx_size: usize,
+    bsize: usize,
+    mi_row: i32,
+    mi_col: i32,
+    ss_x: i32,
+    ss_y: i32,
+    bd: u8,
+) {
+    let mut pc = st.params_computed as i32;
+    unsafe {
+        shim_cfl_store_tx(
+            luma.as_ptr(),
+            block_off as i32,
+            stride as i32,
+            row,
+            col,
+            tx_size as i32,
+            bsize as i32,
+            mi_row,
+            mi_col,
+            ss_x,
+            ss_y,
+            bd as i32,
+            st.recon_q3.as_mut_ptr(),
+            &mut st.buf_w,
+            &mut st.buf_h,
+            &mut pc,
+        )
+    };
+    st.params_computed = pc != 0;
+}
+
+/// The REAL exported `av1_cfl_predict_block` (cfl.c): lazily pad + subtract
+/// the block average (first call after a store), then add the alpha-scaled AC
+/// into `dst` (which must already hold the DC prediction). `plane` is 1 (U)
+/// or 2 (V); alpha comes from the coded `(cfl_alpha_idx, cfl_alpha_signs)`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_cfl_predict_block(
+    st: &mut RefCflState,
+    dst: &mut [u16],
+    dst_off: usize,
+    dst_stride: usize,
+    tx_size: usize,
+    plane: usize,
+    cfl_alpha_idx: i32,
+    cfl_alpha_signs: i32,
+    bsize: usize,
+    lossless: bool,
+    ss_x: i32,
+    ss_y: i32,
+    bd: u8,
+) {
+    let mut pc = st.params_computed as i32;
+    unsafe {
+        shim_cfl_predict_block(
+            st.recon_q3.as_mut_ptr(),
+            st.ac_q3.as_mut_ptr(),
+            &mut st.buf_w,
+            &mut st.buf_h,
+            &mut pc,
+            dst.as_mut_ptr(),
+            dst_off as i32,
+            dst_stride as i32,
+            tx_size as i32,
+            plane as i32,
+            cfl_alpha_idx,
+            cfl_alpha_signs,
+            bsize as i32,
+            lossless as i32,
+            ss_x,
+            ss_y,
+            bd as i32,
+        )
+    };
+    st.params_computed = pc != 0;
+}

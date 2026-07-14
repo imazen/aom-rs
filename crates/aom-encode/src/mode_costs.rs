@@ -60,6 +60,9 @@ pub struct IntraModeCosts {
     pub intrabc_cost: [i32; 2],
     /// Palette-Y flag: `[bsize_ctx][mode_ctx][use_palette]`.
     pub palette_y_mode_cost: [[[i32; 2]; PALETTE_Y_MODE_CONTEXTS]; PALETTE_BSIZE_CTXS],
+    /// Palette-UV flag: `[y_palette_active][use_palette]`
+    /// (`PALETTE_UV_MODE_CONTEXTS` = 2; filled by [`fill_palette_uv_mode_costs`]).
+    pub palette_uv_mode_cost: [[i32; 2]; 2],
 }
 
 impl IntraModeCosts {
@@ -74,7 +77,23 @@ impl IntraModeCosts {
             angle_delta_cost: [[0; 2 * MAX_ANGLE_DELTA + 1]; DIRECTIONAL_MODES],
             intrabc_cost: [0; 2],
             palette_y_mode_cost: [[[0; 2]; PALETTE_Y_MODE_CONTEXTS]; PALETTE_BSIZE_CTXS],
+            palette_uv_mode_cost: [[0; 2]; 2],
         })
+    }
+}
+
+/// The palette-UV-flag slice of `av1_fill_mode_rates` (rd.c):
+/// `av1_cost_tokens_from_cdf(palette_uv_mode_cost[i], palette_uv_mode_cdf[i])`
+/// for the 2 y-palette-active contexts. `palette_uv_mode_cdf` is flat
+/// `[2][3]` (2 symbols + padding).
+pub fn fill_palette_uv_mode_costs(costs: &mut IntraModeCosts, palette_uv_mode_cdf: &[u16]) {
+    assert_eq!(palette_uv_mode_cdf.len(), 2 * 3);
+    for i in 0..2 {
+        cost_tokens_from_cdf(
+            &mut costs.palette_uv_mode_cost[i],
+            &palette_uv_mode_cdf[i * 3..i * 3 + 3],
+            None,
+        );
     }
 }
 
@@ -234,6 +253,128 @@ pub fn intra_mode_info_cost_y(
     }
     if allow_intrabc {
         total_rate += costs.intrabc_cost[usize::from(use_intrabc)];
+    }
+    total_rate
+}
+
+// ---------------------------------------------------------------------------
+// CfL alpha signaling cost (ModeCosts.cfl_cost) + intra_mode_info_cost_uv
+// ---------------------------------------------------------------------------
+
+/// `CFL_JOINT_SIGNS` (enums.h): `CFL_SIGNS * CFL_SIGNS - 1`.
+pub const CFL_JOINT_SIGNS: usize = 8;
+/// `CFL_PRED_PLANES` (enums.h): U and V.
+pub const CFL_PRED_PLANES: usize = 2;
+/// `CFL_ALPHABET_SIZE` (enums.h): 16 coded alpha magnitudes.
+pub const CFL_ALPHABET_SIZE: usize = 16;
+/// `CFL_ALPHA_CONTEXTS` (enums.h): `CFL_JOINT_SIGNS + 1 - CFL_SIGNS`.
+pub const CFL_ALPHA_CONTEXTS: usize = 6;
+
+/// `CFL_SIGN_U(js)` (enums.h): `((js + 1) * 11) >> 5`.
+#[inline]
+pub fn cfl_sign_u(js: usize) -> usize {
+    ((js + 1) * 11) >> 5
+}
+/// `CFL_SIGN_V(js)` (enums.h): `(js + 1) - CFL_SIGNS * CFL_SIGN_U(js)`.
+#[inline]
+pub fn cfl_sign_v(js: usize) -> usize {
+    (js + 1) - 3 * cfl_sign_u(js)
+}
+/// `CFL_CONTEXT_U(js)` (enums.h): `js + 1 - CFL_SIGNS`.
+#[inline]
+pub fn cfl_context_u(js: usize) -> usize {
+    js + 1 - 3
+}
+/// `CFL_CONTEXT_V(js)` (enums.h): `CFL_SIGN_V(js) * CFL_SIGNS + CFL_SIGN_U(js) - CFL_SIGNS`.
+#[inline]
+pub fn cfl_context_v(js: usize) -> usize {
+    cfl_sign_v(js) * 3 + cfl_sign_u(js) - 3
+}
+
+/// `ModeCosts.cfl_cost[CFL_JOINT_SIGNS][CFL_PRED_PLANES][CFL_ALPHABET_SIZE]`
+/// (block.h): the CfL alpha-magnitude signaling rate per joint sign and
+/// plane, with the joint-sign symbol cost folded into every U-plane entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CflCosts(pub [[[i32; CFL_ALPHABET_SIZE]; CFL_PRED_PLANES]; CFL_JOINT_SIGNS]);
+
+impl CflCosts {
+    /// All-zero table, filled by [`fill_cfl_costs`].
+    pub fn zeroed() -> Self {
+        CflCosts([[[0; CFL_ALPHABET_SIZE]; CFL_PRED_PLANES]; CFL_JOINT_SIGNS])
+    }
+}
+
+/// The CfL slice of `av1_fill_mode_rates` (rd.c 154-172): per joint sign,
+/// alpha-magnitude costs from `cfl_alpha_cdf[CFL_CONTEXT_U/V(js)]` (all-zero
+/// rows when that plane's sign is `CFL_SIGN_ZERO`), then the joint-sign
+/// symbol cost (`cfl_sign_cdf`, 8 symbols) added into every U entry.
+/// `cfl_sign_cdf` is one padded row (`8+1`); `cfl_alpha_cdf` is flat
+/// `[CFL_ALPHA_CONTEXTS][CFL_ALPHABET_SIZE + 1]`.
+pub fn fill_cfl_costs(out: &mut CflCosts, cfl_sign_cdf: &[u16], cfl_alpha_cdf: &[u16]) {
+    assert_eq!(cfl_sign_cdf.len(), CFL_JOINT_SIGNS + 1);
+    assert_eq!(cfl_alpha_cdf.len(), CFL_ALPHA_CONTEXTS * (CFL_ALPHABET_SIZE + 1));
+    let mut sign_cost = [0i32; CFL_JOINT_SIGNS];
+    cost_tokens_from_cdf(&mut sign_cost, cfl_sign_cdf, None);
+    #[allow(clippy::needless_range_loop)] // js drives the CFL_* context macros
+    for js in 0..CFL_JOINT_SIGNS {
+        // CFL_SIGN_ZERO == 0.
+        if cfl_sign_u(js) == 0 {
+            out.0[js][0] = [0; CFL_ALPHABET_SIZE];
+        } else {
+            let off = cfl_context_u(js) * (CFL_ALPHABET_SIZE + 1);
+            let row = &cfl_alpha_cdf[off..off + CFL_ALPHABET_SIZE + 1];
+            let mut cost = [0i32; CFL_ALPHABET_SIZE];
+            cost_tokens_from_cdf(&mut cost, row, None);
+            out.0[js][0] = cost;
+        }
+        if cfl_sign_v(js) == 0 {
+            out.0[js][1] = [0; CFL_ALPHABET_SIZE];
+        } else {
+            let off = cfl_context_v(js) * (CFL_ALPHABET_SIZE + 1);
+            let row = &cfl_alpha_cdf[off..off + CFL_ALPHABET_SIZE + 1];
+            let mut cost = [0i32; CFL_ALPHABET_SIZE];
+            cost_tokens_from_cdf(&mut cost, row, None);
+            out.0[js][1] = cost;
+        }
+        for u in 0..CFL_ALPHABET_SIZE {
+            out.0[js][0][u] += sign_cost[js];
+        }
+    }
+}
+
+/// `UV_DC_PRED` (enums.h).
+const UV_DC_PRED: usize = 0;
+
+/// Bit-exact port of `intra_mode_info_cost_uv`
+/// (av1/encoder/intra_mode_search_utils.h) for the **`palette_size[1] == 0`**
+/// path: the UV mode-info signaling rate = `mode_cost` (the caller-selected
+/// `intra_uv_mode_cost[cfl_allowed][y_mode][uv_mode]` entry) + the
+/// no-uv-palette flag bit (when palette is allowed and the mode is
+/// `UV_DC_PRED`; context = whether the Y palette is active) + the UV angle
+/// delta for directional modes on angle-eligible block sizes. The
+/// palette-USE branch (size/color/map rate) is out of scope — it belongs to
+/// the UV palette search. `use_intrabc == 0` in the intra-frame UV RD context
+/// (the C asserts at most one of {non-DC uv_mode, palette, intrabc}).
+pub fn intra_mode_info_cost_uv(
+    costs: &IntraModeCosts,
+    mode_cost: i32,
+    uv_mode: usize,
+    bsize: usize,
+    angle_delta_uv: i32,
+    try_palette: bool,
+    y_palette_active: bool,
+) -> i32 {
+    let mut total_rate = mode_cost;
+    let use_palette = 0usize; // scope: palette_size[1] == 0
+    assert!(usize::from(uv_mode != UV_DC_PRED) + use_palette <= 1);
+    if try_palette && uv_mode == UV_DC_PRED {
+        total_rate +=
+            costs.palette_uv_mode_cost[usize::from(y_palette_active)][use_palette];
+    }
+    let intra_mode = aom_entropy::partition::get_uv_mode(uv_mode);
+    if is_directional_mode(intra_mode) && use_angle_delta(bsize) {
+        total_rate += costs.angle_delta_cost[(intra_mode - 1) as usize]
+            [(angle_delta_uv + MAX_ANGLE_DELTA as i32) as usize];
     }
     total_rate
 }

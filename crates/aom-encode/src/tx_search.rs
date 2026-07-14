@@ -153,6 +153,113 @@ pub fn get_tx_mask_intra(
     (allowed_tx_mask, single)
 }
 
+/// `intra_mode_to_tx_type` (blockd.h): the per-intra-direction default tx
+/// type (DCT_DCT=0 / ADST_DCT=1 / DCT_ADST=2 / ADST_ADST=3), indexed by
+/// `PREDICTION_MODE`.
+pub const INTRA_MODE_TO_TX_TYPE: [usize; 13] = [
+    0, // DC_PRED      -> DCT_DCT
+    1, // V_PRED       -> ADST_DCT
+    2, // H_PRED       -> DCT_ADST
+    0, // D45_PRED     -> DCT_DCT
+    3, // D135_PRED    -> ADST_ADST
+    1, // D113_PRED    -> ADST_DCT
+    2, // D157_PRED    -> DCT_ADST
+    2, // D203_PRED    -> DCT_ADST
+    1, // D67_PRED     -> ADST_DCT
+    3, // SMOOTH_PRED  -> ADST_ADST
+    1, // SMOOTH_V_PRED-> ADST_DCT
+    2, // SMOOTH_H_PRED-> DCT_ADST
+    3, // PAETH_PRED   -> ADST_ADST
+];
+
+/// `av1_get_tx_type` (blockd.h) for `PLANE_TYPE_UV` on an INTRA block: chroma
+/// derives its tx type from the block's UV prediction mode
+/// (`intra_mode_to_tx_type(mbmi, PLANE_TYPE_UV)` reads
+/// `get_uv_mode(mbmi->uv_mode)` — UV_CFL_PRED maps to DC_PRED), demoted to
+/// DCT_DCT when the ext-tx set of `tx_size` does not admit it
+/// (`!av1_ext_tx_used[tx_set_type][tx_type]`), and forced to DCT_DCT outright
+/// for lossless segments or `txsize_sqr_up_map[tx_size] > TX_32X32`.
+/// (The inter arm — Y-plane `tx_type_map` sharing at the chroma-scaled
+/// position — is out of scope for the intra RD search.)
+pub fn uv_intra_tx_type(
+    uv_mode: usize,
+    lossless: bool,
+    tx_size: usize,
+    reduced_tx_set_used: bool,
+) -> usize {
+    if lossless || TXSIZE_SQR_UP_MAP[tx_size] > 3 {
+        return 0; // DCT_DCT
+    }
+    let mode = aom_entropy::partition::get_uv_mode(uv_mode) as usize;
+    let tx_type = INTRA_MODE_TO_TX_TYPE[mode];
+    let tx_set_type = ext_tx_set_type(tx_size, false, reduced_tx_set_used);
+    if AV1_EXT_TX_USED_FLAG[tx_set_type] & (1 << tx_type) == 0 {
+        0
+    } else {
+        tx_type
+    }
+}
+
+/// `get_tx_mask` (tx_search.c, static) — the CHROMA INTRA arm (`plane != 0`):
+/// `txk_allowed` is pinned to [`uv_intra_tx_type`] ("tx_type of PLANE_TYPE_UV
+/// should be the same as PLANE_TYPE_Y"), masked against the ext-tx-used flag
+/// (which, under sf `use_reduced_intra_txset` on `EXT_TX_SET_DTT4_IDTX_1DDCT`
+/// sizes, is the per-direction reduced table selected by the **LUMA** intra
+/// direction `mbmi->mode` — or `fimode_to_intradir` when the luma winner used
+/// filter-intra). KEY GOTCHA (tx_search.c:1942-46): when the masked set comes
+/// out empty, the mask RESETS to `1 << uv_tx_type` — the UV tx type is used
+/// even when outside the reduced set (the luma fallback is DCT_DCT instead).
+/// Returns `(mask, txk_allowed)`; for chroma the mask is always exactly one
+/// bit.
+#[allow(clippy::too_many_arguments)]
+pub fn get_tx_mask_uv_intra(
+    tx_size: usize,
+    uv_mode: usize,
+    luma_mode: usize,
+    luma_use_filter_intra: bool,
+    luma_filter_intra_mode: usize,
+    lossless: bool,
+    reduced_tx_set_used: bool,
+    p: &TxMaskParams,
+) -> (u16, usize) {
+    let uv_tx_type = uv_intra_tx_type(uv_mode, lossless, tx_size, reduced_tx_set_used);
+    let mut txk_allowed = uv_tx_type;
+    let tx_set_type = ext_tx_set_type(tx_size, false, reduced_tx_set_used);
+
+    let intra_dir = if luma_use_filter_intra {
+        FIMODE_TO_INTRADIR[luma_filter_intra_mode]
+    } else {
+        luma_mode
+    };
+    let mut ext_tx_used_flag =
+        if p.use_reduced_intra_txset != 0 && tx_set_type == EXT_TX_SET_DTT4_IDTX_1DDCT {
+            AV1_REDUCED_INTRA_TX_USED_FLAG[intra_dir]
+        } else {
+            AV1_EXT_TX_USED_FLAG[tx_set_type]
+        };
+    if p.use_reduced_intra_txset == 2 {
+        ext_tx_used_flag &= AV1_DERIVED_INTRA_TX_USED_FLAG[intra_dir];
+    }
+
+    if lossless || TXSIZE_SQR_UP_MAP[tx_size] > 3 || ext_tx_used_flag == 0x0001 || p.use_intra_dct_only
+    {
+        txk_allowed = 0; // DCT_DCT
+    }
+    if !p.enable_flip_idtx {
+        ext_tx_used_flag &= DCT_ADST_TX_MASK;
+    }
+
+    // txk_allowed < TX_TYPES always holds on the chroma arm.
+    let mut allowed_tx_mask = (1u16 << txk_allowed) & ext_tx_used_flag;
+    if allowed_tx_mask == 0 {
+        // "txk_allowed = (plane ? uv_tx_type : DCT_DCT)" — the chroma reset.
+        txk_allowed = uv_tx_type;
+        allowed_tx_mask = 1 << txk_allowed;
+    }
+    debug_assert_eq!(allowed_tx_mask, 1 << txk_allowed);
+    (allowed_tx_mask, txk_allowed)
+}
+
 /// The visible-dimension slice of `get_txb_dimensions` (rdopt_utils.h): a
 /// txb's pixels clipped to the frame boundary. `mb_to_right_edge` /
 /// `mb_to_bottom_edge` are the MACROBLOCKD edge fields (1/8-pel units,

@@ -18,6 +18,7 @@
                                       av1_is_directional_mode, av1_use_angle_delta */
 #include "av1/common/common_data.h" /* txsize_sqr_map */
 #include "av1/common/entropymode.h" /* av1_ext_tx_inv */
+#include "av1/common/cfl.h" /* cfl_store_tx, av1_cfl_predict_block */
 #include "av1/common/quant_common.h" /* av1_get_qindex */
 #include "av1/common/seg_common.h" /* struct segmentation, SEG_LVL_ALT_Q */
 #include "av1/common/idct.h" /* MAX_TX_SCALE, av1_get_tx_scale */
@@ -907,4 +908,244 @@ double shim_intra_rd_variance_factor(
   variance_rd_factor = AOMMIN(3.0, variance_rd_factor);
 
   return variance_rd_factor;
+}
+
+/* ---- chroma intra RD: UV tx type / tx mask / CfL costs / UV mode-info cost --
+ * (1) shim_get_tx_type_uv_intra: the REAL av1_get_tx_type (blockd.h static
+ *     inline = pristine C recompiled in this TU) over a calloc'd MACROBLOCKD
+ *     stub — PLANE_TYPE_UV, intra block (ref_frame[0] = INTRA_FRAME,
+ *     use_intrabc = 0). Marshals uv_mode + lossless only (the intra UV arm
+ *     reads nothing else; blk_row/col and tx_type_map are inter-only).
+ * (2) shim_get_tx_mask_uv_intra: the CHROMA arm of get_tx_mask (tx_search.c,
+ *     static) transcribed over the REAL av1_get_tx_type + real header statics
+ *     (av1_ext_tx_used_flag / av1_reduced_intra_tx_used_flag /
+ *     fimode_to_intradir). Structurally-off arms omitted per the speed-0
+ *     intra contract (inter forcing, stats/est-rd/2D prunes,
+ *     use_default_intra_tx_type, LOW_TXFM_RD). NOTE the chroma empty-mask
+ *     reset keeps uv_tx_type (tx_search.c:1942-46), unlike luma's DCT_DCT.
+ * (3) shim_fill_cfl_costs: the CfL slice of av1_fill_mode_rates (rd.c
+ *     154-172) over the REAL av1_cost_tokens_from_cdf + real CFL_* macros.
+ *     out layout [CFL_JOINT_SIGNS=8][CFL_PRED_PLANES=2][CFL_ALPHABET_SIZE=16];
+ *     sign_cdf one padded row (9), alpha_cdf flat [6][17].
+ * (4) shim_fill_palette_uv_mode_costs: rd.c palette_uv_mode_cost fill
+ *     ([2][3] cdf -> [2][2]).
+ * (5) shim_intra_mode_info_cost_uv: transcribed intra_mode_info_cost_uv
+ *     (intra_mode_search_utils.h) for the palette_size[1]==0 path over the
+ *     REAL header gates (get_uv_mode / av1_is_directional_mode /
+ *     av1_use_angle_delta). */
+int shim_get_tx_type_uv_intra(int uv_mode, int lossless, int tx_size,
+                              int reduced_tx_set_used) {
+  MACROBLOCKD *xd = (MACROBLOCKD *)calloc(1, sizeof(MACROBLOCKD));
+  MB_MODE_INFO *mbmi = (MB_MODE_INFO *)calloc(1, sizeof(MB_MODE_INFO));
+  if (!xd || !mbmi) {
+    free(xd);
+    free(mbmi);
+    return -1;
+  }
+  MB_MODE_INFO *mi_ptr = mbmi;
+  xd->mi = &mi_ptr;
+  mbmi->uv_mode = (UV_PREDICTION_MODE)uv_mode;
+  mbmi->ref_frame[0] = INTRA_FRAME;
+  mbmi->segment_id = 0;
+  xd->lossless[0] = lossless;
+  const TX_TYPE t = av1_get_tx_type(xd, PLANE_TYPE_UV, /*blk_row=*/0,
+                                    /*blk_col=*/0, (TX_SIZE)tx_size,
+                                    reduced_tx_set_used);
+  free(xd);
+  free(mbmi);
+  return (int)t;
+}
+
+int shim_get_tx_mask_uv_intra(int tx_size, int uv_mode, int luma_mode,
+                              int luma_use_filter_intra,
+                              int luma_filter_intra_mode, int lossless,
+                              int reduced_tx_set_used,
+                              int use_reduced_intra_txset,
+                              int enable_flip_idtx, int use_intra_dct_only,
+                              int *out_txk_allowed) {
+  const int uv_tx_type =
+      shim_get_tx_type_uv_intra(uv_mode, lossless, tx_size,
+                                reduced_tx_set_used);
+  TX_TYPE txk_allowed = (TX_TYPE)uv_tx_type;
+  const TxSetType tx_set_type = av1_get_ext_tx_set_type(
+      (TX_SIZE)tx_size, /*is_inter=*/0, reduced_tx_set_used);
+
+  PREDICTION_MODE intra_dir;
+  if (luma_use_filter_intra)
+    intra_dir = fimode_to_intradir[luma_filter_intra_mode];
+  else
+    intra_dir = (PREDICTION_MODE)luma_mode;
+  uint16_t ext_tx_used_flag =
+      use_reduced_intra_txset != 0 && tx_set_type == EXT_TX_SET_DTT4_IDTX_1DDCT
+          ? av1_reduced_intra_tx_used_flag[intra_dir]
+          : av1_ext_tx_used_flag[tx_set_type];
+  if (use_reduced_intra_txset == 2)
+    ext_tx_used_flag &= av1_derived_intra_tx_used_flag[intra_dir];
+
+  if (lossless || txsize_sqr_up_map[tx_size] > TX_32X32 ||
+      ext_tx_used_flag == 0x0001 || use_intra_dct_only) {
+    txk_allowed = DCT_DCT;
+  }
+  if (enable_flip_idtx == 0) ext_tx_used_flag &= DCT_ADST_TX_MASK;
+
+  uint16_t allowed_tx_mask = (1 << txk_allowed) & ext_tx_used_flag;
+  if (allowed_tx_mask == 0) {
+    txk_allowed = (TX_TYPE)uv_tx_type; /* plane ? uv_tx_type : DCT_DCT */
+    allowed_tx_mask = (1 << txk_allowed);
+  }
+  *out_txk_allowed = txk_allowed;
+  return allowed_tx_mask;
+}
+
+void shim_fill_cfl_costs(const uint16_t *cfl_sign_cdf,
+                         const uint16_t *cfl_alpha_cdf, int *out) {
+  int sign_cost[CFL_JOINT_SIGNS];
+  av1_cost_tokens_from_cdf(sign_cost, cfl_sign_cdf, NULL);
+  for (int joint_sign = 0; joint_sign < CFL_JOINT_SIGNS; joint_sign++) {
+    int *cost_u = out + (joint_sign * CFL_PRED_PLANES + CFL_PRED_U) *
+                            CFL_ALPHABET_SIZE;
+    int *cost_v = out + (joint_sign * CFL_PRED_PLANES + CFL_PRED_V) *
+                            CFL_ALPHABET_SIZE;
+    if (CFL_SIGN_U(joint_sign) == CFL_SIGN_ZERO) {
+      memset(cost_u, 0, CFL_ALPHABET_SIZE * sizeof(*cost_u));
+    } else {
+      const aom_cdf_prob *cdf_u =
+          cfl_alpha_cdf + CFL_CONTEXT_U(joint_sign) * (CFL_ALPHABET_SIZE + 1);
+      av1_cost_tokens_from_cdf(cost_u, cdf_u, NULL);
+    }
+    if (CFL_SIGN_V(joint_sign) == CFL_SIGN_ZERO) {
+      memset(cost_v, 0, CFL_ALPHABET_SIZE * sizeof(*cost_v));
+    } else {
+      const aom_cdf_prob *cdf_v =
+          cfl_alpha_cdf + CFL_CONTEXT_V(joint_sign) * (CFL_ALPHABET_SIZE + 1);
+      av1_cost_tokens_from_cdf(cost_v, cdf_v, NULL);
+    }
+    for (int u = 0; u < CFL_ALPHABET_SIZE; u++)
+      cost_u[u] += sign_cost[joint_sign];
+  }
+}
+
+void shim_fill_palette_uv_mode_costs(const uint16_t *palette_uv_mode_cdf,
+                                     int *out) {
+  for (int i = 0; i < PALETTE_UV_MODE_CONTEXTS; ++i)
+    av1_cost_tokens_from_cdf(out + i * 2, palette_uv_mode_cdf + i * 3, NULL);
+}
+
+int shim_intra_mode_info_cost_uv(const int *angle_delta_cost,
+                                 const int *palette_uv_mode_cost,
+                                 int mode_cost, int uv_mode, int bsize,
+                                 int angle_delta_uv, int try_palette,
+                                 int y_palette_active) {
+  int total_rate = mode_cost;
+  const int use_palette = 0; /* scope: palette_size[1] == 0 */
+  assert(((uv_mode != UV_DC_PRED) + use_palette) <= 1);
+  if (try_palette && uv_mode == UV_DC_PRED) {
+    total_rate += palette_uv_mode_cost[(y_palette_active ? 1 : 0) * 2 +
+                                       use_palette];
+  }
+  const PREDICTION_MODE intra_mode = get_uv_mode((UV_PREDICTION_MODE)uv_mode);
+  if (av1_is_directional_mode(intra_mode)) {
+    if (av1_use_angle_delta((BLOCK_SIZE)bsize)) {
+      total_rate += angle_delta_cost[(intra_mode - V_PRED) *
+                                         (2 * MAX_ANGLE_DELTA + 1) +
+                                     angle_delta_uv + MAX_ANGLE_DELTA];
+    }
+  }
+  return total_rate;
+}
+
+/* ---- encoder-side CfL facades (REAL exported cfl_store_tx /
+ *      av1_cfl_predict_block over a calloc'd MACROBLOCKD stub) --------------
+ * Buffers are u16 at every bit depth (CONVERT_TO_BYTEPTR world; xd->cur_buf
+ * flags YV12_FLAG_HIGHBITDEPTH so is_cur_buf_hbd(xd) holds, matching every
+ * other hbd shim in this crate). CfL state (recon_buf_q3 / ac_buf_q3 /
+ * buf_width / buf_height / are_parameters_computed) is copied in and out so
+ * callers can thread it across calls exactly as the embedded xd->cfl would
+ * be (store invalidates, first predict computes lazily, later predicts
+ * reuse). */
+void shim_cfl_store_tx(const uint16_t *luma, int block_off, int stride,
+                       int row, int col, int tx_size, int bsize, int mi_row,
+                       int mi_col, int ss_x, int ss_y, int bd,
+                       uint16_t *recon_q3 /* [1024] */, int *buf_w, int *buf_h,
+                       int *params_computed) {
+  MACROBLOCKD *xd = (MACROBLOCKD *)calloc(1, sizeof(MACROBLOCKD));
+  YV12_BUFFER_CONFIG *cb =
+      (YV12_BUFFER_CONFIG *)calloc(1, sizeof(YV12_BUFFER_CONFIG));
+  if (!xd || !cb) {
+    free(xd);
+    free(cb);
+    return;
+  }
+  cb->flags = YV12_FLAG_HIGHBITDEPTH;
+  xd->cur_buf = cb;
+  xd->bd = bd;
+  xd->cfl.subsampling_x = ss_x;
+  xd->cfl.subsampling_y = ss_y;
+  xd->mi_row = mi_row;
+  xd->mi_col = mi_col;
+  memcpy(xd->cfl.recon_buf_q3, recon_q3, sizeof(xd->cfl.recon_buf_q3));
+  xd->cfl.buf_width = *buf_w;
+  xd->cfl.buf_height = *buf_h;
+  xd->cfl.are_parameters_computed = *params_computed;
+  xd->plane[AOM_PLANE_Y].dst.buf =
+      (uint8_t *)CONVERT_TO_BYTEPTR(luma + block_off);
+  xd->plane[AOM_PLANE_Y].dst.stride = stride;
+  cfl_store_tx(xd, row, col, (TX_SIZE)tx_size, (BLOCK_SIZE)bsize);
+  memcpy(recon_q3, xd->cfl.recon_buf_q3, sizeof(xd->cfl.recon_buf_q3));
+  *buf_w = xd->cfl.buf_width;
+  *buf_h = xd->cfl.buf_height;
+  *params_computed = xd->cfl.are_parameters_computed;
+  free(xd);
+  free(cb);
+}
+
+void shim_cfl_predict_block(uint16_t *recon_q3 /* [1024] */,
+                            int16_t *ac_q3 /* [1024] */, int *buf_w,
+                            int *buf_h, int *params_computed,
+                            uint16_t *dst, int dst_off, int dst_stride,
+                            int tx_size, int plane, int cfl_alpha_idx,
+                            int cfl_alpha_signs, int bsize, int lossless,
+                            int ss_x, int ss_y, int bd) {
+  MACROBLOCKD *xd = (MACROBLOCKD *)calloc(1, sizeof(MACROBLOCKD));
+  MB_MODE_INFO *mbmi = (MB_MODE_INFO *)calloc(1, sizeof(MB_MODE_INFO));
+  YV12_BUFFER_CONFIG *cb =
+      (YV12_BUFFER_CONFIG *)calloc(1, sizeof(YV12_BUFFER_CONFIG));
+  if (!xd || !mbmi || !cb) {
+    free(xd);
+    free(mbmi);
+    free(cb);
+    return;
+  }
+  cb->flags = YV12_FLAG_HIGHBITDEPTH;
+  xd->cur_buf = cb;
+  xd->bd = bd;
+  MB_MODE_INFO *mi_ptr = mbmi;
+  xd->mi = &mi_ptr;
+  mbmi->bsize = (BLOCK_SIZE)bsize;
+  mbmi->segment_id = 0;
+  mbmi->ref_frame[0] = INTRA_FRAME;
+  mbmi->uv_mode = UV_CFL_PRED;
+  mbmi->cfl_alpha_idx = (uint8_t)cfl_alpha_idx;
+  mbmi->cfl_alpha_signs = (int8_t)cfl_alpha_signs;
+  xd->lossless[0] = lossless;
+  /* is_cfl_allowed(xd) (assert) reads plane[AOM_PLANE_U] subsampling. */
+  xd->plane[AOM_PLANE_U].subsampling_x = ss_x;
+  xd->plane[AOM_PLANE_U].subsampling_y = ss_y;
+  xd->cfl.subsampling_x = ss_x;
+  xd->cfl.subsampling_y = ss_y;
+  memcpy(xd->cfl.recon_buf_q3, recon_q3, sizeof(xd->cfl.recon_buf_q3));
+  memcpy(xd->cfl.ac_buf_q3, ac_q3, sizeof(xd->cfl.ac_buf_q3));
+  xd->cfl.buf_width = *buf_w;
+  xd->cfl.buf_height = *buf_h;
+  xd->cfl.are_parameters_computed = *params_computed;
+  av1_cfl_predict_block(xd, (uint8_t *)CONVERT_TO_BYTEPTR(dst + dst_off),
+                        dst_stride, (TX_SIZE)tx_size, plane);
+  memcpy(recon_q3, xd->cfl.recon_buf_q3, sizeof(xd->cfl.recon_buf_q3));
+  memcpy(ac_q3, xd->cfl.ac_buf_q3, sizeof(xd->cfl.ac_buf_q3));
+  *buf_w = xd->cfl.buf_width;
+  *buf_h = xd->cfl.buf_height;
+  *params_computed = xd->cfl.are_parameters_computed;
+  free(xd);
+  free(mbmi);
+  free(cb);
 }
