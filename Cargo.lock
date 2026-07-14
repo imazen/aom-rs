@@ -17,6 +17,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aom-decode"
+version = "0.0.1"
+dependencies = [
+ "aom-encode",
+ "aom-entropy",
+ "aom-intra",
+ "aom-txb",
+]
+
+[[package]]
 name = "aom-dist"
 version = "0.0.1"
 dependencies = [

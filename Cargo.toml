@@ -11,6 +11,7 @@ members = [
     "crates/aom-convolve",
     "crates/aom-txb",
     "crates/aom-encode",
+    "crates/aom-decode",
     "crates/aom-sys-ref",
 ]
 
