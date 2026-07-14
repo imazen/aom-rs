@@ -33,18 +33,26 @@
 //! - **`TX_MODE_LARGEST`**: per-block `tx_size = max_txsize_rect_lookup[bsize]`,
 //!   which codes no tx-size bits — matching the landed KEY-frame mode path
 //!   ([`MbModeInfoKf`] carries no tx size; `TX_MODE_SELECT` needs the
-//!   `get_tx_size_context` neighbour facade, which is not ported). Consequence:
-//!   blocks ≤ 64x64 have exactly one luma txb, so the *within-block* multi-txb
-//!   interleave is structurally present but degenerate; the *across-block*
-//!   reconstruction feedback and entropy-context threading are fully exercised.
-//! - **Shared, context-pre-selected CDFs** (the landed [`KfCdfs`] simplification):
-//!   each mode-info symbol adapts one shared CDF instance rather than the full
-//!   neighbour-selected `FRAME_CONTEXT` array. The only per-block CDF *selection*
-//!   done here is forced by alphabet consistency: the UV mode CDF has 14 symbols
-//!   for CfL-allowed blocks and 13 otherwise, so [`KfTileCdfs`] keeps the two
-//!   instances the real `uv_mode_cdf[cfl_allowed][..]` split implies, and the
-//!   ext-tx CDF is kept per set type (5- and 7-symbol alphabets). Full
-//!   FRAME_CONTEXT context selection is the next layer.
+//!   `get_tx_size_context` neighbour facade, which is not ported — the
+//!   `tx_size_cdf` array is held in [`KfFrameContext`] but never selected).
+//!   Consequence: blocks ≤ 64x64 have exactly one luma txb, so the
+//!   *within-block* multi-txb interleave is structurally present but
+//!   degenerate; the *across-block* reconstruction feedback and
+//!   entropy-context threading are fully exercised.
+//! - **Full FRAME_CONTEXT context selection** for every symbol this path codes:
+//!   the driver keeps a per-mi mode-info grid ([`MiNbrKf`]: y mode +
+//!   skip_txfm, stamped over each block's frame-cropped footprint like the C
+//!   mi grid) and hands the `xd->above_mbmi` / `xd->left_mbmi` neighbours to
+//!   [`aom_entropy::partition::read_mb_modes_kf_fc`], which picks each
+//!   symbol's CDF instance from the [`KfFrameContext`] arrays exactly as
+//!   `read_intra_frame_mode_info` does (kf_y by neighbour intra-mode
+//!   contexts, skip by neighbour skip flags, angle deltas by coded mode on
+//!   ONE shared array, uv by `[cfl_allowed][y_mode]`, filter-intra by bsize
+//!   with the real mode-dependent gate). The same grid feeds `get_filt_type`
+//!   (smooth-neighbour edge-filter selection). In the coefficient loop the
+//!   luma tx-type CDF is selected per txb as
+//!   `intra_ext_tx_cdf[eset][square_tx_size][intra_dir]` (`av1_read_tx_type`),
+//!   with `intra_dir = fimode_to_intradir[..]` for filter-intra blocks.
 //! - **Off / fixed in this cut**: segmentation, palette, intra block copy,
 //!   delta-q / delta-lf (so the dequant step is frame-constant; per-block
 //!   `av1_dc/ac_quant_QTX` recompute is not wired), quantization matrices
@@ -70,13 +78,13 @@
 use aom_encode::reconstruct_txb;
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::partition::{
-    KfBlockState, KfCdfs, MbModeInfoKf, get_partition_subsize, intra_avail, is_cfl_allowed,
-    partition_cdf_length, partition_plane_context, read_filter_intra_mode_info, read_mb_modes_kf,
+    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, get_partition_subsize, intra_avail,
+    is_cfl_allowed, partition_cdf_length, partition_plane_context, read_mb_modes_kf_fc,
     read_partition, update_ext_partition_context,
 };
 use aom_intra::predict_intra_high;
 use aom_txb::{
-    ext_tx_set_type, get_txb_ctx, read_coeffs_txb_full, txb_entropy_context, txb_high, txb_wide,
+    ext_tx_derive, get_txb_ctx, read_coeffs_txb_full, txb_entropy_context, txb_high, txb_wide,
 };
 
 // ---- spec constants (av1/common/common_data.h) --------------------------------
@@ -172,30 +180,11 @@ pub struct KfTileConfig {
     pub dequant: [i16; 2],
 }
 
-/// Every CDF the KEY-frame luma tile decode touches. All are *shared* adapting
-/// instances (see crate docs); the encoder mirror must start from identical
-/// contents for the roundtrip.
-#[derive(Clone, Debug)]
-pub struct KfTileCdfs {
-    /// The per-block mode-info CDFs. `kf.uv_mode` is a scratch slot: the driver
-    /// swaps [`Self::uv_mode_cfl`] / [`Self::uv_mode_nocfl`] in per block (the
-    /// two UV alphabets — 14 vs 13 symbols — must be separate instances, exactly
-    /// as the real `uv_mode_cdf[cfl_allowed][..]` split implies).
-    pub kf: KfCdfs,
-    pub uv_mode_cfl: [u16; 15],
-    pub uv_mode_nocfl: [u16; 15],
-    /// The coefficient-CDF arena (`aom_txb::CDF_ARENA_LEN` u16).
-    pub coeff: Vec<u16>,
-    /// Intra ext-tx CDFs per set type: `EXT_TX_SET_DTT4_IDTX` (5 symbols;
-    /// 16x16-class or `reduced_tx_set`) and `EXT_TX_SET_DTT4_IDTX_1DDCT`
-    /// (7 symbols; smaller-than-16x16 class). 32/64-class intra blocks are
-    /// DCT-only and code nothing.
-    pub ext_tx_dtt4_idtx: [u16; 6],
-    pub ext_tx_dtt4_idtx_1ddct: [u16; 8],
-    /// Partition CDF arena: 20 contexts, each an ns-symbol CDF sized by its
-    /// context's block-size level (4/8/10 symbols).
-    pub partition: [[u16; 11]; 20],
-}
+// The tile's CDF state is libaom's FRAME_CONTEXT itself —
+// [`aom_entropy::partition::KfFrameContext`] (the KEY-frame-intra slice at C
+// dims). The driver selects every symbol's instance from its per-context
+// arrays; the coefficient arena (`KfFrameContext::coeff`) must be sized
+// `aom_txb::CDF_ARENA_LEN`.
 
 // ---- decode result --------------------------------------------------------------
 
@@ -229,18 +218,6 @@ pub struct KfTileDecode {
 
 // ---- shared driver helpers (also used by the roundtrip mirror encoder) ----------
 
-/// `av1_filter_intra_allowed` (av1/common/blockd.h) for a KEY intra block with
-/// palette off: the sequence flag, the ≤32x32 bsize gate, and `mode == DC_PRED`.
-/// The mode term is why the flag is coded *after* the intra mode — the driver
-/// reads/writes it as a follow-up to the `read/write_mb_modes_kf` call (whose
-/// flat `filter_allowed` input cannot depend on the mode decoded inside it).
-pub fn filter_intra_allowed(enable_filter_intra: bool, bsize: usize, y_mode: i32) -> bool {
-    enable_filter_intra
-        && y_mode == DC_PRED
-        && BLOCK_SIZE_WIDE[bsize] <= 32
-        && BLOCK_SIZE_HIGH[bsize] <= 32
-}
-
 /// `max_block_wide` / `max_block_high` (av1/common/blockd.h), luma: the block's
 /// in-frame extent in 4x4 units — full size, reduced by the (negative)
 /// eighth-pel distance past the frame edge.
@@ -253,18 +230,36 @@ pub fn max_block_units(full_px: i32, mb_to_edge: i32) -> usize {
     (px >> 2) as usize
 }
 
-/// Select the intra ext-tx CDF for a tx size out of the per-set-type instances.
-/// Set types 0 (DCT-only) never code a symbol; any buffer satisfies the unused
-/// parameter.
+/// `av1_read_tx_type`'s intra CDF selection:
+/// `intra_ext_tx_cdf[eset][square_tx_size][intra_dir]` out of the frame
+/// context's per-eset arrays ([`KfFrameContext::ext_tx_1ddct`] /
+/// [`KfFrameContext::ext_tx_dtt4`], passed as disjoint borrows so the caller
+/// keeps the coefficient arena). The intra direction is
+/// `fimode_to_intradir[filter_intra_mode]` for a filter-intra block, else the
+/// Y mode. DCT-only sets (eset 0) never code a symbol — any slot satisfies the
+/// unused argument.
 pub fn intra_ext_tx_cdf<'a>(
-    dtt4_idtx: &'a mut [u16; 6],
-    dtt4_idtx_1ddct: &'a mut [u16; 8],
+    ext_tx_1ddct: &'a mut [[[u16; 8]; 13]; 4],
+    ext_tx_dtt4: &'a mut [[[u16; 6]; 13]; 4],
     tx_size: usize,
     reduced_tx_set: bool,
+    use_filter_intra: bool,
+    filter_intra_mode: usize,
+    y_mode: usize,
 ) -> &'a mut [u16] {
-    match ext_tx_set_type(tx_size, false, reduced_tx_set) {
-        3 => dtt4_idtx_1ddct,
-        _ => dtt4_idtx, // set 2 (DTT4_IDTX) or the never-coded DCT-only sets
+    let d = ext_tx_derive(
+        tx_size,
+        false,
+        reduced_tx_set,
+        0,
+        use_filter_intra,
+        filter_intra_mode,
+        y_mode,
+    );
+    match d.eset {
+        1 => &mut ext_tx_1ddct[d.square as usize][d.intra_dir as usize],
+        2 => &mut ext_tx_dtt4[d.square as usize][d.intra_dir as usize],
+        _ => &mut ext_tx_dtt4[0][0], // DCT-only set: never coded
     }
 }
 
@@ -283,10 +278,12 @@ struct TileKf<'c> {
     /// Partition contexts with the same lifetimes/indexing.
     above_p: Vec<i8>,
     left_p: [i8; 32],
-    /// Per-mi "luma mode is smooth" grid (frame-cropped stamps) — feeds
-    /// `get_filt_type` (the intra edge-filter type is 1 when the above or left
-    /// neighbour block's y mode is SMOOTH/SMOOTH_V/SMOOTH_H).
-    smooth: Vec<u8>,
+    /// Per-mi mode-info grid (frame-cropped stamps, like the C mi grid): the
+    /// [`MiNbrKf`] projection (`y_mode` + `skip_txfm`) every context selection
+    /// reads through `xd->above_mbmi` / `xd->left_mbmi`, and which also feeds
+    /// `get_filt_type` (edge-filter type 1 when a neighbour's y mode is
+    /// SMOOTH/SMOOTH_V/SMOOTH_H).
+    mi: Vec<MiNbrKf>,
     st: KfBlockState,
     tree: Vec<i8>,
     blocks: Vec<DecodedBlockKf>,
@@ -344,31 +341,37 @@ impl<'c> TileKf<'c> {
             left_e: [0; 32],
             above_p: vec![0; aligned_mi_cols],
             left_p: [0; 32],
-            smooth: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
+            mi: vec![
+                MiNbrKf {
+                    y_mode: 0,
+                    skip_txfm: 0
+                };
+                (cfg.mi_rows * cfg.mi_cols) as usize
+            ],
             st,
             tree: Vec::new(),
             blocks: Vec::new(),
         }
     }
 
-    /// `get_filt_type` (reconintra.c), luma: 1 when the above or left neighbour
-    /// *block* (the mi at the block origin's up/left) has a smooth y mode.
-    fn filt_type(&self, mi_row: i32, mi_col: i32, up: bool, left: bool) -> i32 {
+    /// The `xd->above_mbmi` / `xd->left_mbmi` neighbours of the block at
+    /// `(mi_row, mi_col)`: the mi-grid entries directly above / left of the
+    /// block origin, `None` when off the tile (`up_available`/`left_available`).
+    fn neighbours(&self, mi_row: i32, mi_col: i32) -> (Option<MiNbrKf>, Option<MiNbrKf>) {
         let cols = self.cfg.mi_cols;
-        let ab = up && self.smooth[((mi_row - 1) * cols + mi_col) as usize] != 0;
-        let le = left && self.smooth[(mi_row * cols + mi_col - 1) as usize] != 0;
-        (ab || le) as i32
+        let above = (mi_row > 0).then(|| self.mi[((mi_row - 1) * cols + mi_col) as usize]);
+        let left = (mi_col > 0).then(|| self.mi[(mi_row * cols + mi_col - 1) as usize]);
+        (above, left)
     }
 
-    /// Stamp the block's "smooth y mode" bit over its frame-cropped mi footprint
-    /// (the mi-grid stamp `set_offsets` clips with `x_mis`/`y_mis`).
-    fn stamp_smooth(&mut self, mi_row: i32, mi_col: i32, bsize: usize, y_mode: i32) {
-        let sm = ((SMOOTH_PRED..=SMOOTH_H_PRED).contains(&y_mode)) as u8;
+    /// Stamp the block's mode info over its frame-cropped mi footprint (the
+    /// mi-grid stamp `set_offsets` clips with `x_mis`/`y_mis`).
+    fn stamp_mi(&mut self, mi_row: i32, mi_col: i32, bsize: usize, cell: MiNbrKf) {
         let x_mis = MI_SIZE_WIDE[bsize].min(self.cfg.mi_cols - mi_col);
         let y_mis = MI_SIZE_HIGH[bsize].min(self.cfg.mi_rows - mi_row);
         for r in 0..y_mis {
             let base = ((mi_row + r) * self.cfg.mi_cols + mi_col) as usize;
-            self.smooth[base..base + x_mis as usize].fill(sm);
+            self.mi[base..base + x_mis as usize].fill(cell);
         }
     }
 
@@ -413,7 +416,7 @@ impl<'c> TileKf<'c> {
     fn decode_block(
         &mut self,
         dec: &mut OdEcDec,
-        cdfs: &mut KfTileCdfs,
+        cdfs: &mut KfFrameContext,
         mi_row: i32,
         mi_col: i32,
         bsize: usize,
@@ -423,8 +426,10 @@ impl<'c> TileKf<'c> {
         let up_available = mi_row > 0;
         let left_available = mi_col > 0;
         let cfl_allowed = !cfg.monochrome && is_cfl_allowed(bsize, false, 0, 0);
+        let (above, left) = self.neighbours(mi_row, mi_col);
 
-        // --- decode_mbmi_block: the KEY-frame mode info ---
+        // --- decode_mbmi_block: the KEY-frame mode info, every symbol's CDF
+        // selected from the frame context by neighbour/block state ---
         self.st.mi_row = mi_row;
         self.st.mi_col = mi_col;
         self.st.bsize = bsize;
@@ -432,27 +437,14 @@ impl<'c> TileKf<'c> {
         self.st.mb_to_top_edge = -(mi_row * 32);
         self.st.has_above = up_available;
         self.st.has_left = left_available;
-        // Alphabet-consistent UV CDF selection (14-symbol CfL vs 13-symbol).
-        let saved_uv = cdfs.kf.uv_mode;
-        cdfs.kf.uv_mode = if cfl_allowed {
-            cdfs.uv_mode_cfl
-        } else {
-            cdfs.uv_mode_nocfl
-        };
-        let mut info = read_mb_modes_kf(dec, &mut cdfs.kf, &mut self.st);
-        if cfl_allowed {
-            cdfs.uv_mode_cfl = cdfs.kf.uv_mode;
-        } else {
-            cdfs.uv_mode_nocfl = cdfs.kf.uv_mode;
-        }
-        cdfs.kf.uv_mode = saved_uv;
-        // Filter-intra follow-up with the C-exact mode-dependent gate (the last
-        // mode-info symbol; see `filter_intra_allowed`).
-        let fi_allowed = filter_intra_allowed(cfg.enable_filter_intra, bsize, info.y_mode);
-        let (use_fi, fi_mode) =
-            read_filter_intra_mode_info(dec, &mut cdfs.kf.fi_use, &mut cdfs.kf.fi_mode, fi_allowed);
-        info.use_filter_intra = use_fi;
-        info.filter_intra_mode = fi_mode;
+        let info = read_mb_modes_kf_fc(
+            dec,
+            cdfs,
+            &mut self.st,
+            cfg.enable_filter_intra,
+            above,
+            left,
+        );
 
         // --- parse_decode_block tail: skip blocks reset their entropy context ---
         let bw = MI_SIZE_WIDE[bsize] as usize;
@@ -472,7 +464,13 @@ impl<'c> TileKf<'c> {
         let mb_to_bottom_edge = (cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 32;
         let max_blocks_wide = max_block_units(BLOCK_SIZE_WIDE[bsize], mb_to_right_edge);
         let max_blocks_high = max_block_units(BLOCK_SIZE_HIGH[bsize], mb_to_bottom_edge);
-        let filt_type = self.filt_type(mi_row, mi_col, up_available, left_available);
+        // get_filt_type (reconintra.c), luma: 1 when the above or left neighbour
+        // block (the same xd->above_mbmi/left_mbmi the mode contexts read) has a
+        // smooth y mode.
+        let is_smooth = |m: Option<MiNbrKf>| {
+            m.is_some_and(|n| (SMOOTH_PRED..=SMOOTH_H_PRED).contains(&n.y_mode))
+        };
+        let filt_type = (is_smooth(above) || is_smooth(left)) as i32;
         // av1_read_tx_type gate: !skip_txfm && !seg-skip && qindex > 0.
         let signal_gate = cfg.base_qindex_gt0 && info.skip == 0;
         let area = txb_wide(tx_size) * txb_high(tx_size);
@@ -492,10 +490,13 @@ impl<'c> TileKf<'c> {
                     let (tsc, dsc) =
                         get_txb_ctx(bsize, tx_size, 0, &self.above_e[a0..], &self.left_e[l0..]);
                     let ext = intra_ext_tx_cdf(
-                        &mut cdfs.ext_tx_dtt4_idtx,
-                        &mut cdfs.ext_tx_dtt4_idtx_1ddct,
+                        &mut cdfs.ext_tx_1ddct,
+                        &mut cdfs.ext_tx_dtt4,
                         tx_size,
                         cfg.reduced_tx_set,
+                        info.use_filter_intra != 0,
+                        info.filter_intra_mode as usize,
+                        info.y_mode as usize,
                     );
                     let (eob, tt) = read_coeffs_txb_full(
                         dec,
@@ -601,7 +602,15 @@ impl<'c> TileKf<'c> {
             blk_row += txh;
         }
 
-        self.stamp_smooth(mi_row, mi_col, bsize, info.y_mode);
+        self.stamp_mi(
+            mi_row,
+            mi_col,
+            bsize,
+            MiNbrKf {
+                y_mode: info.y_mode,
+                skip_txfm: info.skip,
+            },
+        );
         self.blocks.push(DecodedBlockKf {
             mi_row,
             mi_col,
@@ -621,7 +630,7 @@ impl<'c> TileKf<'c> {
     fn decode_partition(
         &mut self,
         dec: &mut OdEcDec,
-        cdfs: &mut KfTileCdfs,
+        cdfs: &mut KfFrameContext,
         mi_row: i32,
         mi_col: i32,
         bsize: usize,
@@ -741,7 +750,7 @@ impl<'c> TileKf<'c> {
 pub fn decode_tile_kf(
     dec: &mut OdEcDec,
     cfg: &KfTileConfig,
-    cdfs: &mut KfTileCdfs,
+    cdfs: &mut KfFrameContext,
     recon_init: u16,
 ) -> KfTileDecode {
     let mut t = TileKf::new(cfg, recon_init);

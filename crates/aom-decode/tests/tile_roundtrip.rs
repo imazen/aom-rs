@@ -1,16 +1,23 @@
 //! Full-tile encode→decode roundtrip for the KEY-frame luma decode driver.
 //!
 //! A mirror mini-encoder performs the identical tile walk with the write-side
-//! counterparts (`write_partition` / `write_mb_modes_kf` +
-//! `write_filter_intra_mode_info` / `write_coeffs_txb_full`) and its own
-//! reconstruction feedback loop: per txb it predicts from *its* recon-so-far
-//! (same `intra_avail` + `predict_intra_high`), computes the residual against a
-//! synthetic source, forward-transforms + quantizes (`xform_quant`,
-//! `QuantKind::B`, `invert_quant`-derived params), writes the coefficients, and
-//! reconstructs through the same `reconstruct_txb`. Because every write-side
-//! piece is byte-identical to C libaom, a clean roundtrip (byte-identical
+//! counterparts (`write_partition` / `write_mb_modes_kf_fc` /
+//! `write_coeffs_txb_full`) and its own reconstruction feedback loop: per txb
+//! it predicts from *its* recon-so-far (same `intra_avail` +
+//! `predict_intra_high`), computes the residual against a synthetic source,
+//! forward-transforms + quantizes (`xform_quant`, `QuantKind::B`,
+//! `invert_quant`-derived params), writes the coefficients, and reconstructs
+//! through the same `reconstruct_txb`. Because every write-side piece is
+//! byte-identical to C libaom, a clean roundtrip (byte-identical
 //! reconstruction planes + lockstep CDF state + per-leaf mode-info equality)
 //! pins the decode driver to the C decoder.
+//!
+//! Both sides run the full FRAME_CONTEXT context selection: each keeps its own
+//! per-mi mode-info grid (`MiNbrKf`) and selects every symbol's CDF instance
+//! from the `KfFrameContext` arrays by neighbour/block state. The sweep
+//! asserts the selection is NON-VACUOUS — many distinct kf_y cells / skip
+//! contexts / angle-delta instances / uv_mode instances / filter-intra bsizes
+//! / ext-tx (square, intra-dir) cells must actually adapt.
 //!
 //! Encoder and decoder reconstruction planes start from *different* fill values:
 //! a conformant walk never reads an unwritten pixel, so any neighbour-
@@ -26,18 +33,18 @@
 
 use aom_decode::{
     ANGLE_STEP, BLOCK_8X8, BLOCK_64X64, BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, DecodedBlockKf,
-    KfTileCdfs, KfTileConfig, MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH, MI_SIZE_WIDE, PARTITION_HORZ,
+    KfTileConfig, MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH, MI_SIZE_WIDE, PARTITION_HORZ,
     PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, TX_SIZE_HIGH, TX_SIZE_HIGH_UNIT, TX_SIZE_WIDE,
-    TX_SIZE_WIDE_UNIT, decode_tile_kf, filter_intra_allowed, intra_ext_tx_cdf, max_block_units,
+    TX_SIZE_WIDE_UNIT, decode_tile_kf, intra_ext_tx_cdf, max_block_units,
 };
 use aom_encode::{QuantKind, QuantParams, xform_quant};
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::partition::{
-    KfBlockState, KfCdfs, MbModeInfoKf, get_partition_subsize, get_uv_mode, intra_avail,
-    is_cfl_allowed, is_directional_mode, partition_cdf_length, partition_plane_context,
-    update_ext_partition_context, use_angle_delta, write_filter_intra_mode_info, write_mb_modes_kf,
-    write_partition,
+    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, filter_intra_allowed,
+    get_partition_subsize, get_uv_mode, intra_avail, is_cfl_allowed, is_directional_mode,
+    partition_cdf_length, partition_plane_context, update_ext_partition_context, use_angle_delta,
+    write_mb_modes_kf_fc, write_partition,
 };
 use aom_intra::predict_intra_high;
 use aom_txb::{CDF_ARENA_LEN, ext_tx_set_type, get_txb_ctx, write_coeffs_txb_full};
@@ -97,54 +104,89 @@ fn mk_comp(rng: &mut Rng) -> [u16; 69] {
     c
 }
 
-fn mk_kf_cdfs(rng: &mut Rng) -> KfCdfs {
-    let mut c = KfCdfs {
-        seg: [0; 9],
-        skip: [0; 3],
-        delta_q: [0; 5],
-        delta_lf_multi: [[0; 5]; 4],
-        delta_lf: [0; 5],
-        intrabc: [0; 3],
-        ndvc_joints: [0; 5],
-        ndvc_comp0: mk_comp(rng),
-        ndvc_comp1: mk_comp(rng),
-        y_mode: [0; 14],
-        y_angle: [0; 8],
-        uv_mode: [0; 15],
-        cfl_sign: [0; 9],
-        cfl_alpha: [[0; 17]; 6],
-        uv_angle: [0; 8],
-        pal_y_mode: [0; 3],
-        pal_y_size: [0; 8],
-        pal_uv_mode: [0; 3],
-        pal_uv_size: [0; 8],
-        fi_use: [0; 3],
-        fi_mode: [0; 6],
-    };
-    mk_ns_cdf(rng, 8, &mut c.seg);
-    mk_ns_cdf(rng, 2, &mut c.skip);
-    mk_ns_cdf(rng, 4, &mut c.delta_q);
-    for m in c.delta_lf_multi.iter_mut() {
-        mk_ns_cdf(rng, 4, m);
+/// Random-valid fill for every CDF region of the frame context (the real
+/// coefficient arena included — `mk_coeff_arena`).
+fn mk_frame_ctx(rng: &mut Rng) -> KfFrameContext {
+    let mut f = KfFrameContext::zeroed(CDF_ARENA_LEN);
+    for row in f.kf_y.iter_mut() {
+        for cell in row.iter_mut() {
+            mk_ns_cdf(rng, 13, cell);
+        }
     }
-    mk_ns_cdf(rng, 4, &mut c.delta_lf);
-    mk_ns_cdf(rng, 2, &mut c.intrabc);
-    mk_ns_cdf(rng, 4, &mut c.ndvc_joints);
-    mk_ns_cdf(rng, 13, &mut c.y_mode);
-    mk_ns_cdf(rng, 7, &mut c.y_angle);
-    mk_ns_cdf(rng, 14, &mut c.uv_mode); // scratch slot; real ones live in KfTileCdfs
-    mk_ns_cdf(rng, 8, &mut c.cfl_sign);
-    for a in c.cfl_alpha.iter_mut() {
+    for (cfl, plane) in f.uv_mode.iter_mut().enumerate() {
+        // ns = 14 with CfL / 13 without; slice covers ns+1 slots (count last).
+        for cell in plane.iter_mut() {
+            mk_ns_cdf(rng, 13 + cfl, &mut cell[..14 + cfl]);
+        }
+    }
+    for a in f.angle_delta.iter_mut() {
+        mk_ns_cdf(rng, 7, a);
+    }
+    for s in f.skip.iter_mut() {
+        mk_ns_cdf(rng, 2, s);
+    }
+    for s in f.seg_spatial.iter_mut() {
+        mk_ns_cdf(rng, 8, s);
+    }
+    for (c, slot) in f.partition.iter_mut().enumerate() {
+        let bsl = c / 4;
+        let ns = if bsl == 0 {
+            4
+        } else if bsl == 4 {
+            8
+        } else {
+            10
+        };
+        mk_ns_cdf(rng, ns, slot);
+    }
+    for b in f.palette_y_mode.iter_mut() {
+        for c in b.iter_mut() {
+            mk_ns_cdf(rng, 2, c);
+        }
+    }
+    for c in f.palette_uv_mode.iter_mut() {
+        mk_ns_cdf(rng, 2, c);
+    }
+    for c in f.palette_y_size.iter_mut() {
+        mk_ns_cdf(rng, 7, c);
+    }
+    for c in f.palette_uv_size.iter_mut() {
+        mk_ns_cdf(rng, 7, c);
+    }
+    for c in f.filter_intra.iter_mut() {
+        mk_ns_cdf(rng, 2, c);
+    }
+    mk_ns_cdf(rng, 5, &mut f.filter_intra_mode);
+    mk_ns_cdf(rng, 8, &mut f.cfl_sign);
+    for a in f.cfl_alpha.iter_mut() {
         mk_ns_cdf(rng, 16, a);
     }
-    mk_ns_cdf(rng, 7, &mut c.uv_angle);
-    mk_ns_cdf(rng, 2, &mut c.pal_y_mode);
-    mk_ns_cdf(rng, 7, &mut c.pal_y_size);
-    mk_ns_cdf(rng, 2, &mut c.pal_uv_mode);
-    mk_ns_cdf(rng, 7, &mut c.pal_uv_size);
-    mk_ns_cdf(rng, 2, &mut c.fi_use);
-    mk_ns_cdf(rng, 5, &mut c.fi_mode);
-    c
+    mk_ns_cdf(rng, 4, &mut f.delta_q);
+    for m in f.delta_lf_multi.iter_mut() {
+        mk_ns_cdf(rng, 4, m);
+    }
+    mk_ns_cdf(rng, 4, &mut f.delta_lf);
+    mk_ns_cdf(rng, 2, &mut f.intrabc);
+    mk_ns_cdf(rng, 4, &mut f.ndvc_joints);
+    f.ndvc_comp0 = mk_comp(rng);
+    f.ndvc_comp1 = mk_comp(rng);
+    for cat in f.tx_size.iter_mut() {
+        for c in cat.iter_mut() {
+            mk_ns_cdf(rng, 3, c);
+        }
+    }
+    for sq in f.ext_tx_1ddct.iter_mut() {
+        for c in sq.iter_mut() {
+            mk_ns_cdf(rng, 7, c);
+        }
+    }
+    for sq in f.ext_tx_dtt4.iter_mut() {
+        for c in sq.iter_mut() {
+            mk_ns_cdf(rng, 5, c);
+        }
+    }
+    f.coeff = mk_coeff_arena(rng);
+    f
 }
 
 /// Coefficient-arena regions `(offset, slot_count, symbols)` — the same layout the
@@ -182,43 +224,26 @@ fn mk_coeff_arena(rng: &mut Rng) -> Vec<u16> {
     a
 }
 
-fn mk_tile_cdfs(rng: &mut Rng) -> KfTileCdfs {
-    let mut uv_cfl = [0u16; 15];
-    let mut uv_nocfl = [0u16; 15];
-    mk_ns_cdf(rng, 14, &mut uv_cfl);
-    mk_ns_cdf(rng, 13, &mut uv_nocfl[..14]);
-    let mut ext5 = [0u16; 6];
-    let mut ext7 = [0u16; 8];
-    mk_ns_cdf(rng, 5, &mut ext5);
-    mk_ns_cdf(rng, 7, &mut ext7);
-    let mut partition = [[0u16; 11]; 20];
-    for (c, slot) in partition.iter_mut().enumerate() {
-        let bsl = c / 4;
-        let ns = if bsl == 0 {
-            4
-        } else if bsl == 4 {
-            8
-        } else {
-            10
-        };
-        mk_ns_cdf(rng, ns, slot);
-    }
-    KfTileCdfs {
-        kf: mk_kf_cdfs(rng),
-        uv_mode_cfl: uv_cfl,
-        uv_mode_nocfl: uv_nocfl,
-        coeff: mk_coeff_arena(rng),
-        ext_tx_dtt4_idtx: ext5,
-        ext_tx_dtt4_idtx_1ddct: ext7,
-        partition,
-    }
-}
-
-/// KfCdfs has no PartialEq (public-API discipline); compare field by field so a
-/// mismatch names the desynced symbol.
-fn assert_kf_cdfs_eq(e: &KfCdfs, d: &KfCdfs, what: &str) {
-    assert_eq!(e.seg, d.seg, "{what}: seg cdf");
+/// KfFrameContext has no PartialEq (public-API discipline); compare field by
+/// field so a mismatch names the desynced symbol.
+fn assert_fc_eq(e: &KfFrameContext, d: &KfFrameContext, what: &str) {
+    assert_eq!(e.kf_y, d.kf_y, "{what}: kf_y cdf");
+    assert_eq!(e.uv_mode, d.uv_mode, "{what}: uv_mode cdf");
+    assert_eq!(e.angle_delta, d.angle_delta, "{what}: angle_delta cdf");
     assert_eq!(e.skip, d.skip, "{what}: skip cdf");
+    assert_eq!(e.seg_spatial, d.seg_spatial, "{what}: seg_spatial cdf");
+    assert_eq!(e.partition, d.partition, "{what}: partition arena");
+    assert_eq!(e.palette_y_mode, d.palette_y_mode, "{what}: palette_y_mode cdf");
+    assert_eq!(e.palette_uv_mode, d.palette_uv_mode, "{what}: palette_uv_mode cdf");
+    assert_eq!(e.palette_y_size, d.palette_y_size, "{what}: palette_y_size cdf");
+    assert_eq!(e.palette_uv_size, d.palette_uv_size, "{what}: palette_uv_size cdf");
+    assert_eq!(e.filter_intra, d.filter_intra, "{what}: filter_intra cdf");
+    assert_eq!(
+        e.filter_intra_mode, d.filter_intra_mode,
+        "{what}: filter_intra_mode cdf"
+    );
+    assert_eq!(e.cfl_sign, d.cfl_sign, "{what}: cfl_sign cdf");
+    assert_eq!(e.cfl_alpha, d.cfl_alpha, "{what}: cfl_alpha cdf");
     assert_eq!(e.delta_q, d.delta_q, "{what}: delta_q cdf");
     assert_eq!(
         e.delta_lf_multi, d.delta_lf_multi,
@@ -229,18 +254,10 @@ fn assert_kf_cdfs_eq(e: &KfCdfs, d: &KfCdfs, what: &str) {
     assert_eq!(e.ndvc_joints, d.ndvc_joints, "{what}: ndvc_joints cdf");
     assert_eq!(e.ndvc_comp0, d.ndvc_comp0, "{what}: ndvc_comp0 cdf");
     assert_eq!(e.ndvc_comp1, d.ndvc_comp1, "{what}: ndvc_comp1 cdf");
-    assert_eq!(e.y_mode, d.y_mode, "{what}: y_mode cdf");
-    assert_eq!(e.y_angle, d.y_angle, "{what}: y_angle cdf");
-    assert_eq!(e.uv_mode, d.uv_mode, "{what}: uv_mode scratch slot");
-    assert_eq!(e.cfl_sign, d.cfl_sign, "{what}: cfl_sign cdf");
-    assert_eq!(e.cfl_alpha, d.cfl_alpha, "{what}: cfl_alpha cdf");
-    assert_eq!(e.uv_angle, d.uv_angle, "{what}: uv_angle cdf");
-    assert_eq!(e.pal_y_mode, d.pal_y_mode, "{what}: pal_y_mode cdf");
-    assert_eq!(e.pal_y_size, d.pal_y_size, "{what}: pal_y_size cdf");
-    assert_eq!(e.pal_uv_mode, d.pal_uv_mode, "{what}: pal_uv_mode cdf");
-    assert_eq!(e.pal_uv_size, d.pal_uv_size, "{what}: pal_uv_size cdf");
-    assert_eq!(e.fi_use, d.fi_use, "{what}: fi_use cdf");
-    assert_eq!(e.fi_mode, d.fi_mode, "{what}: fi_mode cdf");
+    assert_eq!(e.tx_size, d.tx_size, "{what}: tx_size cdf");
+    assert_eq!(e.ext_tx_1ddct, d.ext_tx_1ddct, "{what}: ext_tx_1ddct cdf");
+    assert_eq!(e.ext_tx_dtt4, d.ext_tx_dtt4, "{what}: ext_tx_dtt4 cdf");
+    assert_eq!(e.coeff, d.coeff, "{what}: coeff arena");
 }
 
 /// libaom `invert_quant` (av1/encoder/av1_quantize.c): the (quant, shift) pair
@@ -273,6 +290,15 @@ struct Coverage {
     ext7_signaled: usize,
     dct_only_txbs: usize,
     edge_clipped_txb_blocks: usize,
+    // FRAME_CONTEXT selection diversity: which context instances adapted
+    // (final decoder CDFs differ from the initial fill) anywhere in the sweep.
+    kf_y_cells: [[bool; 5]; 5],
+    skip_ctxs: [bool; 3],
+    angle_insts: [bool; 8],
+    uv_insts: [[bool; 13]; 2],
+    fi_bsizes: [bool; 22],
+    ext7_cells: [[bool; 13]; 4],
+    ext5_cells: [[bool; 13]; 4],
 }
 
 // ---- the mirror mini-encoder --------------------------------------------------------
@@ -286,7 +312,9 @@ struct Mirror<'a> {
     left_e: [i8; 32],
     above_p: Vec<i8>,
     left_p: [i8; 32],
-    smooth: Vec<u8>,
+    /// Per-mi mode-info grid — the encoder's own `xd->above_mbmi/left_mbmi`
+    /// source for every context selection (mirrors the decoder's grid).
+    mi: Vec<MiNbrKf>,
     st: KfBlockState,
     quant: [i16; 2],
     quant_shift: [i16; 2],
@@ -347,7 +375,13 @@ impl<'a> Mirror<'a> {
             left_e: [0; 32],
             above_p: vec![0; stride / 4],
             left_p: [0; 32],
-            smooth: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
+            mi: vec![
+                MiNbrKf {
+                    y_mode: 0,
+                    skip_txfm: 0
+                };
+                (cfg.mi_rows * cfg.mi_cols) as usize
+            ],
             st,
             quant: [q0, q1],
             quant_shift: [s0, s1],
@@ -360,11 +394,13 @@ impl<'a> Mirror<'a> {
         }
     }
 
-    fn filt_type(&self, mi_row: i32, mi_col: i32, up: bool, left: bool) -> i32 {
+    /// The `xd->above_mbmi` / `xd->left_mbmi` neighbours of the block at
+    /// `(mi_row, mi_col)` — identical semantics to the decode driver's grid.
+    fn neighbours(&self, mi_row: i32, mi_col: i32) -> (Option<MiNbrKf>, Option<MiNbrKf>) {
         let cols = self.cfg.mi_cols;
-        let ab = up && self.smooth[((mi_row - 1) * cols + mi_col) as usize] != 0;
-        let le = left && self.smooth[(mi_row * cols + mi_col - 1) as usize] != 0;
-        (ab || le) as i32
+        let above = (mi_row > 0).then(|| self.mi[((mi_row - 1) * cols + mi_col) as usize]);
+        let left = (mi_col > 0).then(|| self.mi[(mi_row * cols + mi_col - 1) as usize]);
+        (above, left)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -405,7 +441,7 @@ impl<'a> Mirror<'a> {
     fn encode_block(
         &mut self,
         enc: &mut OdEcEnc,
-        cdfs: &mut KfTileCdfs,
+        cdfs: &mut KfFrameContext,
         rng: &mut Rng,
         cov: &mut Coverage,
         mi_row: i32,
@@ -417,6 +453,7 @@ impl<'a> Mirror<'a> {
         let up_available = mi_row > 0;
         let left_available = mi_col > 0;
         let cfl_allowed = !cfg.monochrome && is_cfl_allowed(bsize, false, 0, 0);
+        let (above, left) = self.neighbours(mi_row, mi_col);
 
         // --- choose the block's mode info ---
         let y_mode = (rng.next() % 13) as i32;
@@ -447,7 +484,7 @@ impl<'a> Mirror<'a> {
             (0, 0, 0, 0)
         };
         let skip = rng.next().is_multiple_of(8) as i32;
-        let fi_allowed = filter_intra_allowed(cfg.enable_filter_intra, bsize, y_mode);
+        let fi_allowed = filter_intra_allowed(cfg.enable_filter_intra, bsize, y_mode, 0);
         let use_fi = if fi_allowed && rng.next() & 1 == 1 {
             1
         } else {
@@ -492,7 +529,8 @@ impl<'a> Mirror<'a> {
             cov.cfl_uv_blocks += 1;
         }
 
-        // --- write the mode info (write_mb_modes_kf + filter-intra follow-up) ---
+        // --- write the mode info (write_mb_modes_kf_fc: full per-symbol
+        // FRAME_CONTEXT selection from the neighbour grid) ---
         self.st.mi_row = mi_row;
         self.st.mi_col = mi_col;
         self.st.bsize = bsize;
@@ -500,26 +538,14 @@ impl<'a> Mirror<'a> {
         self.st.mb_to_top_edge = -(mi_row * 32);
         self.st.has_above = up_available;
         self.st.has_left = left_available;
-        let saved_uv = cdfs.kf.uv_mode;
-        cdfs.kf.uv_mode = if cfl_allowed {
-            cdfs.uv_mode_cfl
-        } else {
-            cdfs.uv_mode_nocfl
-        };
-        write_mb_modes_kf(enc, &info, &mut cdfs.kf, &mut self.st);
-        if cfl_allowed {
-            cdfs.uv_mode_cfl = cdfs.kf.uv_mode;
-        } else {
-            cdfs.uv_mode_nocfl = cdfs.kf.uv_mode;
-        }
-        cdfs.kf.uv_mode = saved_uv;
-        write_filter_intra_mode_info(
+        write_mb_modes_kf_fc(
             enc,
-            &mut cdfs.kf.fi_use,
-            &mut cdfs.kf.fi_mode,
-            fi_allowed,
-            use_fi,
-            fi_mode,
+            &info,
+            cdfs,
+            &mut self.st,
+            cfg.enable_filter_intra,
+            above,
+            left,
         );
         // What the decoder will report for cdef: coded at the first non-skip
         // block of the SB, -1 elsewhere (write_cdef threads cdef_transmitted).
@@ -554,7 +580,10 @@ impl<'a> Mirror<'a> {
         {
             cov.edge_clipped_txb_blocks += 1;
         }
-        let filt_type = self.filt_type(mi_row, mi_col, up_available, left_available);
+        // get_filt_type from the same neighbours the mode contexts used.
+        let is_smooth =
+            |m: Option<MiNbrKf>| m.is_some_and(|n| (9..=11).contains(&n.y_mode));
+        let filt_type = (is_smooth(above) || is_smooth(left)) as i32;
         let signal_gate = cfg.base_qindex_gt0 && skip == 0;
         let set_type = ext_tx_set_type(tx_size, false, cfg.reduced_tx_set);
         let mut scratch = vec![0u16; txwpx * txhpx];
@@ -663,10 +692,13 @@ impl<'a> Mirror<'a> {
                         get_txb_ctx(bsize, tx_size, 0, &self.above_e[a0..], &self.left_e[l0..]);
                     let r = xform_quant(&residual, tx_size, tx_type, QuantKind::B, &qp, false);
                     let ext = intra_ext_tx_cdf(
-                        &mut cdfs.ext_tx_dtt4_idtx,
-                        &mut cdfs.ext_tx_dtt4_idtx_1ddct,
+                        &mut cdfs.ext_tx_1ddct,
+                        &mut cdfs.ext_tx_dtt4,
                         tx_size,
                         cfg.reduced_tx_set,
+                        info.use_filter_intra != 0,
+                        info.filter_intra_mode as usize,
+                        info.y_mode as usize,
                     );
                     write_coeffs_txb_full(
                         enc,
@@ -726,13 +758,16 @@ impl<'a> Mirror<'a> {
             blk_row += txh;
         }
 
-        // smooth-mode grid stamp (frame-cropped), for later blocks' filt_type
-        let sm = ((9..=11).contains(&y_mode)) as u8;
+        // mode-info grid stamp (frame-cropped), for later blocks' context
+        // selection + filt_type
         let x_mis = MI_SIZE_WIDE[bsize].min(cfg.mi_cols - mi_col);
         let y_mis = MI_SIZE_HIGH[bsize].min(cfg.mi_rows - mi_row);
         for r in 0..y_mis {
             let base = ((mi_row + r) * cfg.mi_cols + mi_col) as usize;
-            self.smooth[base..base + x_mis as usize].fill(sm);
+            self.mi[base..base + x_mis as usize].fill(MiNbrKf {
+                y_mode,
+                skip_txfm: skip,
+            });
         }
 
         let mut expected_info = info;
@@ -781,7 +816,7 @@ impl<'a> Mirror<'a> {
     fn encode_partition(
         &mut self,
         enc: &mut OdEcEnc,
-        cdfs: &mut KfTileCdfs,
+        cdfs: &mut KfFrameContext,
         rng: &mut Rng,
         cov: &mut Coverage,
         mi_row: i32,
@@ -899,7 +934,7 @@ impl<'a> Mirror<'a> {
     fn encode_tile(
         &mut self,
         enc: &mut OdEcEnc,
-        cdfs: &mut KfTileCdfs,
+        cdfs: &mut KfFrameContext,
         rng: &mut Rng,
         cov: &mut Coverage,
     ) {
@@ -974,7 +1009,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
             }
         }
     }
-    let cdfs0 = mk_tile_cdfs(&mut rng);
+    let cdfs0 = mk_frame_ctx(&mut rng);
 
     // encode (mirror), recon initialised to 0
     let mut enc_cdfs = cdfs0.clone();
@@ -1014,29 +1049,65 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
             "{what}: recon row {row}"
         );
     }
-    // (c) every CDF in lockstep
-    assert_kf_cdfs_eq(&enc_cdfs.kf, &dec_cdfs.kf, &what);
-    assert_eq!(
-        enc_cdfs.uv_mode_cfl, dec_cdfs.uv_mode_cfl,
-        "{what}: uv cfl cdf"
-    );
-    assert_eq!(
-        enc_cdfs.uv_mode_nocfl, dec_cdfs.uv_mode_nocfl,
-        "{what}: uv nocfl cdf"
-    );
-    assert_eq!(enc_cdfs.coeff, dec_cdfs.coeff, "{what}: coeff arena");
-    assert_eq!(
-        enc_cdfs.ext_tx_dtt4_idtx, dec_cdfs.ext_tx_dtt4_idtx,
-        "{what}: ext-tx 5 cdf"
-    );
-    assert_eq!(
-        enc_cdfs.ext_tx_dtt4_idtx_1ddct, dec_cdfs.ext_tx_dtt4_idtx_1ddct,
-        "{what}: ext-tx 7 cdf"
-    );
-    assert_eq!(
-        enc_cdfs.partition, dec_cdfs.partition,
-        "{what}: partition arena"
-    );
+    // (c) every CDF in lockstep — the whole frame context
+    assert_fc_eq(&enc_cdfs, &dec_cdfs, &what);
+    // (d) tally which context instances adapted (vs the initial fill) for the
+    // sweep-wide selection-diversity assertions
+    for ((flag, new), old) in cov
+        .kf_y_cells
+        .iter_mut()
+        .flatten()
+        .zip(dec_cdfs.kf_y.iter().flatten())
+        .zip(cdfs0.kf_y.iter().flatten())
+    {
+        *flag |= new != old;
+    }
+    for ((flag, new), old) in cov.skip_ctxs.iter_mut().zip(&dec_cdfs.skip).zip(&cdfs0.skip) {
+        *flag |= new != old;
+    }
+    for ((flag, new), old) in cov
+        .angle_insts
+        .iter_mut()
+        .zip(&dec_cdfs.angle_delta)
+        .zip(&cdfs0.angle_delta)
+    {
+        *flag |= new != old;
+    }
+    for ((flag, new), old) in cov
+        .uv_insts
+        .iter_mut()
+        .flatten()
+        .zip(dec_cdfs.uv_mode.iter().flatten())
+        .zip(cdfs0.uv_mode.iter().flatten())
+    {
+        *flag |= new != old;
+    }
+    for ((flag, new), old) in cov
+        .fi_bsizes
+        .iter_mut()
+        .zip(&dec_cdfs.filter_intra)
+        .zip(&cdfs0.filter_intra)
+    {
+        *flag |= new != old;
+    }
+    for ((flag, new), old) in cov
+        .ext7_cells
+        .iter_mut()
+        .flatten()
+        .zip(dec_cdfs.ext_tx_1ddct.iter().flatten())
+        .zip(cdfs0.ext_tx_1ddct.iter().flatten())
+    {
+        *flag |= new != old;
+    }
+    for ((flag, new), old) in cov
+        .ext5_cells
+        .iter_mut()
+        .flatten()
+        .zip(dec_cdfs.ext_tx_dtt4.iter().flatten())
+        .zip(cdfs0.ext_tx_dtt4.iter().flatten())
+    {
+        *flag |= new != old;
+    }
 }
 
 #[test]
@@ -1168,4 +1239,26 @@ fn kf_luma_tile_roundtrips() {
         cov.edge_clipped_txb_blocks > 0,
         "no frame-edge-clipped blocks"
     );
+
+    // FRAME_CONTEXT selection diversity: the per-context arrays must have been
+    // exercised across many DISTINCT instances — a regression back to one
+    // shared CDF per symbol collapses these counts to 1.
+    let kf_y_n: usize = cov.kf_y_cells.iter().flatten().filter(|&&x| x).count();
+    let skip_n = cov.skip_ctxs.iter().filter(|&&x| x).count();
+    let angle_n = cov.angle_insts.iter().filter(|&&x| x).count();
+    let uv_n: usize = cov.uv_insts.iter().flatten().filter(|&&x| x).count();
+    let fi_n = cov.fi_bsizes.iter().filter(|&&x| x).count();
+    let ext7_n: usize = cov.ext7_cells.iter().flatten().filter(|&&x| x).count();
+    let ext5_n: usize = cov.ext5_cells.iter().flatten().filter(|&&x| x).count();
+    eprintln!(
+        "ctx diversity: kf_y {kf_y_n}/25 skip {skip_n}/3 angle {angle_n}/8 \
+         uv {uv_n}/26 fi {fi_n}/22 ext7 {ext7_n}/52 ext5 {ext5_n}/52"
+    );
+    assert!(kf_y_n >= 20, "kf_y context diversity too low: {kf_y_n}/25");
+    assert!(skip_n == 3, "skip context diversity too low: {skip_n}/3");
+    assert!(angle_n == 8, "angle_delta instance diversity too low: {angle_n}/8");
+    assert!(uv_n >= 18, "uv_mode instance diversity too low: {uv_n}/26");
+    assert!(fi_n >= 4, "filter_intra bsize diversity too low: {fi_n}/22");
+    assert!(ext7_n >= 10, "ext-tx 7-symbol cell diversity too low: {ext7_n}/52");
+    assert!(ext5_n >= 10, "ext-tx 5-symbol cell diversity too low: {ext5_n}/52");
 }
