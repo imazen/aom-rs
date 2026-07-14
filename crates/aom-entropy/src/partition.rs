@@ -4217,6 +4217,43 @@ pub fn read_segment_id(
     neg_deinterleave(coded_id, pred, last_active_segid + 1)
 }
 
+/// `av1_get_spatial_seg_pred` (av1/common/pred_common.h) with the three
+/// neighbour segment ids already fetched from the CURRENT frame's segment-id
+/// map (`skip_over4x4 = 0`, the decoder's step size: the mi cells at
+/// `(mi_row-1, mi_col-1)` / `(mi_row-1, mi_col)` / `(mi_row, mi_col-1)`,
+/// `None` when that side is unavailable). Returns `(pred, cdf_num)` — the
+/// spatial prediction and the `spatial_pred_seg_cdf` instance index.
+/// Facade-diffed against the real C inline (dec_shim.c `shim_spatial_seg_pred`).
+pub fn spatial_seg_pred(
+    prev_ul: Option<u8>,
+    prev_u: Option<u8>,
+    prev_l: Option<u8>,
+) -> (i32, usize) {
+    // C: assert(IMPLIES(prev_ul != UINT8_MAX, prev_u != UINT8_MAX && prev_l != UINT8_MAX))
+    debug_assert!(prev_ul.is_none() || (prev_u.is_some() && prev_l.is_some()));
+    // Pick CDF index by matching/out-of-bounds neighbour ids.
+    let cdf_num = match (prev_ul, prev_u, prev_l) {
+        (None, _, _) => 0, // edge cases
+        (Some(ul), Some(u), Some(l)) if ul == u && ul == l => 2,
+        (Some(ul), Some(u), Some(l)) if ul == u || ul == l || u == l => 1,
+        _ => 0,
+    };
+    // If 2 or more are identical return that as predictor, otherwise prev_l.
+    let pred = match (prev_u, prev_l) {
+        (None, None) => 0,
+        (None, Some(l)) => i32::from(l),
+        (Some(u), None) => i32::from(u),
+        (Some(u), Some(l)) => {
+            if prev_ul == Some(u) {
+                i32::from(u)
+            } else {
+                i32::from(l)
+            }
+        }
+    };
+    (pred, cdf_num)
+}
+
 /// `read_cfl_alphas` — inverse of [`write_cfl_alphas`]: the CfL joint sign, then the
 /// per-plane alpha magnitudes for whichever planes are signed. Returns
 /// `(joint_sign, idx)` with `idx = (u_alpha << 4) | v_alpha`.
@@ -5020,6 +5057,19 @@ pub fn read_delta_q_params_sb(
 /// block prefix — segment id (pre- or post-skip), the skip flag, CDEF strength, and the
 /// per-SB delta-q/lf. Returns `(skip, segment_id, cdef_strength, current_qindex)`;
 /// `cdef_transmitted` + the delta carries are updated in place.
+///
+/// `seg_skip_feature[i]` is the per-segment `SEG_LVL_SKIP` feature-active mask
+/// (`seg->feature_mask[i] & (1 << SEG_LVL_SKIP)`): the C evaluates
+/// `segfeature_active(&cm->seg, mbmi->segment_id, SEG_LVL_SKIP)` on the
+/// segment id READ IN THIS PREFIX when `segid_preskip` — the caller cannot
+/// supply the resolved flag, so the mask goes in and is applied here. When
+/// `!segid_preskip` no segment can have the SKIP feature (`av1_calculate_segdata`
+/// sets `segid_preskip` for every feature `>= SEG_LVL_REF_FRAME`), and the
+/// pre-read placeholder id 0 evaluates it false either way.
+///
+/// A `!segid_preskip` block with `skip == 1` codes no segment symbol and takes
+/// the SPATIAL PREDICTION as its id (`read_segment_id`'s `if (skip) return pred`,
+/// decodemv.c) — mirrored by the C encoder setting `mbmi->segment_id = pred`.
 #[allow(clippy::too_many_arguments)]
 pub fn read_mb_modes_kf_prefix(
     dec: &mut OdEcDec,
@@ -5029,7 +5079,7 @@ pub fn read_mb_modes_kf_prefix(
     seg_pred: i32,
     last_active_segid: i32,
     seg_cdf: &mut [u16],
-    seg_skip_active: bool,
+    seg_skip_feature: &[bool; MAX_SEGMENTS_MI],
     skip_cdf: &mut [u16],
     coded_lossless: bool,
     allow_intrabc: bool,
@@ -5058,10 +5108,19 @@ pub fn read_mb_modes_kf_prefix(
     if segid_preskip && seg_coded {
         segment_id = read_segment_id(dec, seg_cdf, seg_pred, last_active_segid);
     }
+    // read_skip_txfm's segfeature_active(seg, mbmi->segment_id, SEG_LVL_SKIP):
+    // the pre-skip-read id when segid_preskip, else the placeholder 0 (no
+    // segment carries SKIP when !segid_preskip — see the doc above).
+    let seg_skip_active = seg_enabled && seg_skip_feature[segment_id as usize];
     let skip = read_skip(dec, skip_cdf, seg_skip_active);
-    // post-skip segment id is gated on skip==0 (write_segment_id's skip_txfm=skip).
-    if !segid_preskip && seg_coded && skip == 0 {
-        segment_id = read_segment_id(dec, seg_cdf, seg_pred, last_active_segid);
+    // post-skip segment id: coded when skip==0 (write_segment_id's
+    // skip_txfm=skip); a skipped block takes the spatial prediction.
+    if !segid_preskip && seg_coded {
+        segment_id = if skip == 0 {
+            read_segment_id(dec, seg_cdf, seg_pred, last_active_segid)
+        } else {
+            seg_pred
+        };
     }
     let cdef_strength = read_cdef(
         dec,
@@ -5162,9 +5221,14 @@ pub struct KfBlockState {
     pub segid_preskip: bool,
     pub seg_enabled: bool,
     pub update_map: bool,
+    /// `av1_get_spatial_seg_pred`'s prediction + CDF index for THIS block
+    /// (the caller computes them from its segment-id map — [`spatial_seg_pred`]).
     pub seg_pred: i32,
+    pub seg_cdf_num: usize,
     pub last_active_segid: i32,
-    pub seg_skip_active: bool,
+    /// Per-segment `SEG_LVL_SKIP` feature-active mask (`seg->feature_mask[i]`
+    /// bit `SEG_LVL_SKIP`); the block's flag resolves against its segment id.
+    pub seg_skip_feature: [bool; MAX_SEGMENTS_MI],
     // block position / sb
     pub mi_row: i32,
     pub mi_col: i32,
@@ -5211,7 +5275,7 @@ pub fn read_mb_modes_kf(dec: &mut OdEcDec, c: &mut KfCdfs, s: &mut KfBlockState)
         s.seg_pred,
         s.last_active_segid,
         &mut c.seg,
-        s.seg_skip_active,
+        &s.seg_skip_feature,
         &mut c.skip,
         s.coded_lossless,
         s.allow_intrabc,
@@ -5293,13 +5357,16 @@ pub fn read_mb_modes_kf(dec: &mut OdEcDec, c: &mut KfCdfs, s: &mut KfBlockState)
 
 /// `write_mb_modes_kf` — the encode-side counterpart to [`read_mb_modes_kf`]: encode a
 /// KEY-frame block's [`MbModeInfoKf`] via the [`KfCdfs`] + [`KfBlockState`] structs.
-/// `seg_skip_active`'s skip and the delta targets come from `info` / `state`.
+/// The C encoder's `write_skip` evaluates `segfeature_active(seg,
+/// mbmi->segment_id, SEG_LVL_SKIP)` on the block's OWN segment id (known to
+/// the encoder up front) — resolved here from the state mask + `info.segment_id`.
 pub fn write_mb_modes_kf(
     enc: &mut OdEcEnc,
     info: &MbModeInfoKf,
     c: &mut KfCdfs,
     s: &mut KfBlockState,
 ) {
+    let seg_skip_active = s.seg_enabled && s.seg_skip_feature[info.segment_id as usize];
     write_mb_modes_kf_prefix(
         enc,
         s.segid_preskip,
@@ -5309,7 +5376,7 @@ pub fn write_mb_modes_kf(
         s.seg_pred,
         s.last_active_segid,
         &mut c.seg,
-        s.seg_skip_active,
+        seg_skip_active,
         info.skip,
         &mut c.skip,
         s.coded_lossless,
@@ -5457,10 +5524,10 @@ pub struct KfFrameContext {
     /// `skip_txfm_cdfs[SKIP_CONTEXTS]` — selected by [`skip_txfm_context`]
     /// (above_skip + left_skip).
     pub skip: [[u16; 3]; SKIP_CONTEXTS],
-    /// `seg.spatial_pred_seg_cdf[SPATIAL_PREDICTION_PROBS]` (8 symbols). Held at C
-    /// dims; the `cdf_num` selection (`av1_get_spatial_seg_pred`) reads the
-    /// segment-id map, which the KEY driver does not model — the `_fc` entry
-    /// points require segmentation coding off.
+    /// `seg.spatial_pred_seg_cdf[SPATIAL_PREDICTION_PROBS]` (8 symbols),
+    /// selected by the `cdf_num` of `av1_get_spatial_seg_pred`
+    /// ([`spatial_seg_pred`] over the caller's segment-id map, threaded in as
+    /// [`KfBlockState::seg_cdf_num`]).
     pub seg_spatial: [[u16; 9]; SPATIAL_PREDICTION_PROBS],
     /// `partition_cdf[PARTITION_CONTEXTS]` — ns-symbol per block-size level
     /// (4/8/10); selected by [`partition_plane_context`].
@@ -5630,10 +5697,6 @@ pub fn filter_intra_allowed(
 /// Shared `_fc` gate checks: the contexts this cut cannot select yet must be off.
 fn assert_fc_scope(s: &KfBlockState) {
     assert!(
-        !(s.seg_enabled && s.update_map),
-        "segment-id spatial context selection (av1_get_spatial_seg_pred) needs the segment-id map — not modelled"
-    );
-    assert!(
         !s.allow_palette,
         "palette coding needs the neighbour palette colour caches — not modelled"
     );
@@ -5658,10 +5721,13 @@ fn assert_fc_scope(s: &KfBlockState) {
 ///   pass the sequence flag as `enable_filter_intra`; `s.filter_allowed` must be
 ///   `false`);
 /// - the single-instance CDFs (delta-q/lf, intrabc + ndvc, cfl sign/alpha,
-///   filter-intra mode) as in C.
+///   filter-intra mode) as in C;
+/// - the segment id on `seg_spatial[s.seg_cdf_num]` — the caller computes the
+///   spatial prediction + CDF index from ITS segment-id map
+///   ([`spatial_seg_pred`]) into `s.seg_pred` / `s.seg_cdf_num`.
 ///
-/// Segmentation coding and palette must be off (their selection needs the
-/// segment-id map / neighbour palette colours — see [`KfFrameContext`]).
+/// Palette must be off (its selection needs the neighbour palette colours —
+/// see [`KfFrameContext`]).
 pub fn read_mb_modes_kf_fc(
     dec: &mut OdEcDec,
     f: &mut KfFrameContext,
@@ -5682,8 +5748,8 @@ pub fn read_mb_modes_kf_fc(
         s.update_map,
         s.seg_pred,
         s.last_active_segid,
-        &mut f.seg_spatial[0],
-        s.seg_skip_active,
+        &mut f.seg_spatial[s.seg_cdf_num],
+        &s.seg_skip_feature,
         &mut f.skip[skip_ctx],
         s.coded_lossless,
         s.allow_intrabc,
@@ -5782,7 +5848,7 @@ pub fn read_mb_modes_kf_fc(
 /// The encode-side counterpart to [`read_mb_modes_kf_fc`]: [`write_mb_modes_kf`] with
 /// the same per-symbol FRAME_CONTEXT selection (`write_intra_prediction_modes`,
 /// av1/encoder/bitstream.c, selects identically to the decoder). Same scope gates:
-/// segmentation coding, palette, and `s.filter_allowed` must be off.
+/// palette and `s.filter_allowed` must be off.
 pub fn write_mb_modes_kf_fc(
     enc: &mut OdEcEnc,
     info: &MbModeInfoKf,
@@ -5797,6 +5863,7 @@ pub fn write_mb_modes_kf_fc(
         above.map_or(0, |m| m.skip_txfm),
         left.map_or(0, |m| m.skip_txfm),
     ) as usize;
+    let seg_skip_active = s.seg_enabled && s.seg_skip_feature[info.segment_id as usize];
     write_mb_modes_kf_prefix(
         enc,
         s.segid_preskip,
@@ -5805,8 +5872,8 @@ pub fn write_mb_modes_kf_fc(
         info.segment_id,
         s.seg_pred,
         s.last_active_segid,
-        &mut f.seg_spatial[0],
-        s.seg_skip_active,
+        &mut f.seg_spatial[s.seg_cdf_num],
+        seg_skip_active,
         info.skip,
         &mut f.skip[skip_ctx],
         s.coded_lossless,

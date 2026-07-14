@@ -94,6 +94,36 @@ int shim_get_max_uv_txsize(int bsize, int ss_x, int ss_y) {
   return (int)av1_get_max_uv_txsize((BLOCK_SIZE)bsize, ss_x, ss_y);
 }
 
+/* av1_get_spatial_seg_pred (pred_common.h) facade: a 2x2-mi frame whose
+ * segment-id map holds the three neighbour cells of the block at (1,1) —
+ * [0]=up-left, [1]=up, [2]=left — with the given availability
+ * (skip_over4x4 = 0, the decoder's step size). Returns pred | (cdf_num << 8). */
+int shim_spatial_seg_pred(int up_available, int left_available, int ul, int u,
+                          int l) {
+  AV1_COMMON cm;
+  memset(&cm, 0, sizeof(cm));
+  RefCntBuffer buf;
+  memset(&buf, 0, sizeof(buf));
+  uint8_t map[4];
+  map[0] = (uint8_t)ul;
+  map[1] = (uint8_t)u;
+  map[2] = (uint8_t)l;
+  map[3] = 0;
+  cm.mi_params.mi_cols = 2;
+  cm.mi_params.mi_rows = 2;
+  buf.seg_map = map;
+  cm.cur_frame = &buf;
+  MACROBLOCKD xd;
+  memset(&xd, 0, sizeof(xd));
+  xd.mi_row = 1;
+  xd.mi_col = 1;
+  xd.up_available = up_available;
+  xd.left_available = left_available;
+  int cdf_num = -1;
+  const uint8_t pred = av1_get_spatial_seg_pred(&cm, &xd, &cdf_num, 0);
+  return (int)pred | (cdf_num << 8);
+}
+
 /* intra_mode_to_tx_type (blockd.h): Y arm keys on mbmi->mode, UV arm on
  * get_uv_mode(mbmi->uv_mode). */
 int shim_intra_mode_to_tx_type(int y_mode, int uv_mode, int plane_type) {

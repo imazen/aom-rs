@@ -6043,10 +6043,25 @@ fn read_mb_modes_kf_prefix_roundtrips_write() {
         let seg_enabled = rng.next() & 1 == 1;
         let update_map = seg_enabled && rng.next() & 1 == 1; // update_map => seg_enabled
         let last = (rng.next() % 8) as i32;
-        let segment_id = (rng.next() % (last as u64 + 1)) as i32;
+        let mut segment_id = (rng.next() % (last as u64 + 1)) as i32;
         let seg_pred = (rng.next() % (last as u64 + 1)) as i32;
-        let seg_skip_active = rng.next() & 1 == 1;
+        // Uniform SEG_LVL_SKIP mask: the write side takes the RESOLVED bool
+        // (the C encoder evaluates segfeature_active on the block's own id);
+        // the read side takes the per-segment mask and resolves it against
+        // the id it reads (or the placeholder 0) — a uniform mask keeps both
+        // sides consistent for every (preskip, update_map, skip) combination.
+        let seg_skip_raw = rng.next() & 1 == 1;
+        let seg_skip_feature = [seg_skip_raw; 8];
+        let seg_skip_active = seg_enabled && seg_skip_raw;
         let skip_txfm = (rng.next() & 1) as i32;
+        // The C encoder's convention for a post-skip skipped block: nothing is
+        // coded and mbmi->segment_id is SET to the spatial prediction
+        // (write_segment_id's skip_txfm arm) — model the encoder-side id so
+        // the roundtrip equality below is exact.
+        let will_skip = seg_skip_active || skip_txfm != 0;
+        if seg_enabled && update_map && !segid_preskip && will_skip {
+            segment_id = seg_pred;
+        }
         let coded_lossless = rng.next() & 1 == 1;
         let allow_intrabc = rng.next() & 1 == 1;
         let sb128 = rng.next() & 1 == 1;
@@ -6168,7 +6183,7 @@ fn read_mb_modes_kf_prefix_roundtrips_write() {
             seg_pred,
             last,
             &mut scd,
-            seg_skip_active,
+            &seg_skip_feature,
             &mut kcd,
             coded_lossless,
             allow_intrabc,
@@ -6193,9 +6208,11 @@ fn read_mb_modes_kf_prefix_roundtrips_write() {
             &mut dlcd,
         );
         assert_eq!(skip_d, skip_e, "skip");
-        let seg_coded = seg_enabled && update_map && (segid_preskip || skip_e == 0);
-        if seg_coded {
-            assert_eq!(seg_d, segment_id, "segment_id");
+        if seg_enabled && update_map {
+            // Coded blocks read the exact symbol; post-skip skipped blocks
+            // take the spatial prediction (segment_id was set to seg_pred
+            // above, mirroring the C encoder) — equal either way.
+            assert_eq!(seg_d, segment_id, "segment_id (coded or spatial-pred)");
         }
         let cdef_coded = !coded_lossless && !allow_intrabc && skip_e == 0;
         assert_eq!(
@@ -6414,8 +6431,9 @@ fn read_mb_modes_kf_struct_driver_roundtrips() {
             seg_enabled,
             update_map,
             seg_pred: (rng.next() % (last as u64 + 1)) as i32,
+            seg_cdf_num: 0,
             last_active_segid: last,
-            seg_skip_active: false,
+            seg_skip_feature: [false; 8],
             mi_row: 0,
             mi_col: 0,
             mib_size: 16,
@@ -6737,8 +6755,9 @@ fn read_modes_b_tile_content_roundtrips() {
             seg_enabled,
             update_map,
             seg_pred: (rng.next() % (last as u64 + 1)) as i32,
+            seg_cdf_num: 0,
             last_active_segid: last,
-            seg_skip_active: false,
+            seg_skip_feature: [false; 8],
             mi_row: 0,
             mi_col: 0,
             mib_size: 16,
@@ -7023,8 +7042,9 @@ fn mb_modes_kf_fc_matches_preselected_writer() {
             seg_enabled: false,
             update_map: false,
             seg_pred: 0,
+            seg_cdf_num: 0,
             last_active_segid: 0,
-            seg_skip_active: false,
+            seg_skip_feature: [false; 8],
             mi_row: 0,
             mi_col: 0,
             mib_size: 16,
@@ -7335,8 +7355,9 @@ fn mb_modes_kf_fc_multi_block_roundtrips_with_ctx_diversity() {
             seg_enabled: false,
             update_map: false,
             seg_pred: 0,
+            seg_cdf_num: 0,
             last_active_segid: 0,
-            seg_skip_active: false,
+            seg_skip_feature: [false; 8],
             mi_row: 0,
             mi_col: 0,
             mib_size: 16,
@@ -7535,4 +7556,33 @@ fn mb_modes_kf_fc_multi_block_roundtrips_with_ctx_diversity() {
     );
     assert!(uv_n >= 20, "uv_mode instance diversity too low: {uv_n}/26");
     assert!(fi_n >= 3, "filter_intra bsize diversity too low: {fi_n}/22");
+}
+
+/// `spatial_seg_pred` == the REAL `av1_get_spatial_seg_pred` (pred_common.h,
+/// the decoder's `skip_over4x4 = 0` step), EXHAUSTIVELY: all 4 availability
+/// combinations x all 8^3 neighbour segment-id triples, via the C facade
+/// (`shim_spatial_seg_pred`: a 2x2-mi frame with the block at (1,1)).
+#[test]
+fn spatial_seg_pred_matches_c() {
+    use aom_entropy::partition::spatial_seg_pred;
+    for up in [false, true] {
+        for left in [false, true] {
+            for ul in 0u8..8 {
+                for u in 0u8..8 {
+                    for l in 0u8..8 {
+                        let want = c::ref_spatial_seg_pred(up, left, ul, u, l);
+                        let got = spatial_seg_pred(
+                            (up && left).then_some(ul),
+                            up.then_some(u),
+                            left.then_some(l),
+                        );
+                        assert_eq!(
+                            got, want,
+                            "spatial_seg_pred up={up} left={left} ul={ul} u={u} l={l}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

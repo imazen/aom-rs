@@ -7722,6 +7722,13 @@ extern "C" {
     );
     fn shim_is_chroma_reference(mi_row: i32, mi_col: i32, bsize: i32, ss_x: i32, ss_y: i32) -> i32;
     fn shim_get_max_uv_txsize(bsize: i32, ss_x: i32, ss_y: i32) -> i32;
+    fn shim_spatial_seg_pred(
+        up_available: i32,
+        left_available: i32,
+        ul: i32,
+        u: i32,
+        l: i32,
+    ) -> i32;
     fn shim_intra_mode_to_tx_type(y_mode: i32, uv_mode: i32, plane_type: i32) -> i32;
     fn shim_av1_get_tx_type_uv_intra(
         y_mode: i32,
@@ -8110,6 +8117,28 @@ pub fn ref_is_chroma_reference(
 /// combinations (the C asserts the plane bsize is real).
 pub fn ref_get_max_uv_txsize(bsize: usize, ss_x: i32, ss_y: i32) -> usize {
     unsafe { shim_get_max_uv_txsize(bsize as i32, ss_x, ss_y) as usize }
+}
+
+/// Reference `av1_get_spatial_seg_pred` (pred_common.h, `skip_over4x4 = 0`):
+/// the (pred, cdf_num) of a block whose up-left/up/left neighbour segment ids
+/// are `ul`/`u`/`l` (each `< MAX_SEGMENTS`) with the given availability.
+pub fn ref_spatial_seg_pred(
+    up_available: bool,
+    left_available: bool,
+    ul: u8,
+    u: u8,
+    l: u8,
+) -> (i32, usize) {
+    let r = unsafe {
+        shim_spatial_seg_pred(
+            up_available as i32,
+            left_available as i32,
+            ul as i32,
+            u as i32,
+            l as i32,
+        )
+    };
+    (r & 0xff, (r >> 8) as usize)
 }
 
 /// Reference `intra_mode_to_tx_type` (blockd.h).
