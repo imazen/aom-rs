@@ -708,6 +708,72 @@ not yet examined this chunk). Then re-run
 existing differential test in `aom-encode`/`aom-txb` to confirm the
 signature change is behavior-preserving where inputs are unchanged.
 
+## Frame-header OBU byte-matches real aomenc — ASSEMBLY-verified (2026-07-14, encoder track)
+
+**The frame-header OBU now byte-matches real aomenc, for the minimal
+single-SB single-tile no-post-filter envelope.** New:
+`crates/aom-encode/tests/frame_header_matches_real_encoder.rs`
+(`frame_header_matches_real_aomenc_output`), the same shape as the
+already-landed `seq_header_matches_real_encoder.rs`: encode a real KEY
+frame via `ref_encode_av1_kf` (`enable_cdef=false, enable_restoration=
+false` -- the task's "no-post-filter envelope"), walk the OBU stream for
+the sequence-header OBU + the frame OBU (`OBU_FRAME`=6, real aomenc emits
+the combined header+tile-data form, not a standalone `OBU_FRAME_HEADER`),
+build the `FrameHeaderObu` `cfg` template from the parsed seq header
+(mirrors `aom-decode/src/frame.rs::parse_frame_header`'s own `cfg`
+construction -- that function plus its `tile_limits`/`mi_dim` helpers are
+private to the decoder-owned `aom-decode` crate, so this is a TRANSCRIPTION
+of ~60 lines, not a call), parse the real frame-header bits with the
+ALREADY-VALIDATED `read_uncompressed_header` (aom-entropy, decoder-owned;
+gated on 336+ byte-identical real streams), then re-serialize with
+`write_frame_header_obu` and assert BIT-exact match (via
+`ReadBitBuffer::bit_position()` — the frame header does not end on a byte
+boundary; the trailing partial byte's low bits belong to the tile-group
+header that follows in the same `OBU_FRAME` payload, so the comparison
+masks to only the bits the frame header actually owns).
+
+**Passed on the first run**, 4 cases (`w×h`, mono, ALLINTRA usage=2 / GOOD
+usage=0, single- and 2-SB): `frame_obu_type=6`, `bit_len` 35-38 bits (~5-6
+bytes, non-trivial), `qindex` 128/160 (non-degenerate), `lf_level=[0,0]`
+(the flat-gray-128 test content genuinely needs no deblocking — not forced,
+observed), `cdef_on=false`, `restoration_on=false`, `tile_cols=tile_rows=1`
+— confirmed via diagnostic printout, not a vacuous pass. A seq-header
+sanity re-check (independent of `seq_header_matches_real_encoder.rs`) is
+inlined too.
+
+**Honest fraction — this is option (a) from the task brief, ASSEMBLY-
+verified, NOT derivation-verified.** The parsed `FrameHeaderObu` holds real
+aomenc's OWN chosen field values (quant, loop-filter level/deltas, tile
+info, ...); the test proves `write_frame_header_obu`'s ordering/gating
+serializes those values back byte-for-byte given the real values, NOT that
+this port can DERIVE them from scratch via RDO. Specifically NOT proven:
+loop-filter-LEVEL search (only ever observed at the trivial 0 value here —
+a nonzero-LF case is untested), CDEF-strength search (sidestepped by
+`enable_cdef=false`), and the coefficient-cost-driven mode/partition search
+achieving the SAME decisions real aomenc's RDO makes (Task 2's coeff-cost
+gap above is exactly this). Two OBUs now byte-match real aomenc
+(sequence-header: fully; frame-header: assembly-verified) out of the three
+this envelope needs (sequence-header + frame-header + tile-group).
+
+**NEXT chunk — tile-group OBU assembly, the last piece for a genuine
+minimal end-to-end byte match**: `write_tile_group_header` (aom-entropy,
+decoder-owned, already used by `aom-decode`'s reader side per
+`read_tile_group_header`) + `pack_tile`'s per-SB payload (already produces
+real coefficient bytes, `crates/aom-encode/src/pack.rs`) + the
+leb128/OBU-header wrapping (`aom-entropy::leb128`/`obu`, both already
+bit-exact) assembled into one `OBU_FRAME` payload (frame-header bits +
+`byte_align()` + tile-group header + tile data, matching
+`aom-decode/src/frame.rs:477-483`'s read-side shape) and diffed against
+`frame_payload[full_bytes..]` from THIS chunk's test (the frame-header's
+end is already the tile-group's start, so extending this exact test is the
+natural next step). For a genuinely single-tile frame the tile-group header
+is close to a no-op (`num_tiles==1`), so this is smaller than the
+frame-header piece was. Once assembled, the TRUE end-to-end byte match
+still needs Task 2's coeff-cost-per-txs_ctx gap closed (else the coded
+coefficient bits, though validly-formed, won't match real aomenc's RDO
+choices) — so "bytes assemble correctly" and "decisions match aomenc" are
+two separate, both-still-open claims even after the tile-group piece lands.
+
 ## Gate posture (honest)
 
 Real, verified, ratcheting progress across BOTH tracks — but still a fraction of
