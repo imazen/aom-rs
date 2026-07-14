@@ -8,10 +8,9 @@
 //! C's exclusive-mode-flag assert LIVE).
 
 use aom_encode::mode_costs::{
-    fill_intra_mode_costs, intra_mode_info_cost_y, IntraModeCosts, BLOCK_SIZES_ALL,
-    BLOCK_SIZE_GROUPS, DIRECTIONAL_MODES, FILTER_INTRA_MODES, INTRA_MODES,
-    KF_MODE_CONTEXTS, MAX_ANGLE_DELTA, PALETTE_BSIZE_CTXS, PALETTE_Y_MODE_CONTEXTS,
-    UV_INTRA_MODES,
+    BLOCK_SIZE_GROUPS, BLOCK_SIZES_ALL, DIRECTIONAL_MODES, FILTER_INTRA_MODES, INTRA_MODES,
+    IntraModeCosts, KF_MODE_CONTEXTS, MAX_ANGLE_DELTA, PALETTE_BSIZE_CTXS, PALETTE_Y_MODE_CONTEXTS,
+    UV_INTRA_MODES, fill_intra_mode_costs, intra_mode_info_cost_y,
 };
 use aom_sys_ref as c;
 
@@ -66,9 +65,19 @@ struct CdfSet {
 fn gen_all_cdfs(rng: &mut Rng) -> CdfSet {
     // uv: cfl_allowed=0 rows carry 13 symbols, cfl_allowed=1 rows carry 14.
     let mut uv = gen_cdfs(rng, INTRA_MODES, UV_INTRA_MODES - 1, UV_INTRA_MODES + 1);
-    uv.extend_from_slice(&gen_cdfs(rng, INTRA_MODES, UV_INTRA_MODES, UV_INTRA_MODES + 1));
+    uv.extend_from_slice(&gen_cdfs(
+        rng,
+        INTRA_MODES,
+        UV_INTRA_MODES,
+        UV_INTRA_MODES + 1,
+    ));
     CdfSet {
-        kf_y: gen_cdfs(rng, KF_MODE_CONTEXTS * KF_MODE_CONTEXTS, INTRA_MODES, INTRA_MODES + 1),
+        kf_y: gen_cdfs(
+            rng,
+            KF_MODE_CONTEXTS * KF_MODE_CONTEXTS,
+            INTRA_MODES,
+            INTRA_MODES + 1,
+        ),
         y_mode: gen_cdfs(rng, BLOCK_SIZE_GROUPS, INTRA_MODES, INTRA_MODES + 1),
         uv,
         fi_mode: gen_cdfs(rng, 1, FILTER_INTRA_MODES, FILTER_INTRA_MODES + 1),
@@ -138,9 +147,16 @@ fn fill_intra_mode_costs_matches_c() {
             }
         }
         assert_eq!(r_uv, want.uv, "uv trial={trial}");
-        assert_eq!(costs.filter_intra_mode_cost.to_vec(), want.fi_mode, "fi_mode trial={trial}");
+        assert_eq!(
+            costs.filter_intra_mode_cost.to_vec(),
+            want.fi_mode,
+            "fi_mode trial={trial}"
+        );
         let r_fi: Vec<i32> = costs.filter_intra_cost.iter().flatten().copied().collect();
-        assert_eq!(r_fi, want.fi, "filter_intra trial={trial} enable={enable_fi}");
+        assert_eq!(
+            r_fi, want.fi,
+            "filter_intra trial={trial} enable={enable_fi}"
+        );
         let mut r_pal = Vec::new();
         for i in &costs.palette_y_mode_cost {
             for j in i {
@@ -150,7 +166,11 @@ fn fill_intra_mode_costs_matches_c() {
         assert_eq!(r_pal, want.pal_y_mode, "palette_y_mode trial={trial}");
         let r_angle: Vec<i32> = costs.angle_delta_cost.iter().flatten().copied().collect();
         assert_eq!(r_angle, want.angle, "angle_delta trial={trial}");
-        assert_eq!(costs.intrabc_cost.to_vec(), want.intrabc, "intrabc trial={trial}");
+        assert_eq!(
+            costs.intrabc_cost.to_vec(),
+            want.intrabc,
+            "intrabc trial={trial}"
+        );
     }
 }
 

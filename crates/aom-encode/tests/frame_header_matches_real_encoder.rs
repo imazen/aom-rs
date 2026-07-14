@@ -36,9 +36,9 @@
 //! remaining bits of the last partial byte).
 
 use aom_entropy::header::{
-    read_sequence_header_obu, read_uncompressed_header, write_frame_header_obu,
-    write_sequence_header_obu, CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
-    LoopfilterHeader, RestorationHeader, TileInfoHeader,
+    CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
+    RestorationHeader, TileInfoHeader, read_sequence_header_obu, read_uncompressed_header,
+    write_frame_header_obu, write_sequence_header_obu,
 };
 use aom_entropy::obu::read_obu_header;
 use aom_entropy::rb::ReadBitBuffer;
@@ -155,10 +155,27 @@ fn frame_header_matches_real_aomenc_output() {
         let v = vec![128u16; cw * ch];
 
         let bytes = c::ref_encode_av1_kf(
-            &y, &u, &v, w, h, 8, mono, ss_x as i32, ss_y as i32, cq_level, 0, false, false, usage,
-            0, false,
+            &y,
+            &u,
+            &v,
+            w,
+            h,
+            8,
+            mono,
+            ss_x as i32,
+            ss_y as i32,
+            cq_level,
+            0,
+            false,
+            false,
+            usage,
+            0,
+            false,
         );
-        assert!(!bytes.is_empty(), "shim_encode_av1_kf must produce a real stream");
+        assert!(
+            !bytes.is_empty(),
+            "shim_encode_av1_kf must produce a real stream"
+        );
 
         let obus = walk_obus(&bytes);
         let seq_payload = obus
@@ -176,7 +193,11 @@ fn frame_header_matches_real_aomenc_output() {
         // real encoder's own choice, not a misparse).
         let mut seq_wb = WriteBitBuffer::new();
         write_sequence_header_obu(&mut seq_wb, &seq);
-        assert_eq!(seq_wb.bytes(), seq_payload, "w={w} h={h}: seq-header sanity re-check");
+        assert_eq!(
+            seq_wb.bytes(),
+            seq_payload,
+            "w={w} h={h}: seq-header sanity re-check"
+        );
 
         let (frame_obu_type, frame_payload) = obus
             .iter()
@@ -199,7 +220,9 @@ fn frame_header_matches_real_aomenc_output() {
                 reduced_still_picture_hdr: seq.reduced_still_picture_hdr,
                 decoder_model_info_present_flag: seq.decoder_model_info_present_flag,
                 equal_picture_interval: seq.timing_info.equal_picture_interval,
-                frame_presentation_time_length: seq.decoder_model_info.frame_presentation_time_length
+                frame_presentation_time_length: seq
+                    .decoder_model_info
+                    .frame_presentation_time_length
                     as u32,
                 frame_id_numbers_present_flag: s.frame_id_numbers_present_flag,
                 frame_id_length: s.frame_id_length as u32,
@@ -212,7 +235,8 @@ fn frame_header_matches_real_aomenc_output() {
                 operating_points_cnt_minus_1: seq.operating_points_cnt_minus_1,
                 operating_point_idc: seq.operating_point_idc,
                 op_decoder_model_param_present: seq.op_decoder_model_param_present,
-                buffer_removal_time_length: seq.decoder_model_info.buffer_removal_time_length as u32,
+                buffer_removal_time_length: seq.decoder_model_info.buffer_removal_time_length
+                    as u32,
                 temporal_layer_id: 0,
                 spatial_layer_id: 0,
                 ..Default::default()
@@ -233,7 +257,10 @@ fn frame_header_matches_real_aomenc_output() {
                 last_mode_deltas: KF_MODE_DELTAS,
                 ..Default::default()
             },
-            cdef: CdefHeader { enable_cdef: s.enable_cdef, ..Default::default() },
+            cdef: CdefHeader {
+                enable_cdef: s.enable_cdef,
+                ..Default::default()
+            },
             restoration: RestorationHeader {
                 enable_restoration: s.enable_restoration,
                 sb_size_128: s.sb_size_128,
@@ -249,8 +276,14 @@ fn frame_header_matches_real_aomenc_output() {
         let p = read_uncompressed_header(&mut rb, &cfg);
         let real_bit_len = rb.bit_position();
 
-        assert!(!p.prefix.show_existing_frame, "w={w} h={h}: show_existing_frame unexpected");
-        assert_eq!(p.prefix.frame_type, 0, "w={w} h={h}: frame_type must be KEY");
+        assert!(
+            !p.prefix.show_existing_frame,
+            "w={w} h={h}: show_existing_frame unexpected"
+        );
+        assert_eq!(
+            p.prefix.frame_type, 0,
+            "w={w} h={h}: frame_type must be KEY"
+        );
 
         let mut wb = WriteBitBuffer::new();
         write_frame_header_obu(&mut wb, &p);
@@ -272,7 +305,10 @@ fn frame_header_matches_real_aomenc_output() {
             p.tile_info.cols,
             p.tile_info.rows,
         );
-        assert!(real_bit_len > 32, "{ctx}: suspiciously short frame header (near-empty parse?)");
+        assert!(
+            real_bit_len > 32,
+            "{ctx}: suspiciously short frame header (near-empty parse?)"
+        );
         assert_eq!(
             wb.bytes()[..full_bytes],
             frame_payload[..full_bytes],

@@ -12,17 +12,21 @@
 //!   harness, picks the rows each quantizer kind reads.
 
 use aom_encode::rd::{
-    av1_set_error_per_bit, av1_set_sad_per_bit, init_plane_quantizers, EncMode, FrameType,
-    FrameUpdateType, TuneMetric,
+    EncMode, FrameType, FrameUpdateType, TuneMetric, av1_set_error_per_bit, av1_set_sad_per_bit,
+    init_plane_quantizers,
 };
-use aom_encode::{xform_quant, QuantKind, QuantParams};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants, Segmentation, SEG_LVL_ALT_Q};
+use aom_encode::{QuantKind, QuantParams, xform_quant};
+use aom_quant::{Dequants, Quants, SEG_LVL_ALT_Q, Segmentation, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
 use aom_transform::txfm2d::fwd_txfm_valid;
 use aom_txb::{txb_high, txb_wide};
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 struct Rng(u64);
 impl Rng {
@@ -43,11 +47,19 @@ impl Rng {
 fn error_per_bit_matches_c() {
     let mut rng = Rng(0xe9b1_7d3f_0451_9c2b);
     for rdmult in [1, 2, 63, 64, 65, 127, 128, 1 << 20, i32::MAX] {
-        assert_eq!(av1_set_error_per_bit(rdmult), c::ref_error_per_bit(rdmult), "rdmult={rdmult}");
+        assert_eq!(
+            av1_set_error_per_bit(rdmult),
+            c::ref_error_per_bit(rdmult),
+            "rdmult={rdmult}"
+        );
     }
     for _ in 0..100_000 {
         let rdmult = rng.range(1, i32::MAX);
-        assert_eq!(av1_set_error_per_bit(rdmult), c::ref_error_per_bit(rdmult), "rdmult={rdmult}");
+        assert_eq!(
+            av1_set_error_per_bit(rdmult),
+            c::ref_error_per_bit(rdmult),
+            "rdmult={rdmult}"
+        );
     }
 }
 
@@ -72,11 +84,23 @@ fn sad_per_bit_matches_c() {
 fn init_plane_quantizers_matches_c_chain() {
     let mut rng = Rng(0x1d1e_5c0d_e0f1_a2b3);
     // Fixed frame-level params: the speed-0 all-intra KEY shape...
-    let allintra =
-        (FrameUpdateType::Kf, FrameType::Key, TuneMetric::Psnr, EncMode::Allintra, false, false);
+    let allintra = (
+        FrameUpdateType::Kf,
+        FrameType::Key,
+        TuneMetric::Psnr,
+        EncMode::Allintra,
+        false,
+        false,
+    );
     // ...plus a two-pass inter shape so the layer/boost path stays honest.
-    let twopass =
-        (FrameUpdateType::Arf, FrameType::NonKey, TuneMetric::Psnr, EncMode::Good, false, true);
+    let twopass = (
+        FrameUpdateType::Arf,
+        FrameType::NonKey,
+        TuneMetric::Psnr,
+        EncMode::Good,
+        false,
+        true,
+    );
     for case in 0..60_000 {
         let (update_type, frame_type, tuning, mode, use_fixed, is_stat) =
             if case % 4 == 3 { twopass } else { allintra };
@@ -96,7 +120,11 @@ fn init_plane_quantizers_matches_c_chain() {
             data[s][SEG_LVL_ALT_Q] = d;
             altq[s] = d;
         }
-        let seg = Segmentation { enabled, feature_mask: mask, feature_data: data };
+        let seg = Segmentation {
+            enabled,
+            feature_mask: mask,
+            feature_data: data,
+        };
         let layer_depth = rng.range(0, 7);
         let boost_index = rng.range(0, 16);
 
@@ -119,8 +147,12 @@ fn init_plane_quantizers_matches_c_chain() {
         );
 
         // C chain (shared clamp prefix, then real C for every step).
-        let current_qindex =
-            if delta_q_present { base_qindex + delta_qindex } else { base_qindex }.clamp(0, 255);
+        let current_qindex = if delta_q_present {
+            base_qindex + delta_qindex
+        } else {
+            base_qindex
+        }
+        .clamp(0, 255);
         let qindex_c = c::ref_get_qindex(enabled, &mask, &altq, segment_id as i32, current_qindex);
         let rdmult_c = c::ref_compute_rd_mult(
             qindex_c + y_dc_delta_q,
@@ -140,8 +172,16 @@ fn init_plane_quantizers_matches_c_chain() {
         );
         assert_eq!(got.qindex, qindex_c, "qindex {m}");
         assert_eq!(got.rdmult, rdmult_c, "rdmult {m}");
-        assert_eq!(got.errorperbit, c::ref_error_per_bit(rdmult_c), "errorperbit {m}");
-        assert_eq!(got.sadperbit, c::ref_sad_per_bit(qindex_c, bd as i32), "sadperbit {m}");
+        assert_eq!(
+            got.errorperbit,
+            c::ref_error_per_bit(rdmult_c),
+            "errorperbit {m}"
+        );
+        assert_eq!(
+            got.sadperbit,
+            c::ref_sad_per_bit(qindex_c, bd as i32),
+            "sadperbit {m}"
+        );
         let skip_c = enabled && (mask[segment_id] & (1 << aom_quant::SEG_LVL_SKIP)) != 0;
         assert_eq!(got.seg_skip_block, skip_c, "seg_skip_block {m}");
     }
@@ -178,26 +218,53 @@ fn from_plane_rows_matches_real_facades() {
                 };
                 // Real quantizer tables from (bd, deltas, sharpness); a LOW
                 // qindex band keeps quant steps small so eob > 0 dominates.
-                let (ydc, udc, uac, vdc, vac) =
-                    (rng.range(-16, 17), rng.range(-16, 17), rng.range(-16, 17), rng.range(-16, 17), rng.range(-16, 17));
+                let (ydc, udc, uac, vdc, vac) = (
+                    rng.range(-16, 17),
+                    rng.range(-16, 17),
+                    rng.range(-16, 17),
+                    rng.range(-16, 17),
+                    rng.range(-16, 17),
+                );
                 let sharpness = if iter % 4 == 0 { rng.range(0, 8) } else { 0 };
-                let qindex = if iter % 2 == 0 { rng.range(1, 96) as usize } else { rng.range(0, 256) as usize };
+                let qindex = if iter % 2 == 0 {
+                    rng.range(1, 96) as usize
+                } else {
+                    rng.range(0, 256) as usize
+                };
                 let plane = (rng.next() % 3) as usize;
 
                 let mut quants = Quants::zeroed();
                 let mut deq = Dequants::zeroed();
-                av1_build_quantizer(bd, ydc, udc, uac, vdc, vac, &mut quants, &mut deq, sharpness);
+                av1_build_quantizer(
+                    bd,
+                    ydc,
+                    udc,
+                    uac,
+                    vdc,
+                    vac,
+                    &mut quants,
+                    &mut deq,
+                    sharpness,
+                );
                 let rows = set_q_index(&quants, &deq, qindex, plane);
                 let qp = QuantParams::from_plane_rows(&rows, kind, bd);
 
-                let residual: Vec<i16> =
-                    (0..full).map(|_| rng.range(-(rmax - 1), rmax) as i16).collect();
+                let residual: Vec<i16> = (0..full)
+                    .map(|_| rng.range(-(rmax - 1), rmax) as i16)
+                    .collect();
                 let got = xform_quant(&residual, tx_size, tx_type, kind, &qp, false);
 
                 // C side: real fwd txfm, then the REAL facade over the full plane rows.
                 let coeff_c = c::ref_fwd_txfm2d(tx_size, &residual, TX_W[tx_size], tx_type);
                 let rows_c = c::ref_set_q_index(
-                    bd as i32, ydc, udc, uac, vdc, vac, sharpness, qindex as i32,
+                    bd as i32,
+                    ydc,
+                    udc,
+                    uac,
+                    vdc,
+                    vac,
+                    sharpness,
+                    qindex as i32,
                 );
                 let plane_rows = &rows_c[plane * 7 * 8..(plane + 1) * 7 * 8];
                 let kind_c = match kind {

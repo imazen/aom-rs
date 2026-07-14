@@ -11,21 +11,28 @@
 //! The trellis rdmult derivation (txb_rdopt.c:390, luma-intra mult 17,
 //! rshift 5) is computed once and fed to BOTH sides.
 
-use aom_encode::tx_search::{
-    search_tx_type_intra, trellis_rdmult_intra_y, TxTypeSearchInputs, TxTypeSearchPolicy,
-    TX_SIZE_2D_TBL,
-};
 use aom_encode::BlockContext;
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_encode::tx_search::{
+    TX_SIZE_2D_TBL, TxTypeSearchInputs, TxTypeSearchPolicy, search_tx_type_intra,
+    trellis_rdmult_intra_y,
+};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{fill_tx_type_costs, scan, txb_high, txb_wide, CoeffCostTables, TxTypeCosts};
+use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs, scan, txb_high, txb_wide};
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
-const TX_TO_BSIZE: [usize; 19] =
-    [0, 3, 6, 9, 12, 1, 2, 4, 5, 7, 8, 10, 11, 16, 17, 18, 19, 20, 21];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
+const TX_TO_BSIZE: [usize; 19] = [
+    0, 3, 6, 9, 12, 1, 2, 4, 5, 7, 8, 10, 11, 16, 17, 18, 19, 20, 21,
+];
 /// sadvar_shim variance size index per TX_SIZE (w x h -> case index).
-const VAR_IDX: [usize; 19] = [0, 4, 9, 14, 18, 1, 3, 5, 8, 10, 13, 15, 17, 2, 7, 6, 12, 11, 16];
+const VAR_IDX: [usize; 19] = [
+    0, 4, 9, 14, 18, 1, 3, 5, 8, 10, 13, 15, 17, 2, 7, 6, 12, 11, 16,
+];
 
 struct Rng(u64);
 impl Rng {
@@ -106,14 +113,19 @@ fn search_tx_type_intra_matches_c_chain() {
             let use_fi = tx_size <= 2 && iter % 7 == 3; // fi only <= 32x32 blocks
             let fi_mode = if use_fi { (rng.next() % 5) as usize } else { 0 };
             // Filter-intra implies DC_PRED (mbmi->mode semantics).
-            let mode = if use_fi { 0 } else { (rng.next() % 13) as usize };
+            let mode = if use_fi {
+                0
+            } else {
+                (rng.next() % 13) as usize
+            };
             let reduced = iter % 5 == 2;
             let lossless = false;
 
             // Pixels: pred + src -> residual = src - pred (consistent px dist).
             let src_off = 3 * STRIDE + 5;
-            let src: Vec<u16> =
-                (0..STRIDE * (h + 8)).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let src: Vec<u16> = (0..STRIDE * (h + 8))
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let pred: Vec<u16> = (0..w * h)
                 .map(|i| {
                     let s = i64::from(src[src_off + (i / w) * STRIDE + (i % w)]);
@@ -171,11 +183,18 @@ fn search_tx_type_intra_matches_c_chain() {
             fill_tx_type_costs(&mut tx_type_costs, &ttc_intra_cdf, &ttc_inter_cdf);
 
             // Neighbour entropy contexts + rd.
-            let above: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let bctx = BlockContext { plane_bsize: bsize, plane: 0, above: &above, left: &left };
+            let above: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let bctx = BlockContext {
+                plane_bsize: bsize,
+                plane: 0,
+                above: &above,
+                left: &left,
+            };
             let rdmult = rng.range(1, 1 << 22);
             let pol = TxTypeSearchPolicy::speed0_allintra();
             // Mostly unconstrained; occasionally tight to exercise the
@@ -220,9 +239,8 @@ fn search_tx_type_intra_matches_c_chain() {
                 false, // use_intra_dct_only
             );
             let _ = txk_c;
-            let (bsse_raw, mut mse_c) = c::ref_pixel_diff_dist(
-                &residual, bsize as i32, bsize as i32, 0, 0, 0, 0, 0, 0,
-            );
+            let (bsse_raw, mut mse_c) =
+                c::ref_pixel_diff_dist(&residual, bsize as i32, bsize as i32, 0, 0, 0, 0, 0, 0);
             let mut bsse_c = bsse_raw;
             if bd > 8 {
                 let s = 2 * (bd as i32 - 8);
@@ -240,7 +258,16 @@ fn search_tx_type_intra_matches_c_chain() {
 
             let mut best_rd_c = i64::MAX;
             #[allow(clippy::type_complexity)] // (type, eob, rate, dist, sse, ctx, qc, dqc)
-            let mut best_c: Option<(usize, u16, i32, i64, i64, u8, Vec<i32>, Vec<i32>)> = None;
+            let mut best_c: Option<(
+                usize,
+                u16,
+                i32,
+                i64,
+                i64,
+                u8,
+                Vec<i32>,
+                Vec<i32>,
+            )> = None;
             for tx_type in 0..16usize {
                 if mask_c & (1 << tx_type) == 0 {
                     continue;
@@ -436,8 +463,14 @@ fn search_tx_type_intra_matches_c_chain() {
     assert!(b_quant_blocks > 40, "B-quant arm: {b_quant_blocks}");
     assert!(eob0_winners > 5, "eob0 winners: {eob0_winners}");
     assert!(coded_winners > 100, "coded winners: {coded_winners}");
-    assert!(high_energy_hits > 20, "high-energy hybrid: {high_energy_hits}");
+    assert!(
+        high_energy_hits > 20,
+        "high-energy hybrid: {high_energy_hits}"
+    );
     assert!(adaptive_breaks > 3, "adaptive breaks: {adaptive_breaks}");
-    assert!(multi_type_blocks > 60, "multi-type blocks: {multi_type_blocks}");
+    assert!(
+        multi_type_blocks > 60,
+        "multi-type blocks: {multi_type_blocks}"
+    );
     assert!(nondct_winners > 10, "non-DCT winners: {nondct_winners}");
 }

@@ -9,11 +9,11 @@
 //! 420/422/444, bd 8/10/12, q sweep, `cfl_search_range` 1/2/3 and tight
 //! `ref_best_rd` budgets.
 
-use aom_encode::intra_uv_rd::{cfl_rd_pick_alpha, UvRdEnv};
-use aom_encode::mode_costs::{fill_cfl_costs, CflCosts};
+use aom_encode::intra_uv_rd::{UvRdEnv, cfl_rd_pick_alpha};
+use aom_encode::mode_costs::{CflCosts, fill_cfl_costs};
 use aom_encode::tx_search::TxTypeSearchPolicy;
-use aom_intra::cfl::{cfl_store_tx, CflCtx};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_intra::cfl::{CflCtx, cfl_store_tx};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
 use aom_txb::{CoeffCostTables, TxTypeCosts};
 
@@ -39,19 +39,21 @@ fn cfl_rd_pick_alpha_matches_c() {
     let mut rng = Rng(0xcf1a_5eec_0a1c_0003);
     // CfL-legal (<= 32x32) chroma-ref shapes.
     let cases: [(usize, usize, usize, i32, i32); 8] = [
-        (3, 1, 1, 8, 8),  // 8x8 @420
-        (6, 1, 1, 8, 8),  // 16x16 @420
-        (9, 1, 1, 8, 8),  // 32x32 @420
-        (0, 1, 1, 9, 9),  // 4x4 @420 sub-8x8
-        (5, 1, 1, 8, 8),  // 16x8 @420
-        (6, 1, 0, 8, 8),  // 16x16 @422
-        (6, 0, 0, 8, 8),  // 16x16 @444
-        (3, 0, 0, 8, 8),  // 8x8 @444
+        (3, 1, 1, 8, 8), // 8x8 @420
+        (6, 1, 1, 8, 8), // 16x16 @420
+        (9, 1, 1, 8, 8), // 32x32 @420
+        (0, 1, 1, 9, 9), // 4x4 @420 sub-8x8
+        (5, 1, 1, 8, 8), // 16x8 @420
+        (6, 1, 0, 8, 8), // 16x16 @422
+        (6, 0, 0, 8, 8), // 16x16 @444
+        (3, 0, 0, 8, 8), // 8x8 @444
     ];
-    const BLK_W_L: [usize; 22] =
-        [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-    const BLK_H_L: [usize; 22] =
-        [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+    const BLK_W_L: [usize; 22] = [
+        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+    ];
+    const BLK_H_L: [usize; 22] = [
+        4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+    ];
     const TX_OF_DIMS: fn(usize, usize) -> usize = |w, h| match (w, h) {
         (4, 4) => 0,
         (8, 8) => 1,
@@ -82,8 +84,7 @@ fn cfl_rd_pick_alpha_matches_c() {
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
             let qindex = [16, 64, 128, 200, 255][iter % 5] as usize;
-            let plane_bsize =
-                aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+            let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
             let (pw, ph) = (BLK_W_L[plane_bsize], BLK_H_L[plane_bsize]);
             let ref_off = aom_encode::intra_uv_rd::chroma_plane_offset(
                 0, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y,
@@ -92,24 +93,47 @@ fn cfl_rd_pick_alpha_matches_c() {
             // Luma recon -> CfL context on both sides. Correlated chroma
             // sources (luma-scaled + noise) so nonzero alphas actually win.
             let (bw, bh) = (BLK_W_L[bsize], BLK_H_L[bsize]);
-            let luma: Vec<u16> =
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let luma: Vec<u16> = (0..STRIDE * 96)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let luma_off = 16 * STRIDE + 16;
             let luma_tx = TX_OF_DIMS(bw, bh);
             let mut cfl_ctx = CflCtx::new(ss_x as i32, ss_y as i32);
             let mut st_c = c::RefCflState::default();
             cfl_store_tx(
-                &mut cfl_ctx, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row, mi_col,
+                &mut cfl_ctx,
+                &luma,
+                luma_off,
+                STRIDE,
+                0,
+                0,
+                luma_tx,
+                bsize,
+                mi_row,
+                mi_col,
             );
             c::ref_cfl_store_tx(
-                &mut st_c, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row, mi_col,
-                ss_x as i32, ss_y as i32, bd,
+                &mut st_c,
+                &luma,
+                luma_off,
+                STRIDE,
+                0,
+                0,
+                luma_tx,
+                bsize,
+                mi_row,
+                mi_col,
+                ss_x as i32,
+                ss_y as i32,
+                bd,
             );
 
-            let recon_u0: Vec<u16> =
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-            let recon_v0: Vec<u16> =
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let recon_u0: Vec<u16> = (0..STRIDE * 128)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
+            let recon_v0: Vec<u16> = (0..STRIDE * 128)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let mut src_u = recon_u0.clone();
             let mut src_v = recon_v0.clone();
             // Chroma = alpha/8 * subsampled-luma + base + noise: puts real
@@ -170,14 +194,18 @@ fn cfl_rd_pick_alpha_matches_c() {
             let dequant_u = [rows_u_c[48], rows_u_c[49]];
             let dequant_v = [rows_v_c[48], rows_v_c[49]];
 
-            let above_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let above_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let above_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 22);
             let luma_mode = (rng.next() % 13) as usize;
             let reduced = iter % 4 == 3;
@@ -304,8 +332,20 @@ fn cfl_rd_pick_alpha_matches_c() {
                     assert_eq!(r.alpha_idx, c_idx, "{ctx} alpha_idx");
                     assert_eq!(r.joint_sign, c_js, "{ctx} joint_sign");
                     assert_eq!(
-                        (r.stats.rate, r.stats.dist, r.stats.sse, r.stats.skip_txfm, r.stats.rdcost),
-                        (c_stats.rate, c_stats.dist, c_stats.sse, c_stats.skip, c_stats.rdcost),
+                        (
+                            r.stats.rate,
+                            r.stats.dist,
+                            r.stats.sse,
+                            r.stats.skip_txfm,
+                            r.stats.rdcost
+                        ),
+                        (
+                            c_stats.rate,
+                            c_stats.dist,
+                            c_stats.sse,
+                            c_stats.skip,
+                            c_stats.rdcost
+                        ),
                         "{ctx} winner stats",
                     );
                     sign_seen[r.joint_sign as usize] = true;
@@ -314,7 +354,11 @@ fn cfl_rd_pick_alpha_matches_c() {
                     }
                 }
                 (r, c_) => {
-                    panic!("{ctx} validity split: rust={:?} c={:?}", r.is_some(), c_.is_some())
+                    panic!(
+                        "{ctx} validity split: rust={:?} c={:?}",
+                        r.is_some(),
+                        c_.is_some()
+                    )
                 }
             }
             // Recon planes + CfL AC state in lockstep regardless of outcome.
@@ -323,8 +367,14 @@ fn cfl_rd_pick_alpha_matches_c() {
             assert_eq!(&ctx_r.ac_buf_q3[..], &st_c.ac_q3[..], "{ctx} ac state");
         }
     }
-    assert!(valid_hits > 40, "valid CfL picks under-exercised: {valid_hits}");
-    assert!(invalid_hits > 3, "invalid arms under-exercised: {invalid_hits}");
+    assert!(
+        valid_hits > 40,
+        "valid CfL picks under-exercised: {valid_hits}"
+    );
+    assert!(
+        invalid_hits > 3,
+        "invalid arms under-exercised: {invalid_hits}"
+    );
     assert!(
         nonzero_alpha_winners > 25,
         "nonzero-alpha winners under-exercised: {nonzero_alpha_winners}",

@@ -12,12 +12,12 @@
 //! (>32x32) shapes, and sub-8x8 chroma-ref blocks.
 
 use aom_encode::intra_uv_rd::{
-    chroma_plane_offset, is_chroma_reference, rd_pick_intra_sbuv_mode, UvLoopPolicy, UvRdEnv,
+    UvLoopPolicy, UvRdEnv, chroma_plane_offset, is_chroma_reference, rd_pick_intra_sbuv_mode,
 };
-use aom_encode::mode_costs::{fill_cfl_costs, CflCosts, IntraModeCosts};
+use aom_encode::mode_costs::{CflCosts, IntraModeCosts, fill_cfl_costs};
 use aom_encode::tx_search::TxTypeSearchPolicy;
-use aom_intra::cfl::{cfl_store_tx, CflCtx};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_intra::cfl::{CflCtx, cfl_store_tx};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
 use aom_txb::{CoeffCostTables, TxTypeCosts};
 
@@ -44,21 +44,23 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
     // (bsize, ss_x, ss_y, mi_row, mi_col): CfL-legal, CfL-forbidden (>32),
     // sub-8x8 chroma-ref, all three subsamplings.
     let cases: [(usize, usize, usize, i32, i32); 10] = [
-        (3, 1, 1, 8, 8),   // 8x8 @420 (CfL ok)
-        (6, 1, 1, 8, 8),   // 16x16 @420
-        (9, 1, 1, 8, 8),   // 32x32 @420
-        (12, 1, 1, 8, 8),  // 64x64 @420 (CfL FORBIDDEN: >32)
-        (0, 1, 1, 9, 9),   // 4x4 @420 sub-8x8
-        (5, 1, 1, 8, 8),   // 16x8 @420
-        (6, 1, 0, 8, 8),   // 16x16 @422
-        (3, 1, 0, 8, 8),   // 8x8 @422
-        (6, 0, 0, 8, 8),   // 16x16 @444
-        (12, 0, 0, 8, 8),  // 64x64 @444 (CfL forbidden; 4-txb UV walk)
+        (3, 1, 1, 8, 8),  // 8x8 @420 (CfL ok)
+        (6, 1, 1, 8, 8),  // 16x16 @420
+        (9, 1, 1, 8, 8),  // 32x32 @420
+        (12, 1, 1, 8, 8), // 64x64 @420 (CfL FORBIDDEN: >32)
+        (0, 1, 1, 9, 9),  // 4x4 @420 sub-8x8
+        (5, 1, 1, 8, 8),  // 16x8 @420
+        (6, 1, 0, 8, 8),  // 16x16 @422
+        (3, 1, 0, 8, 8),  // 8x8 @422
+        (6, 0, 0, 8, 8),  // 16x16 @444
+        (12, 0, 0, 8, 8), // 64x64 @444 (CfL forbidden; 4-txb UV walk)
     ];
-    const BLK_W_L: [usize; 22] =
-        [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-    const BLK_H_L: [usize; 22] =
-        [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+    const BLK_W_L: [usize; 22] = [
+        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+    ];
+    const BLK_H_L: [usize; 22] = [
+        4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+    ];
     const TX_OF_DIMS: fn(usize, usize) -> usize = |w, h| match (w, h) {
         (4, 4) => 0,
         (8, 8) => 1,
@@ -91,18 +93,17 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
             let qindex = [16, 64, 128, 200, 255][(ci + iter) % 5] as usize;
-            let plane_bsize =
-                aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+            let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
             let (pw, ph) = (BLK_W_L[plane_bsize], BLK_H_L[plane_bsize]);
-            let ref_off =
-                chroma_plane_offset(0, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
+            let ref_off = chroma_plane_offset(0, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
 
             // CfL context from a random luma recon (both sides). For
             // CfL-forbidden shapes the ctx is inert (mode gated) but must
             // still be threadable.
             let (bw, bh) = (BLK_W_L[bsize], BLK_H_L[bsize]);
-            let luma: Vec<u16> =
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let luma: Vec<u16> = (0..STRIDE * 96)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let luma_off = 16 * STRIDE + 16;
             let mut cfl_ctx = CflCtx::new(ss_x as i32, ss_y as i32);
             let mut st_c = c::RefCflState::default();
@@ -110,21 +111,42 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
             if cfl_allowed {
                 let luma_tx = TX_OF_DIMS(bw, bh);
                 cfl_store_tx(
-                    &mut cfl_ctx, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row,
+                    &mut cfl_ctx,
+                    &luma,
+                    luma_off,
+                    STRIDE,
+                    0,
+                    0,
+                    luma_tx,
+                    bsize,
+                    mi_row,
                     mi_col,
                 );
                 c::ref_cfl_store_tx(
-                    &mut st_c, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row, mi_col,
-                    ss_x as i32, ss_y as i32, bd,
+                    &mut st_c,
+                    &luma,
+                    luma_off,
+                    STRIDE,
+                    0,
+                    0,
+                    luma_tx,
+                    bsize,
+                    mi_row,
+                    mi_col,
+                    ss_x as i32,
+                    ss_y as i32,
+                    bd,
                 );
             }
 
             // Chroma planes: content per iter — luma-correlated (CfL bait),
             // smooth gradients (DC/SMOOTH bait), directional stripes.
-            let mut recon_u0: Vec<u16> =
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-            let mut recon_v0: Vec<u16> =
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let mut recon_u0: Vec<u16> = (0..STRIDE * 128)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
+            let mut recon_v0: Vec<u16> = (0..STRIDE * 128)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let mut src_u = recon_u0.clone();
             let mut src_v = recon_v0.clone();
             let flavor = iter % 4;
@@ -142,9 +164,8 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
                         0 => {
                             // Luma-correlated (CfL bait).
                             let l = i32::from(
-                                cfl_ctx.recon_buf_q3
-                                    [(rr.max(0) as usize).min(31) * 32
-                                        + (cc.max(0) as usize).min(31)],
+                                cfl_ctx.recon_buf_q3[(rr.max(0) as usize).min(31) * 32
+                                    + (cc.max(0) as usize).min(31)],
                             ) >> 3;
                             (base_u + (5 * l) / 8, base_v - (3 * l) / 8)
                         }
@@ -157,7 +178,11 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
                             // Off-axis oriented stripes (slope alternates 1:2
                             // / 2:1 per case) — lands between the base
                             // directions, so nonzero angle deltas win.
-                            let t = if ci % 2 == 0 { rr + 2 * cc } else { 2 * rr + cc };
+                            let t = if ci % 2 == 0 {
+                                rr + 2 * cc
+                            } else {
+                                2 * rr + cc
+                            };
                             let s = ((t.rem_euclid(10)) / 5) * amp;
                             (base_u + s, base_v - s)
                         }
@@ -174,7 +199,6 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
                     src_v[idx] = v.clamp(0, maxv as i32) as u16;
                 }
             }
-
 
             // Prediction neighbours mirror the oriented source so directional
             // modes genuinely extrapolate it: the corner + top row (extended
@@ -232,10 +256,13 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
                     *e = rng.range(0, 4 << 9);
                 }
             }
-            let angle_flat: Vec<i32> =
-                costs.angle_delta_cost.iter().flatten().copied().collect();
-            let pal_flat: Vec<i32> =
-                costs.palette_uv_mode_cost.iter().flatten().copied().collect();
+            let angle_flat: Vec<i32> = costs.angle_delta_cost.iter().flatten().copied().collect();
+            let pal_flat: Vec<i32> = costs
+                .palette_uv_mode_cost
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
             let sign_cdf = cdf_row(&mut rng, 8, 9);
             let mut alpha_cdf = Vec::new();
             for _ in 0..6 {
@@ -255,19 +282,22 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
             let dequant_u = [rows_u_c[48], rows_u_c[49]];
             let dequant_v = [rows_v_c[48], rows_v_c[49]];
 
-            let above_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let above_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let above_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 22);
             let luma_mode = (rng.next() % 13) as usize;
             let reduced = iter % 4 == 3;
-            let max_tx_size =
-                aom_encode::intra_uv_rd::av1_get_tx_size_uv(bsize, false, ss_x, ss_y);
+            let max_tx_size = aom_encode::intra_uv_rd::av1_get_tx_size_uv(bsize, false, ss_x, ss_y);
 
             let env = UvRdEnv {
                 sb_size: 12,
@@ -415,8 +445,20 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
     // Coverage: multiple distinct winners incl. CfL and nonzero angles;
     // gating arms (mode-rate skip / CfL-forbidden / invalid) exercised.
     let distinct_winners = win_counts.iter().filter(|&&n| n > 0).count();
-    assert!(distinct_winners >= 4, "winner diversity too low: {win_counts:?}");
-    assert!(cfl_winners > 5, "CfL winners under-exercised: {cfl_winners}");
-    assert!(angle_winners > 3, "angle winners under-exercised: {angle_winners}");
-    assert!(gated_visits > 40, "gated candidates under-exercised: {gated_visits}");
+    assert!(
+        distinct_winners >= 4,
+        "winner diversity too low: {win_counts:?}"
+    );
+    assert!(
+        cfl_winners > 5,
+        "CfL winners under-exercised: {cfl_winners}"
+    );
+    assert!(
+        angle_winners > 3,
+        "angle winners under-exercised: {angle_winners}"
+    );
+    assert!(
+        gated_visits > 40,
+        "gated candidates under-exercised: {gated_visits}"
+    );
 }

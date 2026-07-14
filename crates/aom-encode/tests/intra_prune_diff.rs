@@ -6,7 +6,7 @@
 //! prefix). Lockstep per step: prune decision + both accumulators identical.
 
 use aom_encode::intra_rd::{
-    get_model_rd_index_for_pruning, prune_intra_y_mode, TOP_INTRA_MODEL_COUNT,
+    TOP_INTRA_MODEL_COUNT, get_model_rd_index_for_pruning, prune_intra_y_mode,
 };
 use aom_sys_ref as c;
 
@@ -53,7 +53,11 @@ fn prune_intra_y_mode_matches_c_sequences() {
         for step in 0..steps {
             // Occasional INT64_MAX candidate exercises both != INT64_MAX
             // guards.
-            let this = if step % 13 == 12 { i64::MAX } else { rng.range(lo, hi) };
+            let this = if step % 13 == 12 {
+                i64::MAX
+            } else {
+                rng.range(lo, hi)
+            };
             let before_best = best_r;
             let got = prune_intra_y_mode(this, &mut best_r, &mut top_r, max_cnt, idx);
             let want = c::ref_prune_intra_y_mode(this, &mut best_c, &mut top_c, max_cnt, idx);
@@ -88,12 +92,18 @@ fn get_model_rd_index_for_pruning_matches_c() {
         let qindex = (rng.next() as i32).rem_euclid(256);
         let cnt = 1 + (rng.next() as i32).rem_euclid(4); // 1..=4
         let adapt = case % 2 == 1;
-        let left = if rng.next().is_multiple_of(3) { None } else { Some((rng.next() as usize) % 13) };
-        let above = if rng.next().is_multiple_of(3) { None } else { Some((rng.next() as usize) % 13) };
-        let got =
-            get_model_rd_index_for_pruning(cur_mode, qindex, cnt, adapt, left, above);
-        let want =
-            c::ref_get_model_rd_index_for_pruning(cur_mode, qindex, cnt, adapt, left, above);
+        let left = if rng.next().is_multiple_of(3) {
+            None
+        } else {
+            Some((rng.next() as usize) % 13)
+        };
+        let above = if rng.next().is_multiple_of(3) {
+            None
+        } else {
+            Some((rng.next() as usize) % 13)
+        };
+        let got = get_model_rd_index_for_pruning(cur_mode, qindex, cnt, adapt, left, above);
+        let want = c::ref_get_model_rd_index_for_pruning(cur_mode, qindex, cnt, adapt, left, above);
         assert_eq!(
             got, want,
             "case={case} mode={cur_mode} q={qindex} cnt={cnt} adapt={adapt} \

@@ -5,8 +5,8 @@
 //! `prune_luma_odd_delta_angles_using_rd_cost` (pure transcription).
 
 use aom_encode::intra_rd::{
-    prune_luma_odd_delta_angles_using_rd_cost, set_y_mode_and_delta_angle, IntraSbyGates,
-    INTRA_MODES, LUMA_MODE_COUNT,
+    INTRA_MODES, IntraSbyGates, LUMA_MODE_COUNT, prune_luma_odd_delta_angles_using_rd_cost,
+    set_y_mode_and_delta_angle,
 };
 use aom_sys_ref as c;
 
@@ -102,7 +102,10 @@ fn visit_gating_matches_c() {
                 &gates.intra_y_mode_mask,
                 &skip_mask_u8,
             );
-            assert_eq!(rust, cref, "case={case} mode_idx={mode_idx} mode={mode} delta={delta} bsize={bsize}");
+            assert_eq!(
+                rust, cref,
+                "case={case} mode_idx={mode_idx} mode={mode} delta={delta} bsize={bsize}"
+            );
             if rust {
                 visited += 1;
             } else {
@@ -111,7 +114,10 @@ fn visit_gating_matches_c() {
         }
     }
     // Non-vacuity: both outcomes must occur heavily.
-    assert!(visited > 10_000 && skipped > 10_000, "visited={visited} skipped={skipped}");
+    assert!(
+        visited > 10_000 && skipped > 10_000,
+        "visited={visited} skipped={skipped}"
+    );
 }
 
 /// The speed-0 configuration visits ALL 61 candidates on angle-delta-capable

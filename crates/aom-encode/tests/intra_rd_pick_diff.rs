@@ -14,23 +14,27 @@
 //! y_mode_costs lookup comes from the separately C-validated get_y_mode_ctx.
 
 use aom_encode::intra_rd::{
-    pick_intra_mode_rd, IntraCandidate, IntraModeRd, IntraRdEnv, IntraRdRates,
+    IntraCandidate, IntraModeRd, IntraRdEnv, IntraRdRates, pick_intra_mode_rd,
 };
-use aom_encode::mode_costs::{
-    fill_intra_mode_costs, filter_intra_allowed_bsize, IntraModeCosts,
-};
+use aom_encode::mode_costs::{IntraModeCosts, fill_intra_mode_costs, filter_intra_allowed_bsize};
 use aom_encode::{BlockContext, OptimizeInputs, QuantKind, QuantParams};
 use aom_entropy::partition::get_y_mode_ctx;
 use aom_sys_ref as c;
-use aom_txb::{fill_tx_type_costs, scan, txb_high, txb_wide, CoeffCostTables, TxTypeCosts};
+use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs, scan, txb_high, txb_wide};
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 /// BLOCK_SIZE with the same dims as each TX_SIZE (single-txb blocks).
-const TX_TO_BSIZE: [usize; 19] =
-    [0, 3, 6, 9, 12, 1, 2, 4, 5, 7, 8, 10, 11, 16, 17, 18, 19, 20, 21];
-const TX_SIZE_2D: [i32; 19] =
-    [16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024];
+const TX_TO_BSIZE: [usize; 19] = [
+    0, 3, 6, 9, 12, 1, 2, 4, 5, 7, 8, 10, 11, 16, 17, 18, 19, 20, 21,
+];
+const TX_SIZE_2D: [i32; 19] = [
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+];
 
 fn log_scale(tx_size: usize) -> i32 {
     let p = TX_SIZE_2D[tx_size];
@@ -85,7 +89,11 @@ fn gen_cdfs(rng: &mut Rng, count: usize, nsymbs: usize, padded: usize) -> Vec<u1
 fn build_candidates(bsize: usize, enable_fi: bool) -> Vec<IntraCandidate> {
     let mut cands = Vec::new();
     for mode in 0..13usize {
-        let deltas: &[i32] = if (1..=8).contains(&mode) { &[-3, -2, -1, 0, 1, 2, 3] } else { &[0] };
+        let deltas: &[i32] = if (1..=8).contains(&mode) {
+            &[-3, -2, -1, 0, 1, 2, 3]
+        } else {
+            &[0]
+        };
         for &d in deltas {
             cands.push(IntraCandidate {
                 mode,
@@ -123,18 +131,22 @@ fn pick_intra_mode_rd_matches_c_chain() {
         let ls = log_scale(tx_size);
         for &bd in &[8u8, 12] {
             // Pixel planes: recon supplies prediction edges, src the block.
-            let recon: Vec<u16> =
-                (0..STRIDE * (ROW0 + h + 64)).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-            let src: Vec<u16> =
-                (0..STRIDE * (ROW0 + h)).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let recon: Vec<u16> = (0..STRIDE * (ROW0 + h + 64))
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
+            let src: Vec<u16> = (0..STRIDE * (ROW0 + h))
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let ref_off = ROW0 * STRIDE + COL0;
             let src_off = (ROW0 - 1) * STRIDE + COL0 + 1; // distinct block origin
 
             // Quant params (reciprocal quant/dequant like the real tables).
             let dq = [rng.range(16, 800), rng.range(16, 800)];
             let dequant = [dq[0] as i16, dq[1] as i16];
-            let quant =
-                [(65536 / dq[0]).clamp(1, 32767) as i16, (65536 / dq[1]).clamp(1, 32767) as i16];
+            let quant = [
+                (65536 / dq[0]).clamp(1, 32767) as i16,
+                (65536 / dq[1]).clamp(1, 32767) as i16,
+            ];
             let zbin = [rng.range(1, 100) as i16, rng.range(1, 100) as i16];
             let round = [rng.range(1, 400) as i16, rng.range(1, 400) as i16];
             let quant_shift = [rng.range(8000, 32767) as i16, rng.range(8000, 32767) as i16];
@@ -171,7 +183,8 @@ fn pick_intra_mode_rd_matches_c_chain() {
                 let ns = NUM_EXT_TX_SET[IDX_TO_TYPE[1][s]].max(2);
                 ttc_inter_cdf.extend_from_slice(&gen_cdfs(&mut rng, 4, ns, 17));
             }
-            let (c_ttc_intra, c_ttc_inter) = c::ref_fill_tx_type_costs(&ttc_intra_cdf, &ttc_inter_cdf);
+            let (c_ttc_intra, c_ttc_inter) =
+                c::ref_fill_tx_type_costs(&ttc_intra_cdf, &ttc_inter_cdf);
             let mut tx_type_costs = TxTypeCosts::zeroed();
             fill_tx_type_costs(&mut tx_type_costs, &ttc_intra_cdf, &ttc_inter_cdf);
 
@@ -187,26 +200,51 @@ fn pick_intra_mode_rd_matches_c_chain() {
             let angle = gen_cdfs(&mut rng, 8, 7, 8);
             let intrabc_cdf = gen_cdfs(&mut rng, 1, 2, 3);
             let c_mode_costs = c::ref_fill_intra_mode_costs(
-                &kf_y, &y_mode, &uv, &fi_mode_cdf, &fi_cdfs, &pal_y, &angle, &intrabc_cdf,
+                &kf_y,
+                &y_mode,
+                &uv,
+                &fi_mode_cdf,
+                &fi_cdfs,
+                &pal_y,
+                &angle,
+                &intrabc_cdf,
                 enable_fi,
             );
             let mut mode_costs = IntraModeCosts::zeroed();
             fill_intra_mode_costs(
-                &mut mode_costs, &kf_y, &y_mode, &uv, &fi_mode_cdf, &fi_cdfs, &pal_y, &angle,
-                &intrabc_cdf, enable_fi,
+                &mut mode_costs,
+                &kf_y,
+                &y_mode,
+                &uv,
+                &fi_mode_cdf,
+                &fi_cdfs,
+                &pal_y,
+                &angle,
+                &intrabc_cdf,
+                enable_fi,
             );
 
             // Neighbour entropy contexts + trellis inputs.
-            let above: Vec<i8> =
-                (0..16).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left: Vec<i8> =
-                (0..16).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above: Vec<i8> = (0..16)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left: Vec<i8> = (0..16)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 20);
             let sharpness = rng.range(0, 8);
 
             // Mode-rate environment.
-            let above_mode = if rng.range(0, 4) == 0 { None } else { Some(rng.range(0, 13)) };
-            let left_mode = if rng.range(0, 4) == 0 { None } else { Some(rng.range(0, 13)) };
+            let above_mode = if rng.range(0, 4) == 0 {
+                None
+            } else {
+                Some(rng.range(0, 13))
+            };
+            let left_mode = if rng.range(0, 4) == 0 {
+                None
+            } else {
+                Some(rng.range(0, 13))
+            };
             let (actx, lctx) = get_y_mode_ctx(above_mode, left_mode);
             let try_palette = rng.range(0, 2) == 1;
             let pal_bctx = rng.range(0, 7) as usize;
@@ -233,8 +271,17 @@ fn pick_intra_mode_rd_matches_c_chain() {
                 iqm: None,
                 bd,
             };
-            let bctx = BlockContext { above: &above, left: &left, plane: 0, plane_bsize: bsize };
-            let opt = OptimizeInputs { cost: &coeff_costs, rdmult: rdmult as i64, sharpness };
+            let bctx = BlockContext {
+                above: &above,
+                left: &left,
+                plane: 0,
+                plane_bsize: bsize,
+            };
+            let opt = OptimizeInputs {
+                cost: &coeff_costs,
+                rdmult: rdmult as i64,
+                sharpness,
+            };
             let env = IntraRdEnv {
                 recon: &recon,
                 ref_off,
@@ -311,11 +358,25 @@ fn pick_intra_mode_rd_matches_c_chain() {
                 // bd > 8 must use the highbd (64-bit) quantizer refs, matching
                 // xform_quant's bd dispatch (the lowbd ones i16-saturate).
                 let (mut qc, mut dqc, eob0) = match (kind, bd > 8) {
-                    (QuantKind::B, false) => {
-                        c::ref_quantize_b(ls, tcoeff, &zbin, &round, &quant, &quant_shift, &dequant, sc)
-                    }
+                    (QuantKind::B, false) => c::ref_quantize_b(
+                        ls,
+                        tcoeff,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        sc,
+                    ),
                     (QuantKind::B, true) => c::ref_highbd_quantize_b(
-                        ls, tcoeff, &zbin, &round, &quant, &quant_shift, &dequant, sc,
+                        ls,
+                        tcoeff,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        sc,
                     ),
                     (QuantKind::Fp, false) => {
                         c::ref_quantize_fp(ls, tcoeff, &round, &quant, &dequant, sc)
@@ -325,8 +386,7 @@ fn pick_intra_mode_rd_matches_c_chain() {
                     }
                     (QuantKind::Dc, _) => unreachable!(),
                 };
-                let (skip_ctx, sign_ctx) =
-                    c::ref_get_txb_ctx(bsize, tx_size, 0, &above, &left);
+                let (skip_ctx, sign_ctx) = c::ref_get_txb_ctx(bsize, tx_size, 0, &above, &left);
                 let (eob_w, _trellis_rate) = if eob0 == 0 {
                     (0usize, 0i32)
                 } else {
@@ -409,7 +469,12 @@ fn pick_intra_mode_rd_matches_c_chain() {
                 let rate = coeff_rate + tx_type_rate + mode_rate;
                 let (dist, _sse) = c::ref_dist_block_tx_domain(tcoeff, &dqc, tx_size, bd);
                 let rd = c::ref_rdcost(rdmult, rate, dist);
-                want_evals.push(IntraModeRd { rate, dist, rd, eob: eob_w as u16 });
+                want_evals.push(IntraModeRd {
+                    rate,
+                    dist,
+                    rd,
+                    eob: eob_w as u16,
+                });
             }
             let mut want_best = 0usize;
             let mut best_rd = i64::MAX;
@@ -432,5 +497,8 @@ fn pick_intra_mode_rd_matches_c_chain() {
     }
     // Guard: the argmin must have been a real decision (distinct RDs), not a
     // degenerate all-equal pick, on nearly every block.
-    assert!(argmin_spread >= 30, "only {argmin_spread} blocks had distinct candidate RDs");
+    assert!(
+        argmin_spread >= 30,
+        "only {argmin_spread} blocks had distinct candidate RDs"
+    );
 }

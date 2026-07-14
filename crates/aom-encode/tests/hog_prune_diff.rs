@@ -9,7 +9,7 @@
 //! - `prune_intra_mode_with_hog_y` end-to-end mask equality, thresholds
 //!   including the speed-0 `-1.2f`.
 
-use aom_encode::hog::{generate_hog, hog_nn_predict, prune_intra_mode_with_hog_y, HOG_BINS};
+use aom_encode::hog::{HOG_BINS, generate_hog, hog_nn_predict, prune_intra_mode_with_hog_y};
 use aom_sys_ref as c;
 
 struct Rng(u64);
@@ -91,7 +91,10 @@ fn hog_nn_predict_matches_avx2_and_dispatch() {
             }
         }
     }
-    assert!(nonpos_scores > 10_000, "non-positive scores: {nonpos_scores}");
+    assert!(
+        nonpos_scores > 10_000,
+        "non-positive scores: {nonpos_scores}"
+    );
     assert!(pos_scores > 10_000, "positive scores: {pos_scores}");
 }
 
@@ -112,11 +115,11 @@ fn fill_content(
     for r in 0..rows {
         for cx in 0..cols {
             let v: i64 = match class {
-                0 => base,                                    // flat (all-zero hist)
-                1 => (rng.next() % (1 << bd)) as i64,         // noise
-                2 => base + 3 * cx as i64,                    // vertical edges (dy=0)
-                3 => base + 3 * r as i64,                     // horizontal edges (dx=0)
-                4 => base + 2 * (cx as i64 + r as i64),       // diagonal
+                0 => base,                                              // flat (all-zero hist)
+                1 => (rng.next() % (1 << bd)) as i64,                   // noise
+                2 => base + 3 * cx as i64,                              // vertical edges (dy=0)
+                3 => base + 3 * r as i64,                               // horizontal edges (dx=0)
+                4 => base + 2 * (cx as i64 + r as i64),                 // diagonal
                 _ => base + ((cx / 4 + r / 4) % 2) as i64 * (maxv / 2), // checker
             };
             plane[off + r * stride + cx] = v.clamp(0, maxv) as u16;
@@ -184,10 +187,12 @@ fn prune_intra_mode_with_hog_matches_c() {
             2 => 6.0,
             _ => (rng.range(-40, 41) as f32) / 10.0,
         };
-        const BLK_W: [usize; 22] =
-            [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-        const BLK_H: [usize; 22] =
-            [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+        const BLK_W: [usize; 22] = [
+            4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+        ];
+        const BLK_H: [usize; 22] = [
+            4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+        ];
         let (bw, bh) = (BLK_W[bsize], BLK_H[bsize]);
         // Frame-edge overhang on some cases (1/8-pel negative edges).
         let (right_edge, bottom_edge) = if case % 5 == 4 && bw >= 8 {
@@ -205,12 +210,29 @@ fn prune_intra_mode_with_hog_matches_c() {
 
         let mut got = [false; 13];
         prune_intra_mode_with_hog_y(
-            &plane, off, STRIDE, bsize, right_edge, bottom_edge, th, &mut got,
+            &plane,
+            off,
+            STRIDE,
+            bsize,
+            right_edge,
+            bottom_edge,
+            th,
+            &mut got,
         );
         let want = c::ref_prune_intra_mode_with_hog_y(
-            &plane, off, STRIDE, bsize, right_edge, bottom_edge, bd, th,
+            &plane,
+            off,
+            STRIDE,
+            bsize,
+            right_edge,
+            bottom_edge,
+            bd,
+            th,
         );
-        assert_eq!(got, want, "mask case={case} bsize={bsize} bd={bd} class={class} th={th}");
+        assert_eq!(
+            got, want,
+            "mask case={case} bsize={bsize} bd={bd} class={class} th={th}"
+        );
         let n = got.iter().filter(|&&b| b).count();
         if n == 0 {
             none_pruned += 1;

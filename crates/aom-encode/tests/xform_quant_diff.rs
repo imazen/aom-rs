@@ -6,15 +6,20 @@
 //! quantizer dispatch, entropy-ctx deferral) on top of the already bit-exact
 //! sub-modules.
 
-use aom_encode::{xform_quant, QuantKind, QuantParams};
+use aom_encode::{QuantKind, QuantParams, xform_quant};
 use aom_sys_ref as c;
 use aom_transform::txfm2d::fwd_txfm_valid;
 use aom_txb::{txb_high, txb_wide};
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
-const TX_SIZE_2D: [i32; 19] =
-    [16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
+const TX_SIZE_2D: [i32; 19] = [
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+];
 
 fn log_scale(tx_size: usize) -> i32 {
     let p = TX_SIZE_2D[tx_size];
@@ -61,7 +66,9 @@ fn xform_quant_end_to_end_identical() {
                 // quantizers). The forward transform is bd-independent.
                 let bd: u8 = if iter % 3 == 2 { 12 } else { 8 };
                 let rmax = if bd > 8 { 4096 } else { 256 };
-                let residual: Vec<i16> = (0..full).map(|_| rng.range(-(rmax - 1), rmax) as i16).collect();
+                let residual: Vec<i16> = (0..full)
+                    .map(|_| rng.range(-(rmax - 1), rmax) as i16)
+                    .collect();
                 // Quant tables. Small dequant + large quant => plenty of nonzero
                 // coefficients survive so the eob / entropy-ctx paths are exercised.
                 let zbin = [rng.range(1, 400) as i16, rng.range(1, 400) as i16];
@@ -79,7 +86,11 @@ fn xform_quant_end_to_end_identical() {
                     _ => QuantKind::Dc,
                 };
                 let use_optimize_b = iter % 3 == 0;
-                let (qm, iqm) = if use_qm { (Some(&qm_v[..]), Some(&iqm_v[..])) } else { (None, None) };
+                let (qm, iqm) = if use_qm {
+                    (Some(&qm_v[..]), Some(&iqm_v[..]))
+                } else {
+                    (None, None)
+                };
 
                 let qp = QuantParams {
                     zbin: &zbin,
@@ -100,32 +111,99 @@ fn xform_quant_end_to_end_identical() {
                 let hbd = bd > 8;
                 let (qc, dqc, eob) = match (kind, use_qm, hbd) {
                     (QuantKind::Fp, true, false) => c::ref_quantize_fp_qm(
-                        ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type), &iscan,
+                        ls,
+                        src,
+                        &round,
+                        &quant,
+                        &dequant,
+                        &qm_v,
+                        &iqm_v,
+                        sc(tx_size, tx_type),
+                        &iscan,
                     ),
                     (QuantKind::Fp, true, true) => c::ref_highbd_quantize_fp_qm(
-                        ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type), &iscan,
+                        ls,
+                        src,
+                        &round,
+                        &quant,
+                        &dequant,
+                        &qm_v,
+                        &iqm_v,
+                        sc(tx_size, tx_type),
+                        &iscan,
                     ),
-                    (QuantKind::Fp, false, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc(tx_size, tx_type)),
-                    (QuantKind::Fp, false, true) => c::ref_highbd_quantize_fp(ls, src, &round, &quant, &dequant, sc(tx_size, tx_type)),
+                    (QuantKind::Fp, false, false) => {
+                        c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc(tx_size, tx_type))
+                    }
+                    (QuantKind::Fp, false, true) => c::ref_highbd_quantize_fp(
+                        ls,
+                        src,
+                        &round,
+                        &quant,
+                        &dequant,
+                        sc(tx_size, tx_type),
+                    ),
                     (QuantKind::B, true, false) => c::ref_quantize_b_qm(
-                        ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type),
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        &qm_v,
+                        &iqm_v,
+                        sc(tx_size, tx_type),
                     ),
                     (QuantKind::B, true, true) => c::ref_highbd_quantize_b_qm(
-                        ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc(tx_size, tx_type),
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        &qm_v,
+                        &iqm_v,
+                        sc(tx_size, tx_type),
                     ),
                     (QuantKind::B, false, false) => c::ref_quantize_b(
-                        ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc(tx_size, tx_type),
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        sc(tx_size, tx_type),
                     ),
                     (QuantKind::B, false, true) => c::ref_highbd_quantize_b(
-                        ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc(tx_size, tx_type),
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        sc(tx_size, tx_type),
                     ),
                     // DC-only: qm handled via Option; DC scalars quant[0]/dequant[0].
-                    (QuantKind::Dc, _, false) => c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
-                    (QuantKind::Dc, _, true) => c::ref_highbd_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
+                    (QuantKind::Dc, _, false) => {
+                        c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm)
+                    }
+                    (QuantKind::Dc, _, true) => {
+                        c::ref_highbd_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm)
+                    }
                 };
-                let ctx_c = if use_optimize_b { 0 } else { c::ref_txb_entropy_context(&qc, tx_size, tx_type, eob as usize) };
+                let ctx_c = if use_optimize_b {
+                    0
+                } else {
+                    c::ref_txb_entropy_context(&qc, tx_size, tx_type, eob as usize)
+                };
 
-                let m = format!("ts={tx_size} tt={tx_type} kind={kind:?} qm={use_qm} bd={bd} optb={use_optimize_b}");
+                let m = format!(
+                    "ts={tx_size} tt={tx_type} kind={kind:?} qm={use_qm} bd={bd} optb={use_optimize_b}"
+                );
                 assert_eq!(&got.coeff[..n_coeffs], src, "coeff {m}");
                 assert_eq!(got.qcoeff, qc, "qcoeff {m}");
                 assert_eq!(got.dqcoeff, dqc, "dqcoeff {m}");
@@ -141,8 +219,14 @@ fn xform_quant_end_to_end_identical() {
     // A large fraction of blocks should quantize to a nonzero eob, and the
     // non-deferred path should produce nonzero contexts — otherwise the equality
     // assertions above are vacuous.
-    assert!(nonzero_eob * 4 >= total, "too few nonzero-eob blocks: {nonzero_eob}/{total}");
-    assert!(nonzero_ctx > 0, "no nonzero txb_entropy_ctx observed ({total} blocks)");
+    assert!(
+        nonzero_eob * 4 >= total,
+        "too few nonzero-eob blocks: {nonzero_eob}/{total}"
+    );
+    assert!(
+        nonzero_ctx > 0,
+        "no nonzero txb_entropy_ctx observed ({total} blocks)"
+    );
 }
 
 /// Scan order slice for the oracle quantizer calls.

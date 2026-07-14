@@ -283,7 +283,9 @@ fn encode_intra_block_plane_y_matches_c_walk() {
                 above_ctx: &above_ctx,
                 left_ctx: &left_ctx,
                 rdmult,
-                coeff_tbls: (&txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl),
+                coeff_tbls: (
+                    &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl,
+                ),
                 store: store_y,
                 ss: (ss_x, ss_y),
             };

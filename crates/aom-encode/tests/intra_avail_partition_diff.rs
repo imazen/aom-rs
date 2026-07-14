@@ -16,12 +16,18 @@
 use aom_entropy::partition::intra_avail;
 use aom_sys_ref as c;
 
-const MI_W: [i32; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_H: [i32; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
-const BW: [i32; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BH: [i32; 22] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const MI_W: [i32; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const MI_H: [i32; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
+const BW: [i32; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BH: [i32; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 #[test]
 fn intra_avail_partition_input_matches_c() {
@@ -49,14 +55,14 @@ fn intra_avail_partition_input_matches_c() {
                                     let mut base: Option<(i32, i32, i32, i32)> = None;
                                     for partition in [0usize, 1, 2] {
                                         let g = intra_avail(
-                                            sb, bsize, mi_row, mi_col, up, left, mi_cols,
-                                            mi_rows, partition, tx_size, ss_x, ss_y, row_off,
-                                            col_off, wpx, hpx, mi_cols, mi_rows, mode, 0, false,
+                                            sb, bsize, mi_row, mi_col, up, left, mi_cols, mi_rows,
+                                            partition, tx_size, ss_x, ss_y, row_off, col_off, wpx,
+                                            hpx, mi_cols, mi_rows, mode, 0, false,
                                         );
                                         let w = c::ref_intra_avail(
-                                            sb, bsize, mi_row, mi_col, up, left, mi_cols,
-                                            mi_rows, partition, tx_size, ss_x, ss_y, row_off,
-                                            col_off, wpx, hpx, mi_cols, mi_rows, mode, 0, false,
+                                            sb, bsize, mi_row, mi_col, up, left, mi_cols, mi_rows,
+                                            partition, tx_size, ss_x, ss_y, row_off, col_off, wpx,
+                                            hpx, mi_cols, mi_rows, mode, 0, false,
                                         );
                                         assert_eq!(
                                             g, w,
@@ -87,5 +93,8 @@ fn intra_avail_partition_input_matches_c() {
         }
     }
     assert!(checks > 10_000, "sweep breadth: {checks}");
-    assert!(identity_checks > 6_000, "identity breadth: {identity_checks}");
+    assert!(
+        identity_checks > 6_000,
+        "identity breadth: {identity_checks}"
+    );
 }

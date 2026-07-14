@@ -16,8 +16,8 @@
 //!    SEQUENCE (order + best_remain budgets — pins the exact traversal).
 
 use aom_encode::partition::{
-    calculate_rd_cost, rd_cost_update, rd_pick_partition_none_split, rd_stats_subtraction,
-    split_subsize, PartRdStats, PartTree,
+    PartRdStats, PartTree, calculate_rd_cost, rd_cost_update, rd_pick_partition_none_split,
+    rd_stats_subtraction, split_subsize,
 };
 use aom_sys_ref as c;
 
@@ -36,7 +36,11 @@ fn rd_primitives_match_c() {
             match k {
                 0 => (i32::MAX, rng.next() as i64 & 0xFFFF, 0),
                 1 => (rng.range(0, 1 << 24), i64::MAX, 0),
-                2 => (rng.range(0, 1 << 24), rng.next() as i64 & 0xFFFF_FFFF, i64::MAX),
+                2 => (
+                    rng.range(0, 1 << 24),
+                    rng.next() as i64 & 0xFFFF_FFFF,
+                    i64::MAX,
+                ),
                 _ => (
                     rng.range(-(1 << 22), 1 << 24),
                     (rng.next() & 0x3FFF_FFFF) as i64,
@@ -54,19 +58,39 @@ fn rd_primitives_match_c() {
         }
 
         // rd_cost_update
-        let mut s = PartRdStats { rate, dist, rdcost: rdc };
+        let mut s = PartRdStats {
+            rate,
+            dist,
+            rdcost: rdc,
+        };
         rd_cost_update(mult, &mut s);
         let (cr, cd, cc) = c::ref_rd_cost_update(mult, rate, dist, rdc);
-        assert_eq!((s.rate, s.dist, s.rdcost), (cr, cd, cc), "rd_cost_update i={i}");
+        assert_eq!(
+            (s.rate, s.dist, s.rdcost),
+            (cr, cd, cc),
+            "rd_cost_update i={i}"
+        );
 
         // rd_stats_subtraction
         let kind2 = ((rng.next() % 8) as usize).min(3);
         let (r2, d2, c2) = pick(&mut rng, kind2);
-        let left = PartRdStats { rate, dist, rdcost: rdc };
-        let right = PartRdStats { rate: r2, dist: d2, rdcost: c2 };
+        let left = PartRdStats {
+            rate,
+            dist,
+            rdcost: rdc,
+        };
+        let right = PartRdStats {
+            rate: r2,
+            dist: d2,
+            rdcost: c2,
+        };
         let got = rd_stats_subtraction(mult, &left, &right);
         let want = c::ref_rd_stats_subtraction(mult, (rate, dist, rdc), (r2, d2, c2));
-        assert_eq!((got.rate, got.dist, got.rdcost), want, "rd_stats_subtraction i={i}");
+        assert_eq!(
+            (got.rate, got.dist, got.rdcost),
+            want,
+            "rd_stats_subtraction i={i}"
+        );
         if got.rate != i32::MAX && got.rate < 0 {
             neg_rate_arm += 1;
         }
@@ -78,7 +102,11 @@ fn rd_primitives_match_c() {
         let mult = rng.range(1, i32::MAX);
         let rate = rng.range(-(1 << 24), 1 << 24);
         let dist = (rng.next() & 0x3FFF_FFFF) as i64;
-        let mut s = PartRdStats { rate, dist, rdcost: 0 };
+        let mut s = PartRdStats {
+            rate,
+            dist,
+            rdcost: 0,
+        };
         rd_cost_update(mult, &mut s);
         assert_eq!(s.rdcost, calculate_rd_cost(mult, rate, dist));
     }
@@ -108,7 +136,11 @@ fn synth_leaf(seed: u64, mi_row: i32, mi_col: i32, bsize: usize, scale: i32) -> 
     let area = (1u64 << (2 * (bsize as u32 / 3 + 2))) as i64;
     let rate = ((h >> 8) % 2048) as i32 + (area / 4) as i32;
     let dist = ((h >> 24) % 2048) as i64 + area * area * 4 / scale.max(1) as i64;
-    PartRdStats { rate, dist, rdcost: 0 }
+    PartRdStats {
+        rate,
+        dist,
+        rdcost: 0,
+    }
 }
 
 /// The C-side transcription of none_partition_search + split_partition_search
@@ -143,8 +175,11 @@ fn c_rd_pick_partition_none_split(
     let mut best_res: Option<(bool, i32, i64, i64)> = None;
 
     if none_allowed {
-        let pt_cost =
-            if at_least_8x8 { if costs[0] < i32::MAX { costs[0] } else { 0 } } else { 0 };
+        let pt_cost = if at_least_8x8 {
+            if costs[0] < i32::MAX { costs[0] } else { 0 }
+        } else {
+            0
+        };
         let (pr, pd, pc) = c::ref_rd_cost_update(rdmult, pt_cost, 0, 0);
         let best_remain = c::ref_rd_stats_subtraction(rdmult, best, (pr, pd, pc));
         visits.push((mi_row, mi_col, bsize, best_remain.2));
@@ -152,7 +187,11 @@ fn c_rd_pick_partition_none_split(
         let (mut lr, mut ld, mut lc) = if leaf.is_invalid() {
             (i32::MAX, i64::MAX, i64::MAX)
         } else {
-            (leaf.rate, leaf.dist, c::ref_rdcost(rdmult, leaf.rate, leaf.dist))
+            (
+                leaf.rate,
+                leaf.dist,
+                c::ref_rdcost(rdmult, leaf.rate, leaf.dist),
+            )
         };
         let upd = c::ref_rd_cost_update(rdmult, lr, ld, lc);
         (lr, ld, lc) = upd;
@@ -216,7 +255,11 @@ fn c_rd_pick_partition_none_split(
         }
     }
 
-    if found { (best_res, true) } else { (None, false) }
+    if found {
+        (best_res, true)
+    } else {
+        (None, false)
+    }
 }
 
 #[test]
@@ -362,7 +405,7 @@ fn rd_pick_partition_none_split_matches_c_transcription() {
         // early is visible as fewer visits than the full tree would take.
         if found && matches!(tree, PartTree::None(_)) && bsize >= 6 {
             budget_break += 1; // NONE win at >=16x16 means split loop was
-                               // entered and lost or broke early
+            // entered and lost or broke early
         }
     }
     assert!(none_roots >= 40, "NONE root winners: {none_roots}");
@@ -370,7 +413,10 @@ fn rd_pick_partition_none_split_matches_c_transcription() {
     assert!(deep_splits >= 10, "multi-level splits: {deep_splits}");
     assert!(nofind >= 20, "no-find (tight/invalid budgets): {nofind}");
     assert!(edge_cases >= 100, "edge geometries: {edge_cases}");
-    assert!(budget_break >= 10, "split-loses-or-breaks cases: {budget_break}");
+    assert!(
+        budget_break >= 10,
+        "split-loses-or-breaks cases: {budget_break}"
+    );
 }
 
 /// Deterministic EXACT-TIE pin: at an 8x8 root, NONE's total (leaf + pt
@@ -392,7 +438,11 @@ fn none_split_exact_tie_keeps_first_winner() {
     // SPLIT: cost 40 + 4 leaves rate 25 dist 1000 -> rate 140, dist 4000.
     let mut leaf = |_r: i32, _c: i32, bs: usize, _rem: &PartRdStats| -> PartRdStats {
         let (rate, dist) = if bs == 3 { (100, 4000) } else { (25, 1000) };
-        PartRdStats { rate, dist, rdcost: calculate_rd_cost(rdmult, rate, dist) }
+        PartRdStats {
+            rate,
+            dist,
+            rdcost: calculate_rd_cost(rdmult, rate, dist),
+        }
     };
     let mut node_params = |_r: i32, _c: i32, bs: usize| -> (Vec<i32>, bool, bool) {
         // do_square_split = bsize_at_least_8x8 (4x4 children are leaves).
@@ -407,13 +457,24 @@ fn none_split_exact_tie_keeps_first_winner() {
         512,
         512,
         3,
-        PartRdStats { rate: i32::MAX, dist: i64::MAX, rdcost: i64::MAX },
+        PartRdStats {
+            rate: i32::MAX,
+            dist: i64::MAX,
+            rdcost: i64::MAX,
+        },
     );
     assert!(found);
-    let expect = PartRdStats { rate: 140, dist: 4000, rdcost: calculate_rd_cost(rdmult, 140, 4000) };
+    let expect = PartRdStats {
+        rate: 140,
+        dist: 4000,
+        rdcost: calculate_rd_cost(rdmult, 140, 4000),
+    };
     match tree {
         PartTree::None(s) => assert_eq!(s, expect, "NONE stats"),
         t => panic!("exact tie must keep the FIRST winner (PARTITION_NONE), got {t:?}"),
     }
-    assert_eq!((best.rate, best.dist, best.rdcost), (140, 4000, expect.rdcost));
+    assert_eq!(
+        (best.rate, best.dist, best.rdcost),
+        (140, 4000, expect.rdcost)
+    );
 }

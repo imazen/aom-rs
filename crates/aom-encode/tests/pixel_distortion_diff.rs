@@ -8,8 +8,12 @@ use aom_encode::pixel_distortion;
 use aom_sys_ref as c;
 use aom_transform::inv_txfm2d::{inv_input_len, inv_txfm_valid};
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 struct Rng(u64);
 impl Rng {
@@ -55,7 +59,10 @@ fn pixel_distortion_matches_recon_plus_sse() {
                     c::ref_inv_txfm2d_add(tx_size, &dqcoeff, &mut recon, w, tx_type, bd);
                     let want = c::ref_hbd_sse(&recon, w, &source, w, w, h);
 
-                    assert_eq!(got, want, "pixel_distortion ts={tx_size} tt={tx_type} bd={bd}");
+                    assert_eq!(
+                        got, want,
+                        "pixel_distortion ts={tx_size} tt={tx_type} bd={bd}"
+                    );
                     nonzero += (got > 0) as usize;
                 }
             }

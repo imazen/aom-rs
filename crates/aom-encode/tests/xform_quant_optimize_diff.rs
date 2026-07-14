@@ -6,15 +6,20 @@
 //! ref_optimize_txb[_qm] -> ref_txb_entropy_context (or the txb-skip cost at
 //! eob 0). Locks the trellis + context wiring on top of xform_quant.
 
-use aom_encode::{xform_quant_optimize, BlockContext, OptimizeInputs, QuantKind, QuantParams};
+use aom_encode::{BlockContext, OptimizeInputs, QuantKind, QuantParams, xform_quant_optimize};
 use aom_sys_ref as c;
 use aom_transform::txfm2d::fwd_txfm_valid;
-use aom_txb::{scan, txb_high, txb_wide, CoeffCostTables};
+use aom_txb::{CoeffCostTables, scan, txb_high, txb_wide};
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
-const TX_SIZE_2D: [i32; 19] =
-    [16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
+const TX_SIZE_2D: [i32; 19] = [
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+];
 const PLANE_BSIZES: [usize; 8] = [0, 3, 6, 9, 12, 4, 7, 10];
 
 fn log_scale(tx_size: usize) -> i32 {
@@ -68,7 +73,10 @@ fn xform_quant_optimize_end_to_end_identical() {
                 // quantized dqcoeff, not realistic, is what blows it up).
                 let recip = |rng: &mut Rng| -> ([i16; 2], [i16; 2]) {
                     let dq = [rng.range(16, 800), rng.range(16, 800)];
-                    let q = [(65536 / dq[0]).clamp(1, 32767), (65536 / dq[1]).clamp(1, 32767)];
+                    let q = [
+                        (65536 / dq[0]).clamp(1, 32767),
+                        (65536 / dq[1]).clamp(1, 32767),
+                    ];
                     ([dq[0] as i16, dq[1] as i16], [q[0] as i16, q[1] as i16])
                 };
                 let (dequant, quant) = recip(&mut rng);
@@ -80,7 +88,10 @@ fn xform_quant_optimize_end_to_end_identical() {
                 // (dqcoeff reconstructs ~tcoeff). Independent random qm/iqm would
                 // instead compound and blow up the QM trellis' squared get_coeff_dist.
                 let qm_v: Vec<u8> = (0..n_coeffs).map(|_| rng.qm()).collect();
-                let iqm_v: Vec<u8> = qm_v.iter().map(|&w| (1024 / w as u32).clamp(1, 255) as u8).collect();
+                let iqm_v: Vec<u8> = qm_v
+                    .iter()
+                    .map(|&w| (1024 / w as u32).clamp(1, 255) as u8)
+                    .collect();
 
                 // Cost tables (same layout as optimize_diff).
                 let txb_skip = tbl(&mut rng, 13 * 2);
@@ -93,7 +104,9 @@ fn xform_quant_optimize_end_to_end_identical() {
 
                 // Neighbour ENTROPY_CONTEXT bytes (cul_level | dc_sign<<3).
                 let mk = |rng: &mut Rng| -> Vec<i8> {
-                    (0..16).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect()
+                    (0..16)
+                        .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                        .collect()
                 };
                 let above = mk(&mut rng);
                 let left = mk(&mut rng);
@@ -108,7 +121,11 @@ fn xform_quant_optimize_end_to_end_identical() {
                     2 | 3 => QuantKind::B,
                     _ => QuantKind::Dc,
                 };
-                let (qm, iqm) = if use_qm { (Some(&qm_v[..]), Some(&iqm_v[..])) } else { (None, None) };
+                let (qm, iqm) = if use_qm {
+                    (Some(&qm_v[..]), Some(&iqm_v[..]))
+                } else {
+                    (None, None)
+                };
 
                 let cost = CoeffCostTables {
                     txb_skip: &txb_skip,
@@ -120,11 +137,26 @@ fn xform_quant_optimize_end_to_end_identical() {
                     eob: &eob_c,
                 };
                 let qp = QuantParams {
-                    zbin: &zbin, round: &round, quant: &quant, quant_shift: &quant_shift,
-                    dequant: &dequant, qm, iqm, bd: 8,
+                    zbin: &zbin,
+                    round: &round,
+                    quant: &quant,
+                    quant_shift: &quant_shift,
+                    dequant: &dequant,
+                    qm,
+                    iqm,
+                    bd: 8,
                 };
-                let bctx = BlockContext { above: &above, left: &left, plane, plane_bsize };
-                let opt = OptimizeInputs { cost: &cost, rdmult, sharpness };
+                let bctx = BlockContext {
+                    above: &above,
+                    left: &left,
+                    plane,
+                    plane_bsize,
+                };
+                let opt = OptimizeInputs {
+                    cost: &cost,
+                    rdmult,
+                    sharpness,
+                };
                 let got = xform_quant_optimize(&residual, tx_size, tx_type, kind, &qp, &bctx, &opt);
 
                 // Oracle: fwd -> quant -> get_txb_ctx -> optimize (or skip cost).
@@ -133,13 +165,40 @@ fn xform_quant_optimize_end_to_end_identical() {
                 let sc = scan(tx_size, tx_type);
                 let iscan = vec![0i16; n_coeffs];
                 let (mut qc, mut dqc, eob0) = match (kind, use_qm) {
-                    (QuantKind::Fp, true) => c::ref_quantize_fp_qm(ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan),
-                    (QuantKind::Fp, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc),
-                    (QuantKind::B, true) => c::ref_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
-                    (QuantKind::B, false) => c::ref_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
-                    (QuantKind::Dc, _) => c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
+                    (QuantKind::Fp, true) => c::ref_quantize_fp_qm(
+                        ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan,
+                    ),
+                    (QuantKind::Fp, false) => {
+                        c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc)
+                    }
+                    (QuantKind::B, true) => c::ref_quantize_b_qm(
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        &qm_v,
+                        &iqm_v,
+                        sc,
+                    ),
+                    (QuantKind::B, false) => c::ref_quantize_b(
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        sc,
+                    ),
+                    (QuantKind::Dc, _) => {
+                        c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm)
+                    }
                 };
-                let (skip_ctx, dc_sign_ctx) = c::ref_get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
+                let (skip_ctx, dc_sign_ctx) =
+                    c::ref_get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
 
                 let m = format!("ts={tx_size} tt={tx_type} kind={kind:?} qm={use_qm} eob0={eob0}");
                 total += 1;
@@ -154,15 +213,49 @@ fn xform_quant_optimize_end_to_end_identical() {
                 nonzero_eob += 1;
                 let (eob_w, rate_w) = if use_qm {
                     c::ref_optimize_txb_qm(
-                        tx_size, tx_type, &mut qc, &mut dqc, src, eob0 as usize, &dequant, rdmult,
-                        dc_sign_ctx as usize, skip_ctx as usize, sharpness, sc, &txb_skip, &base_eob,
-                        &base, &eob_extra, &dc_sign, &lps, &eob_c, &iqm_v, &qm_v,
+                        tx_size,
+                        tx_type,
+                        &mut qc,
+                        &mut dqc,
+                        src,
+                        eob0 as usize,
+                        &dequant,
+                        rdmult,
+                        dc_sign_ctx as usize,
+                        skip_ctx as usize,
+                        sharpness,
+                        sc,
+                        &txb_skip,
+                        &base_eob,
+                        &base,
+                        &eob_extra,
+                        &dc_sign,
+                        &lps,
+                        &eob_c,
+                        &iqm_v,
+                        &qm_v,
                     )
                 } else {
                     c::ref_optimize_txb(
-                        tx_size, tx_type, &mut qc, &mut dqc, src, eob0 as usize, &dequant, rdmult,
-                        dc_sign_ctx as usize, skip_ctx as usize, sharpness, sc, &txb_skip, &base_eob,
-                        &base, &eob_extra, &dc_sign, &lps, &eob_c,
+                        tx_size,
+                        tx_type,
+                        &mut qc,
+                        &mut dqc,
+                        src,
+                        eob0 as usize,
+                        &dequant,
+                        rdmult,
+                        dc_sign_ctx as usize,
+                        skip_ctx as usize,
+                        sharpness,
+                        sc,
+                        &txb_skip,
+                        &base_eob,
+                        &base,
+                        &eob_extra,
+                        &dc_sign,
+                        &lps,
+                        &eob_c,
                     )
                 };
                 let ctx_w = c::ref_txb_entropy_context(&qc, tx_size, tx_type, eob_w);
@@ -177,6 +270,12 @@ fn xform_quant_optimize_end_to_end_identical() {
         }
     }
     // The trellis path (eob>0) and its eob-reduction branch must both fire.
-    assert!(nonzero_eob * 4 >= total, "too few nonzero-eob blocks: {nonzero_eob}/{total}");
-    assert!(reduced_eob > 0, "trellis never reduced an eob ({nonzero_eob} nonzero blocks)");
+    assert!(
+        nonzero_eob * 4 >= total,
+        "too few nonzero-eob blocks: {nonzero_eob}/{total}"
+    );
+    assert!(
+        reduced_eob > 0,
+        "trellis never reduced an eob ({nonzero_eob} nonzero blocks)"
+    );
 }

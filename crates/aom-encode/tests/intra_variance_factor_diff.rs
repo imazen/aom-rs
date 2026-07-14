@@ -7,7 +7,7 @@
 //! runs SEQUENCES of calls (fresh cache -> warm cache -> var-only-seeded
 //! cache) in lockstep.
 
-use aom_encode::intra_rd::{intra_rd_variance_factor, Block4x4VarInfo, VarFactorInputs};
+use aom_encode::intra_rd::{Block4x4VarInfo, VarFactorInputs, intra_rd_variance_factor};
 use aom_sys_ref as c;
 
 struct Rng(u64);
@@ -23,8 +23,12 @@ impl Rng {
     }
 }
 
-const MI_W: [usize; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_H: [usize; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
+const MI_W: [usize; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const MI_H: [usize; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
 
 /// Fill a `bw x bh` window with one content class: flat / noisy / gradient /
 /// mixed (flat rows + noisy rows — drives per-4x4 var asymmetry).
@@ -44,9 +48,9 @@ fn fill_class(
     for r in 0..bh {
         for cx in 0..bw {
             let v: i64 = match class {
-                0 => base,                                              // flat
-                1 => (rng.next() % (u64::from(maxv) + 1)) as i64,       // noisy
-                2 => base + (cx as i64 * 2) + (r as i64),               // gradient
+                0 => base,                                        // flat
+                1 => (rng.next() % (u64::from(maxv) + 1)) as i64, // noisy
+                2 => base + (cx as i64 * 2) + (r as i64),         // gradient
                 _ => {
                     if (r / 4) % 2 == 0 {
                         base
@@ -130,7 +134,10 @@ fn intra_rd_variance_factor_matches_c() {
                 for k in 0..n_mi {
                     if k % 3 == 0 {
                         let seeded = rng.range(0, 1 << 16);
-                        cache_rust[k] = Block4x4VarInfo { var: seeded, log_var: -1.0 };
+                        cache_rust[k] = Block4x4VarInfo {
+                            var: seeded,
+                            log_var: -1.0,
+                        };
                         cvar[k] = seeded;
                     }
                 }
@@ -158,8 +165,22 @@ fn intra_rd_variance_factor_matches_c() {
                 let speed = if iter % 7 == 6 { 4 } else { 0 }; // speed>=4: threshold <= 0
                 let got = intra_rd_variance_factor(speed, &p, &mut cache_rust);
                 let want = c::ref_intra_rd_variance_factor(
-                    speed, &src, src_off, STRIDE, &recon, ref_off, STRIDE, bsize, sb_size,
-                    mi_row, mi_col, right_edge, bottom_edge, bd, &mut cvar, &mut clog,
+                    speed,
+                    &src,
+                    src_off,
+                    STRIDE,
+                    &recon,
+                    ref_off,
+                    STRIDE,
+                    bsize,
+                    sb_size,
+                    mi_row,
+                    mi_col,
+                    right_edge,
+                    bottom_edge,
+                    bd,
+                    &mut cvar,
+                    &mut clog,
                 );
                 let m = format!(
                     "ci={ci} bsize={bsize} sb={sb_size} iter={iter} call={call} bd={bd} \
@@ -190,7 +211,10 @@ fn intra_rd_variance_factor_matches_c() {
         }
     }
     assert!(scaled_up_src > 8, "src>=recon factor arm: {scaled_up_src}");
-    assert!(scaled_up_recon > 8, "recon>src factor arm: {scaled_up_recon}");
+    assert!(
+        scaled_up_recon > 8,
+        "recon>src factor arm: {scaled_up_recon}"
+    );
     assert!(clamped > 4, "3.0 clamp: {clamped}");
     assert!(unity > 30, "unity factor: {unity}");
     assert!(edge_cases > 10, "frame-edge clipped walks: {edge_cases}");

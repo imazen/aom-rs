@@ -6,13 +6,17 @@
 //! wiring (stride, tx_type/tx_size threading, layout) is correct. Swept over all
 //! valid transform sizes × types × bitdepths {8,10,12}.
 
-use aom_encode::{reconstruct_txb, xform_quant, QuantKind, QuantParams};
+use aom_encode::{QuantKind, QuantParams, reconstruct_txb, xform_quant};
 use aom_sys_ref as c;
 use aom_transform::inv_txfm2d::inv_txfm_valid;
 
 /// Full (un-repacked) transform dims — the residual/prediction buffer size.
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 struct Rng(u64);
 impl Rng {
@@ -46,8 +50,9 @@ fn check(rng: &mut Rng, tx_size: usize, tx_type: usize, bd: i32) {
     let full = w * h;
     // Realistic prediction + source; residual = source − prediction.
     let pred: Vec<u16> = (0..full).map(|_| rng.pixel(bd)).collect();
-    let residual: Vec<i16> =
-        (0..full).map(|i| rng.pixel(bd) as i16 - pred[i] as i16).collect();
+    let residual: Vec<i16> = (0..full)
+        .map(|i| rng.pixel(bd) as i16 - pred[i] as i16)
+        .collect();
 
     // Realistic quantizer params derived from a chosen dequant step.
     let dq = [rng.range(4, 800) as i16, rng.range(4, 800) as i16];
@@ -126,5 +131,8 @@ fn reconstruct_txb_matches_c_composition() {
     let mut got = pred.clone();
     reconstruct_txb(&mut got, w, 2, 0, &r.qcoeff, dq, None, 8);
     nonzero_seen |= got != pred;
-    assert!(nonzero_seen, "reconstruction never altered the prediction — test is vacuous");
+    assert!(
+        nonzero_seen,
+        "reconstruction never altered the prediction — test is vacuous"
+    );
 }

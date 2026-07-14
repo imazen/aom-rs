@@ -5,7 +5,7 @@
 //!   MACROBLOCK), including frame-edge-clipped visible dimensions.
 
 use aom_encode::tx_search::{
-    av1_pixel_diff_dist, get_tx_mask_intra, get_txb_visible_dimensions, TxMaskParams, TX_TYPES,
+    TX_TYPES, TxMaskParams, av1_pixel_diff_dist, get_tx_mask_intra, get_txb_visible_dimensions,
 };
 use aom_sys_ref as c;
 
@@ -48,9 +48,8 @@ fn tx_mask_intra_matches_c() {
                         enable_flip_idtx: flip_idtx,
                         use_intra_dct_only: false,
                     };
-                    let (mask, txk) = get_tx_mask_intra(
-                        tx_size, mode, use_fi, fi_mode, lossless, reduced, &p,
-                    );
+                    let (mask, txk) =
+                        get_tx_mask_intra(tx_size, mode, use_fi, fi_mode, lossless, reduced, &p);
                     let (mask_c, txk_c) = c::ref_get_tx_mask_intra(
                         tx_size as i32,
                         mode as i32,
@@ -82,14 +81,20 @@ fn tx_mask_intra_matches_c() {
         }
     }
     // use_intra_dct_only arm.
-    let p = TxMaskParams { use_intra_dct_only: true, ..TxMaskParams::speed0_allintra() };
+    let p = TxMaskParams {
+        use_intra_dct_only: true,
+        ..TxMaskParams::speed0_allintra()
+    };
     let (mask, txk) = get_tx_mask_intra(2, 4, false, 0, false, false, &p);
     let (mask_c, txk_c) =
         c::ref_get_tx_mask_intra(2, 4, false, 0, false, false, 1, false, true, true);
     assert_eq!((mask, txk.unwrap_or(TX_TYPES) as i32), (mask_c, txk_c));
     assert_eq!(mask, 1);
     // Non-vacuity: both single-type and multi-type outcomes heavily exercised.
-    assert!(multi > 10_000 && single > 10_000, "multi={multi} single={single}");
+    assert!(
+        multi > 10_000 && single > 10_000,
+        "multi={multi} single={single}"
+    );
     assert!(reduced_hits > 10_000);
 }
 
@@ -110,7 +115,9 @@ fn pixel_diff_dist_matches_real_c() {
     let mut clipped = 0usize;
     for case in 0..600 {
         let (pb, tb, bw, bh, txw, txh) = cases[case % cases.len()];
-        let diff: Vec<i16> = (0..bw * bh).map(|_| rng.range(-4095, 4096) as i16).collect();
+        let diff: Vec<i16> = (0..bw * bh)
+            .map(|_| rng.range(-4095, 4096) as i16)
+            .collect();
         // blk offsets in MI units, on the txb grid (multiples of the tx unit,
         // as the real foreach-txb walk produces).
         let (txwu, txhu) = (txw >> 2, txh >> 2);
@@ -128,13 +135,25 @@ fn pixel_diff_dist_matches_real_c() {
         let (right, bottom) = match case % 3 {
             0 => (0, 0),
             1 => (-(rng.range(1, max_right_cut + 1) * 8), 0),
-            _ => (-(rng.range(1, max_right_cut + 1) * 8), -(rng.range(1, max_bottom_cut + 1) * 8)),
+            _ => (
+                -(rng.range(1, max_right_cut + 1) * 8),
+                -(rng.range(1, max_bottom_cut + 1) * 8),
+            ),
         };
         let (vis_w, vis_h) =
             get_txb_visible_dimensions(bw, bh, txw, txh, blk_row, blk_col, right, bottom, 0, 0);
         let (sse, mse) = av1_pixel_diff_dist(&diff, bw, blk_row, blk_col, vis_w, vis_h);
-        let (sse_c, mse_c) =
-            c::ref_pixel_diff_dist(&diff, pb, tb, blk_row as i32, blk_col as i32, right, bottom, 0, 0);
+        let (sse_c, mse_c) = c::ref_pixel_diff_dist(
+            &diff,
+            pb,
+            tb,
+            blk_row as i32,
+            blk_col as i32,
+            right,
+            bottom,
+            0,
+            0,
+        );
         assert_eq!(
             (sse as i64, mse),
             (sse_c, mse_c),

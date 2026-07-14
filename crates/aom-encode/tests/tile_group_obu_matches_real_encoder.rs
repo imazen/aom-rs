@@ -26,8 +26,8 @@
 //! tile case must extend that function first, not this test.
 
 use aom_entropy::header::{
-    read_sequence_header_obu, read_uncompressed_header, CdefHeader, FrameHeaderObu,
-    FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader, RestorationHeader, TileInfoHeader,
+    CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
+    RestorationHeader, TileInfoHeader, read_sequence_header_obu, read_uncompressed_header,
 };
 use aom_entropy::obu::read_obu_header;
 use aom_entropy::rb::ReadBitBuffer;
@@ -47,7 +47,10 @@ fn walk_obus(bytes: &[u8]) -> Vec<(u32, &[u8])> {
     while pos < bytes.len() {
         let hdr = read_obu_header(&bytes[pos..]).expect("valid OBU header");
         let after_header = pos + hdr.header_len;
-        assert!(hdr.obu_has_size_field, "shim_encode_av1_kf always sets has_size_field");
+        assert!(
+            hdr.obu_has_size_field,
+            "shim_encode_av1_kf always sets has_size_field"
+        );
         let (size, size_bytes) =
             aom_entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
         let payload_start = after_header + size_bytes;
@@ -128,15 +131,36 @@ fn tile_group_obu_assembly_matches_real_aomenc_output() {
 
     for &(w, h, mono, ss_x, ss_y, usage, cq_level) in cases {
         let y = vec![128u16; w * h];
-        let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y) };
+        let (cw, ch) = if mono {
+            (0, 0)
+        } else {
+            ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
+        };
         let u = vec![128u16; cw * ch];
         let v = vec![128u16; cw * ch];
 
         let bytes = c::ref_encode_av1_kf(
-            &y, &u, &v, w, h, 8, mono, ss_x as i32, ss_y as i32, cq_level, 0, false, false, usage,
-            0, false,
+            &y,
+            &u,
+            &v,
+            w,
+            h,
+            8,
+            mono,
+            ss_x as i32,
+            ss_y as i32,
+            cq_level,
+            0,
+            false,
+            false,
+            usage,
+            0,
+            false,
         );
-        assert!(!bytes.is_empty(), "shim_encode_av1_kf must produce a real stream");
+        assert!(
+            !bytes.is_empty(),
+            "shim_encode_av1_kf must produce a real stream"
+        );
 
         let obus = walk_obus(&bytes);
         let seq_payload = obus
@@ -173,7 +197,9 @@ fn tile_group_obu_assembly_matches_real_aomenc_output() {
                 reduced_still_picture_hdr: seq.reduced_still_picture_hdr,
                 decoder_model_info_present_flag: seq.decoder_model_info_present_flag,
                 equal_picture_interval: seq.timing_info.equal_picture_interval,
-                frame_presentation_time_length: seq.decoder_model_info.frame_presentation_time_length
+                frame_presentation_time_length: seq
+                    .decoder_model_info
+                    .frame_presentation_time_length
                     as u32,
                 frame_id_numbers_present_flag: s.frame_id_numbers_present_flag,
                 frame_id_length: s.frame_id_length as u32,
@@ -186,7 +212,8 @@ fn tile_group_obu_assembly_matches_real_aomenc_output() {
                 operating_points_cnt_minus_1: seq.operating_points_cnt_minus_1,
                 operating_point_idc: seq.operating_point_idc,
                 op_decoder_model_param_present: seq.op_decoder_model_param_present,
-                buffer_removal_time_length: seq.decoder_model_info.buffer_removal_time_length as u32,
+                buffer_removal_time_length: seq.decoder_model_info.buffer_removal_time_length
+                    as u32,
                 temporal_layer_id: 0,
                 spatial_layer_id: 0,
                 ..Default::default()
@@ -207,7 +234,10 @@ fn tile_group_obu_assembly_matches_real_aomenc_output() {
                 last_mode_deltas: KF_MODE_DELTAS,
                 ..Default::default()
             },
-            cdef: CdefHeader { enable_cdef: s.enable_cdef, ..Default::default() },
+            cdef: CdefHeader {
+                enable_cdef: s.enable_cdef,
+                ..Default::default()
+            },
             restoration: RestorationHeader {
                 enable_restoration: s.enable_restoration,
                 sb_size_128: s.sb_size_128,
@@ -223,8 +253,14 @@ fn tile_group_obu_assembly_matches_real_aomenc_output() {
         let p = read_uncompressed_header(&mut rb, &cfg);
         let real_bit_len = rb.bit_position();
 
-        assert!(!p.prefix.show_existing_frame, "w={w} h={h}: show_existing_frame unexpected");
-        assert_eq!(p.prefix.frame_type, 0, "w={w} h={h}: frame_type must be KEY");
+        assert!(
+            !p.prefix.show_existing_frame,
+            "w={w} h={h}: show_existing_frame unexpected"
+        );
+        assert_eq!(
+            p.prefix.frame_type, 0,
+            "w={w} h={h}: frame_type must be KEY"
+        );
 
         let tiles_log2 = p.tile_info.log2_cols + p.tile_info.log2_rows;
         let ctx = format!(

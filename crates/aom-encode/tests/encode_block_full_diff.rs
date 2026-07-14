@@ -5,22 +5,37 @@
 //! chained (fwd -> quant -> get_txb_ctx -> optimize -> ref_write_coeffs_txb_full).
 
 use aom_encode::{
-    encode_block_coeffs_full, BlockContext, OptimizeInputs, QuantKind, QuantParams, TxTypeContext,
+    BlockContext, OptimizeInputs, QuantKind, QuantParams, TxTypeContext, encode_block_coeffs_full,
 };
 use aom_entropy::enc::OdEcEnc;
 use aom_sys_ref as c;
 use aom_transform::txfm2d::fwd_txfm_valid;
-use aom_txb::{ext_tx_derive, scan, txb_high, txb_wide, CoeffCostTables, CDF_ARENA_LEN};
+use aom_txb::{CDF_ARENA_LEN, CoeffCostTables, ext_tx_derive, scan, txb_high, txb_wide};
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
-const TX_SIZE_2D: [i32; 19] =
-    [16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
+const TX_SIZE_2D: [i32; 19] = [
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+];
 const PLANE_BSIZES: [usize; 8] = [0, 3, 6, 9, 12, 4, 7, 10];
 const REGIONS: [(usize, usize, usize); 13] = [
-    (0, 5 * 13, 2), (195, 4, 5), (219, 4, 6), (247, 4, 7), (279, 4, 8), (315, 4, 9), (355, 4, 10),
-    (399, 4, 11), (447, 5 * 2 * 9, 2), (717, 5 * 2 * 4, 3), (877, 5 * 2 * 42, 4),
-    (2977, 5 * 2 * 21, 4), (4027, 2 * 3, 2),
+    (0, 5 * 13, 2),
+    (195, 4, 5),
+    (219, 4, 6),
+    (247, 4, 7),
+    (279, 4, 8),
+    (315, 4, 9),
+    (355, 4, 10),
+    (399, 4, 11),
+    (447, 5 * 2 * 9, 2),
+    (717, 5 * 2 * 4, 3),
+    (877, 5 * 2 * 42, 4),
+    (2977, 5 * 2 * 21, 4),
+    (4027, 2 * 3, 2),
 ];
 
 fn log_scale(tx_size: usize) -> i32 {
@@ -99,15 +114,23 @@ fn encode_block_coeffs_full_identical() {
             for iter in 0..40 {
                 let bd: u8 = if iter % 3 == 1 { 12 } else { 8 };
                 let rmax = if bd > 8 { 4096 } else { 256 };
-                let residual: Vec<i16> = (0..full).map(|_| rng.range(-(rmax - 1), rmax) as i16).collect();
+                let residual: Vec<i16> = (0..full)
+                    .map(|_| rng.range(-(rmax - 1), rmax) as i16)
+                    .collect();
                 let dq = [rng.range(16, 800), rng.range(16, 800)];
                 let dequant = [dq[0] as i16, dq[1] as i16];
-                let quant = [(65536 / dq[0]).clamp(1, 32767) as i16, (65536 / dq[1]).clamp(1, 32767) as i16];
+                let quant = [
+                    (65536 / dq[0]).clamp(1, 32767) as i16,
+                    (65536 / dq[1]).clamp(1, 32767) as i16,
+                ];
                 let zbin = [rng.range(1, 100) as i16, rng.range(1, 100) as i16];
                 let round = [rng.range(1, 400) as i16, rng.range(1, 400) as i16];
                 let quant_shift = [rng.range(8000, 32767) as i16, rng.range(8000, 32767) as i16];
                 let qm_v: Vec<u8> = (0..n_coeffs).map(|_| rng.qm()).collect();
-                let iqm_v: Vec<u8> = qm_v.iter().map(|&w| (1024 / w as u32).clamp(1, 255) as u8).collect();
+                let iqm_v: Vec<u8> = qm_v
+                    .iter()
+                    .map(|&w| (1024 / w as u32).clamp(1, 255) as u8)
+                    .collect();
 
                 let txb_skip = tbl(&mut rng, 13 * 2);
                 let base_eob = tbl(&mut rng, 4 * 3);
@@ -117,7 +140,9 @@ fn encode_block_coeffs_full_identical() {
                 let lps = tbl(&mut rng, 21 * 26);
                 let eob_c = tbl(&mut rng, 2 * 11);
                 let mk = |rng: &mut Rng| -> Vec<i8> {
-                    (0..16).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect()
+                    (0..16)
+                        .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                        .collect()
                 };
                 let above = mk(&mut rng);
                 let left = mk(&mut rng);
@@ -147,7 +172,11 @@ fn encode_block_coeffs_full_identical() {
                     2 | 3 => QuantKind::B,
                     _ => QuantKind::Dc,
                 };
-                let (qm, iqm) = if use_qm { (Some(&qm_v[..]), Some(&iqm_v[..])) } else { (None, None) };
+                let (qm, iqm) = if use_qm {
+                    (Some(&qm_v[..]), Some(&iqm_v[..]))
+                } else {
+                    (None, None)
+                };
 
                 let arena0 = gen_arena(&mut rng);
                 let ext0 = gen_cdf(&mut rng, d.num.max(2) as usize);
@@ -157,19 +186,59 @@ fn encode_block_coeffs_full_identical() {
                 let mut ext_c = ext0.clone();
 
                 let cost = CoeffCostTables {
-                    txb_skip: &txb_skip, base_eob: &base_eob, base: &base, eob_extra: &eob_extra,
-                    dc_sign: &dc_sign, lps: &lps, eob: &eob_c,
+                    txb_skip: &txb_skip,
+                    base_eob: &base_eob,
+                    base: &base,
+                    eob_extra: &eob_extra,
+                    dc_sign: &dc_sign,
+                    lps: &lps,
+                    eob: &eob_c,
                 };
                 let qp = QuantParams {
-                    zbin: &zbin, round: &round, quant: &quant, quant_shift: &quant_shift,
-                    dequant: &dequant, qm, iqm, bd,
+                    zbin: &zbin,
+                    round: &round,
+                    quant: &quant,
+                    quant_shift: &quant_shift,
+                    dequant: &dequant,
+                    qm,
+                    iqm,
+                    bd,
                 };
-                let bctx = BlockContext { above: &above, left: &left, plane, plane_bsize };
-                let opt = OptimizeInputs { cost: &cost, rdmult, sharpness };
-                let ttx = TxTypeContext { is_inter, reduced, use_filter_intra: use_fi, fi_mode, mode, signal_gate };
+                let bctx = BlockContext {
+                    above: &above,
+                    left: &left,
+                    plane,
+                    plane_bsize,
+                };
+                let opt = OptimizeInputs {
+                    cost: &cost,
+                    rdmult,
+                    sharpness,
+                };
+                let ttx = TxTypeContext {
+                    is_inter,
+                    reduced,
+                    use_filter_intra: use_fi,
+                    fi_mode,
+                    mode,
+                    signal_gate,
+                };
 
                 let mut enc = OdEcEnc::new();
-                let r = encode_block_coeffs_full(&residual, tx_size, tx_type, kind, &qp, &bctx, &opt, &ttx, upd, &mut enc, &mut arena_r, &mut ext_r);
+                let r = encode_block_coeffs_full(
+                    &residual,
+                    tx_size,
+                    tx_type,
+                    kind,
+                    &qp,
+                    &bctx,
+                    &opt,
+                    &ttx,
+                    upd,
+                    &mut enc,
+                    &mut arena_r,
+                    &mut ext_r,
+                );
                 let got = enc.done().to_vec();
 
                 // Oracle chain.
@@ -179,31 +248,144 @@ fn encode_block_coeffs_full_identical() {
                 let iscan = vec![0i16; n_coeffs];
                 let hbd = bd > 8;
                 let (mut qc, mut dqc, eob0) = match (kind, use_qm, hbd) {
-                    (QuantKind::Fp, true, false) => c::ref_quantize_fp_qm(ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan),
-                    (QuantKind::Fp, true, true) => c::ref_highbd_quantize_fp_qm(ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan),
-                    (QuantKind::Fp, false, false) => c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc),
-                    (QuantKind::Fp, false, true) => c::ref_highbd_quantize_fp(ls, src, &round, &quant, &dequant, sc),
-                    (QuantKind::B, true, false) => c::ref_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
-                    (QuantKind::B, true, true) => c::ref_highbd_quantize_b_qm(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, &qm_v, &iqm_v, sc),
-                    (QuantKind::B, false, false) => c::ref_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
-                    (QuantKind::B, false, true) => c::ref_highbd_quantize_b(ls, src, &zbin, &round, &quant, &quant_shift, &dequant, sc),
-                    (QuantKind::Dc, _, false) => c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
-                    (QuantKind::Dc, _, true) => c::ref_highbd_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm),
+                    (QuantKind::Fp, true, false) => c::ref_quantize_fp_qm(
+                        ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan,
+                    ),
+                    (QuantKind::Fp, true, true) => c::ref_highbd_quantize_fp_qm(
+                        ls, src, &round, &quant, &dequant, &qm_v, &iqm_v, sc, &iscan,
+                    ),
+                    (QuantKind::Fp, false, false) => {
+                        c::ref_quantize_fp(ls, src, &round, &quant, &dequant, sc)
+                    }
+                    (QuantKind::Fp, false, true) => {
+                        c::ref_highbd_quantize_fp(ls, src, &round, &quant, &dequant, sc)
+                    }
+                    (QuantKind::B, true, false) => c::ref_quantize_b_qm(
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        &qm_v,
+                        &iqm_v,
+                        sc,
+                    ),
+                    (QuantKind::B, true, true) => c::ref_highbd_quantize_b_qm(
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        &qm_v,
+                        &iqm_v,
+                        sc,
+                    ),
+                    (QuantKind::B, false, false) => c::ref_quantize_b(
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        sc,
+                    ),
+                    (QuantKind::B, false, true) => c::ref_highbd_quantize_b(
+                        ls,
+                        src,
+                        &zbin,
+                        &round,
+                        &quant,
+                        &quant_shift,
+                        &dequant,
+                        sc,
+                    ),
+                    (QuantKind::Dc, _, false) => {
+                        c::ref_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm)
+                    }
+                    (QuantKind::Dc, _, true) => {
+                        c::ref_highbd_quantize_dc(ls, src, &round, quant[0], dequant[0], qm, iqm)
+                    }
                 };
-                let (skip_ctx, dc_sign_ctx) = c::ref_get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
+                let (skip_ctx, dc_sign_ctx) =
+                    c::ref_get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
                 let eob_w = if eob0 == 0 {
                     0
                 } else if use_qm {
-                    c::ref_optimize_txb_qm(tx_size, tx_type, &mut qc, &mut dqc, src, eob0 as usize, &dequant, rdmult, dc_sign_ctx as usize, skip_ctx as usize, sharpness, sc, &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_c, &iqm_v, &qm_v).0
+                    c::ref_optimize_txb_qm(
+                        tx_size,
+                        tx_type,
+                        &mut qc,
+                        &mut dqc,
+                        src,
+                        eob0 as usize,
+                        &dequant,
+                        rdmult,
+                        dc_sign_ctx as usize,
+                        skip_ctx as usize,
+                        sharpness,
+                        sc,
+                        &txb_skip,
+                        &base_eob,
+                        &base,
+                        &eob_extra,
+                        &dc_sign,
+                        &lps,
+                        &eob_c,
+                        &iqm_v,
+                        &qm_v,
+                    )
+                    .0
                 } else {
-                    c::ref_optimize_txb(tx_size, tx_type, &mut qc, &mut dqc, src, eob0 as usize, &dequant, rdmult, dc_sign_ctx as usize, skip_ctx as usize, sharpness, sc, &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_c).0
+                    c::ref_optimize_txb(
+                        tx_size,
+                        tx_type,
+                        &mut qc,
+                        &mut dqc,
+                        src,
+                        eob0 as usize,
+                        &dequant,
+                        rdmult,
+                        dc_sign_ctx as usize,
+                        skip_ctx as usize,
+                        sharpness,
+                        sc,
+                        &txb_skip,
+                        &base_eob,
+                        &base,
+                        &eob_extra,
+                        &dc_sign,
+                        &lps,
+                        &eob_c,
+                    )
+                    .0
                 };
                 let want = c::ref_write_coeffs_txb_full(
-                    &qc, eob_w, tx_size, tx_type, plane_type, skip_ctx as usize, dc_sign_ctx as usize,
-                    upd, &mut arena_c, &mut ext_c, is_inter, reduced, use_fi, fi_mode, mode, signal_gate,
+                    &qc,
+                    eob_w,
+                    tx_size,
+                    tx_type,
+                    plane_type,
+                    skip_ctx as usize,
+                    dc_sign_ctx as usize,
+                    upd,
+                    &mut arena_c,
+                    &mut ext_c,
+                    is_inter,
+                    reduced,
+                    use_fi,
+                    fi_mode,
+                    mode,
+                    signal_gate,
                 );
 
-                let m = format!("ts={tx_size} tt={tx_type} kind={kind:?} bd={bd} pl={plane_type} gate={signal_gate} upd={upd}");
+                let m = format!(
+                    "ts={tx_size} tt={tx_type} kind={kind:?} bd={bd} pl={plane_type} gate={signal_gate} upd={upd}"
+                );
                 assert_eq!(r.eob as usize, eob_w, "eob {m}");
                 assert_eq!(r.qcoeff, qc, "qcoeff {m}");
                 assert_eq!(got, want, "bytes {m}");
@@ -219,6 +401,12 @@ fn encode_block_coeffs_full_identical() {
             }
         }
     }
-    assert!(nonzero_eob * 4 >= total, "too few nonzero-eob blocks: {nonzero_eob}/{total}");
-    assert!(tx_written > 0, "tx_type symbol never exercised in the full encode path");
+    assert!(
+        nonzero_eob * 4 >= total,
+        "too few nonzero-eob blocks: {nonzero_eob}/{total}"
+    );
+    assert!(
+        tx_written > 0,
+        "tx_type symbol never exercised in the full encode path"
+    );
 }

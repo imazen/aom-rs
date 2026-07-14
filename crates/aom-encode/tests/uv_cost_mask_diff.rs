@@ -12,11 +12,10 @@
 //!   roundtrip only, with the shared-misread risk documented).
 
 use aom_encode::mode_costs::{
-    fill_cfl_costs, fill_palette_uv_mode_costs, intra_mode_info_cost_uv, CflCosts,
-    IntraModeCosts,
+    CflCosts, IntraModeCosts, fill_cfl_costs, fill_palette_uv_mode_costs, intra_mode_info_cost_uv,
 };
-use aom_encode::tx_search::{get_tx_mask_uv_intra, uv_intra_tx_type, TxMaskParams};
-use aom_intra::cfl::{cfl_predict_block, cfl_store_tx, CflCtx};
+use aom_encode::tx_search::{TxMaskParams, get_tx_mask_uv_intra, uv_intra_tx_type};
+use aom_intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_sys_ref as c;
 
 struct Rng(u64);
@@ -64,17 +63,20 @@ fn uv_intra_tx_type_matches_real_c() {
                 }
                 // Demotion coverage: default type nonzero but result DCT.
                 let mode = aom_entropy::partition::get_uv_mode(uv_mode) as usize;
-                if !lossless
-                    && aom_encode::tx_search::INTRA_MODE_TO_TX_TYPE[mode] != 0
-                    && t == 0
-                {
+                if !lossless && aom_encode::tx_search::INTRA_MODE_TO_TX_TYPE[mode] != 0 && t == 0 {
                     demoted += 1;
                 }
             }
         }
     }
-    assert!(non_dct > 150, "non-DCT uv tx types under-exercised: {non_dct}");
-    assert!(demoted > 100, "ext-tx-set demotion under-exercised: {demoted}");
+    assert!(
+        non_dct > 150,
+        "non-DCT uv tx types under-exercised: {non_dct}"
+    );
+    assert!(
+        demoted > 100,
+        "ext-tx-set demotion under-exercised: {demoted}"
+    );
 }
 
 #[test]
@@ -101,8 +103,7 @@ fn tx_mask_uv_intra_matches_c() {
                             use_intra_dct_only: false,
                         };
                         let (mask, txk) = get_tx_mask_uv_intra(
-                            tx_size, uv_mode, luma_mode, use_fi, fi_mode, lossless, reduced,
-                            &p,
+                            tx_size, uv_mode, luma_mode, use_fi, fi_mode, lossless, reduced, &p,
                         );
                         let (mask_c, txk_c) = c::ref_get_tx_mask_uv_intra(
                             tx_size,
@@ -134,7 +135,10 @@ fn tx_mask_uv_intra_matches_c() {
             }
         }
     }
-    assert!(non_dct > 1000, "reduced-set non-DCT under-exercised: {non_dct}");
+    assert!(
+        non_dct > 1000,
+        "reduced-set non-DCT under-exercised: {non_dct}"
+    );
     assert!(reset_hits > 1000);
 }
 
@@ -168,7 +172,11 @@ fn cfl_and_palette_uv_costs_match_c() {
         let c_pal = c::ref_fill_palette_uv_mode_costs(&pal_cdf);
         for i in 0..2 {
             for j in 0..2 {
-                assert_eq!(costs.palette_uv_mode_cost[i][j], c_pal[i * 2 + j], "it={it}");
+                assert_eq!(
+                    costs.palette_uv_mode_cost[i][j],
+                    c_pal[i * 2 + j],
+                    "it={it}"
+                );
             }
         }
     }
@@ -192,8 +200,12 @@ fn intra_mode_info_cost_uv_matches_c() {
             }
         }
         let angle_flat: Vec<i32> = costs.angle_delta_cost.iter().flatten().copied().collect();
-        let pal_flat: Vec<i32> =
-            costs.palette_uv_mode_cost.iter().flatten().copied().collect();
+        let pal_flat: Vec<i32> = costs
+            .palette_uv_mode_cost
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
 
         let uv_mode = (rng.next() % 14) as usize;
         let bsize = (rng.next() % 22) as usize;
@@ -203,7 +215,13 @@ fn intra_mode_info_cost_uv_matches_c() {
         let y_palette_active = rng.next() & 1 != 0;
 
         let r = intra_mode_info_cost_uv(
-            &costs, mode_cost, uv_mode, bsize, angle_delta_uv, try_palette, y_palette_active,
+            &costs,
+            mode_cost,
+            uv_mode,
+            bsize,
+            angle_delta_uv,
+            try_palette,
+            y_palette_active,
         );
         let r_c = c::ref_intra_mode_info_cost_uv(
             &angle_flat,
@@ -215,7 +233,10 @@ fn intra_mode_info_cost_uv_matches_c() {
             try_palette,
             y_palette_active,
         );
-        assert_eq!(r, r_c, "it={it} uv={uv_mode} bsize={bsize} ad={angle_delta_uv}");
+        assert_eq!(
+            r, r_c,
+            "it={it} uv={uv_mode} bsize={bsize} ad={angle_delta_uv}"
+        );
         let im = aom_entropy::partition::get_uv_mode(uv_mode);
         if (1..=8).contains(&im) && r != mode_cost {
             angle_hits += 1;
@@ -225,7 +246,10 @@ fn intra_mode_info_cost_uv_matches_c() {
         }
     }
     assert!(angle_hits > 400, "angle arm under-exercised: {angle_hits}");
-    assert!(palette_hits > 100, "palette flag arm under-exercised: {palette_hits}");
+    assert!(
+        palette_hits > 100,
+        "palette flag arm under-exercised: {palette_hits}"
+    );
 }
 
 /// The CfL store/predict pipeline vs the REAL EXPORTED C functions:
@@ -248,18 +272,17 @@ fn cfl_store_predict_matches_real_c() {
         // BLOCK_4X4=0, 4X8=1, 8X4=2, 8X8=3, 8X16=4, 16X8=5, 16X16=6,
         // 16X32=7, 32X16=8, 32X32=9, 4X16=16, 16X4=17, 8X32=18, 32X8=19.
         const BSIZES: [usize; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17];
-        const BLK_W: [usize; 22] =
-            [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-        const BLK_H: [usize; 22] =
-            [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+        const BLK_W: [usize; 22] = [
+            4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+        ];
+        const BLK_H: [usize; 22] = [
+            4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+        ];
         let bsize = BSIZES[(rng.next() as usize) % BSIZES.len()];
         // 4:2:2 rejects tall sub-8x8 chroma shapes (ss_size_lookup invalid):
         // keep 4xN luma out of 4:2:2, and require a valid plane block.
-        let plane_bsize = aom_entropy::partition::get_plane_block_size(
-            bsize,
-            ss_x as usize,
-            ss_y as usize,
-        );
+        let plane_bsize =
+            aom_entropy::partition::get_plane_block_size(bsize, ss_x as usize, ss_y as usize);
         if plane_bsize >= 22 {
             continue;
         }
@@ -271,8 +294,9 @@ fn cfl_store_predict_matches_real_c() {
         // Luma recon plane (u16 at every bd).
         let stride = 96usize;
         let maxv = (1i32 << bd) - 1;
-        let luma: Vec<u16> =
-            (0..stride * 96).map(|_| rng.range(0, maxv + 1) as u16).collect();
+        let luma: Vec<u16> = (0..stride * 96)
+            .map(|_| rng.range(0, maxv + 1) as u16)
+            .collect();
         let block_off = 5 * stride + 7;
 
         // Store: whole block as one luma txb (tx dims == block dims — the
@@ -303,8 +327,8 @@ fn cfl_store_predict_matches_real_c() {
             let sub_tx = TX_OF_DIMS(hw, hh);
             for (r, c_) in [(0, 0), (0, hw / 4), (hh / 4, 0), (hh / 4, hw / 4)] {
                 cfl_store_tx(
-                    &mut cfl, &luma, block_off, stride, r as i32, c_ as i32, sub_tx, bsize,
-                    mi_row, mi_col,
+                    &mut cfl, &luma, block_off, stride, r as i32, c_ as i32, sub_tx, bsize, mi_row,
+                    mi_col,
                 );
                 c::ref_cfl_store_tx(
                     &mut st_c, &luma, block_off, stride, r as i32, c_ as i32, sub_tx, bsize,
@@ -317,12 +341,20 @@ fn cfl_store_predict_matches_real_c() {
                 &mut cfl, &luma, block_off, stride, 0, 0, tx, bsize, mi_row, mi_col,
             );
             c::ref_cfl_store_tx(
-                &mut st_c, &luma, block_off, stride, 0, 0, tx, bsize, mi_row, mi_col, ss_x,
-                ss_y, bd,
+                &mut st_c, &luma, block_off, stride, 0, 0, tx, bsize, mi_row, mi_col, ss_x, ss_y,
+                bd,
             );
         }
-        assert_eq!(&cfl.recon_buf_q3[..], &st_c.recon_q3[..], "it={it} store recon_q3");
-        assert_eq!((cfl.buf_width, cfl.buf_height), (st_c.buf_w, st_c.buf_h), "it={it}");
+        assert_eq!(
+            &cfl.recon_buf_q3[..],
+            &st_c.recon_q3[..],
+            "it={it} store recon_q3"
+        );
+        assert_eq!(
+            (cfl.buf_width, cfl.buf_height),
+            (st_c.buf_w, st_c.buf_h),
+            "it={it}"
+        );
         if (mi_row & 1 != 0 && ss_y != 0) || (mi_col & 1 != 0 && ss_x != 0) {
             sub8_hits += 1;
         }
@@ -370,8 +402,8 @@ fn cfl_store_predict_matches_real_c() {
             i32::from(bd),
         );
         c::ref_cfl_predict_block(
-            &mut st_c, &mut dst_c, dst_off, dst_stride, uv_tx, plane, alpha_idx, joint_sign,
-            bsize, false, ss_x, ss_y, bd,
+            &mut st_c, &mut dst_c, dst_off, dst_stride, uv_tx, plane, alpha_idx, joint_sign, bsize,
+            false, ss_x, ss_y, bd,
         );
         assert_eq!(&cfl.ac_buf_q3[..], &st_c.ac_q3[..], "it={it} ac_buf");
         assert_eq!(
@@ -396,12 +428,29 @@ fn cfl_store_predict_matches_real_c() {
             i32::from(bd),
         );
         c::ref_cfl_predict_block(
-            &mut st_c, &mut dst_c2, dst_off, dst_stride, uv_tx, plane2, alpha_idx, joint_sign,
-            bsize, false, ss_x, ss_y, bd,
+            &mut st_c,
+            &mut dst_c2,
+            dst_off,
+            dst_stride,
+            uv_tx,
+            plane2,
+            alpha_idx,
+            joint_sign,
+            bsize,
+            false,
+            ss_x,
+            ss_y,
+            bd,
         );
         assert_eq!(dst_r2, dst_c2, "it={it} predict plane2");
     }
-    assert!(sub8_hits > 100, "sub-8x8 offset adjustment under-exercised: {sub8_hits}");
+    assert!(
+        sub8_hits > 100,
+        "sub-8x8 offset adjustment under-exercised: {sub8_hits}"
+    );
     assert!(pad_hits > 100, "cfl_pad under-exercised: {pad_hits}");
-    assert!(sign_seen.iter().all(|&s| s), "all joint signs must be exercised");
+    assert!(
+        sign_seen.iter().all(|&s| s),
+        "all joint signs must be exercised"
+    );
 }

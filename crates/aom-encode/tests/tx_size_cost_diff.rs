@@ -5,7 +5,7 @@
 //! / `tx_size_to_depth` / `block_signals_txsize` header statics;
 //! `get_tx_size_context` is the caller's, deferred on both sides).
 
-use aom_encode::mode_costs::{fill_tx_size_costs, tx_size_cost, TxSizeCosts};
+use aom_encode::mode_costs::{TxSizeCosts, fill_tx_size_costs, tx_size_cost};
 use aom_sys_ref as c;
 
 struct Rng(u64);
@@ -37,8 +37,9 @@ fn cdf_row(rng: &mut Rng, nsymbs: usize) -> [u16; 4] {
 
 /// `max_txsize_rect_lookup[bsize]` (common_data.h) — the depth-0 tx size the
 /// depth sweep starts from, for generating valid (bsize, tx_size) pairs.
-const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] =
-    [0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18];
+const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] = [
+    0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18,
+];
 /// `sub_tx_size_map[TX_SIZES_ALL]` (common_data.h): rect sizes halve the
 /// LONG side (4x16 -> 4x8, 8x32 -> 8x16, ...), squares halve both.
 const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
@@ -82,9 +83,11 @@ fn tx_size_costs_match_c() {
             let mut tx = MAX_TXSIZE_RECT_LOOKUP[bsize];
             for _depth in 0..=2 {
                 let rust = tx_size_cost(&costs, select, bsize, tx, ctx as usize);
-                let cval =
-                    c::ref_tx_size_cost(&flat, select, bsize as i32, tx as i32, ctx);
-                assert_eq!(rust, cval, "cost case={case} bsize={bsize} tx={tx} ctx={ctx} select={select}");
+                let cval = c::ref_tx_size_cost(&flat, select, bsize as i32, tx as i32, ctx);
+                assert_eq!(
+                    rust, cval,
+                    "cost case={case} bsize={bsize} tx={tx} ctx={ctx} select={select}"
+                );
                 if rust != 0 {
                     nonzero_gate += 1;
                 } else {
@@ -97,5 +100,8 @@ fn tx_size_costs_match_c() {
             }
         }
     }
-    assert!(nonzero_gate > 20_000 && zero_gate > 5_000, "{nonzero_gate}/{zero_gate}");
+    assert!(
+        nonzero_gate > 20_000 && zero_gate > 5_000,
+        "{nonzero_gate}/{zero_gate}"
+    );
 }

@@ -14,14 +14,14 @@
 //! Both sides start from IDENTICAL recon planes; final planes compared.
 
 use aom_encode::intra_uv_rd::{
-    av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference, txfm_rd_in_plane_uv,
-    txfm_uvrd, CflDcCache, CflPredict, UvRdEnv, UV_CFL_PRED,
+    CflDcCache, CflPredict, UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset,
+    is_chroma_reference, txfm_rd_in_plane_uv, txfm_uvrd,
 };
 use aom_encode::tx_search::TxTypeSearchPolicy;
-use aom_intra::cfl::{cfl_store_tx, CflCtx};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_intra::cfl::{CflCtx, cfl_store_tx};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{fill_tx_type_costs, CoeffCostTables, TxTypeCosts};
+use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
@@ -116,14 +116,15 @@ fn build_scenario(
         _ => 96,
     };
     let qindex = [16, 64, 128, 200, 255][iter % 5] as usize;
-    let plane_bsize =
-        aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+    let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
     let (pw, ph) = (BLK_W[plane_bsize], BLK_H[plane_bsize]);
     let ref_off_u = chroma_plane_offset(0, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
-    let recon_u0: Vec<u16> =
-        (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-    let recon_v0: Vec<u16> =
-        (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+    let recon_u0: Vec<u16> = (0..STRIDE * 128)
+        .map(|_| (rng.next() % (1u64 << bd)) as u16)
+        .collect();
+    let recon_v0: Vec<u16> = (0..STRIDE * 128)
+        .map(|_| (rng.next() % (1u64 << bd)) as u16)
+        .collect();
     let mut src_u = recon_u0.clone();
     let mut src_v = recon_v0.clone();
     for (src, recon) in [(&mut src_u, &recon_u0), (&mut src_v, &recon_v0)] {
@@ -155,10 +156,18 @@ fn build_scenario(
         bd,
         qindex,
         rdmult: rng.range(1, 1 << 22),
-        above_u: (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect(),
-        left_u: (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect(),
-        above_v: (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect(),
-        left_v: (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect(),
+        above_u: (0..32)
+            .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+            .collect(),
+        left_u: (0..32)
+            .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+            .collect(),
+        above_v: (0..32)
+            .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+            .collect(),
+        left_v: (0..32)
+            .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+            .collect(),
     }
 }
 
@@ -169,20 +178,20 @@ fn txfm_uvrd_matches_c_walk() {
     // (bsize, ss_x, ss_y, mi_row, mi_col): chroma-ref shapes incl. sub-8x8
     // (odd mi at subsampled axes) and the 444 64x64 multi-txb walk.
     let cases: [(usize, usize, usize, i32, i32); 14] = [
-        (3, 1, 1, 8, 8),   // 8x8 @420 -> plane 4x4
-        (6, 1, 1, 8, 8),   // 16x16 @420 -> 8x8
-        (9, 1, 1, 8, 8),   // 32x32 @420 -> 16x16
-        (5, 1, 1, 8, 8),   // 16x8 @420 -> 8x4
-        (4, 1, 1, 8, 8),   // 8x16 @420 -> 4x8
-        (12, 1, 1, 8, 8),  // 64x64 @420 -> 32x32
-        (0, 1, 1, 9, 9),   // 4x4 @420 sub-8x8 chroma-ref (odd mi both)
-        (1, 1, 1, 9, 9),   // 4x8 @420 (odd col)
-        (2, 1, 1, 9, 9),   // 8x4 @420 (odd row)
-        (6, 1, 0, 8, 8),   // 16x16 @422 -> 8x16
-        (2, 1, 0, 8, 8),   // 8x4 @422 -> 4x4
-        (6, 0, 0, 8, 8),   // 16x16 @444
-        (12, 0, 0, 8, 8),  // 64x64 @444 -> uv_tx 32x32, FOUR txbs
-        (0, 0, 0, 9, 9),   // 4x4 @444
+        (3, 1, 1, 8, 8),  // 8x8 @420 -> plane 4x4
+        (6, 1, 1, 8, 8),  // 16x16 @420 -> 8x8
+        (9, 1, 1, 8, 8),  // 32x32 @420 -> 16x16
+        (5, 1, 1, 8, 8),  // 16x8 @420 -> 8x4
+        (4, 1, 1, 8, 8),  // 8x16 @420 -> 4x8
+        (12, 1, 1, 8, 8), // 64x64 @420 -> 32x32
+        (0, 1, 1, 9, 9),  // 4x4 @420 sub-8x8 chroma-ref (odd mi both)
+        (1, 1, 1, 9, 9),  // 4x8 @420 (odd col)
+        (2, 1, 1, 9, 9),  // 8x4 @420 (odd row)
+        (6, 1, 0, 8, 8),  // 16x16 @422 -> 8x16
+        (2, 1, 0, 8, 8),  // 8x4 @422 -> 4x4
+        (6, 0, 0, 8, 8),  // 16x16 @444
+        (12, 0, 0, 8, 8), // 64x64 @444 -> uv_tx 32x32, FOUR txbs
+        (0, 0, 0, 9, 9),  // 4x4 @444
     ];
     let mut invalid_hits = 0usize;
     let mut multi_txb_hits = 0usize;
@@ -233,7 +242,11 @@ fn txfm_uvrd_matches_c_walk() {
             // Candidate: non-CfL UV mode (+ angle for directional).
             let uv_mode = (rng.next() % 13) as usize;
             let im = aom_entropy::partition::get_uv_mode(uv_mode);
-            let angle_delta_uv = if (1..=8).contains(&im) { rng.range(-3, 4) } else { 0 };
+            let angle_delta_uv = if (1..=8).contains(&im) {
+                rng.range(-3, 4)
+            } else {
+                0
+            };
             if angle_delta_uv != 0 {
                 angle_hits += 1;
             }
@@ -278,7 +291,13 @@ fn txfm_uvrd_matches_c_walk() {
             let mut recon_u = sc.recon_u0.clone();
             let mut recon_v = sc.recon_v0.clone();
             let rust = txfm_uvrd(
-                &env, &mut recon_u, &mut recon_v, uv_mode, angle_delta_uv, ref_best_rd, &pol,
+                &env,
+                &mut recon_u,
+                &mut recon_v,
+                uv_mode,
+                angle_delta_uv,
+                ref_best_rd,
+                &pol,
             );
 
             let cenv = CUvEnv {
@@ -321,7 +340,12 @@ fn txfm_uvrd_matches_c_walk() {
             let mut recon_u_c = sc.recon_u0.clone();
             let mut recon_v_c = sc.recon_v0.clone();
             let cres = c_txfm_uvrd(
-                &cenv, &mut recon_u_c, &mut recon_v_c, uv_mode, angle_delta_uv, ref_best_rd,
+                &cenv,
+                &mut recon_u_c,
+                &mut recon_v_c,
+                uv_mode,
+                angle_delta_uv,
+                ref_best_rd,
             );
 
             let ctx = format!(
@@ -348,13 +372,26 @@ fn txfm_uvrd_matches_c_walk() {
                         multi_txb_hits += 1;
                     }
                 }
-                (r, c_) => panic!("{ctx} validity split: rust={:?} c={:?}", r.is_some(), c_.is_some()),
+                (r, c_) => panic!(
+                    "{ctx} validity split: rust={:?} c={:?}",
+                    r.is_some(),
+                    c_.is_some()
+                ),
             }
         }
     }
-    assert!(invalid_hits > 4, "tight-budget invalidation under-exercised: {invalid_hits}");
-    assert!(multi_txb_hits > 4, "multi-txb UV walk under-exercised: {multi_txb_hits}");
-    assert!(angle_hits > 20, "UV angle deltas under-exercised: {angle_hits}");
+    assert!(
+        invalid_hits > 4,
+        "tight-budget invalidation under-exercised: {invalid_hits}"
+    );
+    assert!(
+        multi_txb_hits > 4,
+        "multi-txb UV walk under-exercised: {multi_txb_hits}"
+    );
+    assert!(
+        angle_hits > 20,
+        "UV angle deltas under-exercised: {angle_hits}"
+    );
 }
 
 /// CfL fixed-alpha full-RD evaluation (`cfl_compute_rd` fast_mode=0 inner):
@@ -411,8 +448,9 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
             // Load the CfL luma context on BOTH sides from a random luma recon
             // (the av1_encode_intra_block_plane product in the real flow).
             let (bw, bh) = (BLK_W[bsize], BLK_H[bsize]);
-            let luma: Vec<u16> =
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << sc.bd)) as u16).collect();
+            let luma: Vec<u16> = (0..STRIDE * 96)
+                .map(|_| (rng.next() % (1u64 << sc.bd)) as u16)
+                .collect();
             let luma_off = 16 * STRIDE + 16;
             const TX_OF_DIMS: fn(usize, usize) -> usize = |w, h| match (w, h) {
                 (4, 4) => 0,
@@ -431,11 +469,31 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
             let mut cfl_ctx = CflCtx::new(ss_x as i32, ss_y as i32);
             let mut st_c = c::RefCflState::default();
             cfl_store_tx(
-                &mut cfl_ctx, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row, mi_col,
+                &mut cfl_ctx,
+                &luma,
+                luma_off,
+                STRIDE,
+                0,
+                0,
+                luma_tx,
+                bsize,
+                mi_row,
+                mi_col,
             );
             c::ref_cfl_store_tx(
-                &mut st_c, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row, mi_col,
-                ss_x as i32, ss_y as i32, sc.bd,
+                &mut st_c,
+                &luma,
+                luma_off,
+                STRIDE,
+                0,
+                0,
+                luma_tx,
+                bsize,
+                mi_row,
+                mi_col,
+                ss_x as i32,
+                ss_y as i32,
+                sc.bd,
             );
 
             let env = UvRdEnv {
@@ -524,7 +582,11 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
                 let joint_sign = (rng.next() % 8) as i32;
                 let alpha_idx = (rng.next() % 256) as i32;
                 let plane = 1 + ((iter + round) % 2);
-                let mut recon = if plane == 1 { sc.recon_u0.clone() } else { sc.recon_v0.clone() };
+                let mut recon = if plane == 1 {
+                    sc.recon_u0.clone()
+                } else {
+                    sc.recon_v0.clone()
+                };
                 let mut recon_c = recon.clone();
                 let mut cflp = CflPredict {
                     ctx: &mut cfl_ctx,
@@ -565,8 +627,10 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
                     (crate_, cdist, csse),
                     "{ctx}",
                 );
-                let w_t: Vec<(usize, u16, u8)> =
-                    winners.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+                let w_t: Vec<(usize, u16, u8)> = winners
+                    .iter()
+                    .map(|w| (w.tx_type, w.eob, w.txb_ctx))
+                    .collect();
                 assert_eq!(w_t, cw, "{ctx} winners");
                 assert_eq!(recon, recon_c, "{ctx} recon");
                 if cache.use_cache && round > 0 {
@@ -574,8 +638,15 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
                 }
             }
             // Both sides' CfL AC state stays in lockstep.
-            assert_eq!(&cfl_ctx.ac_buf_q3[..], &st_c.ac_q3[..], "case={ci} iter={iter} ac");
+            assert_eq!(
+                &cfl_ctx.ac_buf_q3[..],
+                &st_c.ac_q3[..],
+                "case={ci} iter={iter} ac"
+            );
         }
     }
-    assert!(cached_evals > 20, "dc-pred cache replay under-exercised: {cached_evals}");
+    assert!(
+        cached_evals > 20,
+        "dc-pred cache replay under-exercised: {cached_evals}"
+    );
 }

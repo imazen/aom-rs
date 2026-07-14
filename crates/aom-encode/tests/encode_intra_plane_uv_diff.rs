@@ -24,13 +24,13 @@
 //! usages).
 
 use aom_encode::encode_intra::{
-    encode_intra_block_plane_uv, is_trellis_used, TrellisOptType, UvEncodeParams, UvWinner,
+    TrellisOptType, UvEncodeParams, UvWinner, encode_intra_block_plane_uv, is_trellis_used,
 };
 use aom_encode::intra_uv_rd::{
-    av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference, UvRdEnv, UV_CFL_PRED,
+    UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
-use aom_intra::cfl::{cfl_store_tx, CflCtx};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_intra::cfl::{CflCtx, cfl_store_tx};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
 use aom_txb::{CoeffCostTables, TxTypeCosts};
 
@@ -39,10 +39,12 @@ use common::*;
 
 const STRIDE: usize = 256;
 
-const BLK_W_L: [usize; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLK_H_L: [usize; 22] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const BLK_W_L: [usize; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BLK_H_L: [usize; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 fn tx_of_dims(w: usize, h: usize) -> usize {
     match (w, h) {
@@ -69,16 +71,16 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
     // shared-chroma, CfL-legal (<=32) and CfL-forbidden (64) luma sizes, the
     // 444 64x64 4-txb UV walk, rects.
     let cases: [(usize, usize, usize, i32, i32); 10] = [
-        (3, 1, 1, 8, 8),   // 8x8 @420 (uv 4x4)
-        (6, 1, 1, 8, 8),   // 16x16 @420 (uv 8x8)
-        (9, 1, 1, 8, 8),   // 32x32 @420 (uv 16x16)
-        (12, 1, 1, 8, 8),  // 64x64 @420 (uv 32x32; CfL forbidden: luma > 32)
-        (0, 1, 1, 9, 9),   // 4x4 @420 sub-8x8 odd-mi (shared chroma anchor)
-        (5, 1, 1, 8, 8),   // 16x8 @420 (uv 8x4)
-        (6, 1, 0, 8, 8),   // 16x16 @422 (uv 8x16)
-        (3, 1, 0, 8, 8),   // 8x8 @422 (uv 4x8)
-        (6, 0, 0, 8, 8),   // 16x16 @444 (uv 16x16)
-        (12, 0, 0, 8, 8),  // 64x64 @444 (uv 64x64 -> adjusted TX_32X32: 4 txbs)
+        (3, 1, 1, 8, 8),  // 8x8 @420 (uv 4x4)
+        (6, 1, 1, 8, 8),  // 16x16 @420 (uv 8x8)
+        (9, 1, 1, 8, 8),  // 32x32 @420 (uv 16x16)
+        (12, 1, 1, 8, 8), // 64x64 @420 (uv 32x32; CfL forbidden: luma > 32)
+        (0, 1, 1, 9, 9),  // 4x4 @420 sub-8x8 odd-mi (shared chroma anchor)
+        (5, 1, 1, 8, 8),  // 16x8 @420 (uv 8x4)
+        (6, 1, 0, 8, 8),  // 16x16 @422 (uv 8x16)
+        (3, 1, 0, 8, 8),  // 8x8 @422 (uv 4x8)
+        (6, 0, 0, 8, 8),  // 16x16 @444 (uv 16x16)
+        (12, 0, 0, 8, 8), // 64x64 @444 (uv 64x64 -> adjusted TX_32X32: 4 txbs)
     ];
 
     let mut cfl_encodes = 0usize;
@@ -99,7 +101,8 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
         let (pw, ph) = (BLK_W_L[plane_bsize], BLK_H_L[plane_bsize]);
         let tx_size = av1_get_tx_size_uv(bsize, false, ss_x, ss_y);
         let n_txbs = (pw / TX_W[tx_size]) * (ph / TX_H[tx_size]);
-        let ref_off = chroma_plane_offset(32 * STRIDE + 32, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
+        let ref_off =
+            chroma_plane_offset(32 * STRIDE + 32, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
 
         for iter in 0..12 {
             // BOTH usage arms of the chroma trellis-table sf.
@@ -110,11 +113,19 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
             let flat = iter % 6 == 5; // bait eob 0
-            let qindex: usize = if flat { 255 } else { [16, 64, 128, 200, 255][iter % 5] };
+            let qindex: usize = if flat {
+                255
+            } else {
+                [16, 64, 128, 200, 255][iter % 5]
+            };
             // UV mode: CfL every 3rd iter on CfL-legal shapes; else the
             // non-CfL modes (13), with UV angle on directional.
             let use_cfl = cfl_allowed && iter % 3 == 1;
-            let uv_mode = if use_cfl { UV_CFL_PRED } else { (rng.next() % 13) as usize };
+            let uv_mode = if use_cfl {
+                UV_CFL_PRED
+            } else {
+                (rng.next() % 13) as usize
+            };
             let angle_delta_uv = if !use_cfl && (1..=8).contains(&uv_mode) {
                 rng.range(-3, 4)
             } else {
@@ -142,19 +153,40 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
 
             // CfL context loaded from a random luma recon (both sides) —
             // exactly the state the LUMA re-encode's cfl_store_tx leaves.
-            let luma: Vec<u16> =
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let luma: Vec<u16> = (0..STRIDE * 96)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let luma_off = 16 * STRIDE + 16;
             let mut cfl_rust = CflCtx::new(ss_x as i32, ss_y as i32);
             let mut cfl_c = c::RefCflState::default();
             if use_cfl {
                 let luma_tx = tx_of_dims(bw, bh);
                 cfl_store_tx(
-                    &mut cfl_rust, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row, mi_col,
+                    &mut cfl_rust,
+                    &luma,
+                    luma_off,
+                    STRIDE,
+                    0,
+                    0,
+                    luma_tx,
+                    bsize,
+                    mi_row,
+                    mi_col,
                 );
                 c::ref_cfl_store_tx(
-                    &mut cfl_c, &luma, luma_off, STRIDE, 0, 0, luma_tx, bsize, mi_row, mi_col,
-                    ss_x as i32, ss_y as i32, bd,
+                    &mut cfl_c,
+                    &luma,
+                    luma_off,
+                    STRIDE,
+                    0,
+                    0,
+                    luma_tx,
+                    bsize,
+                    mi_row,
+                    mi_col,
+                    ss_x as i32,
+                    ss_y as i32,
+                    bd,
                 );
             }
 
@@ -163,12 +195,16 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
             let recon0: Vec<u16> = if flat {
                 vec![(1u16 << (bd - 1)) - 5; STRIDE * 128]
             } else {
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect()
+                (0..STRIDE * 128)
+                    .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                    .collect()
             };
             let recon_v0: Vec<u16> = if flat {
                 vec![(1u16 << (bd - 1)) + 5; STRIDE * 128]
             } else {
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect()
+                (0..STRIDE * 128)
+                    .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                    .collect()
             };
             let mut src_u = recon0.clone();
             let mut src_v = recon_v0.clone();
@@ -216,14 +252,18 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
             let ttc_intra = vec![0i32; 3 * 4 * 13 * 16];
             let ttc_inter = vec![0i32; 4 * 4 * 16];
 
-            let above_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let above_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let above_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 22);
             let luma_mode = (rng.next() % 13) as usize;
 
@@ -304,7 +344,13 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
                 left_ctx: [&left_u, &left_v],
                 rdmult,
                 coeff_tbls: (
-                    &t_txb_skip, &t_base_eob, &t_base, &t_eob_extra, &t_dc_sign, &t_lps, &t_eob,
+                    &t_txb_skip,
+                    &t_base_eob,
+                    &t_base,
+                    &t_eob_extra,
+                    &t_dc_sign,
+                    &t_lps,
+                    &t_eob,
                 ),
                 ttc_tables: (&ttc_intra, &ttc_inter),
                 use_chroma_trellis_rd_mult,
@@ -331,7 +377,11 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
                     plane,
                     uv_mode,
                     angle_delta_uv,
-                    if use_cfl { Some((&mut cfl_c, alpha_idx, joint_sign)) } else { None },
+                    if use_cfl {
+                        Some((&mut cfl_c, alpha_idx, joint_sign))
+                    } else {
+                        None
+                    },
                     tx_size,
                     skip_txfm,
                     use_trellis,
@@ -387,13 +437,28 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
     }
 
     // Coverage floors.
-    assert!(cfl_encodes >= 20, "signalled-CfL encodes exercised: {cfl_encodes}");
+    assert!(
+        cfl_encodes >= 20,
+        "signalled-CfL encodes exercised: {cfl_encodes}"
+    );
     assert!(multi_txb >= 20, "multi-txb UV walks exercised: {multi_txb}");
     assert!(eob0 >= 20, "eob-0 txbs exercised: {eob0}");
     assert!(eob_pos >= 150, "eob>0 txbs exercised: {eob_pos}");
-    assert!(angle_hits >= 15, "nonzero UV angle encodes exercised: {angle_hits}");
+    assert!(
+        angle_hits >= 15,
+        "nonzero UV angle encodes exercised: {angle_hits}"
+    );
     assert!(skip_arm >= 10, "skip_txfm arm exercised: {skip_arm}");
-    assert!(no_trellis_arm >= 20, "no-trellis (B) arm exercised: {no_trellis_arm}");
-    assert!(good_table_hits >= 40, "GOOD trellis-table arm exercised: {good_table_hits}");
-    assert!(sub8 >= 10, "sub-8x8 odd-mi chroma-ref shapes exercised: {sub8}");
+    assert!(
+        no_trellis_arm >= 20,
+        "no-trellis (B) arm exercised: {no_trellis_arm}"
+    );
+    assert!(
+        good_table_hits >= 40,
+        "GOOD trellis-table arm exercised: {good_table_hits}"
+    );
+    assert!(
+        sub8 >= 10,
+        "sub-8x8 odd-mi chroma-ref shapes exercised: {sub8}"
+    );
 }

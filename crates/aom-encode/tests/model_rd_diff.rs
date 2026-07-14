@@ -35,7 +35,10 @@ fn model_rd_from_var_lapndz_matches_c() {
             let qstep = rng.range(1, 1 << 15) as u32;
             let got = model_rd_from_var_lapndz(var, n_log2, qstep);
             let want = c::ref_model_rd_from_var_lapndz(var, n_log2, qstep);
-            assert_eq!(got, want, "model_rd var={var} n_log2={n_log2} qstep={qstep}");
+            assert_eq!(
+                got, want,
+                "model_rd var={var} n_log2={n_log2} qstep={qstep}"
+            );
         }
     }
 }
