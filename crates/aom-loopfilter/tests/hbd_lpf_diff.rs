@@ -14,7 +14,7 @@ fn hbd_loopfilter_byte_identical() {
     let mut rng = Rng(0x_a1b2_c3d4_e5f6_0789);
     for &bd in &[10i32, 12] {
         let maxv = (1u32 << bd) - 1;
-        for &dir in &[b'h', b'v'] {
+        for &dir in b"hv" {
             for &width in &[4u32, 6, 8, 14] {
                 for _ in 0..15_000 {
                     // near-flat sometimes to hit flat/flat2 branches

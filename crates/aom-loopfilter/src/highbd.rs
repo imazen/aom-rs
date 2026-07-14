@@ -22,8 +22,8 @@ fn iabs(a: u16, b: u16) -> i32 {
 fn hev_mask(thresh: u8, p1: u16, p0: u16, q0: u16, q1: u16, bd: i32) -> i16 {
     let t = (thresh as i32) << (bd - 8);
     let mut hev = 0i16;
-    hev |= ((iabs(p1, p0) > t) as i16) * -1;
-    hev |= ((iabs(q1, q0) > t) as i16) * -1;
+    hev |= -((iabs(p1, p0) > t) as i16);
+    hev |= -((iabs(q1, q0) > t) as i16);
     hev
 }
 
@@ -32,9 +32,9 @@ fn filter_mask2(limit: u8, blimit: u8, p1: u16, p0: u16, q0: u16, q1: u16, bd: i
     let l = (limit as i32) << (bd - 8);
     let bl = (blimit as i32) << (bd - 8);
     let mut mask = 0i8;
-    mask |= ((iabs(p1, p0) > l) as i8) * -1;
-    mask |= ((iabs(q1, q0) > l) as i8) * -1;
-    mask |= ((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > bl) as i8) * -1;
+    mask |= -((iabs(p1, p0) > l) as i8);
+    mask |= -((iabs(q1, q0) > l) as i8);
+    mask |= -((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > bl) as i8);
     !mask
 }
 
@@ -44,13 +44,13 @@ fn filter_mask(limit: u8, blimit: u8, p3: u16, p2: u16, p1: u16, p0: u16, q0: u1
     let l = (limit as i32) << (bd - 8);
     let bl = (blimit as i32) << (bd - 8);
     let mut mask = 0i8;
-    mask |= ((iabs(p3, p2) > l) as i8) * -1;
-    mask |= ((iabs(p2, p1) > l) as i8) * -1;
-    mask |= ((iabs(p1, p0) > l) as i8) * -1;
-    mask |= ((iabs(q1, q0) > l) as i8) * -1;
-    mask |= ((iabs(q2, q1) > l) as i8) * -1;
-    mask |= ((iabs(q3, q2) > l) as i8) * -1;
-    mask |= ((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > bl) as i8) * -1;
+    mask |= -((iabs(p3, p2) > l) as i8);
+    mask |= -((iabs(p2, p1) > l) as i8);
+    mask |= -((iabs(p1, p0) > l) as i8);
+    mask |= -((iabs(q1, q0) > l) as i8);
+    mask |= -((iabs(q2, q1) > l) as i8);
+    mask |= -((iabs(q3, q2) > l) as i8);
+    mask |= -((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > bl) as i8);
     !mask
 }
 
@@ -60,22 +60,23 @@ fn filter_mask3_chroma(limit: u8, blimit: u8, p2: u16, p1: u16, p0: u16, q0: u16
     let l = (limit as i32) << (bd - 8);
     let bl = (blimit as i32) << (bd - 8);
     let mut mask = 0i8;
-    mask |= ((iabs(p2, p1) > l) as i8) * -1;
-    mask |= ((iabs(p1, p0) > l) as i8) * -1;
-    mask |= ((iabs(q1, q0) > l) as i8) * -1;
-    mask |= ((iabs(q2, q1) > l) as i8) * -1;
-    mask |= ((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > bl) as i8) * -1;
+    mask |= -((iabs(p2, p1) > l) as i8);
+    mask |= -((iabs(p1, p0) > l) as i8);
+    mask |= -((iabs(q1, q0) > l) as i8);
+    mask |= -((iabs(q2, q1) > l) as i8);
+    mask |= -((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > bl) as i8);
     !mask
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn flat_mask3_chroma(thresh: u8, p2: u16, p1: u16, p0: u16, q0: u16, q1: u16, q2: u16, bd: i32) -> i8 {
     let t = (thresh as i32) << (bd - 8);
     let mut mask = 0i8;
-    mask |= ((iabs(p1, p0) > t) as i8) * -1;
-    mask |= ((iabs(q1, q0) > t) as i8) * -1;
-    mask |= ((iabs(p2, p0) > t) as i8) * -1;
-    mask |= ((iabs(q2, q0) > t) as i8) * -1;
+    mask |= -((iabs(p1, p0) > t) as i8);
+    mask |= -((iabs(q1, q0) > t) as i8);
+    mask |= -((iabs(p2, p0) > t) as i8);
+    mask |= -((iabs(q2, q0) > t) as i8);
     !mask
 }
 
@@ -84,15 +85,16 @@ fn flat_mask3_chroma(thresh: u8, p2: u16, p1: u16, p0: u16, q0: u16, q1: u16, q2
 fn flat_mask4(thresh: u8, p3: u16, p2: u16, p1: u16, p0: u16, q0: u16, q1: u16, q2: u16, q3: u16, bd: i32) -> i8 {
     let t = (thresh as i32) << (bd - 8);
     let mut mask = 0i8;
-    mask |= ((iabs(p1, p0) > t) as i8) * -1;
-    mask |= ((iabs(q1, q0) > t) as i8) * -1;
-    mask |= ((iabs(p2, p0) > t) as i8) * -1;
-    mask |= ((iabs(q2, q0) > t) as i8) * -1;
-    mask |= ((iabs(p3, p0) > t) as i8) * -1;
-    mask |= ((iabs(q3, q0) > t) as i8) * -1;
+    mask |= -((iabs(p1, p0) > t) as i8);
+    mask |= -((iabs(q1, q0) > t) as i8);
+    mask |= -((iabs(p2, p0) > t) as i8);
+    mask |= -((iabs(q2, q0) > t) as i8);
+    mask |= -((iabs(p3, p0) > t) as i8);
+    mask |= -((iabs(q3, q0) > t) as i8);
     !mask
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filter4(buf: &mut [u16], i1: usize, i0: usize, j0: usize, j1: usize, mask: i8, thresh: u8, bd: i32) {
     let shift = bd - 8;
     let bias = 0x80i32 << shift;
@@ -173,6 +175,7 @@ fn idx(center: isize, k: isize, ts: isize) -> usize {
     (center + k * ts) as usize
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lpf_4(buf: &mut [u16], mut c: isize, ts: isize, step: isize, bl: u8, li: u8, th: u8, bd: i32) {
     for _ in 0..4 {
         let g = |k| buf[idx(c, k, ts)];
@@ -182,6 +185,7 @@ fn lpf_4(buf: &mut [u16], mut c: isize, ts: isize, step: isize, bl: u8, li: u8, 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lpf_6(buf: &mut [u16], mut c: isize, ts: isize, step: isize, bl: u8, li: u8, th: u8, bd: i32) {
     for _ in 0..4 {
         let g = |k| buf[idx(c, k, ts)];
@@ -193,6 +197,7 @@ fn lpf_6(buf: &mut [u16], mut c: isize, ts: isize, step: isize, bl: u8, li: u8, 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lpf_8(buf: &mut [u16], mut c: isize, ts: isize, step: isize, bl: u8, li: u8, th: u8, bd: i32) {
     for _ in 0..4 {
         let g = |k| buf[idx(c, k, ts)];
@@ -204,6 +209,7 @@ fn lpf_8(buf: &mut [u16], mut c: isize, ts: isize, step: isize, bl: u8, li: u8, 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lpf_14(buf: &mut [u16], mut c: isize, ts: isize, step: isize, bl: u8, li: u8, th: u8, bd: i32) {
     for _ in 0..4 {
         let g = |k| buf[idx(c, k, ts)];

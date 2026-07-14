@@ -45,7 +45,7 @@ fn gen_buf(rng: &mut Rng, strategy: u32) -> Vec<u8> {
 fn loopfilter_byte_identical() {
     let mut rng = Rng(0x_10fd_ead0_1234_5678);
     let mut checks = 0u64;
-    for &dir in &[b'h', b'v'] {
+    for &dir in b"hv" {
         for &width in &[4u32, 6, 8, 14] {
             for _ in 0..30_000 {
                 let strategy = rng.upto(3);

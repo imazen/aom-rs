@@ -29,8 +29,8 @@ fn iabs(a: u8, b: u8) -> i32 {
 #[inline]
 fn hev_mask(thresh: u8, p1: u8, p0: u8, q0: u8, q1: u8) -> i8 {
     let mut hev = 0i8;
-    hev |= ((iabs(p1, p0) > thresh as i32) as i8) * -1;
-    hev |= ((iabs(q1, q0) > thresh as i32) as i8) * -1;
+    hev |= -((iabs(p1, p0) > thresh as i32) as i8);
+    hev |= -((iabs(q1, q0) > thresh as i32) as i8);
     hev
 }
 
@@ -38,9 +38,9 @@ fn hev_mask(thresh: u8, p1: u8, p0: u8, q0: u8, q1: u8) -> i8 {
 fn filter_mask2(limit: u8, blimit: u8, p1: u8, p0: u8, q0: u8, q1: u8) -> i8 {
     let l = limit as i32;
     let mut mask = 0i8;
-    mask |= ((iabs(p1, p0) > l) as i8) * -1;
-    mask |= ((iabs(q1, q0) > l) as i8) * -1;
-    mask |= ((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > blimit as i32) as i8) * -1;
+    mask |= -((iabs(p1, p0) > l) as i8);
+    mask |= -((iabs(q1, q0) > l) as i8);
+    mask |= -((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > blimit as i32) as i8);
     !mask
 }
 
@@ -49,13 +49,13 @@ fn filter_mask2(limit: u8, blimit: u8, p1: u8, p0: u8, q0: u8, q1: u8) -> i8 {
 fn filter_mask(limit: u8, blimit: u8, p3: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1: u8, q2: u8, q3: u8) -> i8 {
     let l = limit as i32;
     let mut mask = 0i8;
-    mask |= ((iabs(p3, p2) > l) as i8) * -1;
-    mask |= ((iabs(p2, p1) > l) as i8) * -1;
-    mask |= ((iabs(p1, p0) > l) as i8) * -1;
-    mask |= ((iabs(q1, q0) > l) as i8) * -1;
-    mask |= ((iabs(q2, q1) > l) as i8) * -1;
-    mask |= ((iabs(q3, q2) > l) as i8) * -1;
-    mask |= ((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > blimit as i32) as i8) * -1;
+    mask |= -((iabs(p3, p2) > l) as i8);
+    mask |= -((iabs(p2, p1) > l) as i8);
+    mask |= -((iabs(p1, p0) > l) as i8);
+    mask |= -((iabs(q1, q0) > l) as i8);
+    mask |= -((iabs(q2, q1) > l) as i8);
+    mask |= -((iabs(q3, q2) > l) as i8);
+    mask |= -((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > blimit as i32) as i8);
     !mask
 }
 
@@ -64,11 +64,11 @@ fn filter_mask(limit: u8, blimit: u8, p3: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1
 fn filter_mask3_chroma(limit: u8, blimit: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1: u8, q2: u8) -> i8 {
     let l = limit as i32;
     let mut mask = 0i8;
-    mask |= ((iabs(p2, p1) > l) as i8) * -1;
-    mask |= ((iabs(p1, p0) > l) as i8) * -1;
-    mask |= ((iabs(q1, q0) > l) as i8) * -1;
-    mask |= ((iabs(q2, q1) > l) as i8) * -1;
-    mask |= ((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > blimit as i32) as i8) * -1;
+    mask |= -((iabs(p2, p1) > l) as i8);
+    mask |= -((iabs(p1, p0) > l) as i8);
+    mask |= -((iabs(q1, q0) > l) as i8);
+    mask |= -((iabs(q2, q1) > l) as i8);
+    mask |= -((iabs(p0, q0) * 2 + iabs(p1, q1) / 2 > blimit as i32) as i8);
     !mask
 }
 
@@ -76,10 +76,10 @@ fn filter_mask3_chroma(limit: u8, blimit: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1
 fn flat_mask3_chroma(thresh: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1: u8, q2: u8) -> i8 {
     let t = thresh as i32;
     let mut mask = 0i8;
-    mask |= ((iabs(p1, p0) > t) as i8) * -1;
-    mask |= ((iabs(q1, q0) > t) as i8) * -1;
-    mask |= ((iabs(p2, p0) > t) as i8) * -1;
-    mask |= ((iabs(q2, q0) > t) as i8) * -1;
+    mask |= -((iabs(p1, p0) > t) as i8);
+    mask |= -((iabs(q1, q0) > t) as i8);
+    mask |= -((iabs(p2, p0) > t) as i8);
+    mask |= -((iabs(q2, q0) > t) as i8);
     !mask
 }
 
@@ -88,12 +88,12 @@ fn flat_mask3_chroma(thresh: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1: u8, q2: u8)
 fn flat_mask4(thresh: u8, p3: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1: u8, q2: u8, q3: u8) -> i8 {
     let t = thresh as i32;
     let mut mask = 0i8;
-    mask |= ((iabs(p1, p0) > t) as i8) * -1;
-    mask |= ((iabs(q1, q0) > t) as i8) * -1;
-    mask |= ((iabs(p2, p0) > t) as i8) * -1;
-    mask |= ((iabs(q2, q0) > t) as i8) * -1;
-    mask |= ((iabs(p3, p0) > t) as i8) * -1;
-    mask |= ((iabs(q3, q0) > t) as i8) * -1;
+    mask |= -((iabs(p1, p0) > t) as i8);
+    mask |= -((iabs(q1, q0) > t) as i8);
+    mask |= -((iabs(p2, p0) > t) as i8);
+    mask |= -((iabs(q2, q0) > t) as i8);
+    mask |= -((iabs(p3, p0) > t) as i8);
+    mask |= -((iabs(q3, q0) > t) as i8);
     !mask
 }
 
