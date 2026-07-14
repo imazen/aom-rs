@@ -60,10 +60,10 @@ use crate::partition_pick::{ModeGrid, PickFrameCfg, rd_pick_partition_real};
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::partition::{
-    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, bsize_to_max_depth, bsize_to_tx_size_cat,
-    get_partition_subsize, get_tx_size_context, is_cfl_allowed, partition_cdf_length,
-    partition_plane_context, tx_size_to_depth, update_ext_partition_context, write_mb_modes_kf_fc,
-    write_partition, write_selected_tx_size,
+    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, allow_palette, bsize_to_max_depth,
+    bsize_to_tx_size_cat, get_partition_subsize, get_tx_size_context, is_cfl_allowed,
+    partition_cdf_length, partition_plane_context, tx_size_to_depth, update_ext_partition_context,
+    write_mb_modes_kf_fc, write_partition, write_selected_tx_size,
 };
 use aom_intra::cfl::CflCtx;
 use aom_txb::{ext_tx_derive, write_coeffs_txb_full};
@@ -106,6 +106,14 @@ pub struct PackCfg {
     /// The frame's `current_base_qindex` (no delta-q in this envelope, so
     /// every block's `current_qindex` is this constant).
     pub base_qindex: i32,
+    /// `cm->features.allow_screen_content_tools` — gates PALETTE mode per
+    /// block (`av1_allow_palette`, also needs the block's own bsize in
+    /// `[BLOCK_8X8, 64x64]`). When true, every eligible DC-predicted block
+    /// codes a palette-usage flag (this envelope never uses palette, so the
+    /// flag is always the `no-palette` symbol) — the decoder unconditionally
+    /// reads it, so omitting it desyncs the whole tile-group. MUST equal the
+    /// value the real frame header carries.
+    pub allow_screen_content_tools: bool,
 }
 
 /// Per-MI-position neighbour tracking for [`write_mb_modes_kf_fc`]'s
@@ -255,6 +263,15 @@ pub fn pack_leaf(
     kfs.cfl_allowed = cfl_allowed;
     kfs.has_above = has_above;
     kfs.has_left = has_left;
+    // `av1_allow_palette(cm->features.allow_screen_content_tools, bsize)`
+    // (blockd.h) — the SAME per-block gate the decoder applies
+    // (`aom-decode`'s `decode_block`: `st.allow_palette =
+    // av1_allow_palette(...)`). When screen-content tools are on, every
+    // DC-predicted block in `[BLOCK_8X8, 64x64]` codes a palette-usage flag;
+    // this envelope never uses palette, so `write_mb_modes_kf_fc` emits the
+    // `no-palette` symbol, but the flag MUST still be written or the decoder
+    // (which reads it unconditionally) desyncs from here to the tile end.
+    kfs.allow_palette = allow_palette(cfg.allow_screen_content_tools, bsize);
     write_mb_modes_kf_fc(
         enc,
         &info,

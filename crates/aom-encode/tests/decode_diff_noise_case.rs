@@ -480,6 +480,7 @@ fn decode_diff_pseudo_random_noise_case() {
         signal_gate: qindex > 0,
         allow_update_cdf: !p.prefix.disable_cdf_update,
         base_qindex: qindex,
+        allow_screen_content_tools: p.allow_screen_content_tools,
     };
 
     let mut recon_y = src_y_strided.clone();

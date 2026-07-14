@@ -31,7 +31,7 @@
 //! AB type on this content, and exactly where.
 
 use aom_encode::encode_intra::TrellisOptType;
-use aom_encode::encode_sb::SbEncodeEnv;
+use aom_encode::encode_sb::{SbEncodeEnv, SbTree};
 use aom_encode::intra_uv_rd::UvLoopPolicy;
 use aom_encode::lf_search::{LfSearchFrame, build_lf_mi_grid, pick_filter_level};
 use aom_encode::obu_assemble::assemble_obu_frame_single_tile;
@@ -177,6 +177,75 @@ fn left_flat_right_split(r: usize, c: usize) -> u8 {
     }
 }
 
+/// Serialize the port's OWN search [`SbTree`] into the same
+/// `(mi_row, mi_col, bsize, partition)` sequence the decoded-tree
+/// [`replay_tree`] produces, so the search tree and the decoded tree can be
+/// compared node-for-node. The two walks are deliberately structural twins:
+/// each emits one entry per visited node and recurses ONLY on `SPLIT`, with the
+/// identical partition-code encoding (0=NONE/Leaf, 1=HORZ, 2=VERT, 3=SPLIT,
+/// 4..=7=AB, 8=HORZ_4, 9=VERT_4). Equal sequences therefore mean the packed
+/// bytes decode back to exactly the partition structure the search chose --
+/// the self-consistency invariant the palette-usage-flag fix restores.
+#[allow(clippy::too_many_arguments)]
+fn sbtree_seq(
+    tree: &SbTree,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    mi_rows: i32,
+    mi_cols: i32,
+    out: &mut Vec<(i32, i32, usize, i8)>,
+) {
+    if mi_row >= mi_rows || mi_col >= mi_cols {
+        return;
+    }
+    let p: i8 = match tree {
+        SbTree::Leaf(_) => 0,
+        SbTree::Horz(_) => 1,
+        SbTree::Vert(_) => 2,
+        SbTree::Split(_) => 3,
+        SbTree::HorzA(_) => 4,
+        SbTree::HorzB(_) => 5,
+        SbTree::VertA(_) => 6,
+        SbTree::VertB(_) => 7,
+        SbTree::Horz4(_) => 8,
+        SbTree::Vert4(_) => 9,
+    };
+    out.push((mi_row, mi_col, bsize, p));
+    if let SbTree::Split(kids) = tree {
+        let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+        let subsize = get_partition_subsize(bsize, 3) as usize;
+        sbtree_seq(&kids[0], mi_row, mi_col, subsize, mi_rows, mi_cols, out);
+        sbtree_seq(
+            &kids[1],
+            mi_row,
+            mi_col + hbs,
+            subsize,
+            mi_rows,
+            mi_cols,
+            out,
+        );
+        sbtree_seq(
+            &kids[2],
+            mi_row + hbs,
+            mi_col,
+            subsize,
+            mi_rows,
+            mi_cols,
+            out,
+        );
+        sbtree_seq(
+            &kids[3],
+            mi_row + hbs,
+            mi_col + hbs,
+            subsize,
+            mi_rows,
+            mi_cols,
+            out,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn replay_tree(
     tree: &[i8],
@@ -253,7 +322,21 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
     let v: Vec<u16> = Vec::new();
 
     let bytes = c::ref_encode_av1_kf(
-        &y, &u, &v, w, h, 8, mono, ss_x as i32, ss_y as i32, cq_level, 0, false, false, usage, 0,
+        &y,
+        &u,
+        &v,
+        w,
+        h,
+        8,
+        mono,
+        ss_x as i32,
+        ss_y as i32,
+        cq_level,
+        0,
+        false,
+        false,
+        usage,
+        0,
         false,
     );
     assert!(!bytes.is_empty());
@@ -452,12 +535,17 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
         enable_1to4_partitions: true,
         enable_ab_partitions: true,
     };
+    eprintln!(
+        "{name}: allow_screen_content_tools={}",
+        p.allow_screen_content_tools
+    );
     let pack_cfg = aom_encode::pack::PackCfg {
         enable_filter_intra: s.enable_filter_intra,
         tx_mode_is_select: p.tx_mode_select,
         signal_gate: qindex > 0,
         allow_update_cdf: !p.prefix.disable_cdf_update,
         base_qindex: qindex,
+        allow_screen_content_tools: p.allow_screen_content_tools,
     };
 
     let mut recon_y = src_y_strided.clone();
@@ -629,6 +717,67 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
             .join(" ")
     );
 
+    // ---- SELF-CONSISTENCY REGRESSION (palette-usage-flag desync) ----
+    // The port's packed bytes MUST decode back to exactly the partition tree its
+    // OWN search chose. Walk the search tree (`trees[0]`) into the same flat
+    // sequence `ours_seq` was built from, then require equality.
+    //
+    // This is the permanent guard for the (mi_row=0, mi_col=8, BLOCK_32X32)
+    // NONE-vs-SPLIT bug. This checkerboard content turns
+    // `allow_screen_content_tools` ON, and `pack.rs` used to hardcode
+    // `allow_palette = false` -- omitting the palette-usage flag the decoder
+    // reads unconditionally for every DC-predicted 8x8..64x64 block. That
+    // desynced the arithmetic coder from the very first (0,0) 32x32 leaf, so the
+    // decoded tree collapsed (search len 25 vs decoded len 5) and the
+    // decode-diff misread (0,8) as NONE. Threading SCT into `PackCfg` + setting
+    // `kfs.allow_palette` per block (matching the decoder's `av1_allow_palette`)
+    // restores the flag; the two sequences now match exactly. A regression here
+    // fires the instant the write side drops/adds a symbol the read side expects.
+    //
+    // `trees[0]` is the whole frame: this probe is hard-wired to 64x64 == one
+    // 64x64 superblock, and `ours_seq` was likewise replayed from the single
+    // decoded SB tree rooted at (0,0). Assert that so a future frame-size bump
+    // can't silently make this a partial-frame check.
+    assert_eq!(
+        trees.len(),
+        1,
+        "{name}: self-consistency check assumes a single 64x64 superblock",
+    );
+    let mut search_seq = Vec::new();
+    sbtree_seq(&trees[0], 0, 0, SB, mi_rows, mi_cols, &mut search_seq);
+    let fmt_seq = |seq: &[(i32, i32, usize, i8)]| {
+        seq.iter()
+            .enumerate()
+            .map(|(i, &(r, c, b, p))| {
+                format!(
+                    "[{i}](mr={r},mc={c},bs={b},{})",
+                    PARTITION_NAMES[p as usize]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    eprintln!(
+        "{name}: PORT SEARCH tree (len={}): {}",
+        search_seq.len(),
+        fmt_seq(&search_seq)
+    );
+    eprintln!(
+        "{name}: DECODED ours tree (len={}): {}",
+        ours_seq.len(),
+        fmt_seq(&ours_seq)
+    );
+    assert_eq!(
+        search_seq,
+        ours_seq,
+        "{name}: SELF-CONSISTENCY: the port's packed bytes did NOT decode back to the partition \
+         tree its own search chose -- the palette-usage-flag desync signature (see comment \
+         above): the write side dropped/added a symbol the decoder expects. search_len={} \
+         decoded_len={}",
+        search_seq.len(),
+        ours_seq.len()
+    );
+
     let mut first_divergence: Option<(i32, i32, usize, i8, i8)> = None;
     for (r, o) in real_seq.iter().zip(ours_seq.iter()) {
         if (r.0, r.1, r.2) != (o.0, o.1, o.2) {
@@ -671,10 +820,16 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
     }
 }
 
-/// Diagnostic only -- see module docs. Prints the first partition-tree
-/// divergence (if any) for both LF-clean AB-probe cases; does not assert,
-/// because a divergence is the EXPECTED state until AB partitions are
-/// ported.
+/// ASSERTS self-consistency (the port's bytes decode back to the port's own
+/// search tree) for both LF-clean AB-probe cases -- the permanent regression
+/// for the palette-usage-flag desync that made (0,8,BLOCK_32X32) read as NONE.
+///
+/// The port-vs-REAL-aomenc comparison stays diagnostic-only: after the desync
+/// fix the trees agree with real down to ~node 10, then diverge at DEEP nodes
+/// (top-split: (2,12,8x8) real=NONE/ours=HORZ; left-flat: (8,12,16x16)
+/// real=SPLIT/ours=HORZ). Those are genuine deep RD-parity differences, not
+/// desyncs, and are tracked separately -- so this test prints that first
+/// divergence but does not assert on it.
 #[test]
 fn decode_diff_ab_probe_clean_cases() {
     run_one("top split (2 freqs) / bottom flat", top_split_bottom_flat);
