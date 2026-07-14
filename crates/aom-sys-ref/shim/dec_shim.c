@@ -1929,3 +1929,28 @@ int shim_is_dv_valid(int dv_row, int dv_col, int mi_row, int mi_col, int bsize,
   dv.col = (int16_t)dv_col;
   return av1_is_dv_valid(dv, &cm, &xd, mi_row, mi_col, (BLOCK_SIZE)bsize, mib_size_log2);
 }
+
+/* shim_dump_default_inter_ext_tx — dump the compiled default
+ * fc->inter_ext_tx_cdf[EXT_TX_SETS_INTER][EXT_TX_SIZES][CDF_SIZE(TX_TYPES)]
+ * (the full padded [4][4][17] = 272 u16 table) from the real
+ * av1_setup_past_independence default frame context. inter_ext_tx_cdf is
+ * qindex-independent (av1_init_mode_probs); base_qindex is accepted only to
+ * mirror shim_dump_default_kf_fc. Verifies aom-entropy's DEFAULT_INTER_EXT_TX. */
+int shim_dump_default_inter_ext_tx(int base_qindex, uint16_t *out) {
+  AV1_COMMON *cm = (AV1_COMMON *)calloc(1, sizeof(AV1_COMMON));
+  FRAME_CONTEXT *fc = (FRAME_CONTEXT *)calloc(1, sizeof(FRAME_CONTEXT));
+  FRAME_CONTEXT *dfc = (FRAME_CONTEXT *)calloc(1, sizeof(FRAME_CONTEXT));
+  RefCntBuffer *rcb = (RefCntBuffer *)calloc(1, sizeof(RefCntBuffer));
+  if (!cm || !fc || !dfc || !rcb) return 1;
+  cm->fc = fc;
+  cm->default_frame_context = dfc;
+  cm->cur_frame = rcb; /* seg_map NULL -> the memset arm is skipped */
+  cm->quant_params.base_qindex = base_qindex;
+  av1_setup_past_independence(cm);
+  memcpy(out, fc->inter_ext_tx_cdf, sizeof(fc->inter_ext_tx_cdf)); /* 272 u16 */
+  free(cm);
+  free(fc);
+  free(dfc);
+  free(rcb);
+  return 0;
+}

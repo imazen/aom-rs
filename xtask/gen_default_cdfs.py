@@ -37,7 +37,7 @@ CONSTS = {
     "FILTER_INTRA_MODES": 5, "CFL_JOINT_SIGNS": 8, "CFL_ALPHA_CONTEXTS": 6,
     "CFL_ALPHABET_SIZE": 16, "DELTA_Q_PROBS": 3, "FRAME_LF_COUNT": 4,
     "DELTA_LF_PROBS": 3, "MAX_TX_CATS": 4, "TX_SIZE_CONTEXTS": 3,
-    "MAX_TX_DEPTH": 2, "EXT_TX_SETS_INTRA": 3, "EXT_TX_SIZES": 4,
+    "MAX_TX_DEPTH": 2, "EXT_TX_SETS_INTRA": 3, "EXT_TX_SETS_INTER": 4, "EXT_TX_SIZES": 4,
     "TX_TYPES": 16, "MV_JOINTS": 4, "MV_CLASSES": 11, "CLASS0_SIZE": 2,
     "MV_FP_SIZE": 4, "MV_OFFSET_BITS": 10, "MAX_ANGLE_DELTA": 3,
     "NUM_BASE_LEVELS": 2, "EOB_MAX_SYMS": 11,
@@ -278,6 +278,19 @@ def main():
          "`default_intra_ext_tx_cdf[1]` (EXT_TX_SET_DTT4_IDTX_1DDCT, 7-symbol) sliced to 8 slots.")
     emit("DEFAULT_EXT_TX_DTT4", [4, 13, 6], slice_set(2, 6),
          "`default_intra_ext_tx_cdf[2]` (EXT_TX_SET_DTT4_IDTX, 5-symbol) sliced to 6 slots.")
+
+    # --- inter ext-tx: full padded [4][4][17] table, C-faithful (no slicing).
+    # intrabc blocks are is_inter, so av1_read_tx_type selects their tx-type
+    # CDF from inter_ext_tx_cdf[eset][square_tx_size]; the reader codes each
+    # set's exact alphabet, leaving the padding slots untouched. Emitting the
+    # raw table keeps the byte-for-byte comparison against the compiled C
+    # fc->inter_ext_tx_cdf trivial (see shim_dump_default_inter_ext_tx).
+    d, f = extract(mode_c, "default_inter_ext_tx_cdf")
+    assert d == [4, 4, 17], d
+    emit("DEFAULT_INTER_EXT_TX", d, f,
+         "`default_inter_ext_tx_cdf[EXT_TX_SETS_INTER][EXT_TX_SIZES][CDF_SIZE(TX_TYPES)]`, "
+         "the full padded table (set 0 is DCT-only / all-zero; sets 1-3 fill their "
+         "alphabet's leading slots). Selected by (eset, square tx size) for intrabc tx-type.")
 
     # --- loop-restoration mode CDFs (single instances) ---
     d, f = extract(mode_c, "default_switchable_restore_cdf")

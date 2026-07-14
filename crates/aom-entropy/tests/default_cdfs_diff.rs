@@ -180,3 +180,45 @@ fn coeff_band_selection_matches_get_q_ctx() {
         assert_ne!(w[0], w[1]);
     }
 }
+
+/// `inter_ext_tx_cdf` is the intrabc tx-type CDF region. It is not part of the
+/// `shim_dump_default_kf_fc` KF dump (that stays append-only), so verify it
+/// against a dedicated dump of the real `av1_setup_past_independence`
+/// `fc->inter_ext_tx_cdf`. The table is qindex-independent
+/// (`av1_init_mode_probs`), so any band reproduces it — sweep a few anyway.
+#[test]
+fn default_inter_ext_tx_matches_compiled_c() {
+    for q in [0, 20, 21, 120, 121, 255] {
+        let fc = KfFrameContext::default_for_qindex(q);
+        // Row-major flatten matching the contiguous [4][4][17] C memcpy.
+        let rust: Vec<u16> = fc
+            .inter_ext_tx
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect();
+        let cd = c::ref_dump_default_inter_ext_tx(q);
+        assert_eq!(rust.len(), c::DUMP_INTER_EXT_TX_LEN, "dump length");
+        assert_eq!(rust.len(), cd.len(), "length parity");
+        if rust != cd {
+            let bad = rust.iter().zip(&cd).position(|(a, b)| a != b).unwrap();
+            let (set, sz, slot) = (bad / (4 * 17), (bad / 17) % 4, bad % 17);
+            panic!(
+                "q={q}: inter_ext_tx mismatch at set {set} sz {sz} slot {slot} \
+                 — rust {} vs C {}",
+                rust[bad], cd[bad]
+            );
+        }
+    }
+    // Non-vacuity: set 0 is DCT-only (all-zero), sets 1-3 are populated.
+    let fc = KfFrameContext::default_for_qindex(120);
+    assert!(
+        fc.inter_ext_tx[0].iter().flatten().all(|&x| x == 0),
+        "set 0 zero"
+    );
+    assert!(
+        fc.inter_ext_tx[1].iter().flatten().any(|&x| x != 0),
+        "set 1 nonzero"
+    );
+}

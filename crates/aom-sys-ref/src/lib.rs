@@ -10827,3 +10827,21 @@ pub fn ref_is_dv_valid(
     };
     rc != 0
 }
+
+extern "C" {
+    fn shim_dump_default_inter_ext_tx(base_qindex: i32, out: *mut u16) -> i32;
+}
+
+/// Length of the `inter_ext_tx_cdf[EXT_TX_SETS_INTER][EXT_TX_SIZES][CDF_SIZE(TX_TYPES)]`
+/// dump: 4 * 4 * 17 = 272 u16.
+pub const DUMP_INTER_EXT_TX_LEN: usize = 4 * 4 * 17;
+
+/// Dump the compiled default `fc->inter_ext_tx_cdf` (the full padded
+/// `[4][4][17]` table) from the REAL `av1_setup_past_independence` default
+/// frame context. Verifies aom-entropy's `DEFAULT_INTER_EXT_TX`.
+pub fn ref_dump_default_inter_ext_tx(base_qindex: i32) -> Vec<u16> {
+    let mut out = vec![0u16; DUMP_INTER_EXT_TX_LEN];
+    let rc = unsafe { shim_dump_default_inter_ext_tx(base_qindex, out.as_mut_ptr()) };
+    assert_eq!(rc, 0, "shim_dump_default_inter_ext_tx failed ({rc})");
+    out
+}

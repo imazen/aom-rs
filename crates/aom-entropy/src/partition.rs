@@ -5740,6 +5740,8 @@ const MAX_TX_CATS: usize = 4;
 const TX_SIZE_CONTEXTS: usize = 3;
 /// `EXT_TX_SIZES` (enums.h): square tx-size classes indexing the ext-tx CDFs.
 const EXT_TX_SIZES: usize = 4;
+/// `EXT_TX_SETS_INTER` (enums.h): inter (and intrabc) ext-tx selection sets.
+const EXT_TX_SETS_INTER: usize = 4;
 /// `BLOCK_SIZES_ALL` (enums.h).
 const BLOCK_SIZES_ALL: usize = 22;
 
@@ -5840,6 +5842,11 @@ pub struct KfFrameContext {
     /// filter-intra block, else the Y mode.
     pub ext_tx_1ddct: [[[u16; 8]; INTRA_MODES]; EXT_TX_SIZES],
     pub ext_tx_dtt4: [[[u16; 6]; INTRA_MODES]; EXT_TX_SIZES],
+    /// `inter_ext_tx_cdf[EXT_TX_SETS_INTER][EXT_TX_SIZES][CDF_SIZE(TX_TYPES)]`,
+    /// the full padded C table. Intrabc blocks (is_inter on KEY frames) select
+    /// their tx-type CDF here via `(eset, square tx size)`; each set codes its
+    /// exact alphabet, leaving the padding slots untouched.
+    pub inter_ext_tx: [[[u16; 17]; EXT_TX_SIZES]; EXT_TX_SETS_INTER],
     /// `switchable_restore_cdf` (3 symbols) — per-restoration-unit type in a
     /// `RESTORE_SWITCHABLE` frame (`loop_restoration_read_sb_coeffs`).
     pub switchable_restore: [u16; 4],
@@ -5886,6 +5893,7 @@ impl KfFrameContext {
             tx_size: [[[0; 4]; TX_SIZE_CONTEXTS]; MAX_TX_CATS],
             ext_tx_1ddct: [[[0; 8]; INTRA_MODES]; EXT_TX_SIZES],
             ext_tx_dtt4: [[[0; 6]; INTRA_MODES]; EXT_TX_SIZES],
+            inter_ext_tx: [[[0; 17]; EXT_TX_SIZES]; EXT_TX_SETS_INTER],
             switchable_restore: [0; 4],
             wiener_restore: [0; 3],
             sgrproj_restore: [0; 3],
@@ -5928,6 +5936,7 @@ impl KfFrameContext {
             tx_size: d::DEFAULT_TX_SIZE,
             ext_tx_1ddct: d::DEFAULT_EXT_TX_1DDCT,
             ext_tx_dtt4: d::DEFAULT_EXT_TX_DTT4,
+            inter_ext_tx: d::DEFAULT_INTER_EXT_TX,
             switchable_restore: d::DEFAULT_SWITCHABLE_RESTORE,
             wiener_restore: d::DEFAULT_WIENER_RESTORE,
             sgrproj_restore: d::DEFAULT_SGRPROJ_RESTORE,
