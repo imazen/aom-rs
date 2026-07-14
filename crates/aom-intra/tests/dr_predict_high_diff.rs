@@ -42,7 +42,7 @@ fn valid_angle(angle: i32) -> bool {
 
 #[test]
 fn dr_predict_high_matches_c() {
-    let mut rng = Rng(0x_c0ffee_dd_1234_99);
+    let mut rng = Rng(0xc0ff_eedd_1234_9990);
     let mut checks = 0u64;
     let mut saw_v = false;
     let mut saw_h = false;

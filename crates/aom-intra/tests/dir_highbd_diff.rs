@@ -32,7 +32,7 @@ fn edges(rng: &mut Rng, bw: usize, bh: usize, bd: i32) -> Vec<u16> {
 
 #[test]
 fn highbd_dr_predictors_identical() {
-    let mut rng = Rng(0x_d1_dec_71_04a1_1c37);
+    let mut rng = Rng(0xd1de_c710_4a11_c370);
     let mut checks = 0u64;
     for &bd in &[8i32, 10, 12] {
         for &(bw, bh) in SIZES.iter() {

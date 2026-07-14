@@ -27,7 +27,7 @@ impl Rng {
 
 #[test]
 fn filter_intra_matches_c() {
-    let mut rng = Rng(0x_f117e_a1a_9931);
+    let mut rng = Rng(0xf117_ea1a_9931_0000);
     let mut checks = 0u64;
     for &bd in &[8i32, 10, 12] {
         for tx_size in 0..19usize {

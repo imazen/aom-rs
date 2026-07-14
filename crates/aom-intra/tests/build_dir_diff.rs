@@ -70,7 +70,7 @@ fn check(
 
 #[test]
 fn build_directional_matches_c() {
-    let mut rng = Rng(0x_d15ec7_104a1_77b);
+    let mut rng = Rng(0xd15e_c710_4a17_7bad);
     for &bd in &[8i32, 10, 12] {
         let recon: Vec<u16> = (0..STRIDE * ROWS).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
         for tx_size in 0..19usize {

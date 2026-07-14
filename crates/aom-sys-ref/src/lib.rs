@@ -2164,6 +2164,24 @@ extern "C" {
     );
 }
 
+/// Reference highbd intra prediction dispatch (`av1_predict_intra_block` routing,
+/// minus palette / CfL): pick the predictor family, derive `p_angle` for
+/// directional modes, and build. `recon[ref_off]` is the block top-left. Returns
+/// the `txw*txh` block (row stride `txw`).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_hbd_predict_intra(
+    recon: &[u16], ref_off: usize, ref_stride: usize, mode: usize, angle_delta: i32, use_filter_intra: bool, filter_intra_mode: usize, disable_edge_filter: bool, filt_type: i32, tx_size: usize, txw: usize, txh: usize, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; txw * txh];
+    unsafe {
+        shim_hbd_predict_intra(
+            recon.as_ptr().add(ref_off), ref_stride as i32, mode as i32, angle_delta, use_filter_intra as i32, filter_intra_mode as i32, disable_edge_filter as i32, filt_type, tx_size as i32,
+            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, bd, dst.as_mut_ptr(), txw as i32,
+        )
+    }
+    dst
+}
+
 /// Reference highbd filter-intra predictor (`highbd_filter_intra_predictor`).
 /// `above` is a `[-1..]` view (index 0 the corner), `left` is `left[0..bh]`;
 /// `mode` is the `FILTER_INTRA_MODE`. Returns the `bw*bh` block (row stride `bw`).
@@ -2299,6 +2317,9 @@ extern "C" {
     );
     fn shim_hbd_filter_intra_predict(
         dst: *mut u16, stride: isize, tx_size: i32, above: *const u16, left: *const u16, mode: i32, bd: i32,
+    );
+    fn shim_hbd_predict_intra(
+        r: *const u16, ref_stride: i32, mode: i32, angle_delta: i32, use_filter_intra: i32, filter_intra_mode: i32, disable_edge_filter: i32, filt_type: i32, tx_size: i32, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32, dst: *mut u16, dst_stride: i32,
     );
 }
 

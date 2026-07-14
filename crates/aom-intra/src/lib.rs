@@ -820,6 +820,62 @@ pub fn build_directional_intra_high(
     );
 }
 
+/// `mode_to_angle_map[INTRA_MODES]` (reconintra.h): the base prediction angle per
+/// intra mode (0 for the non-directional modes). Directional modes are V/H and
+/// D45..D67 (`av1_is_directional_mode`: `V_PRED..=D67_PRED`, i.e. 1..=8).
+const MODE_TO_ANGLE: [i32; 13] = [0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0];
+
+/// Highbd intra prediction dispatch — the mode routing of `av1_predict_intra_block`
+/// (reconintra.c), minus palette and chroma-from-luma. Selects the predictor
+/// family and, for a directional mode, derives `p_angle = mode_to_angle_map[mode]
+/// + angle_delta` (the caller pre-scales `angle_delta` by `ANGLE_STEP`, as
+/// `av1_predict_intra_block` does), then calls the matching builder —
+/// [`build_filter_intra_high`], [`build_non_directional_intra_high`], or
+/// [`build_directional_intra_high`].
+///
+/// This is the per-block predict step the decode reconstruction driver invokes;
+/// the driver computes the neighbour-availability counts (`n_top_px`,
+/// `n_topright_px`, `n_left_px`, `n_bottomleft_px`) and passes them as arguments.
+#[allow(clippy::too_many_arguments)]
+pub fn predict_intra_high(
+    recon: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    dst: &mut [u16],
+    dst_stride: usize,
+    mode: usize,
+    angle_delta: i32,
+    use_filter_intra: bool,
+    filter_intra_mode: usize,
+    disable_edge_filter: bool,
+    filter_type: i32,
+    tx_size: usize,
+    n_top_px: usize,
+    n_topright_px: i32,
+    n_left_px: usize,
+    n_bottomleft_px: i32,
+    bd: i32,
+) {
+    let is_dr = (1..=8).contains(&mode); // V_PRED..=D67_PRED
+    if use_filter_intra {
+        build_filter_intra_high(
+            recon, ref_off, ref_stride, dst, dst_stride, filter_intra_mode, tx_size, n_top_px,
+            n_topright_px, n_left_px, n_bottomleft_px, bd,
+        );
+    } else if !is_dr {
+        // Non-directional (DC / SMOOTH* / PAETH): above/left only, no extension.
+        build_non_directional_intra_high(
+            recon, ref_off, ref_stride, dst, dst_stride, mode, tx_size, n_top_px, n_left_px, bd,
+        );
+    } else {
+        let p_angle = MODE_TO_ANGLE[mode] + angle_delta;
+        build_directional_intra_high(
+            recon, ref_off, ref_stride, dst, dst_stride, p_angle, disable_edge_filter, filter_type,
+            tx_size, n_top_px, n_topright_px, n_left_px, n_bottomleft_px, bd,
+        );
+    }
+}
+
 /// Build the intra prediction for the filter-intra mode into `dst` — the
 /// `use_filter_intra` branch of libaom's directional-and-filter builder
 /// (reconintra.c): assemble the reference edges (above / left / corner all

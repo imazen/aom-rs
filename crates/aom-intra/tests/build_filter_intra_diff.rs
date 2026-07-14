@@ -29,7 +29,7 @@ const COL0: usize = 4;
 
 #[test]
 fn build_filter_intra_matches_c() {
-    let mut rng = Rng(0x_f117e_b0114e_3);
+    let mut rng = Rng(0xf117_eb01_14e3_0000);
     let ref_off = ROW0 * STRIDE + COL0;
     for &bd in &[8i32, 10, 12] {
         let recon: Vec<u16> = (0..STRIDE * ROWS).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();

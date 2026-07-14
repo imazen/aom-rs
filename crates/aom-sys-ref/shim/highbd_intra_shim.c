@@ -667,3 +667,28 @@ void shim_hbd_filter_intra_predict(uint16_t *dst, ptrdiff_t stride, int tx_size,
   for (int r = 0; r < bh; ++r)
     for (int c = 0; c < bw; ++c) dst[r * stride + c] = buffer[r + 1][c + 1];
 }
+
+/* ---- highbd intra prediction dispatch (av1_predict_intra_block routing) -----
+ * Transcription of av1_predict_intra_block's mode routing (reconintra.c), minus
+ * palette / CfL: pick the predictor family and derive p_angle for directional
+ * modes, then call the matching builder shim above. */
+void shim_hbd_predict_intra(const uint16_t *ref, int ref_stride, int mode,
+                            int angle_delta, int use_filter_intra,
+                            int filter_intra_mode, int disable_edge_filter,
+                            int filt_type, int tx_size, int n_top_px,
+                            int n_topright_px, int n_left_px, int n_bottomleft_px,
+                            int bd, uint16_t *dst, int dst_stride) {
+  static const int mode_to_angle[13] = { 0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0 };
+  const int is_dr = (mode >= 1 && mode <= 8); /* V_PRED..D67_PRED */
+  if (use_filter_intra) {
+    shim_hbd_build_dir_intra(ref, ref_stride, 90, 0, 0, tx_size, n_top_px, n_topright_px,
+                             n_left_px, n_bottomleft_px, 1, filter_intra_mode, bd, dst, dst_stride);
+  } else if (!is_dr) {
+    shim_hbd_build_nd_intra(ref, ref_stride, mode, tx_size, n_top_px, n_left_px, bd, dst, dst_stride);
+  } else {
+    int p_angle = mode_to_angle[mode] + angle_delta;
+    shim_hbd_build_dir_intra(ref, ref_stride, p_angle, disable_edge_filter, filt_type, tx_size,
+                             n_top_px, n_topright_px, n_left_px, n_bottomleft_px, 0, 0, bd, dst,
+                             dst_stride);
+  }
+}
