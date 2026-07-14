@@ -529,7 +529,7 @@ pub const DEFAULT_NMV_COMPS: [[u16; 69]; 2] = [
 ];
 
 /// The four TOKEN_CDF_Q_CTXS coefficient-CDF bands (qindex <=20 / <=60 / <=120 / >120), each pre-packed into aom-txb's 4045-u16 arena layout.
-pub const DEFAULT_COEFF_ARENA: [[u16; 4045]; 4] = [
+pub static DEFAULT_COEFF_ARENA: [[u16; 4045]; 4] = [
     [
         919, 0, 0, 26876, 0, 0, 20656, 0, 0, 10833, 0, 0, 12479, 0, 0, 5295, 0, 0, 281, 0, 0,
         25114, 0, 0, 13295, 0, 0, 2784, 0, 0, 22807, 0, 0, 2526, 0, 0, 651, 0, 0, 1220, 0, 0,

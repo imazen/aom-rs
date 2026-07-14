@@ -377,6 +377,25 @@ libaom; FFI is inherently unsafe and is isolated there).
 6. **Decoder conformance corpus run** (gate 1) — wire the AV1 conformance vectors +
    libaom decode tests through the ported decoder path.
 
+## Real-bitstream decode milestone (2026-07-14, decoder track)
+
+**First real-bitstream decode landed** (b8d79b2): `aom_decode::frame::decode_frame_obus`
+parses full temporal units (OBU walk + all headers via aom-entropy readers) and drives
+the KEY-frame tile decoder from `KfFrameContext::default_for_qindex` (b11e00c — libaom's
+default CDF tables generated from source, byte-identical to the compiled
+`av1_setup_past_independence` across all 4 coeff-CDF qindex bands). Gate-1-shaped test
+(`aom-decode/tests/real_bitstream.rs`): **56 bitstreams from the REAL libaom v3.14.1
+encoder** (`aom_codec_av1_cx` public API = the aomenc path, `--cpu-used=0 --end-usage=q`)
+decode **byte-identical on all planes vs the REAL C decoder** (`aom_codec_av1_dx`).
+Envelope (hard-errors outside it, never mis-decodes): one shown KEY frame, sb64,
+single tile, no CDEF/restoration/film-grain/superres/screen-content/qm/segmentation/
+lossless, `disable_cdf_update` off, loop-filter levels 0 (verified per stream from our
+own parse; cq grid probed 2026-07-14). Covered: 64x64 / 96x80 / 100x76 (8px-aligned mi
+crop), 4:2:0 + 4:4:4 + monochrome, bd 8 + 10, q 8..144 (all four TOKEN_CDF bands),
+TX_MODE_SELECT live. Deferred-shim backlog closed the same session: CfL kernels +
+tx-size/chroma facades now diffed DIRECTLY vs C (dec_shim.c), shared-misread risk
+retired.
+
 ## Perf gate honest number
 
 Like-for-like vs C's production AVX2 (`aom_sad64x64_avx2`): Rust AVX2 SAD is

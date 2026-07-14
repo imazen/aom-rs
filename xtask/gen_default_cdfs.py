@@ -11,7 +11,7 @@ av1_setup_past_independence) in crates/aom-entropy/tests/default_cdfs_diff.rs â€
 that closes the loop over this parse, the Rust struct mapping, and the aom-txb
 arena packing.
 
-Usage: python3 xtask/gen_default_cdfs.py  (from the repo root)
+Usage: python3 xtask/gen_default_cdfs.py && cargo fmt -p aom-entropy  (repo root)
 """
 
 import re
@@ -186,7 +186,9 @@ def main():
 
     def emit(rust_name, dims, flat, doc):
         out.append(f"/// {doc}")
-        out.append(f"pub const {rust_name}: {rust_type(dims)} = {rust_array(flat, dims)};")
+        # clippy::large_const_arrays: big tables become statics.
+        kw = "static" if len(flat) > 512 else "const"
+        out.append(f"pub {kw} {rust_name}: {rust_type(dims)} = {rust_array(flat, dims)};")
         out.append("")
 
     # --- mode tables, exact-sized ---
