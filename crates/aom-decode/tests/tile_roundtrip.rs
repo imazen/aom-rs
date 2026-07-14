@@ -1685,6 +1685,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         delta_lf_multi: case.dlf.is_some_and(|(m, _)| m),
         delta_lf_res: case.dlf.map_or(1, |(_, r)| r),
         lr: Default::default(),
+        seg: Default::default(),
     };
     let aligned_cols = (cfg.mi_cols as usize).div_ceil(16) * 16;
     let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;

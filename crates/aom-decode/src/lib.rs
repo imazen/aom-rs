@@ -87,7 +87,18 @@
 //!   TILE decoder itself does not filter (like C), but `frame.rs`'s
 //!   deblock stage reads `delta_lf_from_base`/`delta_lf[]` from the block
 //!   records when it filters the frame.
-//! - **Off / fixed in this cut**: segmentation, palette, intra block copy,
+//! - **Segmentation ([`KfTileConfig::seg`])**: per-block segment ids are
+//!   decoded exactly as `read_intra_segment_id` (pre- or post-skip by
+//!   `segid_preskip`; a post-skip skipped block takes the spatial
+//!   prediction), with the spatial-pred context over a current-frame
+//!   segment-id map (`av1_get_spatial_seg_pred`, stamped per block like
+//!   `set_segment_id`); `SEG_LVL_ALT_Q` shifts each coded block's dequant
+//!   through `av1_get_qindex` (composing with the delta-q carry exactly as
+//!   `parse_decode_block` recomputes `seg_dequant_QTX`), and the tx-type
+//!   signalling gate reads the per-segment frame-level qindex. `SEG_LVL_SKIP`
+//!   forces the skip flag. Lossless SEGMENTS (`xd->lossless[i]`, forced
+//!   TX_4X4 + WHT) are out of scope and asserted away.
+//! - **Off / fixed in this cut**: palette, intra block copy,
 //!   quantization matrices (flat dequant), superblock size 64x64 (no
 //!   128x128), CDF update always on (`disable_cdf_update` unsupported — the
 //!   mode-symbol readers adapt unconditionally), and no in-tile loop
@@ -119,11 +130,14 @@ use aom_entropy::partition::{
     bsize_to_tx_size_cat, depth_to_tx_size, get_partition_subsize, get_plane_block_size,
     get_tx_size_context, get_uv_mode, intra_avail, is_cfl_allowed, partition_cdf_length,
     partition_plane_context, read_mb_modes_kf_fc, read_partition, read_selected_tx_size,
-    set_txfm_ctxs, tx_size_from_tx_mode, update_ext_partition_context,
+    set_txfm_ctxs, spatial_seg_pred, tx_size_from_tx_mode, update_ext_partition_context,
 };
 use aom_intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_intra::predict_intra_high;
-use aom_quant::{av1_ac_quant_qtx, av1_dc_quant_qtx};
+use aom_quant::{
+    MAX_SEGMENTS, SEG_LVL_MAX, SEG_LVL_SKIP, Segmentation, av1_ac_quant_qtx, av1_dc_quant_qtx,
+    av1_get_qindex,
+};
 use aom_txb::{
     ext_tx_derive, get_txb_ctx, read_coeffs_txb_full, txb_entropy_context, txb_high, txb_wide,
 };
@@ -337,13 +351,13 @@ pub struct KfTileConfig {
     pub tx_mode: TxMode,
     /// `features.reduced_tx_set_used`.
     pub reduced_tx_set: bool,
-    /// `quant_params.base_qindex` (the frame base; segmentation is off so
-    /// there is one frame qindex). Also the tx-type signalling gate:
-    /// `av1_read_tx_type` codes tx types only when `xd->qindex[segment_id]`
-    /// — the FRAME-level qindex, not the delta-q-modified carry — is
-    /// non-zero. `base_qindex == 0` with all plane deltas zero would be
-    /// `coded_lossless` in C (a different decode path, out of scope): give a
-    /// zero-base config a non-zero plane delta.
+    /// `quant_params.base_qindex` (the frame base; a block's effective
+    /// qindex is `av1_get_qindex(seg, segment_id, base_or_carry)`). Also the
+    /// tx-type signalling gate: `av1_read_tx_type` codes tx types only when
+    /// `xd->qindex[segment_id]` — the per-segment FRAME-level qindex, not
+    /// the delta-q-modified carry — is non-zero. `base_qindex == 0` with all
+    /// plane deltas zero would be `coded_lossless` in C (a different decode
+    /// path, out of scope): give a zero-base config a non-zero plane delta.
     pub base_qindex: i32,
     /// `quant_params.y_dc_delta_q` / `u_dc_delta_q` / `u_ac_delta_q` /
     /// `v_dc_delta_q` / `v_ac_delta_q` (read_quantization; each in
@@ -369,15 +383,47 @@ pub struct KfTileConfig {
     /// the unit grid. Default (all `RESTORE_NONE`) codes no RU params —
     /// the pre-restoration tile syntax is unchanged.
     pub lr: aom_entropy::lr::LrFrameConfig,
+    /// `cm->seg` — the frame's segmentation state (`read_segmentation`, the
+    /// KEY-frame form: when enabled, `update_map`/`update_data` are forced on
+    /// and `temporal_update` off). When enabled, per-block segment ids are
+    /// coded in the tile (the spatial-pred symbol / spatial prediction on
+    /// skip), `SEG_LVL_ALT_Q` shifts each block's dequant qindex
+    /// (`av1_get_qindex`), and `SEG_LVL_SKIP` forces the block skip flag.
+    /// No segment may be LOSSLESS (effective qindex 0 with all plane deltas
+    /// zero — `xd->lossless[i]`): that switches the C per-block transform
+    /// path (forced TX_4X4 + WHT), which is out of scope (asserted).
+    pub seg: Segmentation,
+}
+
+/// `av1_calculate_segdata` (av1/common/seg_common.c) — the derived
+/// segmentation facts: `segid_preskip` (any active feature `>=
+/// SEG_LVL_REF_FRAME` — the id must be read before the skip flag) and
+/// `last_active_segid` (the highest segment with any active feature, the
+/// segment-id alphabet bound).
+pub fn calculate_segdata(seg: &Segmentation) -> (bool, i32) {
+    /// `SEG_LVL_REF_FRAME` (seg_common.h).
+    const SEG_LVL_REF_FRAME: usize = 5;
+    let mut segid_preskip = false;
+    let mut last_active_segid = 0i32;
+    for i in 0..MAX_SEGMENTS {
+        for j in 0..SEG_LVL_MAX {
+            if seg.feature_mask[i] & (1 << j) != 0 {
+                segid_preskip |= j >= SEG_LVL_REF_FRAME;
+                last_active_segid = i as i32;
+            }
+        }
+    }
+    (segid_preskip, last_active_segid)
 }
 
 /// The per-plane `[dc, ac]` dequant steps for an effective qindex — the shared
 /// formula of `setup_segmentation_dequant` (frame level, decodeframe.c) and
 /// the per-block delta-q recompute in `parse_decode_block`: per plane the
 /// frame's dc/ac deltas fold in via `av1_{dc,ac}_quant_QTX` (which clamp
-/// `qindex + delta` to `[0, MAXQ]`); Y's AC delta is always 0. Segmentation is
-/// off in this scope, so this is the `segment_id = 0` row of
-/// `seg_dequant_QTX` (`av1_get_qindex` is the identity without `SEG_LVL_ALT_Q`).
+/// `qindex + delta` to `[0, MAXQ]`); Y's AC delta is always 0. `qindex` is the
+/// block's EFFECTIVE index — `av1_get_qindex(seg, segment_id, base_or_carry)`,
+/// i.e. one row of the C's per-segment `seg_dequant_QTX` table (the identity
+/// row without `SEG_LVL_ALT_Q`).
 pub fn plane_dequants(cfg: &KfTileConfig, qindex: i32) -> [[i16; 2]; 3] {
     let bd = cfg.bd as u8;
     [
@@ -535,6 +581,13 @@ struct TileKf<'c> {
     /// (the C `read_intra_frame_mode_info` else-branch), but the chroma
     /// neighbour pointers only ever land on chroma-reference cells.
     mi_uv: Vec<i8>,
+    /// The CURRENT frame's segment-id map (`cm->cur_frame->seg_map`,
+    /// mi_rows x mi_cols): each block stamps its resolved segment id over its
+    /// frame-cropped footprint (`set_segment_id`, decodemv.c), and the next
+    /// blocks' spatial predictions (`av1_get_spatial_seg_pred`) read their
+    /// up-left/up/left cells — always already-decoded positions. Zeroed like
+    /// the C's freshly-allocated map; untouched when segmentation is off.
+    seg_map: Vec<u8>,
     /// The CfL luma store (one per tile, like `xd->cfl`): sub-8x8 members of a
     /// shared-chroma group accumulate into it across blocks.
     cfl: CflCtx,
@@ -580,6 +633,27 @@ impl<'c> TileKf<'c> {
                 "subsampled axes require even mi dimensions"
             );
         }
+        // Derived segmentation facts (av1_calculate_segdata) + the per-segment
+        // SEG_LVL_SKIP mask the skip read resolves against.
+        let (segid_preskip, last_active_segid) = calculate_segdata(&cfg.seg);
+        let seg_skip_feature: [bool; MAX_SEGMENTS] =
+            std::array::from_fn(|i| cfg.seg.feature_mask[i] & (1 << SEG_LVL_SKIP) != 0);
+        if cfg.seg.enabled {
+            // xd->lossless[i] (decodeframe.c:5166): a lossless SEGMENT flips
+            // the per-block transform path (read_tx_size -> TX_4X4 + WHT),
+            // out of scope. Only ids 0..=last_active_segid are decodable.
+            for i in 0..=last_active_segid as usize {
+                assert!(
+                    av1_get_qindex(&cfg.seg, i, cfg.base_qindex) != 0
+                        || cfg.y_dc_delta_q != 0
+                        || cfg.u_dc_delta_q != 0
+                        || cfg.u_ac_delta_q != 0
+                        || cfg.v_dc_delta_q != 0
+                        || cfg.v_ac_delta_q != 0,
+                    "segment {i} is lossless (effective qindex 0) — out of scope"
+                );
+            }
+        }
         let aligned_mi_cols = (cfg.mi_cols as usize).div_ceil(SB_MI as usize) * SB_MI as usize;
         let aligned_mi_rows = (cfg.mi_rows as usize).div_ceil(SB_MI as usize) * SB_MI as usize;
         let stride = aligned_mi_cols * 4;
@@ -590,13 +664,15 @@ impl<'c> TileKf<'c> {
             stride_uv * ((aligned_mi_rows * 4) >> ss_y)
         };
         let st = KfBlockState {
-            segid_preskip: false,
-            seg_enabled: false,
-            update_map: false,
+            segid_preskip,
+            seg_enabled: cfg.seg.enabled,
+            // KEY frames force update_map = 1 when segmentation is enabled
+            // (setup_segmentation's PRIMARY_REF_NONE arm).
+            update_map: cfg.seg.enabled,
             seg_pred: 0,
             seg_cdf_num: 0,
-            last_active_segid: 0,
-            seg_skip_feature: [false; 8],
+            last_active_segid,
+            seg_skip_feature,
             mi_row: 0,
             mi_col: 0,
             mib_size: SB_MI,
@@ -655,6 +731,7 @@ impl<'c> TileKf<'c> {
                 (cfg.mi_rows * cfg.mi_cols) as usize
             ],
             mi_uv: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
+            seg_map: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
             cfl: CflCtx::new(ss_x as i32, ss_y as i32),
             // setup_segmentation_dequant: the frame-level dequant rows from
             // base_qindex (the live values until a per-block recompute).
@@ -777,6 +854,20 @@ impl<'c> TileKf<'c> {
         self.st.mb_to_top_edge = -(mi_row * 32);
         self.st.has_above = up_available;
         self.st.has_left = left_available;
+        // read_intra_segment_id's spatial prediction (av1_get_spatial_seg_pred,
+        // step 1): the up-left/up/left cells of the CURRENT frame's segment-id
+        // map — always positions already decoded and stamped by this walk.
+        if cfg.seg.enabled {
+            let cols = cfg.mi_cols;
+            let cell = |r: i32, c: i32| self.seg_map[(r * cols + c) as usize];
+            let (pred, cdf_num) = spatial_seg_pred(
+                (up_available && left_available).then(|| cell(mi_row - 1, mi_col - 1)),
+                up_available.then(|| cell(mi_row - 1, mi_col)),
+                left_available.then(|| cell(mi_row, mi_col - 1)),
+            );
+            self.st.seg_pred = pred;
+            self.st.seg_cdf_num = cdf_num;
+        }
         let info = read_mb_modes_kf_fc(
             dec,
             cdfs,
@@ -785,16 +876,29 @@ impl<'c> TileKf<'c> {
             above,
             left,
         );
+        // set_segment_id (read_intra_segment_id, decodemv.c): stamp the
+        // block's resolved id over its frame-cropped mi footprint. The C
+        // stamps between the segment read and the rest of the mode info;
+        // nothing in between reads the map, so stamping here is equivalent.
+        if cfg.seg.enabled {
+            let x_mis = MI_SIZE_WIDE[bsize].min(cfg.mi_cols - mi_col);
+            let y_mis = MI_SIZE_HIGH[bsize].min(cfg.mi_rows - mi_row);
+            for r in 0..y_mis {
+                let base = ((mi_row + r) * cfg.mi_cols + mi_col) as usize;
+                self.seg_map[base..base + x_mis as usize].fill(info.segment_id as u8);
+            }
+        }
 
         // --- parse_decode_block: the block's transform size (read_tx_size) +
         // txfm-context stamp, in the C statement order (after the mode info /
         // palette tokens, before the skip entropy reset) ---
         let bw = MI_SIZE_WIDE[bsize] as usize;
         let bh = MI_SIZE_HIGH[bsize] as usize;
-        // read_tx_size (decodeframe.c), intra: coded_lossless (TX_4X4
-        // preemption) is off in this scope; a signalling block (bsize >
-        // BLOCK_4X4) under TX_MODE_SELECT codes its tx-size depth — intra
-        // blocks code it even when skip_txfm is set (`!is_inter ||
+        // read_tx_size (decodeframe.c), intra: the xd->lossless[segment_id]
+        // TX_4X4 preemption is off in this scope (coded_lossless rejected;
+        // lossless SEGMENTS asserted away in TileKf::new); a signalling block
+        // (bsize > BLOCK_4X4) under TX_MODE_SELECT codes its tx-size depth —
+        // intra blocks code it even when skip_txfm is set (`!is_inter ||
         // allow_select_inter` is true for intra) — else the tx_mode fallback.
         let tx_size = if bsize > 0 {
             // block_signals_txsize
@@ -837,13 +941,24 @@ impl<'c> TileKf<'c> {
         // parse_decode_block (decodeframe.c): with delta-q present, every
         // block's dequant is recomputed from the running current_base_qindex
         // (already advanced by this block's SB-level delta read inside the
-        // mode-info decode — mbmi->current_qindex == the carry). C refills
-        // all MAX_SEGMENTS rows; segmentation is off here, so only the
-        // segment-0 row is live. The per-plane dc/ac deltas fold in through
-        // av1_{dc,ac}_quant_QTX.
-        if cfg.delta_q_present {
-            debug_assert_eq!(self.st.current_base_qindex, info.current_qindex);
-            self.dequants = plane_dequants(cfg, self.st.current_base_qindex);
+        // mode-info decode — mbmi->current_qindex == the carry); the C
+        // refills all MAX_SEGMENTS seg_dequant_QTX rows via
+        // av1_get_qindex(seg, i, carry) and the txb read consumes row
+        // [mbmi->segment_id] — computed here directly for the block's
+        // segment. Without delta-q the frame-level rows come from
+        // setup_segmentation_dequant (xd->qindex[i] = av1_get_qindex(seg, i,
+        // base_qindex)) — the same formula on the never-moved carry. The
+        // per-plane dc/ac deltas fold in through av1_{dc,ac}_quant_QTX.
+        if cfg.delta_q_present || cfg.seg.enabled {
+            debug_assert!(
+                !cfg.delta_q_present || self.st.current_base_qindex == info.current_qindex
+            );
+            let eff_qindex = av1_get_qindex(
+                &cfg.seg,
+                info.segment_id as usize,
+                self.st.current_base_qindex,
+            );
+            self.dequants = plane_dequants(cfg, eff_qindex);
         }
 
         // The chroma-side geometry (used by the skip reset, the chroma txb
@@ -899,10 +1014,13 @@ impl<'c> TileKf<'c> {
             m.is_some_and(|n| (SMOOTH_PRED..=SMOOTH_H_PRED).contains(&n.y_mode))
         };
         let filt_type = (is_smooth(above) || is_smooth(left)) as i32;
-        // av1_read_tx_type gate: !skip_txfm && !seg-skip && qindex > 0 —
-        // xd->qindex[segment_id], the FRAME-level qindex (not the delta-q
-        // carry), so the gate is frame-constant with segmentation off.
-        let signal_gate = cfg.base_qindex > 0 && info.skip == 0;
+        // av1_read_tx_type gate: !skip_txfm && !seg-SKIP && qindex > 0 —
+        // xd->qindex[segment_id] = av1_get_qindex over the FRAME base qindex
+        // (decodeframe.c:5165, NOT the delta-q carry). skip == 0 already
+        // implies the segment's SEG_LVL_SKIP feature is inactive (read_skip
+        // returns a forced 1 when it is active).
+        let signal_gate = info.skip == 0
+            && av1_get_qindex(&cfg.seg, info.segment_id as usize, cfg.base_qindex) > 0;
         let area = txb_wide(tx_size) * txb_high(tx_size);
         let mut tcoeff = vec![0i32; area];
         let mut scratch = vec![0u16; txwpx * txhpx];

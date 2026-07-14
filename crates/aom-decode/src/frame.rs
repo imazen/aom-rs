@@ -31,7 +31,16 @@
 //!   `max_txsize_rect_lookup[BLOCK_INVALID]` out of bounds for tall blocks
 //!   at `ss = (1,0)` (av1_ss_size_lookup, common_data.c:17), which is not
 //!   portable behavior. 4:2:2 luma-only deblocking is in the envelope.
-//! - no segmentation, no quantization matrices, not (coded-)lossless.
+//! - segmentation IS in the envelope: per-block segment ids (spatial-pred
+//!   symbols over the current-frame segment map), `SEG_LVL_ALT_Q` per-block
+//!   dequant shifts (composing with delta-q), `SEG_LVL_SKIP` forced skips,
+//!   and `SEG_LVL_ALT_LF_*` loop-filter level deltas (threaded into the
+//!   deblock stage's per-segment level derivation). LOSSLESS SEGMENTS
+//!   (`xd->lossless[i]` — effective qindex 0 with all plane deltas zero,
+//!   which flips the block transform path to forced TX_4X4 + WHT) are
+//!   rejected; the C encoder never emits them (av1_vaq_frame_setup clamps
+//!   `base + delta` to >= 1).
+//! - no quantization matrices, not (coded-)lossless.
 //! - `disable_cdf_update` off (the driver always adapts).
 //! - delta-q / delta-lf ARE in the envelope (per-block dequant recompute).
 //!
@@ -50,6 +59,7 @@ use aom_entropy::leb128::uleb_decode;
 use aom_entropy::obu::read_obu_header;
 use aom_entropy::partition::{KfFrameContext, TxMode};
 use aom_entropy::rb::ReadBitBuffer;
+use aom_quant::av1_get_qindex;
 
 /// aom-txb's `CDF_ARENA_LEN` (the coefficient region length
 /// `KfFrameContext::default_for_qindex` fills).
@@ -86,6 +96,13 @@ pub struct FrameDecode {
     pub tx_mode_select: bool,
     pub reduced_tx_set: bool,
     pub delta_q_present: bool,
+    /// Segmentation as coded: when enabled, per-block segment ids were
+    /// decoded, `SEG_LVL_ALT_Q` shifted the per-block dequant, and
+    /// `SEG_LVL_ALT_LF_*` deltas fed the deblock level derivation.
+    /// `seg_last_active_segid` is `av1_calculate_segdata`'s highest segment
+    /// with any active feature (the coded id alphabet bound).
+    pub seg_enabled: bool,
+    pub seg_last_active_segid: i32,
     /// Per-plane `frame_restoration_type` as coded (`RESTORE_*`); loop
     /// restoration was applied when any is non-NONE.
     pub lr_frame_restoration_type: [u8; 3],
@@ -138,6 +155,23 @@ fn tile_limits(mi_cols: i32, mi_rows: i32, mib_size_log2: u32) -> TileInfoHeader
 /// `set_mb_mi` (av1/common/alloccommon.c): frame mi dims, 8-pixel aligned.
 fn mi_dim(px: i32) -> i32 {
     ((px + 7) & !7) >> 2
+}
+
+/// Bridge the parsed segmentation frame header into the quantizer-layer
+/// `cm->seg` shape ([`aom_quant::Segmentation`]) the block layer consumes.
+/// Feature data is post-clamp (`|data| <= 255`), so the i16 narrowing is exact.
+fn bridge_segmentation(h: &aom_entropy::header::SegmentationHeader) -> aom_quant::Segmentation {
+    let mut feature_data = [[0i16; aom_quant::SEG_LVL_MAX]; aom_quant::MAX_SEGMENTS];
+    for (dst, src) in feature_data.iter_mut().zip(h.feature_data.iter()) {
+        for (d, s) in dst.iter_mut().zip(src.iter()) {
+            *d = *s as i16;
+        }
+    }
+    aom_quant::Segmentation {
+        enabled: h.enabled,
+        feature_mask: h.feature_mask,
+        feature_data,
+    }
 }
 
 /// KF `av1_setup_past_independence` loop-filter delta defaults
@@ -279,7 +313,30 @@ fn parse_frame_header(
         return Err("(coded-)lossless stream".into());
     }
     if p.segmentation.enabled {
-        return Err("segmentation".into());
+        // KEY frame, no primary ref: the parse forces map+data updates on and
+        // temporal prediction off (setup_segmentation's PRIMARY_REF_NONE arm).
+        debug_assert!(
+            p.segmentation.update_map
+                && p.segmentation.update_data
+                && !p.segmentation.temporal_update
+        );
+        // xd->lossless[i] (decodeframe.c:5166): a lossless SEGMENT switches
+        // the block transform path (forced TX_4X4 + WHT) — out of envelope.
+        // Only ids 0..=last_active_segid are decodable (read_segment_id
+        // bounds the alphabet), so only those rows gate.
+        let seg = bridge_segmentation(&p.segmentation);
+        let (_, last_active) = crate::calculate_segdata(&seg);
+        for i in 0..=last_active as usize {
+            if av1_get_qindex(&seg, i, q.base_qindex) == 0
+                && q.y_dc_delta_q == 0
+                && q.u_dc_delta_q == 0
+                && q.u_ac_delta_q == 0
+                && q.v_dc_delta_q == 0
+                && q.v_ac_delta_q == 0
+            {
+                return Err(format!("lossless segment {i} (forced-WHT path)"));
+            }
+        }
     }
     let lf = &p.loopfilter;
     if c.subsampling_x == 1
@@ -530,6 +587,7 @@ fn decode_tile_payload(
             crop_width: p.frame_size.superres_upscaled_width,
             crop_height: p.frame_size.superres_upscaled_height,
         },
+        seg: bridge_segmentation(&p.segmentation),
     };
     let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
     let mut dec = OdEcDec::new(tile_data);
@@ -590,6 +648,8 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
         tx_mode_select: p.tx_mode_select,
         reduced_tx_set: p.reduced_tx_set_used,
         delta_q_present: p.delta_q.delta_q_present,
+        seg_enabled: p.segmentation.enabled,
+        seg_last_active_segid: crate::calculate_segdata(&bridge_segmentation(&p.segmentation)).1,
         lr_frame_restoration_type: p.restoration.frame_restoration_type,
         lr_unit_counts: {
             let mut c = (0, 0, 0);
@@ -656,6 +716,30 @@ pub fn build_lf_inputs(
     }
 
     let lfh = &p.loopfilter;
+    // Segmentation LF inputs: the SEG_LVL_ALT_LF_* features (C ids 1..=4)
+    // re-based to LfSeg's 0..4, exactly what av1_loop_filter_frame_init's
+    // per-segment level derivation (and the per-block delta-lf path) read;
+    // xd->lossless[i] via the C formula (decodeframe.c:5166) — always false
+    // here since whole-frame and per-segment lossless are rejected upstream.
+    let seg = bridge_segmentation(&p.segmentation);
+    let mut lf_seg = aom_loopfilter::frame::LfSeg {
+        enabled: seg.enabled,
+        ..Default::default()
+    };
+    for i in 0..aom_quant::MAX_SEGMENTS {
+        for f in 0..4 {
+            lf_seg.active[i][f] = seg.feature_mask[i] & (1 << (1 + f)) != 0;
+            lf_seg.data[i][f] = i32::from(seg.feature_data[i][1 + f]);
+        }
+    }
+    let q = &p.quant;
+    let plane_deltas_zero = q.y_dc_delta_q == 0
+        && q.u_dc_delta_q == 0
+        && q.u_ac_delta_q == 0
+        && q.v_dc_delta_q == 0
+        && q.v_ac_delta_q == 0;
+    let lossless =
+        std::array::from_fn(|i| av1_get_qindex(&seg, i, q.base_qindex) == 0 && plane_deltas_zero);
     let params = LfParams {
         filter_level: lfh.filter_level,
         filter_level_u: lfh.filter_level_u,
@@ -666,10 +750,8 @@ pub fn build_lf_inputs(
         mode_deltas: lfh.mode_deltas,
         delta_lf_present: p.delta_q.delta_lf_present,
         delta_lf_multi: p.delta_q.delta_lf_multi,
-        // Lossless streams are rejected upstream (and there is no
-        // segmentation), so no segment is lossless.
-        lossless: [false; 8],
-        seg: Default::default(),
+        lossless,
+        seg: lf_seg,
     };
     (mi, params)
 }
