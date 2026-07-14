@@ -128,6 +128,115 @@ fn rand_params_y_only(rng: &mut Rng) -> FilmGrainParams {
     p
 }
 
+/// A random spec-valid grain param set WITH chroma grain. `cfl` selects
+/// chroma-scaling-from-luma (num_cb/cr_points stay 0, chroma AR coeffs set,
+/// multipliers forced by the synthesis); otherwise independent cb/cr scaling
+/// points + multipliers. `num_y_points > 0` so chroma is present in every
+/// format (`chroma_absent` gates chroma off for 4:2:0 when num_y_points==0).
+fn rand_params_chroma(rng: &mut Rng, cfl: bool) -> FilmGrainParams {
+    let mut p = rand_params_y_only(rng); // gives num_y_points >= 1
+    let num_pos_luma = 2 * p.ar_coeff_lag * (p.ar_coeff_lag + 1);
+    let num_pos_chroma = num_pos_luma + 1; // num_y_points > 0 -> cfl luma-avg pos
+    if cfl {
+        p.chroma_scaling_from_luma = true;
+        p.num_cb_points = 0;
+        p.num_cr_points = 0;
+        rand_ar(rng, num_pos_chroma, &mut p.ar_coeffs_cb);
+        rand_ar(rng, num_pos_chroma, &mut p.ar_coeffs_cr);
+    } else {
+        p.chroma_scaling_from_luma = false;
+        let want_cb = rng.range(1, 11);
+        let (cbpts, cbn) = rand_scaling_points::<10>(rng, want_cb);
+        p.scaling_points_cb = cbpts;
+        p.num_cb_points = cbn;
+        let want_cr = rng.range(1, 11);
+        let (crpts, crn) = rand_scaling_points::<10>(rng, want_cr);
+        p.scaling_points_cr = crpts;
+        p.num_cr_points = crn;
+        rand_ar(rng, num_pos_chroma, &mut p.ar_coeffs_cb);
+        rand_ar(rng, num_pos_chroma, &mut p.ar_coeffs_cr);
+        p.cb_mult = rng.range(0, 256);
+        p.cb_luma_mult = rng.range(0, 256);
+        p.cb_offset = rng.range(0, 512);
+        p.cr_mult = rng.range(0, 256);
+        p.cr_luma_mult = rng.range(0, 256);
+        p.cr_offset = rng.range(0, 512);
+    }
+    p
+}
+
+/// Shared driver for the chroma sweeps (non-mono formats only).
+fn chroma_sweep(seed: u64, cfl: bool) {
+    let mut rng = Rng::new(seed);
+    let formats: &[(bool, i32, i32)] = &[(false, 1, 1), (false, 0, 0), (false, 1, 0)];
+    let mut total = 0u64;
+    let mut chroma_changed = 0u64;
+
+    for &bd in &[8i32, 10, 12] {
+        for &(mono, ss_x, ss_y) in formats {
+            for &(d_w, d_h) in SIZES {
+                for _ in 0..12 {
+                    let p = rand_params_chroma(&mut rng, cfl);
+                    let mc_identity = rng.boolean();
+                    let (y, u, v) = rand_recon(&mut rng, bd, mono, ss_x, ss_y, d_w, d_h);
+                    assert!(has_ac(&u) && has_ac(&v), "recon chroma must have AC content");
+                    let blob = pack_blob(&p, bd);
+
+                    let (cy, cu, cv) = ref_add_film_grain(
+                        &blob, bd, mono, ss_x, ss_y, mc_identity, d_w, d_h, &y, &u, &v,
+                    );
+                    let (ry, ru, rv) = aom_decode::film_grain::add_film_grain(
+                        &p, bd, mono, ss_x, ss_y, mc_identity, d_w, d_h, &y, &u, &v,
+                    );
+
+                    assert_eq!(
+                        ry, cy,
+                        "Y mismatch cfl={cfl} bd={bd} ss=({ss_x},{ss_y}) size={d_w}x{d_h} \
+                         seed={} clip={} overlap={}",
+                        p.random_seed, p.clip_to_restricted_range, p.overlap_flag
+                    );
+                    assert_eq!(
+                        ru, cu,
+                        "U mismatch cfl={cfl} bd={bd} ss=({ss_x},{ss_y}) size={d_w}x{d_h} \
+                         seed={} num_cb={} clip={} overlap={}",
+                        p.random_seed, p.num_cb_points, p.clip_to_restricted_range, p.overlap_flag
+                    );
+                    assert_eq!(
+                        rv, cv,
+                        "V mismatch cfl={cfl} bd={bd} ss=({ss_x},{ss_y}) size={d_w}x{d_h} \
+                         seed={} num_cr={}",
+                        p.random_seed, p.num_cr_points
+                    );
+
+                    if ru != u || rv != v {
+                        chroma_changed += 1;
+                    }
+                    total += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        chroma_changed * 10 >= total * 7,
+        "chroma grain changed pixels in only {chroma_changed}/{total} trials (cfl={cfl})"
+    );
+    assert!(total >= 400, "expected a broad chroma sweep, got {total} trials");
+    eprintln!(
+        "film_grain chroma cfl={cfl}: {total} trials byte-identical, {chroma_changed} chroma-altered"
+    );
+}
+
+#[test]
+fn film_grain_chroma_matches_c() {
+    chroma_sweep(0xC420_A11, false);
+}
+
+#[test]
+fn film_grain_cfl_matches_c() {
+    chroma_sweep(0x0CF1_A11, true);
+}
+
 /// Random reconstruction planes (u16, tight) for the given format, bounded to
 /// `[0, (1<<bd)-1]`, with maximal AC content.
 fn rand_recon(
