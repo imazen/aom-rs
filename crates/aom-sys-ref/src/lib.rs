@@ -2184,6 +2184,9 @@ extern "C" {
     fn shim_highbd_intra_pred(
         mode: i32, size_idx: i32, dst: *mut u16, stride: isize, above: *const u16, left: *const u16, bd: i32,
     );
+    fn shim_hbd_build_nd_intra(
+        r: *const u16, ref_stride: i32, av1_mode: i32, tx_size: i32, n_top_px: i32, n_left_px: i32, bd: i32, dst: *mut u16, dst_stride: i32,
+    );
 }
 
 /// Reference highbd intra prediction. Returns the `bw*bh` predicted block.
@@ -2196,6 +2199,26 @@ pub fn ref_highbd_intra_pred(
         shim_highbd_intra_pred(
             mode as i32, size_idx as i32, dst.as_mut_ptr(), bw as isize,
             above_tl.as_ptr().add(1), left.as_ptr(), bd,
+        )
+    }
+    dst
+}
+
+/// Reference highbd non-directional intra builder (`av1_predict_intra_block`
+/// branch, `highbd_build_non_directional_intra_predictors`): assemble the
+/// reference edges from the reconstruction buffer (`recon[ref_off]` is the block
+/// top-left, row stride `ref_stride`) with availability counts, then predict.
+/// `av1_mode` is the AV1 `PREDICTION_MODE`. Returns the `txw*txh` predicted block
+/// (row stride `txw`).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_hbd_build_nd_intra(
+    recon: &[u16], ref_off: usize, ref_stride: usize, av1_mode: usize, tx_size: usize, txw: usize, txh: usize, n_top_px: usize, n_left_px: usize, bd: i32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; txw * txh];
+    unsafe {
+        shim_hbd_build_nd_intra(
+            recon.as_ptr().add(ref_off), ref_stride as i32, av1_mode as i32, tx_size as i32,
+            n_top_px as i32, n_left_px as i32, bd, dst.as_mut_ptr(), txw as i32,
         )
     }
     dst

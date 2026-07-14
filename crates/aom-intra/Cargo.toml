@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+archmage = { path = "/root/work/archmage" }
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }

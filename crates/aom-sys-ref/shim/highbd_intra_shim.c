@@ -387,3 +387,66 @@ void shim_highbd_intra_pred(int mode, int size_idx, uint16_t* dst, ptrdiff_t str
     default: return;
   }
 }
+
+/* ---- highbd non-directional intra builder (av1_predict_intra_block branch) ---
+ * Verbatim transcription of highbd_build_non_directional_intra_predictors
+ * (av1/common/reconintra.c) edge assembly, then dispatch via shim_highbd_intra_pred
+ * above. Driven by a caller-supplied reconstruction buffer (block top-left at
+ * ref[0]) + availability counts, so it needs no MACROBLOCKD state. av1_mode is the
+ * AV1 PREDICTION_MODE (DC=0, SMOOTH=9, SMOOTH_V=10, SMOOTH_H=11, PAETH=12). */
+void shim_hbd_build_nd_intra(const uint16_t *ref, int ref_stride, int av1_mode,
+                             int tx_size, int n_top_px, int n_left_px, int bd,
+                             uint16_t *dst, int dst_stride) {
+  static const int txw[19] = { 4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64 };
+  static const int txh[19] = { 4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16 };
+  const int txwpx = txw[tx_size];
+  const int txhpx = txh[tx_size];
+  const int need_above_left = (av1_mode == 12); /* PAETH */
+  const uint16_t *const above_ref = ref - ref_stride;
+  const uint16_t *const left_ref = ref - 1;
+  const int base = 128 << (bd - 8);
+  int i = 0;
+
+  /* NUM_INTRA_NEIGHBOUR_PIXELS == MAX_TX_SIZE*2 + 32 == 160 */
+  uint16_t left_data[160], above_data[160];
+  uint16_t *const above_row = above_data + 16;
+  uint16_t *const left_col = left_data + 16;
+
+  /* need_left (always, for the five non-directional modes) */
+  for (i = 0; i < 160; ++i) left_data[i] = (uint16_t)(base + 1);
+  if (n_left_px > 0) {
+    for (i = 0; i < n_left_px; i++) left_col[i] = left_ref[i * ref_stride];
+    if (i < txhpx)
+      for (int k = i; k < txhpx; ++k) left_col[k] = left_col[i - 1];
+  } else if (n_top_px > 0) {
+    for (int k = 0; k < txhpx; ++k) left_col[k] = above_ref[0];
+  }
+
+  /* need_above (always) */
+  for (i = 0; i < 160; ++i) above_data[i] = (uint16_t)(base - 1);
+  if (n_top_px > 0) {
+    for (i = 0; i < n_top_px; ++i) above_row[i] = above_ref[i];
+    if (i < txwpx)
+      for (int k = i; k < txwpx; ++k) above_row[k] = above_row[i - 1];
+  } else if (n_left_px > 0) {
+    for (int k = 0; k < txwpx; ++k) above_row[k] = left_ref[0];
+  }
+
+  if (need_above_left) {
+    if (n_top_px > 0 && n_left_px > 0) above_row[-1] = above_ref[-1];
+    else if (n_top_px > 0) above_row[-1] = above_ref[0];
+    else if (n_left_px > 0) above_row[-1] = left_ref[0];
+    else above_row[-1] = (uint16_t)base;
+    left_col[-1] = above_row[-1];
+  }
+
+  int shim_mode;
+  if (av1_mode == 0) { /* DC: dc_pred_high[n_left>0][n_top>0] */
+    shim_mode = (n_left_px > 0) ? ((n_top_px > 0) ? 0 : 2) : ((n_top_px > 0) ? 1 : 3);
+  } else if (av1_mode == 12) shim_mode = 6; /* PAETH */
+  else if (av1_mode == 9) shim_mode = 7;    /* SMOOTH */
+  else if (av1_mode == 10) shim_mode = 8;   /* SMOOTH_V */
+  else shim_mode = 9;                       /* SMOOTH_H (11) */
+
+  shim_highbd_intra_pred(shim_mode, tx_size, dst, dst_stride, above_row, left_col, bd);
+}
