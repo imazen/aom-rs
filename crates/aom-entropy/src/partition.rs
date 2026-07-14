@@ -4166,12 +4166,24 @@ pub fn read_kf_tail(
     }
 }
 
+/// `MAXQ` (`av1/common/quant_common.h`) — the top of the qindex range.
+const MAXQ: i32 = 255;
+/// `MAX_LOOP_FILTER` (`av1/common/av1_loopfilter.h`).
+const MAX_LOOP_FILTER: i32 = 63;
+
 /// `read_delta_q_params_sb` — inverse of [`write_delta_q_params_sb`] (the per-SB delta-q /
 /// delta-lf driver). At an SB-upper-left non-skip block it reads the reduced delta-qindex
-/// (reconstructing `current_qindex = base + reduced * delta_q_res`, updating the base
-/// carry) and, when delta-lf is present, the per-plane multi deltas or the single
-/// from-base delta (each updating its carry). Returns the (possibly unchanged)
-/// `current_qindex`.
+/// (reconstructing `current_qindex = clamp(base + reduced * delta_q_res, 1, MAXQ)` — the
+/// normative `[1, 255]` clamp of `read_delta_q_params`, av1/decoder/decodemv.c: "Clamp to
+/// [1,MAXQ] to not interfere with lossless mode" — updating the base carry) and, when
+/// delta-lf is present, the per-plane multi deltas or the single from-base delta (each
+/// updating its carry, clamped to `[-MAX_LOOP_FILTER, MAX_LOOP_FILTER]` as in C). Returns
+/// the (possibly unchanged) `current_qindex`.
+///
+/// The clamps only fire on streams a libaom encoder never emits (its write side asserts
+/// `current_qindex > 0` and derives targets via `av1_adjust_q_from_delta_q_res`, so
+/// `base + reduced * res` is always in range and the carries stay lockstep); they are
+/// normative decoder behaviour for arbitrary conformant-syntax input.
 #[allow(clippy::too_many_arguments)]
 pub fn read_delta_q_params_sb(
     dec: &mut OdEcDec,
@@ -4197,18 +4209,22 @@ pub fn read_delta_q_params_sb(
     }
     if (bsize != sb_size || skip == 0) && super_block_upper_left {
         let reduced = read_delta_qindex(dec, delta_q_cdf);
-        let current_qindex = *current_base_qindex + reduced * delta_q_res;
+        // "Normative: Clamp to [1,MAXQ] to not interfere with lossless mode"
+        // (read_delta_q_params, av1/decoder/decodemv.c).
+        let current_qindex = (*current_base_qindex + reduced * delta_q_res).clamp(1, MAXQ);
         *current_base_qindex = current_qindex;
         if delta_lf_present {
             if delta_lf_multi {
                 let frame_lf_count = if num_planes > 1 { FRAME_LF_COUNT } else { FRAME_LF_COUNT - 2 };
                 for lf_id in 0..frame_lf_count {
                     let r = read_delta_lflevel(dec, &mut delta_lf_multi_cdf[lf_id]);
-                    xd_delta_lf[lf_id] += r * delta_lf_res;
+                    xd_delta_lf[lf_id] = (xd_delta_lf[lf_id] + r * delta_lf_res)
+                        .clamp(-MAX_LOOP_FILTER, MAX_LOOP_FILTER);
                 }
             } else {
                 let r = read_delta_lflevel(dec, delta_lf_cdf);
-                *xd_delta_lf_from_base += r * delta_lf_res;
+                *xd_delta_lf_from_base = (*xd_delta_lf_from_base + r * delta_lf_res)
+                    .clamp(-MAX_LOOP_FILTER, MAX_LOOP_FILTER);
             }
         }
         return current_qindex;

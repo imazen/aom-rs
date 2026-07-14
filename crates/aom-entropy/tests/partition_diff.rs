@@ -4336,13 +4336,25 @@ fn read_mb_modes_kf_prefix_roundtrips_write() {
         let dq_res = 1 << (rng.next() % 4);
         let dlf_res = 1 << (rng.next() % 4);
         let base0 = 100i32;
-        let cur_qindex = base0 + ((rng.next() % 101) as i32 - 50) * dq_res;
+        // Encoder-valid delta targets only: the C write side asserts current_qindex > 0
+        // and its RD layer keeps targets in [1, MAXQ] / [-63, 63] (bitstream.c,
+        // av1_adjust_q_from_delta_q_res), so `base + reduced * res` never leaves range
+        // and the reader's normative clamps (decodemv.c read_delta_q_params) stay
+        // no-ops — lockstep carries require in-domain targets.
+        let kq = ((rng.next() % 101) as i32 - 50).clamp(-((base0 - 1) / dq_res), (255 - base0) / dq_res);
+        let cur_qindex = base0 + kq * dq_res;
         let mut xd_lf0 = [0i32; 4];
         for x in xd_lf0.iter_mut() { *x = (rng.next() % 21) as i32 - 10; }
         let xd_lfb0 = (rng.next() % 21) as i32 - 10;
         let mut mbmi_lf = [0i32; 4];
-        for i in 0..4 { mbmi_lf[i] = xd_lf0[i] + ((rng.next() % 21) as i32 - 10) * dlf_res; }
-        let mbmi_lfb = xd_lfb0 + ((rng.next() % 21) as i32 - 10) * dlf_res;
+        for i in 0..4 {
+            let k = ((rng.next() % 21) as i32 - 10)
+                .clamp(-((63 + xd_lf0[i]) / dlf_res), (63 - xd_lf0[i]) / dlf_res);
+            mbmi_lf[i] = xd_lf0[i] + k * dlf_res;
+        }
+        let klb = ((rng.next() % 21) as i32 - 10)
+            .clamp(-((63 + xd_lfb0) / dlf_res), (63 - xd_lfb0) / dlf_res);
+        let mbmi_lfb = xd_lfb0 + klb * dlf_res;
 
         let mut sc = [0u16; 9];
         let mut kc = [0u16; 3];
@@ -4394,6 +4406,98 @@ fn read_mb_modes_kf_prefix_roundtrips_write() {
         assert_eq!((base_d, xd_lf_d, xd_lfb_d), (base_e, xd_lf_e, xd_lfb_e), "delta carries");
         assert_eq!(cq_d, base_e, "current_qindex == updated base");
         assert_eq!((scd, kcd, dqcd, dlmcd, dlcd), (sce, kce, dqce, dlmce, dlce), "cdf adapt");
+    }
+}
+
+/// The normative decoder clamps of `read_delta_q_params` (av1/decoder/decodemv.c):
+/// `current_base_qindex = clamp(base + reduced * res, 1, MAXQ)` ("Clamp to [1,MAXQ]
+/// to not interfere with lossless mode") and per-lf-carry
+/// `clamp(carry + r * res, -MAX_LOOP_FILTER, MAX_LOOP_FILTER)`. A libaom encoder
+/// never produces out-of-range reconstructions (its write side asserts and aligns
+/// targets), so these fire only on adversarial/foreign conformant-syntax streams —
+/// pinned here with hand vectors at both bounds, plus interior/boundary no-ops.
+#[test]
+fn read_delta_q_params_normative_clamps() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        read_delta_q_params_sb, write_delta_lflevel, write_delta_qindex,
+    };
+    let mut rng = Rng(0xc1a3_c1a3_0000_0001);
+    // (base, res, reduced, expected current_qindex after clamp)
+    let dq_vectors = [
+        (10, 8, -5, 1),    // 10 - 40 = -30 -> 1 (low clamp)
+        (250, 8, 5, 255),  // 250 + 40 = 290 -> 255 (high clamp)
+        (1, 1, -1, 1),     // 0 -> 1 (low clamp at the lossless boundary)
+        (2, 1, -1, 1),     // exact bound, no clamp
+        (100, 4, 7, 128),  // interior, no clamp
+        (255, 2, 0, 255),  // zero delta at the top, no clamp
+        (37, 8, 100, 255), // exp-Golomb-range positive delta -> high clamp
+        (37, 8, -100, 1),  // exp-Golomb-range negative delta -> low clamp
+    ];
+    // (carry, res, r, expected carry after clamp)
+    let dlf_vectors = [
+        (-60, 4, -2, -63), // -68 -> -63 (low clamp)
+        (60, 4, 2, 63),    // 68 -> 63 (high clamp)
+        (-63, 1, 0, -63),  // bound, no clamp
+        (10, 2, -5, 0),    // interior, no clamp
+        (0, 8, 100, 63),   // exp-Golomb-range delta -> high clamp
+    ];
+    for &(base, dq_res, reduced, want_q) in &dq_vectors {
+        for &(lf0, dlf_res, r_lf, want_lf) in &dlf_vectors {
+            for &multi in &[false, true] {
+                let mut dq_cdf = [0u16; 5];
+                let mut dlf_cdf = [0u16; 5];
+                let mut dlmc = [[0u16; 5]; 4];
+                mk_ns_cdf(&mut rng, 4, &mut dq_cdf);
+                mk_ns_cdf(&mut rng, 4, &mut dlf_cdf);
+                for c in dlmc.iter_mut() {
+                    mk_ns_cdf(&mut rng, 4, c);
+                }
+                // Raw symbol stream: the low-level writers code ANY reduced value
+                // (no write-side clamp), exactly what a foreign encoder could emit.
+                let mut enc = OdEcEnc::new();
+                let (mut wq, mut wl, mut wlm) = (dq_cdf, dlf_cdf, dlmc);
+                write_delta_qindex(&mut enc, &mut wq, reduced);
+                if multi {
+                    for c in wlm.iter_mut() {
+                        write_delta_lflevel(&mut enc, c, r_lf);
+                    }
+                } else {
+                    write_delta_lflevel(&mut enc, &mut wl, r_lf);
+                }
+                let b = enc.done().to_vec();
+
+                let mut dec = OdEcDec::new(&b);
+                let (mut rq, mut rl, mut rlm) = (dq_cdf, dlf_cdf, dlmc);
+                let mut carry_q = base;
+                let mut xd_lf = [lf0; 4];
+                let mut xd_lfb = lf0;
+                let got = read_delta_q_params_sb(
+                    &mut dec, true, true, multi, 3, 3, 12, 0, true, &mut carry_q, dq_res,
+                    &mut xd_lf, &mut xd_lfb, dlf_res, &mut rq, &mut rlm, &mut rl,
+                );
+                assert_eq!(
+                    got, want_q,
+                    "clamped current_qindex (base {base} res {dq_res} reduced {reduced})"
+                );
+                assert_eq!(carry_q, want_q, "carry == clamped current_qindex");
+                if multi {
+                    assert_eq!(
+                        xd_lf,
+                        [want_lf; 4],
+                        "clamped delta_lf (carry {lf0} res {dlf_res} r {r_lf})"
+                    );
+                    assert_eq!(xd_lfb, lf0, "from_base carry untouched in multi mode");
+                } else {
+                    assert_eq!(
+                        xd_lfb, want_lf,
+                        "clamped delta_lf_from_base (carry {lf0} res {dlf_res} r {r_lf})"
+                    );
+                    assert_eq!(xd_lf, [lf0; 4], "multi carries untouched in single mode");
+                }
+            }
+        }
     }
 }
 
@@ -4478,7 +4582,9 @@ fn read_mb_modes_kf_struct_driver_roundtrips() {
         let uv_ang = if !mono && chroma_ref && use_angle_delta(bsize) && is_directional_mode(uv_intra) { (rng.next() % 7) as i32 - 3 } else { 0 };
         let use_fi = if st.filter_allowed { (rng.next() & 1) as i32 } else { 0 };
         let fi_mode = if use_fi != 0 { (rng.next() % 5) as i32 } else { 0 };
-        let cur_q = 100 + ((rng.next() % 41) as i32 - 20) * dq_res;
+        // encoder-valid target: in [1, 255] so the reader's normative clamp is a no-op
+        let kq = ((rng.next() % 41) as i32 - 20).clamp(-(99 / dq_res), 155 / dq_res);
+        let cur_q = 100 + kq * dq_res;
         let dlf = [st.xd_delta_lf[0] + ((rng.next() % 11) as i32 - 5) * dlf_res, st.xd_delta_lf[1] + ((rng.next() % 11) as i32 - 5) * dlf_res, st.xd_delta_lf[2] + ((rng.next() % 11) as i32 - 5) * dlf_res, st.xd_delta_lf[3] + ((rng.next() % 11) as i32 - 5) * dlf_res];
         let dlfb = st.xd_delta_lf_from_base + ((rng.next() % 11) as i32 - 5) * dlf_res;
         let info = MbModeInfoKf {
@@ -4808,7 +4914,12 @@ fn mb_modes_kf_fc_matches_preselected_writer() {
         // encoder invariant: current_qindex deviates from the carry only when the
         // delta-q gate ((bsize != sb_size || !skip) at the SB upper-left) codes it
         let dq_coded = st.dq_present && (bsize != st.sb_size || skip == 0);
-        let cur_q = if dq_coded { 100 + ((rng.next() % 41) as i32 - 20) * dq_res } else { 100 };
+        // encoder-valid target: in [1, 255] so the reader's normative clamp is a no-op
+        let cur_q = if dq_coded {
+            100 + ((rng.next() % 41) as i32 - 20).clamp(-(99 / dq_res), 155 / dq_res) * dq_res
+        } else {
+            100
+        };
         let info = MbModeInfoKf {
             segment_id: 0, skip,
             cdef_strength: if st.cdef_bits > 0 { (rng.next() % (1u64 << st.cdef_bits)) as i32 } else { 0 },
