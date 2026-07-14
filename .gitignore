@@ -3,6 +3,7 @@
 /reference/extracted
 /reference/*.log
 .workongoing
+.workongoing.decoder
 conformance/data/
 conformance/vectors.json
 __pycache__/
