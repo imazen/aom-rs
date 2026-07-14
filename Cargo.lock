@@ -26,6 +26,7 @@ dependencies = [
  "aom-intra",
  "aom-loopfilter",
  "aom-quant",
+ "aom-restore",
  "aom-sys-ref",
  "aom-txb",
 ]

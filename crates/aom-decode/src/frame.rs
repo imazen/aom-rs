@@ -11,8 +11,13 @@
 //! - single tile (1x1), single tile group.
 //! - screen-content tools OFF (`allow_screen_content_tools` would put
 //!   palette/intrabc flags in the block layer).
-//! - loop restoration / film grain disabled at the sequence level; superres
-//!   not scaled; no frame-size override (frame == sequence max dims).
+//! - film grain disabled at the sequence level; superres not scaled; no
+//!   frame-size override (frame == sequence max dims).
+//! - loop restoration IS applied ([`aom_restore::frame`], C-diffed against
+//!   the real `av1_loop_restoration_filter_frame` + boundary-line saves in
+//!   frame_walk_diff.rs): per-RU Wiener/SGR params decoded interleaved in
+//!   the tile SB walk, deblocked-pre-CDEF stripe boundary context, both the
+//!   boundary-swapped (with CDEF) and optimized (no CDEF) decoder arms.
 //! - CDEF IS applied ([`aom_cdef::frame::cdef_frame`], C-diffed against the
 //!   real `av1_cdef_frame` walk in cdef_frame_diff.rs): any damping /
 //!   strength grids / per-64x64 strength indices, with the same gate as the
@@ -81,6 +86,12 @@ pub struct FrameDecode {
     pub tx_mode_select: bool,
     pub reduced_tx_set: bool,
     pub delta_q_present: bool,
+    /// Per-plane `frame_restoration_type` as coded (`RESTORE_*`); loop
+    /// restoration was applied when any is non-NONE.
+    pub lr_frame_restoration_type: [u8; 3],
+    /// Restoration-unit populations actually decoded+applied across all
+    /// planes: `(wiener, sgrproj, none)` counts (for harness floors).
+    pub lr_unit_counts: (usize, usize, usize),
 }
 
 /// `av1_get_tile_limits` (av1/common/tile_common.c) for the single-tile
@@ -314,10 +325,71 @@ pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, String> {
     // upstream) && any CDEF syntax present. allow_intrabc (which would force
     // cdef_bits == 0) and multi-tile large-scale decoding are rejected too.
     let cd = &header.cdef;
-    if cd.cdef_bits != 0 || cd.cdef_strengths[0] != 0 || cd.cdef_uv_strengths[0] != 0 {
+    let do_cdef = cd.cdef_bits != 0 || cd.cdef_strengths[0] != 0 || cd.cdef_uv_strengths[0] != 0;
+    let do_lr = cfg.lr.any_enabled();
+    // decodeframe.c:5423: optimized_loop_restoration = !do_cdef &&
+    // !do_superres (superres is rejected upstream, so always unscaled). The
+    // non-optimized arm saves the DEBLOCKED rows (pre-CDEF) as internal
+    // stripe boundary context before CDEF runs, and the CDEF output rows as
+    // frame-edge context after; the optimized arm saves nothing (the frame's
+    // own rows are the context).
+    let optimized_lr = !do_cdef;
+    let pre_cdef =
+        (do_lr && !optimized_lr).then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
+    if do_cdef {
         apply_cdef(&mut t, &cfg, &header);
     }
+    if do_lr {
+        apply_restoration(&mut t, &cfg, pre_cdef.as_ref(), optimized_lr);
+    }
     Ok(finish_frame(t, &cfg, &header))
+}
+
+/// Run [`aom_restore::frame::loop_restoration_filter_frame`] over the
+/// (mi-aligned, deblocked+CDEF'd) recon planes, exactly as the C decoder does
+/// after CDEF (decodeframe.c:5437-5482). `pre_cdef` is the deblocked
+/// pre-CDEF snapshot feeding internal stripe boundaries (`None` on the
+/// optimized no-CDEF path, which reads no boundary context). Hidden: harness
+/// entry so tests can recompose the filter pipeline stage by stage.
+#[doc(hidden)]
+pub fn apply_restoration(
+    t: &mut KfTileDecode,
+    cfg: &KfTileConfig,
+    pre_cdef: Option<&(Vec<u16>, Vec<u16>, Vec<u16>)>,
+    optimized_lr: bool,
+) {
+    use aom_restore::frame::{LrPlaneInput, loop_restoration_filter_frame};
+    let empty: (Vec<u16>, Vec<u16>, Vec<u16>) = (Vec::new(), Vec::new(), Vec::new());
+    let (dy, du, dv) = pre_cdef.unwrap_or(&empty);
+    let mut planes = Vec::new();
+    planes.push(LrPlaneInput {
+        cur: &mut t.recon,
+        deblocked: dy,
+        stride: t.stride,
+        units: &t.lr_units[0],
+    });
+    if !cfg.monochrome {
+        planes.push(LrPlaneInput {
+            cur: &mut t.recon_u,
+            deblocked: du,
+            stride: t.stride_uv,
+            units: &t.lr_units[1],
+        });
+        planes.push(LrPlaneInput {
+            cur: &mut t.recon_v,
+            deblocked: dv,
+            stride: t.stride_uv,
+            units: &t.lr_units[2],
+        });
+    }
+    loop_restoration_filter_frame(
+        &mut planes,
+        &cfg.lr,
+        cfg.subsampling_x,
+        cfg.subsampling_y,
+        cfg.bd,
+        optimized_lr,
+    );
 }
 
 /// Everything [`decode_frame_obus`] does up to (but not including) the loop
@@ -358,9 +430,6 @@ pub fn decode_frame_obus_prefilter(
                 let s = &sh.seq_header;
                 if s.sb_size_128 {
                     return Err("128x128 superblocks".into());
-                }
-                if s.enable_restoration {
-                    return Err("loop restoration enabled (sequence)".into());
                 }
                 if sh.film_grain_params_present {
                     return Err("film grain enabled (sequence)".into());
@@ -521,6 +590,20 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
         tx_mode_select: p.tx_mode_select,
         reduced_tx_set: p.reduced_tx_set_used,
         delta_q_present: p.delta_q.delta_q_present,
+        lr_frame_restoration_type: p.restoration.frame_restoration_type,
+        lr_unit_counts: {
+            let mut c = (0, 0, 0);
+            for units in &t.lr_units {
+                for u in units {
+                    match u.restoration_type {
+                        aom_entropy::lr::RESTORE_WIENER => c.0 += 1,
+                        aom_entropy::lr::RESTORE_SGRPROJ => c.1 += 1,
+                        _ => c.2 += 1,
+                    }
+                }
+            }
+            c
+        },
     }
 }
 

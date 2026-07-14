@@ -31,7 +31,7 @@
 //!   bounds; see `deblocked_422_chroma_is_rejected`.)
 
 use aom_decode::frame::{
-    apply_cdef, apply_deblock, decode_frame_obus, decode_frame_obus_prefilter,
+    apply_cdef, apply_deblock, apply_restoration, decode_frame_obus, decode_frame_obus_prefilter,
 };
 use aom_sys_ref as c;
 
@@ -79,6 +79,10 @@ struct Cfg {
     cq: i32,
     /// `--enable-cdef` for the encode.
     cdef: bool,
+    /// `--enable-restoration` for the encode.
+    restoration: bool,
+    /// `--usage`: 0 = GOOD, 2 = ALL_INTRA (the zenavif/avifenc still mode).
+    usage: u32,
 }
 
 /// Facts the sweep asserts floors over.
@@ -92,6 +96,12 @@ struct RunFacts {
     /// CDEF genuinely changed at least one pixel (recomposed without the
     /// CDEF stage and compared).
     cdef_applied: bool,
+    /// The stream carries restoration syntax (any plane type non-NONE).
+    lr_gated: bool,
+    /// Decoded RU populations `(wiener, sgrproj)` summed over planes.
+    lr_units: (usize, usize),
+    /// Restoration genuinely changed at least one pixel.
+    lr_applied: bool,
 }
 
 fn run_config(cfg: &Cfg) -> RunFacts {
@@ -111,7 +121,20 @@ fn run_config(cfg: &Cfg) -> RunFacts {
 
     // REAL encoder bytes (cpu-used=0).
     let bytes = c::ref_encode_av1_kf(
-        &y, &u, &v, cfg.w, cfg.h, cfg.bd, cfg.mono, cfg.ss.0, cfg.ss.1, cfg.cq, 0, cfg.cdef,
+        &y,
+        &u,
+        &v,
+        cfg.w,
+        cfg.h,
+        cfg.bd,
+        cfg.mono,
+        cfg.ss.0,
+        cfg.ss.1,
+        cfg.cq,
+        0,
+        cfg.cdef,
+        cfg.restoration,
+        cfg.usage,
     );
 
     // Rust decode (hard-errors outside the envelope — that FAILS the test).
@@ -180,6 +203,30 @@ fn run_config(cfg: &Cfg) -> RunFacts {
     } else {
         false
     };
+    // Restoration application detection: recompose the pipeline WITHOUT the
+    // restoration stage and compare (the decoder's exact ordering — deblock,
+    // pre-CDEF snapshot, CDEF, restoration — reproduced via the hidden
+    // stage entry points).
+    let lr_gated = rust.lr_frame_restoration_type.iter().any(|&t| t != 0);
+    assert!(
+        cfg.restoration || !lr_gated,
+        "--enable-restoration=0 stream carries restoration syntax"
+    );
+    let lr_applied = if lr_gated {
+        let (mut t, tcfg, header) = decode_frame_obus_prefilter(&bytes).unwrap();
+        if header.loopfilter.filter_level != [0, 0] {
+            apply_deblock(&mut t, &tcfg, &header);
+        }
+        let pre_cdef = cdef_gated.then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
+        if cdef_gated {
+            apply_cdef(&mut t, &tcfg, &header);
+        }
+        let no_lr = t.clone();
+        apply_restoration(&mut t, &tcfg, pre_cdef.as_ref(), !cdef_gated);
+        t.recon != no_lr.recon || t.recon_u != no_lr.recon_u || t.recon_v != no_lr.recon_v
+    } else {
+        false
+    };
     RunFacts {
         len: bytes.len(),
         tx_select: rust.tx_mode_select,
@@ -187,6 +234,9 @@ fn run_config(cfg: &Cfg) -> RunFacts {
         filter_level: rust.filter_level,
         cdef_gated,
         cdef_applied,
+        lr_gated,
+        lr_units: (rust.lr_unit_counts.0, rust.lr_unit_counts.1),
+        lr_applied,
     }
 }
 
@@ -216,7 +266,22 @@ fn real_bitstreams_decode_byte_identical_to_c() {
     let mut nonzero_chroma_lf = 0u32;
     let mut cdef_gated = 0u32;
     let mut cdef_applied = 0u32;
-    let mut run = |w: usize, h: usize, bd: i32, ss: (i32, i32), mono: bool, cq: i32, cdef: bool| {
+    let mut lr_gated = 0u32;
+    let mut lr_applied = 0u32;
+    let mut lr_wiener_units = 0usize;
+    let mut lr_sgrproj_units = 0usize;
+    let mut allintra_arms = 0u32;
+    #[allow(clippy::too_many_arguments)]
+    let mut run_full = |w: usize,
+                        h: usize,
+                        bd: i32,
+                        ss: (i32, i32),
+                        mono: bool,
+                        cq: i32,
+                        cdef: bool,
+                        restoration: bool,
+                        usage: u32|
+     -> RunFacts {
         let f = run_config(&Cfg {
             w,
             h,
@@ -225,6 +290,8 @@ fn real_bitstreams_decode_byte_identical_to_c() {
             ss,
             cq,
             cdef,
+            restoration,
+            usage,
         });
         assert!(f.len > 50, "suspiciously small stream ({} bytes)", f.len);
         select_seen += f.tx_select as u32;
@@ -249,26 +316,32 @@ fn real_bitstreams_decode_byte_identical_to_c() {
         }
         cdef_gated += f.cdef_gated as u32;
         cdef_applied += f.cdef_applied as u32;
+        lr_gated += f.lr_gated as u32;
+        lr_applied += f.lr_applied as u32;
+        lr_wiener_units += f.lr_units.0;
+        lr_sgrproj_units += f.lr_units.1;
+        allintra_arms += (usage == 2) as u32;
         n += 1;
+        f
     };
     for &(w, h) in &sizes {
         for &(bd, ss, mono) in &combos {
             for &cq in &[2i32, 6] {
-                run(w, h, bd, ss, mono, cq, false);
+                run_full(w, h, bd, ss, mono, cq, false, false, 0);
             }
             if bd == 8 {
                 for &cq in &[16i32, 28] {
-                    run(w, h, bd, ss, mono, cq, false);
+                    run_full(w, h, bd, ss, mono, cq, false, false, 0);
                 }
                 // Deblocked arms: aggressive q picks nonzero filter levels.
                 for &cq in &[44i32, 52] {
-                    run(w, h, bd, ss, mono, cq, false);
+                    run_full(w, h, bd, ss, mono, cq, false, false, 0);
                 }
             } else {
                 // bd10 picks nonzero levels from cq>=8 — previously excluded,
                 // now the deblocked bd10 arm.
                 for &cq in &[16i32, 36] {
-                    run(w, h, bd, ss, mono, cq, false);
+                    run_full(w, h, bd, ss, mono, cq, false, false, 0);
                 }
             }
             // CDEF arms (--enable-cdef=1): the speed-0 CDEF search picks the
@@ -277,10 +350,10 @@ fn real_bitstreams_decode_byte_identical_to_c() {
             // ten cq-6 high-quality arms pick all-zero and code none — and
             // every gated arm changes pixels; cq 52 bd8 chains deblock+CDEF).
             for &cq in &[6i32, 36] {
-                run(w, h, bd, ss, mono, cq, true);
+                run_full(w, h, bd, ss, mono, cq, true, false, 0);
             }
             if bd == 8 {
-                run(w, h, bd, ss, mono, 52, true);
+                run_full(w, h, bd, ss, mono, 52, true, false, 0);
             }
         }
     }
@@ -297,13 +370,40 @@ fn real_bitstreams_decode_byte_identical_to_c() {
         (100, 76, (0, 0), false),
         (100, 76, (1, 1), true),
     ] {
-        run(w, h, 8, ss, mono, 36, false);
+        run_full(w, h, 8, ss, mono, 36, false, false, 0);
+    }
+    // LOOP-RESTORATION arms. Three pipeline shapes, all vs the C decoder:
+    //  (a) --enable-restoration=1 --enable-cdef=0: the OPTIMIZED LR path
+    //      (no boundary saves; decodeframe.c:5470);
+    //  (b) restoration+cdef both on: the boundary-swapped path (deblocked
+    //      pre-CDEF rows feed internal stripe boundaries);
+    //  (c) usage=2 (ALL_INTRA — the zenavif/avifenc still mode; encoder
+    //      defaults CDEF off for allintra but an explicit control overrides,
+    //      av1_cx_iface.c:3065) x both shapes — ALLINTRA-headline coverage.
+    for &(w, h) in &sizes {
+        for &(bd, ss, mono) in &combos {
+            for &cq in &[6i32, 36] {
+                run_full(w, h, bd, ss, mono, cq, false, true, 0); // (a)
+            }
+            run_full(w, h, bd, ss, mono, 36, true, true, 0); // (b)
+            for &cq in &[6i32, 36] {
+                run_full(w, h, bd, ss, mono, cq, true, true, 2); // (c) lr+cdef
+            }
+            run_full(w, h, bd, ss, mono, 36, false, true, 2); // (c) optimized
+            if bd == 8 {
+                // deblock + CDEF + restoration chained, GOOD and ALLINTRA.
+                run_full(w, h, bd, ss, mono, 52, true, true, 0);
+                run_full(w, h, bd, ss, mono, 52, true, true, 2);
+            }
+        }
     }
     assert_eq!(
         n,
-        30 + 18 + 18 + 12 + 9 + 30 + 9,
+        30 + 18 + 18 + 12 + 9 + 30 + 9 + 90 + 18,
         "15 combos x cq{{2,6}} + 9 bd8 x cq{{16,28}} + 9 bd8 x cq{{44,52}} + 6 bd10 x cq{{16,36}} \
-         + 9 band-3 + CDEF arms (15 combos x cq{{6,36}} + 9 bd8 cq52)"
+         + 9 band-3 + CDEF arms (15 combos x cq{{6,36}} + 9 bd8 cq52) \
+         + LR arms (15 combos x [2 opt-GOOD + 1 swap-GOOD + 2 allintra-cdef + 1 allintra-opt] \
+         + 9 bd8 x cq52 x {{GOOD,ALLINTRA}})"
     );
     // Speed-0 allintra codes TX_MODE_SELECT — the multi-txb path must be live.
     assert!(select_seen > 0, "no TX_MODE_SELECT stream decoded");
@@ -341,6 +441,26 @@ fn real_bitstreams_decode_byte_identical_to_c() {
         cdef_applied >= 20,
         "CDEF-applied population too small ({cdef_applied})"
     );
+    // Restoration floors (PROBED 2026-07-14 on this content, cpu-used=0:
+    // 71 of the 108 restoration arms carry LR syntax — the speed-0 search
+    // picks all-NONE on the rest — ALL 71 genuinely change pixels, and the
+    // decoded RU populations are 44 wiener + 85 sgrproj): the sweep must
+    // keep streams that CARRY restoration syntax, BOTH RU kernel families,
+    // and genuinely-pixel-changing restoration from silently vanishing.
+    println!(
+        "lr coverage: gated={lr_gated} applied={lr_applied} wiener_units={lr_wiener_units} \
+         sgrproj_units={lr_sgrproj_units} allintra_arms={allintra_arms} of {n}"
+    );
+    assert!(lr_gated >= 55, "LR-gated population too small ({lr_gated})");
+    assert!(
+        lr_applied >= 55,
+        "LR-applied population too small ({lr_applied})"
+    );
+    assert!(
+        lr_wiener_units >= 30 && lr_sgrproj_units >= 60,
+        "RU kernel populations too small (wiener={lr_wiener_units} sgrproj={lr_sgrproj_units})"
+    );
+    assert_eq!(allintra_arms, 54, "ALL_INTRA arm count");
 }
 
 #[test]
@@ -359,6 +479,8 @@ fn high_q_deblocked_stream_decodes_byte_identical() {
         ss: (1, 1),
         cq: 52,
         cdef: false,
+        restoration: false,
+        usage: 0,
     });
     println!(
         "deblocked companion: {} bytes, filter_level = {:?}",
@@ -382,7 +504,7 @@ fn deblocked_422_chroma_is_rejected_not_misdecoded() {
     let y = gen_plane(w, h, bd, seed ^ 0x1111, false);
     let u = gen_plane(w / 2, h, bd, seed ^ 0x2222, true);
     let v = gen_plane(w / 2, h, bd, seed ^ 0x3333, true);
-    let bytes = c::ref_encode_av1_kf(&y, &u, &v, w, h, bd, false, 1, 0, cq, 0, false);
+    let bytes = c::ref_encode_av1_kf(&y, &u, &v, w, h, bd, false, 1, 0, cq, 0, false, false, 0);
     match decode_frame_obus(&bytes) {
         Err(e) => {
             println!("422 arm: REJECTED ({e})");
@@ -422,6 +544,8 @@ fn cdef_stream_decodes_byte_identical_and_filters() {
         ss: (1, 1),
         cq: 36,
         cdef: true,
+        restoration: false,
+        usage: 0,
     });
     println!(
         "cdef companion: {} bytes, gated={} applied={}",

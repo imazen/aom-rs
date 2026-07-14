@@ -49,7 +49,7 @@ fn codec_api_encode_decode_roundtrip_smoke() {
     }
     let u = vec![100u16; (w / 2) * (h / 2)];
     let v = vec![160u16; (w / 2) * (h / 2)];
-    let bytes = ref_encode_av1_kf(&y, &u, &v, w, h, 8, false, 1, 1, 30, 3, false);
+    let bytes = ref_encode_av1_kf(&y, &u, &v, w, h, 8, false, 1, 1, 30, 3, false, false, 0);
     assert!(
         bytes.len() > 20,
         "suspiciously small bitstream: {}",

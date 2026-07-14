@@ -327,10 +327,14 @@ int shim_dump_default_kf_fc(int base_qindex, uint16_t *out) {
 long shim_encode_av1_kf(const uint16_t *y, const uint16_t *u,
                         const uint16_t *v, int w, int h, int bd, int mono,
                         int ss_x, int ss_y, int cq_level, int cpu_used,
-                        int enable_cdef, uint8_t *out, size_t out_cap) {
+                        int enable_cdef, int enable_restoration, int usage,
+                        uint8_t *out, size_t out_cap) {
   aom_codec_iface_t *iface = aom_codec_av1_cx();
   aom_codec_enc_cfg_t cfg;
-  if (aom_codec_enc_config_default(iface, &cfg, AOM_USAGE_GOOD_QUALITY))
+  /* usage: AOM_USAGE_GOOD_QUALITY (0) or AOM_USAGE_ALL_INTRA (2 — the
+   * zenavif/avifenc still-image mode; different speed-feature + default
+   * arms in the encoder, same decode-side syntax). */
+  if (aom_codec_enc_config_default(iface, &cfg, (unsigned int)usage))
     return -1;
   cfg.g_w = w;
   cfg.g_h = h;
@@ -367,7 +371,7 @@ long shim_encode_av1_kf(const uint16_t *y, const uint16_t *u,
   TRYCTRL(AOME_SET_CPUUSED, cpu_used);
   TRYCTRL(AOME_SET_CQ_LEVEL, cq_level);
   TRYCTRL(AV1E_SET_ENABLE_CDEF, enable_cdef);
-  TRYCTRL(AV1E_SET_ENABLE_RESTORATION, 0);
+  TRYCTRL(AV1E_SET_ENABLE_RESTORATION, enable_restoration);
   TRYCTRL(AV1E_SET_SUPERBLOCK_SIZE, AOM_SUPERBLOCK_SIZE_64X64);
   TRYCTRL(AV1E_SET_DELTAQ_MODE, 0);
   TRYCTRL(AV1E_SET_AQ_MODE, 0);

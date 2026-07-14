@@ -7748,6 +7748,8 @@ extern "C" {
         cq_level: i32,
         cpu_used: i32,
         enable_cdef: i32,
+        enable_restoration: i32,
+        usage: i32,
         out: *mut u8,
         out_cap: usize,
     ) -> i64;
@@ -8004,12 +8006,7 @@ pub fn ref_lr_corners_in_sb(
         )
     };
     assert!(hit >= 0, "shim_lr_corners_in_sb failed");
-    (
-        hit != 0,
-        out[0],
-        out[1],
-        [out[2], out[3], out[4], out[5]],
-    )
+    (hit != 0, out[0], out[1], [out[2], out[3], out[4], out[5]])
 }
 
 /// Words per unit in [`ref_lr_units_roundtrip`] packing:
@@ -8169,9 +8166,11 @@ pub fn ref_dump_default_kf_fc(base_qindex: i32) -> Vec<u16> {
 }
 
 /// Encode one KEY frame through the REAL `aom_codec_av1_cx` public API (the
-/// path the aomenc CLI drives) with `--cpu-used=<cpu_used> --end-usage=q
-/// --cq-level=<cq_level> --enable-cdef=0 --enable-restoration=0 --sb-size=64
-/// --deltaq-mode=0 --aq-mode=0 --enable-palette=0 --enable-intrabc=0`.
+/// path the aomenc CLI drives) with `--usage=<usage> --cpu-used=<cpu_used>
+/// --end-usage=q --cq-level=<cq_level> --enable-cdef=<enable_cdef>
+/// --enable-restoration=<enable_restoration> --sb-size=64 --deltaq-mode=0
+/// --aq-mode=0 --enable-palette=0 --enable-intrabc=0`. `usage` 0 = GOOD,
+/// 2 = ALL_INTRA (the zenavif/avifenc still-image mode).
 /// Planes are u16 at every bit depth; chroma dims are `(w+ss)>>ss`.
 #[allow(clippy::too_many_arguments)]
 pub fn ref_encode_av1_kf(
@@ -8187,6 +8186,8 @@ pub fn ref_encode_av1_kf(
     cq_level: i32,
     cpu_used: i32,
     enable_cdef: bool,
+    enable_restoration: bool,
+    usage: u32,
 ) -> Vec<u8> {
     let (cw, ch) = if mono {
         (0, 0)
@@ -8210,6 +8211,8 @@ pub fn ref_encode_av1_kf(
             cq_level,
             cpu_used,
             enable_cdef as i32,
+            enable_restoration as i32,
+            usage as i32,
             out.as_mut_ptr(),
             out.len(),
         )
@@ -10050,9 +10053,8 @@ unsafe extern "C" {
 /// The REAL `store_cfl_required` (cfl.h:38) — the NON-rdo `store_y` gate of
 /// `encode_superblock` (intra arm: `is_inter_block == 0` marshalled).
 pub fn ref_store_cfl_required(monochrome: bool, is_chroma_ref: bool, uv_mode: usize) -> bool {
-    let r = unsafe {
-        shim_store_cfl_required(monochrome as i32, is_chroma_ref as i32, uv_mode as i32)
-    };
+    let r =
+        unsafe { shim_store_cfl_required(monochrome as i32, is_chroma_ref as i32, uv_mode as i32) };
     assert!(r >= 0, "shim_store_cfl_required alloc failed");
     r != 0
 }
@@ -10087,4 +10089,3 @@ pub fn ref_set_entropy_contexts(
     };
     assert!(r >= 0, "shim_set_entropy_contexts alloc failed");
 }
-
