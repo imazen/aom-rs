@@ -244,6 +244,7 @@ fn cfl_rd_pick_alpha_matches_c() {
             );
 
             let cenv = CUvEnv {
+                partition: 0,
                 bsize,
                 mi_row,
                 mi_col,

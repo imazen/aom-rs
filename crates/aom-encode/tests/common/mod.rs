@@ -668,6 +668,9 @@ pub struct CUvEnv<'a> {
     /// sf `tx_sf.use_chroma_trellis_rd_mult` — ALLINTRA/RT 1 (chroma trellis
     /// mult 13), usage GOOD 0 (mult 20). Both arms swept by the diffs.
     pub use_chroma_trellis_rd_mult: bool,
+    /// `mbmi->partition` (has_top_right/has_bottom_left input; 0 NONE /
+    /// 1 HORZ / 2 VERT for the ported tree shapes).
+    pub partition: usize,
 }
 
 /// C-side `av1_txfm_rd_in_plane` for one CHROMA plane (intra): the walk over
@@ -1794,6 +1797,9 @@ pub struct CEncPlaneArgs<'a> {
     /// (mi_row, mi_col, ref_off, src_off, stride)
     pub geometry: (i32, i32, usize, usize, usize),
     pub sb_size: usize,
+    /// `mbmi->partition` — the has_top_right/has_bottom_left availability
+    /// input (0 NONE / 1 HORZ / 2 VERT for the ported tree shapes).
+    pub partition: usize,
     pub src: &'a [u16],
     pub mode: usize,
     pub angle_delta: i32,
@@ -1856,7 +1862,7 @@ pub fn c_encode_intra_block_plane_y(
     for blk_row in (0..mbh).step_by(txhu) {
         for blk_col in (0..mbw).step_by(txwu) {
             let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
-                a.sb_size, a.bsize, mi_row, mi_col, true, true, 1 << 16, 1 << 16, 0,
+                a.sb_size, a.bsize, mi_row, mi_col, true, true, 1 << 16, 1 << 16, a.partition,
                 a.tx_size, 0, 0, blk_row as i32, blk_col as i32, bw as i32, bh as i32, 512,
                 512, a.mode, a.angle_delta * 3, a.use_fi,
             );
@@ -2027,9 +2033,9 @@ pub fn c_encode_intra_block_plane_uv(
                 assert_eq!((blk_row, blk_col), (0, 0), "CfL block == tx block");
                 // Fresh DC prediction (no dc-pred cache in the encode pass).
                 let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
-                    12, env.bsize, env.mi_row, env.mi_col, true, true, 1 << 16, 1 << 16, 0,
-                    tx_size, env.ss_x as i32, env.ss_y as i32, blk_row as i32, blk_col as i32,
-                    wpx, hpx, 512, 512, mode, 0, false,
+                    12, env.bsize, env.mi_row, env.mi_col, true, true, 1 << 16, 1 << 16,
+                    env.partition, tx_size, env.ss_x as i32, env.ss_y as i32, blk_row as i32,
+                    blk_col as i32, wpx, hpx, 512, 512, mode, 0, false,
                 );
                 let pred = c::ref_hbd_predict_intra(
                     recon, txb_off, env.stride, mode, 0, false, 0, false, 0, tx_size, txw, txh,
@@ -2045,9 +2051,9 @@ pub fn c_encode_intra_block_plane_uv(
                 );
             } else {
                 let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
-                    12, env.bsize, env.mi_row, env.mi_col, true, true, 1 << 16, 1 << 16, 0,
-                    tx_size, env.ss_x as i32, env.ss_y as i32, blk_row as i32, blk_col as i32,
-                    wpx, hpx, 512, 512, mode, angle_delta_uv * 3, false,
+                    12, env.bsize, env.mi_row, env.mi_col, true, true, 1 << 16, 1 << 16,
+                    env.partition, tx_size, env.ss_x as i32, env.ss_y as i32, blk_row as i32,
+                    blk_col as i32, wpx, hpx, 512, 512, mode, angle_delta_uv * 3, false,
                 );
                 let pred = c::ref_hbd_predict_intra(
                     recon, txb_off, env.stride, mode, angle_delta_uv * 3, false, 0, false, 0,
@@ -2235,6 +2241,7 @@ impl COracle<'_> {
         w: &mut LeafWinner,
         mi_row: i32,
         mi_col: i32,
+        partition: usize,
         out: &mut Vec<CLeafOut>,
     ) {
         let bsize = w.bsize;
@@ -2250,6 +2257,7 @@ impl COracle<'_> {
         let above_y: Vec<i8> = self.above_e[0][a0..a0 + mbw].to_vec();
         let left_y: Vec<i8> = self.left_e[0][l0..l0 + mbh].to_vec();
         let ca = CEncPlaneArgs {
+            partition,
             bsize,
             tx_size: w.tx_size,
             geometry: (mi_row, mi_col, ref_off_y, ref_off_y, self.stride),
@@ -2294,6 +2302,7 @@ impl COracle<'_> {
             let above_v: Vec<i8> = self.above_e[2][au..au + pmw].to_vec();
             let left_v: Vec<i8> = self.left_e[2][lu..lu + pmh].to_vec();
             let cenv = CUvEnv {
+                partition,
                 bsize,
                 mi_row,
                 mi_col,
@@ -2443,16 +2452,35 @@ impl COracle<'_> {
         let (partition, subsize) = match tree {
             SbTree::Leaf(_) => (0i32, bsize),
             SbTree::Split(_) => (3i32, c_split_subsize(bsize)),
+            // REAL get_partition_subsize for the rect subsizes.
+            SbTree::Horz(_) => (1i32, c::ref_get_partition_subsize(bsize as i32, 1) as usize),
+            SbTree::Vert(_) => (2i32, c::ref_get_partition_subsize(bsize as i32, 2) as usize),
         };
         match tree {
             SbTree::Leaf(w) => {
-                self.encode_b(recon_y, recon_u, recon_v, cfl, w, mi_row, mi_col, out);
+                self.encode_b(recon_y, recon_u, recon_v, cfl, w, mi_row, mi_col, 0, out);
             }
             SbTree::Split(kids) => {
                 for (idx, child) in kids.iter_mut().enumerate() {
                     let y = mi_row + ((idx as i32) >> 1) * hbs;
                     let x = mi_col + ((idx as i32) & 1) * hbs;
                     self.encode_sb(recon_y, recon_u, recon_v, cfl, child, y, x, subsize, out);
+                }
+            }
+            SbTree::Horz(subs) => {
+                // encode_sb PARTITION_HORZ (partition_search.c:1637-1644).
+                let [s0, s1] = &mut **subs;
+                self.encode_b(recon_y, recon_u, recon_v, cfl, s0, mi_row, mi_col, 1, out);
+                if mi_row + hbs < self.mi_rows {
+                    self.encode_b(recon_y, recon_u, recon_v, cfl, s1, mi_row + hbs, mi_col, 1, out);
+                }
+            }
+            SbTree::Vert(subs) => {
+                // encode_sb PARTITION_VERT (partition_search.c:1629-1636).
+                let [s0, s1] = &mut **subs;
+                self.encode_b(recon_y, recon_u, recon_v, cfl, s0, mi_row, mi_col, 2, out);
+                if mi_col + hbs < self.mi_cols {
+                    self.encode_b(recon_y, recon_u, recon_v, cfl, s1, mi_row, mi_col + hbs, 2, out);
                 }
             }
         }

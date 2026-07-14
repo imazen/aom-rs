@@ -576,7 +576,7 @@ impl Block4x4VarInfo {
 /// fn_ptr resolution by stream depth: `aom_variance4x4` over the u8 planes
 /// for 8-bit streams; `aom_highbd_<bd>_variance4x4` over the u16 planes for
 /// bd > 8 (both individually C-validated in aom-dist).
-fn calc_normalized_variance_4x4(buf: &[u16], off: usize, stride: usize, bd: u8) -> i32 {
+pub(crate) fn calc_normalized_variance_4x4(buf: &[u16], off: usize, stride: usize, bd: u8) -> i32 {
     if bd > 8 {
         const ZEROS16: [u16; 4] = [0; 4];
         aom_dist::highbd_variance(&buf[off..], stride, &ZEROS16, 0, 4, 4, bd).0 as i32

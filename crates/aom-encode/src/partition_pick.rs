@@ -65,20 +65,11 @@
 //! - the entropy-context slices at the block position (what
 //!   `av1_get_entropy_contexts` copies).
 //!
-//! # Scope
-//!
-//! NONE + SPLIT (2 of 10 partition types), KEY intra, interior SBs,
-//! sb_size <= 64, no segmentation. MISSING: rect/AB/4-way stages, the
-//! edge-block partition-cost override, the SB-level must-find retry,
-//! `log_sub_block_var` (the ALLINTRA SB-root rdmult modifier input — the
-//! folded rdmult is an input here), and the OUTPUT pack-stage state at the
-//! SB root.
-//!
-//! # RECT stage survey (next chunk; all verified in source)
+//! # The RECT stage (partition_search.c:3520-3648; wired :5875)
 //!
 //! **THE KEY-FRAME RECT STAGE IS NN-FREE.** Every NN prune around HORZ/VERT
 //! is `!frame_is_intra_only(cm)`-gated and therefore DEAD in the one-KEY-
-//! frame envelope, for BOTH usages:
+//! frame envelope, for BOTH usages (each gate re-verified in v3.14.1):
 //! - `av1_ml_prune_rect_partition` (the 9-feature rect NN,
 //!   partition_strategy.c:1124): gate at partition_search.c:4336 requires
 //!   `!frame_is_intra_only` (also `!ml_early_term_after_part_split_level`,
@@ -86,57 +77,114 @@
 //! - `av1_ml_early_term_after_split` (partition_strategy.c:1017): gate at
 //!   partition_search.c:4323 requires `!frame_is_intra_only`;
 //! - `simple_motion_search_prune_rect` (sf = 1 both usages):
-//!   partition_strategy.c:692 requires `!frame_is_intra_only`;
-//! - `prune_rect_part_using_none_pred_mode`: sf = 0 at speed 0 both usages.
+//!   partition_strategy.c:1822 requires `!frame_is_intra_only`;
+//! - `prune_rect_part_using_none_pred_mode` +
+//!   `prune_rect_part_using_4x4_var_deviation`: sfs set at ALLINTRA
+//!   speed >= 6 only (speed_features.c:539-540) — 0/false at speed 0;
+//! - `prune_partitions_after_none` (:4247) and
+//!   `prune_partitions_after_split` (:4309) are ENTIRELY
+//!   `!frame_is_intra_only`-gated — both no-ops at KEY;
+//! - `early_term_after_none_split` (:5851) = 0 at speed 0 both usages
+//!   (ALLINTRA speed >= 4, GOOD speed >= 3);
+//!   `skip_non_sq_part_based_on_none` (:5859) = 0 at speed 0;
+//! - `av1_prune_partitions_before_search` (partition_strategy.c:1648)
+//!   reduces at speed-0 KEY to the `bsize > rect_partition_eval_thresh`
+//!   check with the DEFAULT `BLOCK_128X128` (speed_features.c:2313) — dead
+//!   for the <= 64 envelope;
+//! - `use_square_partition_only_threshold` (:5700 `bsize > thresh` rect
+//!   kill): BLOCK_64X64 sub-480p / BLOCK_128X128 at 480p+ (ALLINTRA
+//!   speed 0, speed_features.c:176-182) — `bsize > 64` never holds in the
+//!   sb <= 64 envelope;
+//! - `reuse_prev_rd_results_for_part_ab = 1` both usages, but
+//!   `ctx->rd_mode_is_ready` (pick_sb_modes:854 early-return) is only ever
+//!   set on AB-stage contexts — dead until the AB chunk.
 //!
-//! The one LIVE usage-differing knob: `less_rectangular_check_level`
-//! (ALLINTRA 1 / GOOD 0) — pure integer logic in the SPLIT stage's ELSE arm
-//! (partition_search.c:4630-4640): when SPLIT did NOT beat best and
-//! (`level == 2 || idx <= 2`), `do_rectangular_split &= !(none_rd > 0 &&
-//! none_rd < sum_rdc.rdcost)` — requires tracking `none_rd` (the NONE
-//! leaf's rdcost before pt_cost? none_partition_search:4474 stores
-//! `this_rdc.rdcost` AFTER pt_cost — re-verify the exact stored value when
-//! porting) and the split stage's final `sum_rdc`.
+//! Flag init (`init_partition_search_state_params`:3380-3399):
+//! `do_rectangular_split = enable_rect_partitions && bsize_at_least_8x8`;
+//! `partition_rect_allowed[HORZ] = do_rect && has_cols &&
+//! get_plane_block_size(HORZ subsize) != BLOCK_INVALID` (the 4:2:2
+//! tall-block guard; VERT mirrored with `has_rows`); `prune_rect_part`
+//! zeroed; `none_rd = 0`, `split_rd/rect_part_rd` zeroed.
+//! `av1_prune_partitions_by_max_min_bsize` (partition_strategy.c:1837)
+//! extends over rect: gt-max -> `av1_set_square_split_only` (none off,
+//! square on, rect off); le-min -> `av1_disable_rect_partitions` + the
+//! square-only clamp.
 //!
-//! `rectangular_partition_search` (partition_search.c:3520-3648), per type
-//! i in {HORZ, VERT} (`start/end_type` full range at speed 0):
+//! **The per-node ALLINTRA variance arm (:5791-5827) runs BEFORE the NONE
+//! stage** for `oxcf.mode == ALLINTRA` at bsize >= 16x16 (speed 0: the
+//! `prune_rect_part_using_4x4_var_deviation` sibling arm is sf-dead):
+//! `log_sub_block_var` (:5572 — min/max `log1p(var_4x4/16)` over the
+//! block's 4x4 source sub-blocks, NO cache) and, when `var_min < 0.272 &&
+//! var_max - var_min > 3.0`, forces `partition_none_allowed = 0;
+//! terminate_partition_search = 0; do_square_split = 1` ([`log_sub_block_var`]).
+//!
+//! The one LIVE usage-differing rect knob: `less_rectangular_check_level`
+//! (ALLINTRA 1 / GOOD 0 at speed 0; level 2 at ALLINTRA speed >= 3) — the
+//! SPLIT stage's ELSE arm (:4630-4640): when NOT (reached_last_index &&
+//! sum < best) and (`level == 2 || idx <= 2`), `do_rectangular_split &=
+//! !(none_rd > 0 && none_rd < sum_rdc.rdcost)`. `none_rd` is stored at
+//! :4458-4459 immediately after the NONE leaf's `av1_rd_cost_update` —
+//! **BEFORE pt_cost is added** (pt_cost lands at :4470; the
+//! WITH-pt_cost value goes to `part_none_rd`, consumed only by intra-dead
+//! prunes). `split_rd[idx]` (:4566) is the child's none_rd out-value —
+//! consumed only by the intra-dead NN prunes; threaded for shape.
+//!
+//! `rectangular_partition_search` (:3520), per type i in {HORZ, VERT}:
 //! 1. `is_rect_part_allowed` (:3506): `!terminate &&
 //!    partition_rect_allowed[i] && !prune_rect_part[i] &&
-//!    (do_rectangular_split || active_edge)` — with
-//!    `partition_rect_allowed` from init: `has_cols/has_rows` + rect
-//!    enabled + subsize valid for chroma (`get_plane_block_size(subsize)
-//!    != BLOCK_INVALID` — the 4:2:2 tall-block guard).
+//!    (do_rectangular_split || active_edge)`; `av1_active_h/v_edge`
+//!    (encodeframe_utils.c:767/797) at the one-pass shape: active iff the
+//!    node's mi range straddles 0 or mi_rows/mi_cols.
 //! 2. `sum_rdc = {rate: partition_cost[type], rdcost: RDCOST(rate, 0)}`.
 //! 3. sub-block 0 at (mi_row, mi_col): `rd_pick_rect_partition` (:3471) =
-//!    `best_remain = best - sum` -> `pick_sb_modes(partition_type)` ->
-//!    `av1_rd_cost_update` -> accumulate (INT_MAX -> rdcost MAX); records
-//!    `rect_part_rd[i][0]` (an AB-stage input).
+//!    `best_remain = best - sum` -> `pick_sb_modes(partition_type)` (the
+//!    leaf with `mbmi->partition = HORZ/VERT` — feeds the
+//!    has_top_right/has_bottom_left tables, which branch only on
+//!    VERT_A/VERT_B) -> `av1_rd_cost_update` -> accumulate (rate INT_MAX ->
+//!    sum rdcost MAX); records `rect_part_rd[i][0]` (an AB-stage input).
 //! 4. If `sum < best && is_not_edge` (has_rows for HORZ / has_cols VERT):
-//!    `av1_update_state + encode_superblock(DRY_RUN_NORMAL)` of sub 0 —
-//!    the MID-STAGE propagation (sub 1 reads sub 0's pixels+contexts;
-//!    note: encode_superblock DIRECTLY, no encode_b — no partition-ctx
-//!    stamp, no rdmult save) + `is_rect_ctx_is_ready[i]` bookkeeping
-//!    (palette/CfL-free sub-0 winners feed the AB stage's
-//!    `reuse_prev_rd_results_for_part_ab = 1`). Then sub-block 1 at the
-//!    edge position (mi_row_edge/mi_col_edge = +hbs).
+//!    `is_rect_ctx_is_ready[i]` bookkeeping (:3605-3612: palette-free —
+//!    always in this envelope — and `uv_mode != UV_CFL_PRED`; the AB
+//!    stage's reuse input), then `av1_update_state +
+//!    encode_superblock(DRY_RUN_NORMAL)` of sub 0 — the MID-STAGE
+//!    propagation (sub 1 reads sub 0's winner pixels, entropy/txfm
+//!    contexts AND mi-grid modes; encode_superblock DIRECTLY: no
+//!    partition-ctx stamp, no rdmult save — [`crate::encode_sb::encode_b_intra_dry`]
+//!    composes exactly those pieces since ctx->mic already carries the
+//!    pick's partition). Then sub-block 1 at the edge position
+//!    (`mi_row_edge`/`mi_col_edge` = origin + mi_step, :3323).
 //! 5. Best update: `sum < best` -> rdcost recompute -> strict-< ->
-//!    `partitioning = HORZ/VERT`.
+//!    `partitioning = HORZ/VERT`; the ELSE records
+//!    `rect_part_win_info->rect_part_win[i] = false` (NULL outside the
+//!    split recursion — an AB-stage input, next chunk).
 //! 6. `av1_restore_context` at EACH type's loop tail (:3644) — HORZ's
-//!    sub-0 encode debris is restored before VERT evaluates.
+//!    sub-0 encode debris (contexts) is restored before VERT evaluates;
+//!    pixels/mi-grid are NOT restored (C behavior: rect sub-0 pixel debris
+//!    persists until the winner encode overwrites the node's extent).
 //!
-//! Port plan: extend [`SbTree`] with `Horz([LeafWinner; 2])`/`Vert(..)` +
-//! the encode_sb HORZ/VERT walk arms (partition_search.c:1640-1660), add
-//! the stage between NONE and SPLIT result handling in
-//! [`rd_pick_partition_real`] (C order: NONE -> SPLIT -> rect), track
-//! `none_rd`/`split_rd[4]` per node for the less_rect arm, and sweep BOTH
-//! usages in the diff (less_rect ON under ALLINTRA).
+//! # Scope
+//!
+//! NONE + SPLIT + HORZ + VERT (4 of 10 partition types), KEY intra,
+//! interior SBs, sb_size <= 64, no segmentation, min_partition >= 8x8
+//! (every rect leaf >= 16x8 is a chroma reference; 8x8 nodes have rect
+//! clamped off by le-min). MISSING: AB (HORZ_A/B, VERT_A/B) + 4-way
+//! (HORZ_4/VERT_4) stages — `rect_part_rd`/`is_rect_ctx_is_ready`/
+//! `rect_part_win` are tracked but their consumers are next chunk; rect at
+//! min_partition 4x4 (8x4/4x8 leaves: sub-8x8 shared-chroma pairing + the
+//! C's uv_mode read on !chroma_ref sub-0 in `is_rect_ctx_is_ready`); the
+//! edge-block partition-cost override + edge rect (sub-0-only HORZ/VERT);
+//! the SB-level must-find retry; the SB-root ALLINTRA
+//! `intra_sb_rdmult_modifier` fold (:5710 — the folded rdmult is an input
+//! here); and the OUTPUT pack-stage state at the SB root.
 
 use crate::encode_sb::{
     encode_sb_dry, LeafEncodeOut, LeafWinner, SbEncodeEnv, SbTree, TileCtxState,
 };
 use crate::hog::prune_intra_mode_with_hog_y;
 use crate::intra_rd::{Block4x4VarInfo, IntraSbyGates, IntraSbySearchCfg};
-use crate::intra_uv_rd::{chroma_plane_offset, is_chroma_reference, UvLoopPolicy, UvRdEnv};
+use crate::intra_uv_rd::{
+    chroma_plane_offset, is_chroma_reference, UvLoopPolicy, UvRdEnv, UV_CFL_PRED,
+};
 use crate::mode_costs::{CflCosts, IntraModeCosts};
 use crate::partition::{rd_cost_update, rd_stats_subtraction, split_subsize, PartRdStats};
 use crate::rd_pick::{rd_pick_intra_mode_sb, RdPickUvArgs, RdPickUvOutcome, ReencodeParams};
@@ -144,7 +192,7 @@ use crate::mode_costs::TxSizeCosts;
 use crate::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv, MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
 use aom_dist::highbd_variance;
 use aom_entropy::partition::{
-    get_plane_block_size, get_tx_size_context, partition_plane_context,
+    get_partition_subsize, get_plane_block_size, get_tx_size_context, partition_plane_context,
 };
 use aom_intra::cfl::CflCtx;
 use aom_txb::TxTypeCosts;
@@ -169,6 +217,50 @@ pub fn perpixel_variance_y(src: &[u16], off: usize, stride: usize, bsize: usize,
     let (var, _sse) = highbd_variance(&src[off..], stride, &offs, 0, w, h, bd);
     let bits = NUM_PELS_LOG2[bsize];
     (var + (1 << (bits - 1))) >> bits
+}
+
+/// `log_sub_block_var` (partition_search.c:5572): the min/max
+/// `log1p(var/16.0)` over the block's 4x4 SOURCE sub-blocks (frame-edge
+/// overhang clipped out via the `mb_to_*_edge` fields; NO per-SB cache —
+/// direct `av1_calc_normalized_variance` calls, unlike the leaf
+/// variance-factor arm). Feeds the per-node ALLINTRA variance arm
+/// (:5791-5827) and the SB-root rdmult modifier (:5710, not ported).
+/// f64 arithmetic matches the reference build (`f64::ln_1p` = libm
+/// `log1p`; the AOMMIN/MAX fold over `(double)var`).
+pub fn log_sub_block_var(
+    src: &[u16],
+    off: usize,
+    stride: usize,
+    bsize: usize,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    bd: u8,
+) -> (f64, f64) {
+    let right_overflow =
+        if mb_to_right_edge < 0 { ((-mb_to_right_edge) >> 3) as usize } else { 0 };
+    let bottom_overflow =
+        if mb_to_bottom_edge < 0 { ((-mb_to_bottom_edge) >> 3) as usize } else { 0 };
+    let bw = 4 * MI_SIZE_WIDE_B[bsize] - right_overflow;
+    let bh = 4 * MI_SIZE_HIGH_B[bsize] - bottom_overflow;
+    let mut min_var_4x4 = f64::from(i32::MAX);
+    let mut max_var_4x4 = 0.0f64;
+    let mut i = 0usize;
+    while i < bh {
+        let mut j = 0usize;
+        while j < bw {
+            let var = crate::intra_rd::calc_normalized_variance_4x4(
+                src,
+                off + i * stride + j,
+                stride,
+                bd,
+            );
+            min_var_4x4 = min_var_4x4.min(f64::from(var));
+            max_var_4x4 = max_var_4x4.max(f64::from(var));
+            j += 4;
+        }
+        i += 4;
+    }
+    ((min_var_4x4 / 16.0).ln_1p(), (max_var_4x4 / 16.0).ln_1p())
 }
 
 /// The per-mi-cell winner Y mode state (`av1_update_state`'s mi-grid fill;
@@ -222,6 +314,12 @@ pub struct PickFrameCfg<'a> {
     /// sf `intra_sf.intra_pruning_with_hog` (1 at speed 0, both usages;
     /// KEY-frame threshold row -1.2).
     pub intra_pruning_with_hog: bool,
+    /// `oxcf.part_cfg.enable_rect_partitions` (aomenc default 1; the
+    /// `do_rectangular_split`/`partition_rect_allowed` init input).
+    pub enable_rect_partitions: bool,
+    /// sf `part_sf.less_rectangular_check_level` (ALLINTRA 1 / GOOD 0 at
+    /// speed 0) — the SPLIT-stage ELSE arm's rect kill (module docs).
+    pub less_rectangular_check_level: i32,
     /// `x->sb_enc.max_partition_size` (default `BLOCK_128X128` at KEY —
     /// the dry-run gate + split-restore inputs).
     pub max_partition_size: usize,
@@ -249,8 +347,10 @@ pub struct LeafVisit {
 
 /// `pick_sb_modes` (partition_search.c:850) for a KEY intra leaf: derive the
 /// per-leaf inputs live (module docs) and run the whole-block
-/// [`rd_pick_intra_mode_sb`]. Returns the normalized rd stats + the winner
-/// as an [`LeafWinner`] (None when `rate == INT_MAX`).
+/// [`rd_pick_intra_mode_sb`]. `partition` is the `mbmi->partition = partition`
+/// install (:887) — the has_top_right/has_bottom_left availability input.
+/// Returns the normalized rd stats + the winner as an [`LeafWinner`] (None
+/// when `rate == INT_MAX`).
 #[allow(clippy::too_many_arguments)]
 fn leaf_pick_sb_modes(
     env: &SbEncodeEnv,
@@ -264,6 +364,7 @@ fn leaf_pick_sb_modes(
     mi_row: i32,
     mi_col: i32,
     bsize: usize,
+    partition: usize,
     best_remain: &PartRdStats,
 ) -> (PartRdStats, Option<LeafWinner>) {
     // av1_rd_cost_update(x->rdmult, &best_rd) on entry (pick_sb_modes:927).
@@ -321,7 +422,7 @@ fn leaf_pick_sb_modes(
         left_available,
         tile_col_end: env.tile_col_end,
         tile_row_end: env.tile_row_end,
-        partition: 0, // PARTITION_NONE (pick_sb_modes' partition arg)
+        partition,
         mi_cols: env.mi_cols,
         mi_rows: env.mi_rows,
         ref_off: ref_off_y,
@@ -407,7 +508,7 @@ fn leaf_pick_sb_modes(
         chroma_left_available,
         tile_col_end: env.tile_col_end,
         tile_row_end: env.tile_row_end,
-        partition: 0,
+        partition,
         mi_cols: env.mi_cols,
         mi_rows: env.mi_rows,
         ss_x: env.ss_x,
@@ -584,11 +685,62 @@ fn restore_context(
     tile.left_tctx[l0..l0 + h].copy_from_slice(&saved.left_t);
 }
 
-/// `av1_rd_pick_partition` with REAL leaves, NONE + SPLIT — see the module
-/// docs for the exact C sequence. Returns `(winner tree, best stats,
-/// found)`; when found and the dry-run gate passes, the winner subtree has
-/// been re-encoded (recons + contexts + mode grid stamped) exactly as the C
-/// leaves it for siblings.
+/// `rd_pick_rect_partition` (partition_search.c:3471): one rect sub-block
+/// pick — the `best - sum` budget subtraction, the leaf at
+/// `partition_type`, and the `sum_rdc` accumulation (rate `INT_MAX` -> sum
+/// rdcost `INT64_MAX`). Returns `(this_rdc.rdcost — the `rect_part_rd`
+/// record, the winner)`.
+#[allow(clippy::too_many_arguments)]
+fn rd_pick_rect_partition(
+    env: &SbEncodeEnv,
+    cfg: &PickFrameCfg,
+    tile: &TileCtxState,
+    grid: &ModeGrid,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    cfl: &mut CflCtx,
+    mi_row: i32,
+    mi_col: i32,
+    subsize: usize,
+    partition_type: usize,
+    best_rdc: &PartRdStats,
+    sum_rdc: &mut PartRdStats,
+    visits: &mut Vec<LeafVisit>,
+) -> (i64, Option<LeafWinner>) {
+    let best_remain = rd_stats_subtraction(env.rdmult, best_rdc, sum_rdc);
+    let (this_rdc, winner) = leaf_pick_sb_modes(
+        env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, subsize,
+        partition_type, &best_remain,
+    );
+    visits.push(LeafVisit {
+        mi_row,
+        mi_col,
+        bsize: subsize,
+        budget: best_remain.rdcost,
+        rate: this_rdc.rate,
+        dist: this_rdc.dist,
+        rdcost: this_rdc.rdcost,
+    });
+    // (av1_rd_cost_update(x->rdmult, &this_rdc) at :3487 — a no-op on the
+    // leaf's already-consistent rdcost, as at the NONE stage.)
+    if this_rdc.rate == i32::MAX {
+        sum_rdc.rdcost = i64::MAX;
+    } else {
+        sum_rdc.rate += this_rdc.rate;
+        sum_rdc.dist += this_rdc.dist;
+        rd_cost_update(env.rdmult, sum_rdc);
+    }
+    (this_rdc.rdcost, winner)
+}
+
+/// `av1_rd_pick_partition` with REAL leaves, NONE + SPLIT + HORZ + VERT —
+/// see the module docs for the exact C sequence. `none_rd_out` mirrors the
+/// C's `none_rd` out-pointer (the parent's `split_rd[idx]` slot; consumed
+/// only by intra-dead NN prunes — threaded for shape). Returns `(winner
+/// tree, best stats, found)`; when found and the dry-run gate passes, the
+/// winner subtree has been re-encoded (recons + contexts + mode grid
+/// stamped) exactly as the C leaves it for siblings.
 #[allow(clippy::too_many_arguments)]
 pub fn rd_pick_partition_real(
     env: &SbEncodeEnv,
@@ -604,8 +756,13 @@ pub fn rd_pick_partition_real(
     bsize: usize,
     mut best_rdc: PartRdStats,
     pc_index: usize,
+    mut none_rd_out: Option<&mut i64>,
     visits: &mut Vec<LeafVisit>,
 ) -> (Option<SbTree>, PartRdStats, bool) {
+    // if (none_rd) *none_rd = 0 (:5682).
+    if let Some(out) = none_rd_out.as_deref_mut() {
+        *out = 0;
+    }
     if best_rdc.rdcost < 0 {
         return (None, PartRdStats::invalid(), false);
     }
@@ -616,14 +773,36 @@ pub fn rd_pick_partition_real(
     let has_cols = mi_col + mi_step < env.mi_cols;
     let mut partition_none_allowed = has_rows && has_cols;
     let mut do_square_split = bsize_at_least_8x8;
+    // Rect flag init (:3382-3399) incl. the get_plane_block_size chroma
+    // guard (4:2:2 kills VERT-of-8x8 4x8 subsizes; 4:4:0 the HORZ mirror).
+    let mut do_rectangular_split = cfg.enable_rect_partitions && bsize_at_least_8x8;
+    let mut partition_rect_allowed = [false; 2];
+    if do_rectangular_split {
+        let horz_subsize = get_partition_subsize(bsize, 1) as usize;
+        let vert_subsize = get_partition_subsize(bsize, 2) as usize;
+        partition_rect_allowed[0] =
+            has_cols && get_plane_block_size(horz_subsize, env.ss_x, env.ss_y) != 255;
+        partition_rect_allowed[1] =
+            has_rows && get_plane_block_size(vert_subsize, env.ss_x, env.ss_y) != 255;
+    }
+    // prune_rect_part (:3385) / terminate_partition_search (:3380): no live
+    // writer in the speed-0 KEY envelope (module docs).
+    let prune_rect_part = [false; 2];
+    let terminate_partition_search = false;
     // av1_prune_partitions_by_max_min_bsize (partition_strategy.c:1837).
     const BLK_1D: [usize; 22] =
         [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
     if BLK_1D[bsize] > BLK_1D[cfg.max_partition_size] {
-        // Larger than max: square split only.
+        // av1_set_square_split_only (encodeframe_utils.h:266).
         partition_none_allowed = false;
-        do_square_split = bsize_at_least_8x8;
+        do_square_split = true;
+        do_rectangular_split = false;
+        partition_rect_allowed = [false, false];
     } else if BLK_1D[bsize] <= BLK_1D[cfg.min_partition_size] {
+        // av1_disable_rect_partitions (encodeframe_utils.h:253) + the
+        // le-min square clamp.
+        do_rectangular_split = false;
+        partition_rect_allowed = [false, false];
         if has_rows && has_cols {
             do_square_split = false;
         }
@@ -650,8 +829,28 @@ pub fn rd_pick_partition_real(
     // av1_save_context (:5754).
     let saved = save_context(tile, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
 
+    // The per-node ALLINTRA variance arm (:5791-5827; module docs): at
+    // speed 0 only the >= BLOCK_16X16 force-split branch is live (the
+    // rect-prune sibling needs the speed >= 6
+    // prune_rect_part_using_4x4_var_deviation sf).
+    if cfg.allintra && bsize >= 6 {
+        let ref_off_y = env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+        let mb_right = (env.mi_cols - mi_w as i32 - mi_col) * 4 * 8;
+        let mb_bottom = (env.mi_rows - MI_SIZE_HIGH_B[bsize] as i32 - mi_row) * 4 * 8;
+        let (var_min, var_max) =
+            log_sub_block_var(env.src_y, ref_off_y, env.stride, bsize, mb_right, mb_bottom, env.bd);
+        if var_min < 0.272 && (var_max - var_min) > 3.0 {
+            partition_none_allowed = false;
+            // terminate_partition_search = 0 (:5817): already false — no
+            // live setter in the envelope.
+            do_square_split = true;
+        }
+    }
+
     let mut found = false;
     let mut best_tree: Option<SbTree> = None;
+    // part_search_state->none_rd (:3366; the :4458 store is PRE-pt_cost).
+    let mut none_rd: i64 = 0;
 
     // ---- PARTITION_NONE stage ----
     if partition_none_allowed {
@@ -665,7 +864,7 @@ pub fn rd_pick_partition_real(
         let best_remain = rd_stats_subtraction(env.rdmult, &best_rdc, &partition_rdcost);
 
         let (mut this_rdc, winner) = leaf_pick_sb_modes(
-            env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, bsize,
+            env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, bsize, 0,
             &best_remain,
         );
         visits.push(LeafVisit {
@@ -677,6 +876,12 @@ pub fn rd_pick_partition_real(
             dist: this_rdc.dist,
             rdcost: this_rdc.rdcost,
         });
+        // *none_rd / part_search_state->none_rd = this_rdc.rdcost
+        // (:4458-4459) — BEFORE the pt_cost fold below.
+        none_rd = this_rdc.rdcost;
+        if let Some(out) = none_rd_out {
+            *out = this_rdc.rdcost;
+        }
         // (pick_sb_modes normalized INT_MAX already; av1_rd_cost_update at
         // the stage is folded into the leaf's returned rdcost.)
         if this_rdc.rate != i32::MAX {
@@ -701,6 +906,9 @@ pub fn rd_pick_partition_real(
         sum_rdc.rate = partition_cost[3];
         sum_rdc.rdcost = crate::rd::rdcost(env.rdmult, sum_rdc.rate, 0);
 
+        // split_rd[4] (:3367/:4566): the children's none_rd out-values —
+        // consumed only by intra-dead NN prunes; threaded for shape.
+        let mut split_rd = [0i64; 4];
         let mut children: Vec<Option<SbTree>> = Vec::new();
         let mut idx = 0usize;
         while idx < 4 && sum_rdc.rdcost < best_rdc.rdcost {
@@ -714,7 +922,7 @@ pub fn rd_pick_partition_real(
             let best_remain = rd_stats_subtraction(env.rdmult, &best_rdc, &sum_rdc);
             let (child_tree, child_rdc, child_found) = rd_pick_partition_real(
                 env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, y, x, subsize,
-                best_remain, idx, visits,
+                best_remain, idx, Some(&mut split_rd[idx]), visits,
             );
             if !child_found {
                 sum_rdc = PartRdStats::invalid();
@@ -743,12 +951,115 @@ pub fn rd_pick_partition_real(
                     <[SbTree; 4]>::try_from(kids).ok().unwrap(),
                 )));
             }
+        } else if cfg.less_rectangular_check_level > 0 {
+            // The less_rectangular_check arm (:4630-4640; ALLINTRA level 1
+            // at speed 0): when SPLIT did not complete-and-beat and
+            // (level == 2 || the loop exited at idx <= 2), kill rect if the
+            // NONE leaf (PRE-pt_cost none_rd) was valid and beat the
+            // split-stage sum.
+            if cfg.less_rectangular_check_level == 2 || idx <= 2 {
+                let partition_none_valid = none_rd > 0;
+                let partition_none_better = none_rd < sum_rdc.rdcost;
+                if partition_none_valid && partition_none_better {
+                    do_rectangular_split = false;
+                }
+            }
         }
         // The SPLIT-stage restore (:4645-4647): gated `bsize <=
         // max_partition_size || bsize == sb_size` — always true here.
         debug_assert!(bsize <= cfg.max_partition_size || bsize == env.sb_size);
         restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+        let _ = split_rd; // NN-prune inputs (intra-dead; module docs).
     }
+
+    // ---- rectangular partition stage (rectangular_partition_search,
+    // :3520; wired :5875) ----
+    // Between SPLIT and rect the C runs early_term_after_none_split (sf 0),
+    // skip_non_sq_part_based_on_none (sf 0) and prune_partitions_after_split
+    // (entirely !frame_is_intra_only-gated) — verified no-ops (module docs).
+    let mut rect_part_rd = [[0i64; 2]; 2]; // :3368 — an AB-stage input.
+    let mut is_rect_ctx_is_ready = [false; 2]; // :3373 — an AB-stage input.
+    for i in 0..2usize {
+        // is_rect_part_allowed (:3506) with av1_active_h/v_edge at the
+        // one-pass shape (encodeframe_utils.c:787/817): active iff the
+        // node's mi range straddles 0 or the frame mi end.
+        let (mi_pos, dim_end) =
+            if i == 0 { (mi_row, env.mi_rows) } else { (mi_col, env.mi_cols) };
+        let active_edge = (0 >= mi_pos && 0 < mi_pos + mi_step)
+            || (dim_end >= mi_pos && dim_end < mi_pos + mi_step);
+        if terminate_partition_search
+            || !partition_rect_allowed[i]
+            || prune_rect_part[i]
+            || !(do_rectangular_split || active_edge)
+        {
+            continue;
+        }
+        let partition_type = 1 + i; // PARTITION_HORZ / PARTITION_VERT
+        let subsize = get_partition_subsize(bsize, partition_type as i32) as usize;
+        let mut sum_rdc = PartRdStats::init();
+        sum_rdc.rate = partition_cost[partition_type];
+        sum_rdc.rdcost = crate::rd::rdcost(env.rdmult, sum_rdc.rate, 0);
+
+        // Sub-block 0 at the origin (:3596).
+        let (rd0, mut w0) = rd_pick_rect_partition(
+            env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, subsize,
+            partition_type, &best_rdc, &mut sum_rdc, visits,
+        );
+        rect_part_rd[i][0] = rd0;
+
+        // is_not_edge_block[i] (:3550): has_rows for HORZ / has_cols VERT.
+        let is_not_edge_block = if i == 0 { has_rows } else { has_cols };
+        let mut w1: Option<LeafWinner> = None;
+        if sum_rdc.rdcost < best_rdc.rdcost && is_not_edge_block {
+            let w0 = w0.as_mut().expect("valid rect sum implies a sub-0 winner");
+            // is_rect_ctx_is_ready (:3605-3612): palette-free (envelope:
+            // try_palette off) and uv_mode != UV_CFL_PRED.
+            if w0.uv_mode != UV_CFL_PRED {
+                is_rect_ctx_is_ready[i] = true;
+            }
+            // av1_update_state + encode_superblock(DRY_RUN_NORMAL)
+            // (:3613-3616) — the MID-STAGE propagation: sub 1 reads sub 0's
+            // winner pixels, entropy/txfm contexts, and mi-grid modes.
+            // encode_b_intra_dry composes exactly update_state +
+            // encode_superblock for a KEY intra leaf (no partition-ctx
+            // stamp, no rdmult save; ctx->mic already carries the pick's
+            // partition — module docs #4).
+            let _ = crate::encode_sb::encode_b_intra_dry(
+                env, tile, recon_y, recon_u, recon_v, cfl, w0, mi_row, mi_col, partition_type,
+            );
+            grid.stamp(mi_row, mi_col, subsize, w0.mode as u8, env.mi_rows, env.mi_cols);
+            // Sub-block 1 at the edge position (mi_row_edge/mi_col_edge =
+            // origin + mi_step, :3323-3324).
+            let (r1, c1) =
+                if i == 0 { (mi_row + mi_step, mi_col) } else { (mi_row, mi_col + mi_step) };
+            let (rd1, got) = rd_pick_rect_partition(
+                env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, r1, c1, subsize,
+                partition_type, &best_rdc, &mut sum_rdc, visits,
+            );
+            rect_part_rd[i][1] = rd1;
+            w1 = got;
+        }
+        // Best update (:3626-3632).
+        if sum_rdc.rdcost < best_rdc.rdcost {
+            sum_rdc.rdcost = crate::rd::rdcost(env.rdmult, sum_rdc.rate, sum_rdc.dist);
+            if sum_rdc.rdcost < best_rdc.rdcost {
+                best_rdc = sum_rdc;
+                found = true;
+                let pair = Box::new([
+                    w0.take().expect("rect winner sub 0"),
+                    w1.take().expect("interior rect winner sub 1"),
+                ]);
+                best_tree = Some(if i == 0 { SbTree::Horz(pair) } else { SbTree::Vert(pair) });
+            }
+        }
+        // else: rect_part_win_info->rect_part_win[i] = false (:3634-3636) —
+        // an AB-stage input (non-NULL only under a SPLIT parent's
+        // recursion); next chunk.
+        // av1_restore_context at EACH type's loop tail (:3644) — HORZ's
+        // sub-0 encode debris restored before VERT evaluates.
+        restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+    }
+    let _ = (rect_part_rd, is_rect_ctx_is_ready); // AB-stage inputs (next chunk).
 
     // ---- the winner encode (:5998-6026) ----
     if found {
@@ -808,6 +1119,22 @@ fn stamp_grid_from_tree(
                     mi_rows,
                     mi_cols,
                 );
+            }
+        }
+        SbTree::Horz(subs) => {
+            let sub = get_partition_subsize(bsize, 1) as usize;
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            if mi_row + hbs < mi_rows {
+                grid.stamp(mi_row + hbs, mi_col, sub, subs[1].mode as u8, mi_rows, mi_cols);
+            }
+        }
+        SbTree::Vert(subs) => {
+            let sub = get_partition_subsize(bsize, 2) as usize;
+            let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            if mi_col + hbs < mi_cols {
+                grid.stamp(mi_row, mi_col + hbs, sub, subs[1].mode as u8, mi_rows, mi_cols);
             }
         }
     }

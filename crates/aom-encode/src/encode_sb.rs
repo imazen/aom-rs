@@ -57,19 +57,27 @@
 //! `encode_sb` (:1581): out-of-frame/invalid-subsize outs; [`!dry_run` ONLY:
 //! the partition-CDF update at partition roots with rows+cols — pack stage];
 //! the partition switch (NONE -> `encode_b`; SPLIT -> 4 recursive
-//! `encode_sb`; rect/AB/4-way sequences for those tree types); then ALWAYS
-//! `update_ext_partition_context` (the partition-context stamp; ported in
-//! aom-entropy).
+//! `encode_sb`; HORZ -> `encode_b(subsize, HORZ)` at the origin + [`mi_row +
+//! hbs < mi_rows`:] `encode_b` at `(mi_row + hbs, mi_col)` (:1637-1644);
+//! VERT -> the mirrored column pair (:1629-1636); AB/4-way sequences for
+//! those tree types); then ALWAYS `update_ext_partition_context` (the
+//! partition-context stamp; ported in aom-entropy). The rect leaves receive
+//! `partition = PARTITION_HORZ/VERT` — `mbmi->partition` feeds the
+//! `has_top_right`/`has_bottom_left` availability tables (reconintra.c:182/
+//! 367 branch only on VERT_A/VERT_B, so HORZ/VERT read the default table;
+//! threaded for exactness + the AB stage).
 //!
 //! # Scope
 //!
-//! NONE + SPLIT tree shapes (2 of 10 partition types — matching the ported
-//! partition search slice; the rect/AB/4-way `encode_b` sequences are
-//! mechanical extensions of the same leaf composition). KEY intra leaves,
-//! interior blocks, no segmentation, non-lossless-segment envelope, block
-//! sizes <= 64x64. MISSING: the OUTPUT_ENABLED adds (partition/coeff/tx-size
-//! CDF adaptation, tcoeff recording, cb offsets — the pack stage, documented
-//! per step above); frame-edge clipped walks; SB128.
+//! NONE + SPLIT + HORZ + VERT tree shapes (4 of 10 partition types —
+//! matching the ported partition search slice; the AB/4-way `encode_b`
+//! sequences are mechanical extensions of the same leaf composition). KEY
+//! intra leaves, interior blocks, no segmentation, non-lossless-segment
+//! envelope, block sizes <= 64x64. MISSING: AB/4-way tree shapes; the
+//! OUTPUT_ENABLED adds (partition/coeff/tx-size CDF adaptation, tcoeff
+//! recording, cb offsets — the pack stage, documented per step above);
+//! frame-edge clipped walks (the rect arms carry the C's sub-1 frame-bound
+//! guards but interior fixtures never take them); SB128.
 
 use crate::encode_intra::{
     encode_intra_block_plane_uv, encode_intra_block_plane_y, EncodeIntraPlaneOutcome,
@@ -219,17 +227,28 @@ pub struct LeafEncodeOut {
     pub v: Option<EncodeIntraPlaneOutcome>,
 }
 
-/// A picked partition tree (`pc_tree` slice): NONE leaves + SPLIT nodes.
+/// A picked partition tree (`pc_tree` slice): NONE leaves + SPLIT nodes +
+/// HORZ/VERT rect pairs.
 #[derive(Clone, Debug)]
 pub enum SbTree {
     /// PARTITION_NONE at this node — the leaf winner.
     Leaf(LeafWinner),
     /// PARTITION_SPLIT — 4 children in raster order.
     Split(Box<[SbTree; 4]>),
+    /// PARTITION_HORZ — `pc_tree->horizontal[2]`: the top sub-block at the
+    /// node origin + the bottom at `mi_row + hbs` (both winners' bsize is
+    /// the HORZ subsize). Interior envelope: both present (an edge HORZ
+    /// with only sub-0 coded — `!has_rows` — is out of envelope).
+    Horz(Box<[LeafWinner; 2]>),
+    /// PARTITION_VERT — `pc_tree->vertical[2]`: left + right sub-blocks.
+    Vert(Box<[LeafWinner; 2]>),
 }
 
-/// `PARTITION_NONE` / `PARTITION_SPLIT` C values.
+/// `PARTITION_NONE` / `PARTITION_HORZ` / `PARTITION_VERT` /
+/// `PARTITION_SPLIT` C values.
 const PARTITION_NONE: i32 = 0;
+const PARTITION_HORZ: i32 = 1;
+const PARTITION_VERT: i32 = 2;
 const PARTITION_SPLIT: i32 = 3;
 
 /// `get_partition_subsize(bsize, PARTITION_SPLIT)` for the square sizes.
@@ -542,7 +561,16 @@ pub fn encode_sb_dry(
     let (partition, subsize) = match tree {
         SbTree::Leaf(_) => (PARTITION_NONE, bsize),
         SbTree::Split(_) => (PARTITION_SPLIT, split_subsize(bsize)),
+        SbTree::Horz(_) => (
+            PARTITION_HORZ,
+            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ) as usize,
+        ),
+        SbTree::Vert(_) => (
+            PARTITION_VERT,
+            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT) as usize,
+        ),
     };
+    debug_assert_ne!(subsize, 255, "tree subsize is valid by construction");
     // !dry_run partition-CDF update: pack stage (skipped at DRY_RUN).
     match tree {
         SbTree::Leaf(w) => {
@@ -566,6 +594,44 @@ pub fn encode_sb_dry(
                 let y = mi_row + ((idx as i32) >> 1) * hbs;
                 let x = mi_col + ((idx as i32) & 1) * hbs;
                 encode_sb_dry(env, state, recon_y, recon_u, recon_v, cfl, child, y, x, subsize, leaves);
+            }
+        }
+        SbTree::Horz(subs) => {
+            // encode_sb PARTITION_HORZ (:1637-1644): sub-0 at the origin,
+            // sub-1 at (mi_row + hbs, mi_col) gated by the frame bound.
+            let [s0, s1] = &mut **subs;
+            debug_assert_eq!(s0.bsize, subsize, "horz winner bsize == subsize");
+            let out = encode_b_intra_dry(
+                env, state, recon_y, recon_u, recon_v, cfl, s0, mi_row, mi_col,
+                PARTITION_HORZ as usize,
+            );
+            leaves.push(out);
+            if mi_row + hbs < env.mi_rows {
+                debug_assert_eq!(s1.bsize, subsize, "horz winner bsize == subsize");
+                let out = encode_b_intra_dry(
+                    env, state, recon_y, recon_u, recon_v, cfl, s1, mi_row + hbs, mi_col,
+                    PARTITION_HORZ as usize,
+                );
+                leaves.push(out);
+            }
+        }
+        SbTree::Vert(subs) => {
+            // encode_sb PARTITION_VERT (:1629-1636): sub-0 at the origin,
+            // sub-1 at (mi_row, mi_col + hbs) gated by the frame bound.
+            let [s0, s1] = &mut **subs;
+            debug_assert_eq!(s0.bsize, subsize, "vert winner bsize == subsize");
+            let out = encode_b_intra_dry(
+                env, state, recon_y, recon_u, recon_v, cfl, s0, mi_row, mi_col,
+                PARTITION_VERT as usize,
+            );
+            leaves.push(out);
+            if mi_col + hbs < env.mi_cols {
+                debug_assert_eq!(s1.bsize, subsize, "vert winner bsize == subsize");
+                let out = encode_b_intra_dry(
+                    env, state, recon_y, recon_u, recon_v, cfl, s1, mi_row, mi_col + hbs,
+                    PARTITION_VERT as usize,
+                );
+                leaves.push(out);
             }
         }
     }

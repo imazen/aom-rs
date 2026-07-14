@@ -60,7 +60,8 @@ fn in_set_types(tx_size: usize, reduced: bool) -> Vec<usize> {
     (0..16).filter(|t| mask & (1 << t) != 0).collect()
 }
 
-/// Valid uniform luma tx sizes that tile each square bsize (winner sizes).
+/// Valid uniform luma tx sizes that tile each bsize (winner sizes — the
+/// C's max_txsize_rect_lookup depth chain, MAX_TX_DEPTH 2).
 fn tx_choices(bsize: usize) -> &'static [usize] {
     match bsize {
         0 => &[0],          // 4x4
@@ -68,7 +69,15 @@ fn tx_choices(bsize: usize) -> &'static [usize] {
         6 => &[2, 1, 0],    // 16x16
         9 => &[3, 2, 1],    // 32x32
         12 => &[4, 3, 2],   // 64x64
-        _ => unreachable!("square bsizes only"),
+        1 => &[5, 0],       // 4x8: TX_4X8 -> TX_4X4
+        2 => &[6, 0],       // 8x4: TX_8X4 -> TX_4X4
+        4 => &[7, 1, 0],    // 8x16: TX_8X16 -> TX_8X8 -> TX_4X4
+        5 => &[8, 1, 0],    // 16x8: TX_16X8 -> TX_8X8 -> TX_4X4
+        7 => &[9, 2, 1],    // 16x32: TX_16X32 -> TX_16X16 -> TX_8X8
+        8 => &[10, 2, 1],   // 32x16: TX_32X16 -> TX_16X16 -> TX_8X8
+        10 => &[11, 3, 2],  // 32x64: TX_32X64 -> TX_32X32 -> TX_16X16
+        11 => &[12, 3, 2],  // 64x32: TX_64X32 -> TX_32X32 -> TX_16X16
+        _ => unreachable!("64x64-partitionable bsizes only"),
     }
 }
 
@@ -78,6 +87,21 @@ fn split_subsize(bsize: usize) -> usize {
         6 => 3,
         9 => 6,
         12 => 9,
+        _ => unreachable!(),
+    }
+}
+
+/// `get_partition_subsize(bsize, HORZ/VERT)` for the square parents.
+fn rect_subsize(bsize: usize, horz: bool) -> usize {
+    match (bsize, horz) {
+        (3, true) => 2,   // 8x8 -> 8x4
+        (3, false) => 1,  // 8x8 -> 4x8
+        (6, true) => 5,   // 16x16 -> 16x8
+        (6, false) => 4,  // 16x16 -> 8x16
+        (9, true) => 8,   // 32x32 -> 32x16
+        (9, false) => 7,  // 32x32 -> 16x32
+        (12, true) => 11, // 64x64 -> 64x32
+        (12, false) => 10, // 64x64 -> 32x64
         _ => unreachable!(),
     }
 }
@@ -125,15 +149,22 @@ fn gen_winner(rng: &mut Rng, bsize: usize, reduced: bool) -> LeafWinner {
     }
 }
 
-/// Random NONE/SPLIT tree; `force_deep` sends the first splittable branch to
-/// 4x4 (the sub-8x8 chroma-ref/CfL shapes).
-fn gen_tree(rng: &mut Rng, bsize: usize, reduced: bool, force_deep: bool) -> SbTree {
+/// Random NONE/SPLIT/HORZ/VERT tree; `force_deep` sends the first
+/// splittable branch to 4x4 (the sub-8x8 chroma-ref/CfL shapes); `rect`
+/// lets 8x8+ nodes come up HORZ/VERT (winner pairs at the rect subsize).
+fn gen_tree(rng: &mut Rng, bsize: usize, reduced: bool, force_deep: bool, rect: bool) -> SbTree {
     let can_split = bsize > 0;
+    if rect && bsize >= 3 && !force_deep && rng.next().is_multiple_of(3) {
+        let horz = rng.next().is_multiple_of(2);
+        let sub = rect_subsize(bsize, horz);
+        let pair = Box::new([gen_winner(rng, sub, reduced), gen_winner(rng, sub, reduced)]);
+        return if horz { SbTree::Horz(pair) } else { SbTree::Vert(pair) };
+    }
     let do_split = can_split && (force_deep || rng.next().is_multiple_of(3));
     if do_split {
         let sub = split_subsize(bsize);
         let kids: Vec<SbTree> = (0..4)
-            .map(|i| gen_tree(rng, sub, reduced, force_deep && i == 0))
+            .map(|i| gen_tree(rng, sub, reduced, force_deep && i == 0, rect))
             .collect();
         SbTree::Split(Box::new(
             <[SbTree; 4]>::try_from(kids).ok().unwrap(),
@@ -156,9 +187,10 @@ fn encode_sb_dry_run_matches_c_walk() {
     let mut store_leaves = 0usize;
     let mut nonref_leaves = 0usize;
     let mut leaves_total = 0usize;
+    let mut rect_leaves = 0usize;
     let mut good_arm = 0usize;
 
-    for case in 0..12 {
+    for case in 0..14 {
         let (ss_x, ss_y) = if case % 2 == 0 { (1usize, 1usize) } else { (0usize, 0usize) };
         let bd: u8 = if case % 3 == 2 { 12 } else { 8 };
         let qindex: usize = [16, 64, 128, 200][case % 4];
@@ -178,10 +210,22 @@ fn encode_sb_dry_run_matches_c_walk() {
                     .collect();
                 SbTree::Split(Box::new(<[SbTree; 4]>::try_from(kids).ok().unwrap()))
             }
+            // HORZ at the SB root: two 64x32 leaves (the widest rect
+            // encode_b's; CfL-illegal dims).
+            12 => SbTree::Horz(Box::new([
+                gen_winner(&mut rng, 11, reduced),
+                gen_winner(&mut rng, 11, reduced),
+            ])),
+            // VERT at the SB root: two 32x64 leaves.
+            13 => SbTree::Vert(Box::new([
+                gen_winner(&mut rng, 10, reduced),
+                gen_winner(&mut rng, 10, reduced),
+            ])),
             _ => {
-                // Ensure the root splits so mixed shapes occur.
+                // Ensure the root splits so mixed shapes occur; from case 6
+                // on, 8x8+ nodes may come up HORZ/VERT (rect walk arms).
                 let kids: Vec<SbTree> = (0..4)
-                    .map(|i| gen_tree(&mut rng, 9, reduced, force_deep && i == 0))
+                    .map(|i| gen_tree(&mut rng, 9, reduced, force_deep && i == 0, case >= 6))
                     .collect();
                 SbTree::Split(Box::new(<[SbTree; 4]>::try_from(kids).ok().unwrap()))
             }
@@ -437,6 +481,15 @@ fn encode_sb_dry_run_matches_c_walk() {
                 }
             }
             leaves_total += 1;
+            {
+                const W: [usize; 22] =
+                    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
+                const H: [usize; 22] =
+                    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+                if W[r.bsize] != H[r.bsize] {
+                    rect_leaves += 1;
+                }
+            }
             if r.store_y {
                 store_leaves += 1;
                 any_store = true;
@@ -473,6 +526,12 @@ fn encode_sb_dry_run_matches_c_walk() {
                         cmp_maps(x, y, tag);
                     }
                 }
+                (SbTree::Horz(xs), SbTree::Horz(ys))
+                | (SbTree::Vert(xs), SbTree::Vert(ys)) => {
+                    for (x, y) in xs.iter().zip(ys.iter()) {
+                        assert_eq!(x.tx_type_map, y.tx_type_map, "rect winner map: {tag}");
+                    }
+                }
                 _ => panic!("tree shape divergence: {tag}"),
             }
         }
@@ -505,4 +564,5 @@ fn encode_sb_dry_run_matches_c_walk() {
     assert!(nonref_leaves >= 6, "!chroma_ref leaves exercised: {nonref_leaves}");
     assert!(deep_420 >= 6, "420 sub-8x8 leaves exercised: {deep_420}");
     assert!(good_arm >= 6, "GOOD trellis-table cases: {good_arm}");
+    assert!(rect_leaves >= 8, "HORZ/VERT rect leaves exercised: {rect_leaves}");
 }

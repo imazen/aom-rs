@@ -112,11 +112,34 @@ struct CPick<'a> {
     monochrome: bool,
     lossless: bool,
     enable_optimize_b: TrellisOptType,
+    enable_rect_partitions: bool,
+    /// sf less_rectangular_check_level (ALLINTRA 1 / GOOD 0 at speed 0).
+    less_rectangular_check_level: i32,
+    /// Stage-coverage counters (C-side instrumentation; outputs are
+    /// separately asserted equal to the Rust side).
+    stats: CPickStats,
+}
+
+/// C-side coverage counters for the stage arms this harness must
+/// genuinely exercise.
+#[derive(Default)]
+struct CPickStats {
+    /// ALLINTRA var arm force-split firings (:5814-5818).
+    var_force_split: usize,
+    /// less_rectangular_check rect kills (:4630-4640).
+    less_rect_kills: usize,
+    /// rect types entered (is_rect_part_allowed passed).
+    rect_evals: usize,
+    /// rect mid-stage sub-0 propagation encodes (:3613-3616).
+    rect_mid_encodes: usize,
+    /// HORZ / VERT winners picked.
+    rect_wins: [usize; 2],
 }
 
 impl CPick<'_> {
     /// pick_sb_modes over the C-side mirrors: REAL derivations
     /// (variance/HOG/tx-size-ctx) + the validated whole-block leaf.
+    /// `partition` = the `mbmi->partition = partition` install (:887).
     #[allow(clippy::too_many_arguments)]
     fn leaf(
         &mut self,
@@ -127,6 +150,7 @@ impl CPick<'_> {
         mi_row: i32,
         mi_col: i32,
         bsize: usize,
+        partition: usize,
         best_remain: (i32, i64, i64),
     ) -> (PartRdStats, Option<aom_encode::encode_sb::LeafWinner>) {
         // av1_rd_cost_update on entry (REAL).
@@ -149,9 +173,15 @@ impl CPick<'_> {
         let l0 = (mi_row & 31) as usize;
 
         // REAL av1_get_perpixel_variance: vf vs the flat offs buffer.
+        // BSIZE_VAR_IDX: AV1 BLOCK_SIZE -> the dims-sorted shim_hbd_var
+        // kernel index (fixes the chunk-7 harness slip of passing the enum
+        // straight through — wrong dims for every size above 4x8; the
+        // tx-depth low-contrast gate `source_variance < 256` is live).
+        const BSIZE_VAR_IDX: [usize; 22] =
+            [0, 1, 3, 4, 5, 8, 9, 10, 13, 14, 15, 17, 18, 19, 20, 21, 2, 7, 6, 12, 11, 16];
         let offs = vec![128u16 << (self.o.bd - 8); 128];
         let (var, _sse) = c::ref_hbd_variance(
-            bsize,
+            BSIZE_VAR_IDX[bsize],
             self.o.bd,
             &self.o.src_y[ref_off_y..],
             STRIDE,
@@ -214,7 +244,7 @@ impl CPick<'_> {
             left_available: left,
             tile_col_end: 1 << 16,
             tile_row_end: 1 << 16,
-            partition: 0,
+            partition,
             mi_cols: self.o.mi_cols,
             mi_rows: self.o.mi_rows,
             ref_off: ref_off_y,
@@ -301,7 +331,7 @@ impl CPick<'_> {
             chroma_left_available: c_left,
             tile_col_end: 1 << 16,
             tile_row_end: 1 << 16,
-            partition: 0,
+            partition,
             mi_cols: self.o.mi_cols,
             mi_rows: self.o.mi_rows,
             ss_x,
@@ -390,8 +420,9 @@ impl CPick<'_> {
         }
     }
 
-    /// The transcribed av1_rd_pick_partition (NONE + SPLIT) over the
-    /// C-side mirrors.
+    /// The transcribed av1_rd_pick_partition (NONE + SPLIT + HORZ + VERT)
+    /// over the C-side mirrors — every ADDED derivation through REAL C
+    /// primitives (module docs).
     #[allow(clippy::too_many_arguments)]
     fn pick(
         &mut self,
@@ -417,10 +448,28 @@ impl CPick<'_> {
         let has_cols = mi_col + mi_step < self.o.mi_cols;
         let mut partition_none_allowed = has_rows && has_cols;
         let mut do_square_split = bsize_at_least_8x8;
+        // Rect flag init (:3382-3399): REAL get_partition_subsize + REAL
+        // get_plane_block_size (the chroma-validity guard).
+        let mut do_rectangular_split = self.enable_rect_partitions && bsize_at_least_8x8;
+        let mut partition_rect_allowed = [false; 2];
+        if do_rectangular_split {
+            let horz_sub = c::ref_get_partition_subsize(bsize as i32, 1) as usize;
+            let vert_sub = c::ref_get_partition_subsize(bsize as i32, 2) as usize;
+            partition_rect_allowed[0] = has_cols
+                && c::ref_get_plane_block_size(horz_sub, self.o.ss.0, self.o.ss.1) != 255;
+            partition_rect_allowed[1] = has_rows
+                && c::ref_get_plane_block_size(vert_sub, self.o.ss.0, self.o.ss.1) != 255;
+        }
         if BLK_1D[bsize] > BLK_1D[self.max_partition_size] {
+            // av1_set_square_split_only.
             partition_none_allowed = false;
-            do_square_split = bsize_at_least_8x8;
+            do_square_split = true;
+            do_rectangular_split = false;
+            partition_rect_allowed = [false, false];
         } else if BLK_1D[bsize] <= BLK_1D[self.min_partition_size] {
+            // av1_disable_rect_partitions + the le-min square clamp.
+            do_rectangular_split = false;
+            partition_rect_allowed = [false, false];
             if has_rows && has_cols {
                 do_square_split = false;
             }
@@ -491,8 +540,27 @@ impl CPick<'_> {
             o.left_t[l0..l0 + saved_lt.len()].copy_from_slice(&saved_lt);
         };
 
+        // The per-node ALLINTRA variance arm (:5791-5827) via the REAL
+        // log_sub_block_var facade — at speed 0 only the >= 16x16
+        // force-split branch is live.
+        if self.allintra && bsize >= 6 {
+            let ref_off_y = self.o.base_y + (mi_row as usize * 4) * STRIDE + mi_col as usize * 4;
+            let mb_right = (self.o.mi_cols - mi_w as i32 - mi_col) * 4 * 8;
+            let mb_bottom = (self.o.mi_rows - MI_HB[bsize] as i32 - mi_row) * 4 * 8;
+            let (var_min, var_max) = c::ref_log_sub_block_var(
+                self.o.src_y, ref_off_y, STRIDE, bsize, mb_right, mb_bottom, self.o.bd,
+            );
+            if var_min < 0.272 && (var_max - var_min) > 3.0 {
+                partition_none_allowed = false;
+                do_square_split = true;
+                self.stats.var_force_split += 1;
+            }
+        }
+
         let mut found = false;
         let mut best_tree: Option<SbTree> = None;
+        // part_search_state->none_rd (:3366; stored PRE-pt_cost at :4458).
+        let mut none_rd: i64 = 0;
 
         if partition_none_allowed {
             let mut pt_cost = 0i32;
@@ -507,7 +575,7 @@ impl CPick<'_> {
                 (pt_cost, 0, ptc),
             );
             let (mut this_rdc, winner) = self.leaf(
-                recon_y, recon_u, recon_v, cfl_search, mi_row, mi_col, bsize, best_remain,
+                recon_y, recon_u, recon_v, cfl_search, mi_row, mi_col, bsize, 0, best_remain,
             );
             visits.push(LeafVisit {
                 mi_row,
@@ -518,6 +586,7 @@ impl CPick<'_> {
                 dist: this_rdc.dist,
                 rdcost: this_rdc.rdcost,
             });
+            none_rd = this_rdc.rdcost;
             if this_rdc.rate != i32::MAX {
                 if bsize_at_least_8x8 {
                     this_rdc.rate += pt_cost;
@@ -590,7 +659,139 @@ impl CPick<'_> {
                     best_tree =
                         Some(SbTree::Split(Box::new(<[SbTree; 4]>::try_from(kids).ok().unwrap())));
                 }
+            } else if self.less_rectangular_check_level > 0 {
+                // :4630-4640 (ALLINTRA level 1 at speed 0): kill rect when
+                // the PRE-pt_cost NONE rdcost beat the split-stage sum.
+                if self.less_rectangular_check_level == 2 || idx <= 2 {
+                    let partition_none_valid = none_rd > 0;
+                    let partition_none_better = none_rd < sum_rdc.rdcost;
+                    if partition_none_valid && partition_none_better {
+                        do_rectangular_split = false;
+                        self.stats.less_rect_kills += 1;
+                    }
+                }
             }
+            restore(&mut self.o);
+        }
+
+        // ---- rectangular partition stage (rectangular_partition_search,
+        // :3520): REAL subsize/plane-size/budget/propagation primitives ----
+        #[allow(clippy::needless_range_loop)] // C-transcription index loop
+        for i in 0..2usize {
+            // is_rect_part_allowed (:3506) + av1_active_h/v_edge at the
+            // one-pass shape (top/left edge 0, bottom/right edge mi dims).
+            let (mi_pos, dim_end) =
+                if i == 0 { (mi_row, self.o.mi_rows) } else { (mi_col, self.o.mi_cols) };
+            let active_edge = (0 >= mi_pos && 0 < mi_pos + mi_step)
+                || (dim_end >= mi_pos && dim_end < mi_pos + mi_step);
+            if !partition_rect_allowed[i] || !(do_rectangular_split || active_edge) {
+                continue;
+            }
+            self.stats.rect_evals += 1;
+            let partition_type = 1 + i; // PARTITION_HORZ / PARTITION_VERT
+            let subsize =
+                c::ref_get_partition_subsize(bsize as i32, partition_type as i32) as usize;
+            let mut sum_rdc = PartRdStats::init();
+            sum_rdc.rate = partition_cost[partition_type];
+            sum_rdc.rdcost = aom_encode::rd::rdcost(self.o.rdmult, sum_rdc.rate, 0);
+
+            // Sub-block 0 at the origin (rd_pick_rect_partition :3471).
+            let mut w0 = {
+                let best_remain = c::ref_rd_stats_subtraction(
+                    self.o.rdmult,
+                    (best_rdc.rate, best_rdc.dist, best_rdc.rdcost),
+                    (sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost),
+                );
+                let (this_rdc, w) = self.leaf(
+                    recon_y, recon_u, recon_v, cfl_search, mi_row, mi_col, subsize,
+                    partition_type, best_remain,
+                );
+                visits.push(LeafVisit {
+                    mi_row,
+                    mi_col,
+                    bsize: subsize,
+                    budget: best_remain.2,
+                    rate: this_rdc.rate,
+                    dist: this_rdc.dist,
+                    rdcost: this_rdc.rdcost,
+                });
+                if this_rdc.rate == i32::MAX {
+                    sum_rdc.rdcost = i64::MAX;
+                } else {
+                    sum_rdc.rate += this_rdc.rate;
+                    sum_rdc.dist += this_rdc.dist;
+                    let (nr, nd, nc) = c::ref_rd_cost_update(
+                        self.o.rdmult, sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost,
+                    );
+                    sum_rdc = PartRdStats { rate: nr, dist: nd, rdcost: nc };
+                }
+                w
+            };
+
+            let is_not_edge_block = if i == 0 { has_rows } else { has_cols };
+            let mut w1: Option<aom_encode::encode_sb::LeafWinner> = None;
+            if sum_rdc.rdcost < best_rdc.rdcost && is_not_edge_block {
+                // Mid-stage propagation (:3613-3616): av1_update_state +
+                // encode_superblock(DRY_RUN_NORMAL) of sub 0 through the
+                // REAL-piece encode_b + the mi-grid stamp.
+                let w0m = w0.as_mut().unwrap();
+                let mut outs: Vec<CLeafOut> = Vec::new();
+                self.o.encode_b(
+                    recon_y, recon_u, recon_v, cfl_enc, w0m, mi_row, mi_col, partition_type,
+                    &mut outs,
+                );
+                for rr in 0..MI_HB[subsize] {
+                    let base = (mi_row as usize + rr) * self.grid_stride + mi_col as usize;
+                    self.grid[base..base + MI_WB[subsize]].fill(w0m.mode as u8);
+                }
+                self.stats.rect_mid_encodes += 1;
+                // Sub-block 1 at the edge position (+ mi_step).
+                let (r1, c1) =
+                    if i == 0 { (mi_row + mi_step, mi_col) } else { (mi_row, mi_col + mi_step) };
+                let best_remain = c::ref_rd_stats_subtraction(
+                    self.o.rdmult,
+                    (best_rdc.rate, best_rdc.dist, best_rdc.rdcost),
+                    (sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost),
+                );
+                let (this_rdc, w) = self.leaf(
+                    recon_y, recon_u, recon_v, cfl_search, r1, c1, subsize, partition_type,
+                    best_remain,
+                );
+                visits.push(LeafVisit {
+                    mi_row: r1,
+                    mi_col: c1,
+                    bsize: subsize,
+                    budget: best_remain.2,
+                    rate: this_rdc.rate,
+                    dist: this_rdc.dist,
+                    rdcost: this_rdc.rdcost,
+                });
+                if this_rdc.rate == i32::MAX {
+                    sum_rdc.rdcost = i64::MAX;
+                } else {
+                    sum_rdc.rate += this_rdc.rate;
+                    sum_rdc.dist += this_rdc.dist;
+                    let (nr, nd, nc) = c::ref_rd_cost_update(
+                        self.o.rdmult, sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost,
+                    );
+                    sum_rdc = PartRdStats { rate: nr, dist: nd, rdcost: nc };
+                }
+                w1 = w;
+            }
+            // Best update (:3626-3632).
+            if sum_rdc.rdcost < best_rdc.rdcost {
+                sum_rdc.rdcost =
+                    aom_encode::rd::rdcost(self.o.rdmult, sum_rdc.rate, sum_rdc.dist);
+                if sum_rdc.rdcost < best_rdc.rdcost {
+                    best_rdc = sum_rdc;
+                    found = true;
+                    self.stats.rect_wins[i] += 1;
+                    let pair = Box::new([w0.take().unwrap(), w1.take().unwrap()]);
+                    best_tree =
+                        Some(if i == 0 { SbTree::Horz(pair) } else { SbTree::Vert(pair) });
+                }
+            }
+            // av1_restore_context at EACH type's loop tail (:3644).
             restore(&mut self.o);
         }
 
@@ -639,26 +840,58 @@ fn stamp_grid(grid: &mut [u8], stride: usize, tree: &SbTree, mi_row: i32, mi_col
                 );
             }
         }
+        SbTree::Horz(subs) => {
+            let sub = c::ref_get_partition_subsize(bsize as i32, 1) as usize;
+            let hbs = (MI_WB[bsize] / 2) as i32;
+            for (k, w) in subs.iter().enumerate() {
+                let r = mi_row + (k as i32) * hbs;
+                for rr in 0..MI_HB[sub] {
+                    let base = (r as usize + rr) * stride + mi_col as usize;
+                    grid[base..base + MI_WB[sub]].fill(w.mode as u8);
+                }
+            }
+        }
+        SbTree::Vert(subs) => {
+            let sub = c::ref_get_partition_subsize(bsize as i32, 2) as usize;
+            let hbs = (MI_WB[bsize] / 2) as i32;
+            for (k, w) in subs.iter().enumerate() {
+                let cc = mi_col + (k as i32) * hbs;
+                for rr in 0..MI_HB[sub] {
+                    let base = (mi_row as usize + rr) * stride + cc as usize;
+                    grid[base..base + MI_WB[sub]].fill(w.mode as u8);
+                }
+            }
+        }
     }
+}
+
+fn leaf_eq(x: &aom_encode::encode_sb::LeafWinner, y: &aom_encode::encode_sb::LeafWinner, tag: &str) {
+    assert_eq!(x.bsize, y.bsize, "leaf bsize: {tag}");
+    assert_eq!(x.mode, y.mode, "leaf mode: {tag}");
+    assert_eq!(x.angle_delta_y, y.angle_delta_y, "leaf angle: {tag}");
+    assert_eq!(x.use_filter_intra, y.use_filter_intra, "leaf fi: {tag}");
+    assert_eq!(x.filter_intra_mode, y.filter_intra_mode, "leaf fi mode: {tag}");
+    assert_eq!(x.tx_size, y.tx_size, "leaf tx: {tag}");
+    assert_eq!(x.uv_mode, y.uv_mode, "leaf uv_mode: {tag}");
+    assert_eq!(x.angle_delta_uv, y.angle_delta_uv, "leaf uv angle: {tag}");
+    assert_eq!(x.cfl_alpha_idx, y.cfl_alpha_idx, "leaf cfl idx: {tag}");
+    assert_eq!(x.cfl_alpha_signs, y.cfl_alpha_signs, "leaf cfl signs: {tag}");
+    assert_eq!(x.tx_type_map, y.tx_type_map, "leaf map: {tag}");
 }
 
 fn tree_eq(a: &SbTree, b: &SbTree, tag: &str) {
     match (a, b) {
         (SbTree::Leaf(x), SbTree::Leaf(y)) => {
-            assert_eq!(x.mode, y.mode, "leaf mode: {tag}");
-            assert_eq!(x.angle_delta_y, y.angle_delta_y, "leaf angle: {tag}");
-            assert_eq!(x.use_filter_intra, y.use_filter_intra, "leaf fi: {tag}");
-            assert_eq!(x.filter_intra_mode, y.filter_intra_mode, "leaf fi mode: {tag}");
-            assert_eq!(x.tx_size, y.tx_size, "leaf tx: {tag}");
-            assert_eq!(x.uv_mode, y.uv_mode, "leaf uv_mode: {tag}");
-            assert_eq!(x.angle_delta_uv, y.angle_delta_uv, "leaf uv angle: {tag}");
-            assert_eq!(x.cfl_alpha_idx, y.cfl_alpha_idx, "leaf cfl idx: {tag}");
-            assert_eq!(x.cfl_alpha_signs, y.cfl_alpha_signs, "leaf cfl signs: {tag}");
-            assert_eq!(x.tx_type_map, y.tx_type_map, "leaf map: {tag}");
+            leaf_eq(x, y, tag);
         }
         (SbTree::Split(xs), SbTree::Split(ys)) => {
             for (x, y) in xs.iter().zip(ys.iter()) {
                 tree_eq(x, y, tag);
+            }
+        }
+        (SbTree::Horz(xs), SbTree::Horz(ys)) | (SbTree::Vert(xs), SbTree::Vert(ys)) => {
+            for (x, y) in xs.iter().zip(ys.iter()) {
+                leaf_eq(x, y, tag);
             }
         }
         _ => panic!("tree SHAPE divergence: {tag}"),
@@ -678,17 +911,29 @@ fn rd_pick_partition_real_matches_c_recursion() {
     let mut split_roots = 0usize;
     let mut none_nodes = 0usize;
     let mut split_nodes = 0usize;
+    let mut horz_nodes = 0usize;
+    let mut vert_nodes = 0usize;
     let mut total_visits = 0usize;
+    let mut tot = CPickStats::default();
 
-    // (ss, qindex, allintra, min_partition, seed content amp per quadrant)
-    let cases: [((usize, usize), usize, bool, usize); 4] = [
-        ((1, 1), 64, true, 6),  // 420, ALLINTRA arm, min 16x16
-        ((0, 0), 128, false, 6), // 444, GOOD arm, min 16x16
-        ((1, 1), 200, true, 6), // 420 high q, min 16x16
-        ((1, 1), 128, false, 3), // 420, min 8x8 (3-level recursion)
+    // (ss, qindex, allintra, min_partition, enable_rect_partitions, banded)
+    #[allow(clippy::type_complexity)]
+    let cases: [((usize, usize), usize, bool, usize, bool, bool); 8] = [
+        // Chunk-7 regression baselines (rect off).
+        ((1, 1), 64, true, 6, false, false),   // 420, ALLINTRA arm, min 16x16
+        ((0, 0), 128, false, 6, false, false), // 444, GOOD arm, min 16x16
+        // Rect ON over the flat-ish quadrant content: NONE dominates ->
+        // the ALLINTRA less_rectangular_check arm gets to kill rect.
+        ((1, 1), 200, true, 6, true, false), // 420 high q, min 16x16
+        ((1, 1), 128, false, 3, false, false), // 420, min 8x8 (3-level recursion)
+        // Rect-structured (banded) content: HORZ/VERT genuinely win.
+        ((1, 1), 128, true, 3, true, true),  // 420 ALLINTRA min 8x8
+        ((0, 0), 128, false, 3, true, true), // 444 GOOD min 8x8
+        ((1, 1), 64, true, 6, true, true),   // 420 ALLINTRA min 16x16
+        ((1, 1), 200, false, 6, true, true), // 420 GOOD high q min 16x16
     ];
 
-    for (case, &((ss_x, ss_y), qindex, allintra, min_part)) in cases.iter().enumerate() {
+    for (case, &((ss_x, ss_y), qindex, allintra, min_part, rect_on, banded)) in cases.iter().enumerate() {
         let bd: u8 = 8;
         let maxv = 255i64;
         let reduced = false;
@@ -718,11 +963,54 @@ fn rd_pick_partition_real_matches_c_recursion() {
             for cx in 0..64usize {
                 let i = y_org + r * STRIDE + cx;
                 let (qr, qc) = (r / 32, cx / 32);
-                let v: i64 = match (qr, qc) {
-                    (0, 0) => 96 + (r as i64 / 8),                        // near-flat
-                    (0, 1) => 40 + 3 * (cx as i64 % 24),                  // vertical texture
-                    (1, 0) => 200 - 2 * (r as i64 % 32),                  // horizontal ramp
-                    _ => i64::from(rng.range(0, 255)),                    // noise (split bait)
+                let v: i64 = if banded {
+                    // Rect-structured: sharp band boundaries at half-block
+                    // offsets (NONE mispredicts the step, SPLIT overpays,
+                    // HORZ/VERT split exactly on it).
+                    match (qr, qc) {
+                        // TL: horizontal bands split at r%32 == 16 (the
+                        // 32x32 nodes' HORZ line).
+                        (0, 0) => {
+                            if r % 32 < 16 {
+                                70 + (cx as i64 / 16)
+                            } else {
+                                185 + (cx as i64 / 16)
+                            }
+                        }
+                        // TR: vertical bands split at cx%32 == 16 (VERT).
+                        (0, 1) => {
+                            if cx % 32 < 16 {
+                                55 + (r as i64 / 16)
+                            } else {
+                                205 - (r as i64 / 16)
+                            }
+                        }
+                        // BL: height-8 horizontal bands (HORZ at 16x16).
+                        (1, 0) => {
+                            if r % 16 < 8 {
+                                90 + (cx as i64 % 3)
+                            } else {
+                                160 + (cx as i64 % 3)
+                            }
+                        }
+                        // BR: width-8 vertical bands + dither (VERT bait;
+                        // the dither keeps a high-variance 4x4 in the SB
+                        // for the ALLINTRA var arm).
+                        _ => {
+                            if cx % 16 < 8 {
+                                100 + i64::from(rng.range(0, 6))
+                            } else {
+                                30 + i64::from(rng.range(0, 6))
+                            }
+                        }
+                    }
+                } else {
+                    match (qr, qc) {
+                        (0, 0) => 96 + (r as i64 / 8),       // near-flat
+                        (0, 1) => 40 + 3 * (cx as i64 % 24), // vertical texture
+                        (1, 0) => 200 - 2 * (r as i64 % 32), // horizontal ramp
+                        _ => i64::from(rng.range(0, 255)),   // noise (split bait)
+                    }
                 };
                 src_y[i] = v.clamp(0, maxv) as u16;
             }
@@ -942,6 +1230,8 @@ fn rd_pick_partition_real_matches_c_recursion() {
             enable_tx64: true,
             enable_rect_tx: true,
             intra_pruning_with_hog: true,
+            enable_rect_partitions: rect_on,
+            less_rectangular_check_level: if allintra { 1 } else { 0 },
             max_partition_size: 15, // BLOCK_128X128 (KEY default)
             min_partition_size: min_part,
         };
@@ -966,6 +1256,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
             sb,
             PartRdStats::invalid(),
             0,
+            None,
             &mut visits,
         );
 
@@ -1048,6 +1339,9 @@ fn rd_pick_partition_real_matches_c_recursion() {
             monochrome: false,
             lossless: false,
             enable_optimize_b: TrellisOptType::FullTrellisOpt,
+            enable_rect_partitions: rect_on,
+            less_rectangular_check_level: if allintra { 1 } else { 0 },
+            stats: CPickStats::default(),
         };
         let mut c_visits = Vec::new();
         let (c_tree, c_best, c_found) = cp.pick(
@@ -1090,25 +1384,36 @@ fn rd_pick_partition_real_matches_c_recursion() {
         assert_eq!(grid_rust.modes, cp.grid, "mode grid: {tag}");
 
         // Shape coverage accounting.
-        fn count(t: &SbTree, none_n: &mut usize, split_n: &mut usize) {
+        fn count(t: &SbTree, none_n: &mut usize, split_n: &mut usize, rect_n: &mut [usize; 2]) {
             match t {
                 SbTree::Leaf(_) => *none_n += 1,
                 SbTree::Split(kids) => {
                     *split_n += 1;
                     for k in kids.iter() {
-                        count(k, none_n, split_n);
+                        count(k, none_n, split_n, rect_n);
                     }
                 }
+                SbTree::Horz(_) => rect_n[0] += 1,
+                SbTree::Vert(_) => rect_n[1] += 1,
             }
         }
         let (mut n, mut s) = (0usize, 0usize);
-        count(&tree, &mut n, &mut s);
+        let mut r2 = [0usize; 2];
+        count(&tree, &mut n, &mut s, &mut r2);
+        horz_nodes += r2[0];
+        vert_nodes += r2[1];
         none_nodes += n;
         split_nodes += s;
         if matches!(tree, SbTree::Split(_)) {
             split_roots += 1;
         }
         total_visits += visits.len();
+        tot.var_force_split += cp.stats.var_force_split;
+        tot.less_rect_kills += cp.stats.less_rect_kills;
+        tot.rect_evals += cp.stats.rect_evals;
+        tot.rect_mid_encodes += cp.stats.rect_mid_encodes;
+        tot.rect_wins[0] += cp.stats.rect_wins[0];
+        tot.rect_wins[1] += cp.stats.rect_wins[1];
     }
 
     // Coverage floors: both partition outcomes must genuinely occur.
@@ -1116,5 +1421,21 @@ fn rd_pick_partition_real_matches_c_recursion() {
     assert!(none_nodes >= 6, "NONE leaves across cases: {none_nodes}");
     assert!(split_nodes >= 2, "SPLIT nodes across cases: {split_nodes}");
     assert!(total_visits >= 40, "leaf evaluations exercised: {total_visits}");
+    // Rect-stage coverage floors: HORZ and VERT must both genuinely win
+    // somewhere, the mid-stage sub-0 propagation must run, and the ALLINTRA
+    // arms (less_rect kill + var force-split) must fire.
+    assert!(horz_nodes >= 1, "HORZ winners across cases: {horz_nodes}");
+    assert!(vert_nodes >= 1, "VERT winners across cases: {vert_nodes}");
+    assert!(tot.rect_evals >= 8, "rect types evaluated: {}", tot.rect_evals);
+    assert!(tot.rect_mid_encodes >= 4, "rect mid-stage encodes: {}", tot.rect_mid_encodes);
+    assert!(tot.rect_wins[0] >= 1 && tot.rect_wins[1] >= 1, "rect wins: {:?}", tot.rect_wins);
+    assert!(tot.less_rect_kills >= 1, "less_rect kills: {}", tot.less_rect_kills);
+    assert!(tot.var_force_split >= 1, "ALLINTRA var force-splits: {}", tot.var_force_split);
+    eprintln!(
+        "coverage: none={none_nodes} split={split_nodes} horz={horz_nodes} vert={vert_nodes} \
+         visits={total_visits} rect_evals={} mid_encodes={} wins={:?} less_rect={} var_split={}",
+        tot.rect_evals, tot.rect_mid_encodes, tot.rect_wins, tot.less_rect_kills,
+        tot.var_force_split
+    );
     let _ = (_rust_hog, perpixel_variance_y, is_chroma_reference);
 }

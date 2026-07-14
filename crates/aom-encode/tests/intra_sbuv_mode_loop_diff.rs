@@ -325,6 +325,7 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
             );
 
             let cenv = CUvEnv {
+                partition: 0,
                 bsize,
                 mi_row,
                 mi_col,

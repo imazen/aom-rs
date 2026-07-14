@@ -555,6 +555,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             let mut txbs_c = Vec::new();
             if store_y_c {
                 let ca = CEncPlaneArgs {
+                    partition: 0,
                     bsize,
                     tx_size: cy.2,
                     geometry: (mi_row, mi_col, ref_off, src_off, STRIDE),
@@ -622,6 +623,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 not_chroma_ref += 1;
             } else {
                 let cuv = CUvEnv {
+                    partition: 0,
                     bsize,
                     mi_row,
                     mi_col,

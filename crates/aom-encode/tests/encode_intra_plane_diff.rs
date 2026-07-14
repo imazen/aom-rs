@@ -262,6 +262,7 @@ fn encode_intra_block_plane_y_matches_c_walk() {
             let mut map_c = map0.clone();
             let mut cfl_c = c::RefCflState::default();
             let ca = CEncPlaneArgs {
+                partition: 0,
                 bsize,
                 tx_size,
                 geometry: (mi_row, mi_col, ref_off, src_off, STRIDE),

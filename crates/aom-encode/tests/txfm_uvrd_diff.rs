@@ -282,6 +282,7 @@ fn txfm_uvrd_matches_c_walk() {
             );
 
             let cenv = CUvEnv {
+                partition: 0,
                 bsize: sc.bsize,
                 mi_row: sc.mi_row,
                 mi_col: sc.mi_col,
@@ -474,6 +475,7 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
                 left_ctx: [&sc.left_u, &sc.left_v],
             };
             let cenv = CUvEnv {
+                partition: 0,
                 bsize: sc.bsize,
                 mi_row: sc.mi_row,
                 mi_col: sc.mi_col,
