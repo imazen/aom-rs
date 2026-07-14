@@ -48,18 +48,26 @@
 
 use crate::rd::rdcost;
 use crate::tx_search::{
-    search_tx_type_intra, RdStats, TxTypeSearchInputs, TxTypeSearchPolicy, TxbWinner,
-    MAX_TXSIZE_RECT_LOOKUP,
+    MAX_TXSIZE_RECT_LOOKUP, RdStats, TxTypeSearchInputs, TxTypeSearchPolicy, TxbWinner,
+    search_tx_type_intra,
 };
 use aom_entropy::partition::{get_plane_block_size, get_uv_mode, intra_avail};
-use aom_intra::cfl::{cfl_predict_block, CflCtx, CFL_BUF_LINE};
+use aom_intra::cfl::{CFL_BUF_LINE, CflCtx, cfl_predict_block};
 use aom_intra::predict_intra_high;
 use aom_txb::{CoeffCostTables, TxTypeCosts};
 
-const TXS_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TXS_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
-const MI_W: [usize; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_H: [usize; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
+const TXS_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TXS_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
+const MI_W: [usize; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const MI_H: [usize; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
 
 /// `UV_CFL_PRED` (enums.h).
 pub const UV_CFL_PRED: usize = 13;
@@ -160,7 +168,11 @@ pub struct CflDcCache {
 impl CflDcCache {
     /// `clear_cfl_dc_pred_cache_flags`: cache off, nothing cached.
     pub fn cleared() -> Self {
-        CflDcCache { use_cache: false, cached: [false; 2], row: [[0; CFL_BUF_LINE]; 2] }
+        CflDcCache {
+            use_cache: false,
+            cached: [false; 2],
+            row: [[0; CFL_BUF_LINE]; 2],
+        }
     }
 }
 
@@ -219,6 +231,11 @@ pub struct UvRdEnv<'a> {
     pub rows_u: &'a aom_quant::PlaneQuantRows<'a>,
     pub rows_v: &'a aom_quant::PlaneQuantRows<'a>,
     pub rdmult: i32,
+    /// The REAL per-(txs_ctx, eob_multi_size) chroma cost table, PRE-SELECTED
+    /// by the caller for this block's (single, uniform) UV `tx_size`
+    /// (`av1_get_tx_size_uv` — chroma has no tx-size depth search, so unlike
+    /// luma's [`crate::tx_search::TxfmYrdEnv`] one lookup at construction
+    /// covers this env's whole lifetime: `CoeffCostSet::tables(uv_tx_size)`).
     pub coeff_costs: &'a CoeffCostTables<'a>,
     pub tx_type_costs: &'a TxTypeCosts,
     // Per-plane neighbour entropy contexts (plane 4x4 units).
@@ -313,8 +330,7 @@ pub(crate) fn predict_uv_txb(
             }
             if cfl.cache.use_cache {
                 // cfl_store_dc_pred: the first `width` pixels of the dc pred.
-                cfl.cache.row[pred_plane][..txw]
-                    .copy_from_slice(&recon[txb_off..txb_off + txw]);
+                cfl.cache.row[pred_plane][..txw].copy_from_slice(&recon[txb_off..txb_off + txw]);
                 cfl.cache.cached[pred_plane] = true;
             }
         } else {
@@ -540,8 +556,12 @@ pub fn txfm_rd_in_plane_uv(
             }
 
             // Intra rd accumulation: signalled non-skip.
-            let this =
-                RdStats { rate: win.rate, dist: win.dist, sse: win.sse, skip_txfm: false };
+            let this = RdStats {
+                rate: win.rate,
+                dist: win.dist,
+                sse: win.sse,
+                skip_txfm: false,
+            };
             stats.merge(&this);
             let rd = rdcost(env.rdmult, win.rate, win.dist);
             current_rd += rd;
@@ -577,7 +597,10 @@ pub fn txfm_uvrd(
     ref_best_rd: i64,
     pol: &TxTypeSearchPolicy,
 ) -> Option<(RdStats, Vec<TxbWinner>, Vec<TxbWinner>)> {
-    debug_assert_ne!(uv_mode, UV_CFL_PRED, "CfL evaluates through cfl_rd_pick_alpha");
+    debug_assert_ne!(
+        uv_mode, UV_CFL_PRED,
+        "CfL evaluates through cfl_rd_pick_alpha"
+    );
     if ref_best_rd < 0 {
         return None;
     }
@@ -643,7 +666,11 @@ pub fn cfl_idx_to_sign_and_alpha(cfl_idx: i32) -> (i32, i32) {
     if cfl_linear_idx == 0 {
         (CFL_SIGN_ZERO, 0)
     } else {
-        let sign = if cfl_linear_idx > 0 { CFL_SIGN_POS } else { CFL_SIGN_NEG };
+        let sign = if cfl_linear_idx > 0 {
+            CFL_SIGN_POS
+        } else {
+            CFL_SIGN_NEG
+        };
         (sign, cfl_linear_idx.abs() - 1)
     }
 }
@@ -803,7 +830,12 @@ pub fn cfl_compute_rd(
     let dummy_sign = CFL_SIGN_NEG;
     let joint_sign = plane_sign_to_joint_sign(pred_plane, cfl_sign, dummy_sign);
     let alpha_idx = (cfl_alpha << 4) + cfl_alpha; // CFL_ALPHABET_SIZE_LOG2
-    let mut cflp = CflPredict { ctx, cache, alpha_idx, joint_sign };
+    let mut cflp = CflPredict {
+        ctx,
+        cache,
+        alpha_idx,
+        joint_sign,
+    };
 
     if fast_mode {
         let cost = intra_model_rd_uv(env, recon, plane, &mut cflp, tx_size);
@@ -857,8 +889,17 @@ pub fn cfl_pick_plane_parameter(
     }
     let mut est_best_cfl_idx = CFL_INDEX_ZERO;
     let start_cfl_idx = CFL_INDEX_ZERO;
-    let (mut best_cfl_cost, _) =
-        cfl_compute_rd(env, recon, plane, ctx, cache, tx_size, start_cfl_idx, true, pol);
+    let (mut best_cfl_cost, _) = cfl_compute_rd(
+        env,
+        recon,
+        plane,
+        ctx,
+        cache,
+        tx_size,
+        start_cfl_idx,
+        true,
+        pol,
+    );
     for dir in [1i32, -1] {
         for i in 1..CFL_MAGS_SIZE as i32 {
             let cfl_idx = start_cfl_idx + dir * i;
@@ -896,8 +937,17 @@ pub fn cfl_pick_plane_rd(
     debug_assert!((1..=CFL_MAGS_SIZE).contains(&cfl_search_range));
     let mut arr = [CflRdStats::invalid(); CFL_MAGS_SIZE];
     let start_cfl_idx = est_best_cfl_idx;
-    let (_, s) =
-        cfl_compute_rd(env, recon, plane, ctx, cache, tx_size, start_cfl_idx, false, pol);
+    let (_, s) = cfl_compute_rd(
+        env,
+        recon,
+        plane,
+        ctx,
+        cache,
+        tx_size,
+        start_cfl_idx,
+        false,
+        pol,
+    );
     arr[start_cfl_idx as usize] = s.expect("full mode returns stats");
     if cfl_search_range == 1 {
         return arr;
@@ -954,10 +1004,24 @@ pub fn cfl_rd_pick_alpha(
     cache.use_cache = true;
 
     let est_best_cfl_idx_u = cfl_pick_plane_parameter(
-        env, recon_u, 1, ctx, &mut cache, tx_size, cfl_search_range, pol,
+        env,
+        recon_u,
+        1,
+        ctx,
+        &mut cache,
+        tx_size,
+        cfl_search_range,
+        pol,
     );
     let est_best_cfl_idx_v = cfl_pick_plane_parameter(
-        env, recon_v, 2, ctx, &mut cache, tx_size, cfl_search_range, pol,
+        env,
+        recon_v,
+        2,
+        ctx,
+        &mut cache,
+        tx_size,
+        cfl_search_range,
+        pol,
     );
 
     if cfl_search_range == 1 {
@@ -977,10 +1041,26 @@ pub fn cfl_rd_pick_alpha(
     }
 
     let cfl_rd_arr_u = cfl_pick_plane_rd(
-        env, recon_u, 1, ctx, &mut cache, tx_size, cfl_search_range, est_best_cfl_idx_u, pol,
+        env,
+        recon_u,
+        1,
+        ctx,
+        &mut cache,
+        tx_size,
+        cfl_search_range,
+        est_best_cfl_idx_u,
+        pol,
     );
     let cfl_rd_arr_v = cfl_pick_plane_rd(
-        env, recon_v, 2, ctx, &mut cache, tx_size, cfl_search_range, est_best_cfl_idx_v, pol,
+        env,
+        recon_v,
+        2,
+        ctx,
+        &mut cache,
+        tx_size,
+        cfl_search_range,
+        est_best_cfl_idx_v,
+        pol,
     );
     // clear_cfl_dc_pred_cache_flags(&xd->cfl): the cache scope ends here (the
     // joint scan below re-evaluates nothing).
@@ -1031,19 +1111,18 @@ pub fn cfl_rd_pick_alpha(
 // 14-candidate search over uv_rd_search_mode_order).
 // ---------------------------------------------------------------------------
 
-use crate::mode_costs::{intra_mode_info_cost_uv, CflCosts, IntraModeCosts};
+use crate::mode_costs::{CflCosts, IntraModeCosts, intra_mode_info_cost_uv};
 use aom_entropy::partition::{is_directional_mode, use_angle_delta};
 
 /// `uv_rd_search_mode_order[UV_INTRA_MODES]` (intra_mode_search.c:44).
-pub const UV_RD_SEARCH_MODE_ORDER: [usize; 14] =
-    [0, 13, 2, 1, 9, 12, 10, 11, 4, 7, 6, 8, 5, 3];
+pub const UV_RD_SEARCH_MODE_ORDER: [usize; 14] = [0, 13, 2, 1, 9, 12, 10, 11, 4, 7, 6, 8, 5, 3];
 
 /// `av1_derived_chroma_intra_mode_used_flag[INTRA_MODES]`
 /// (intra_mode_search.c:87) — the `prune_chroma_modes_using_luma_winner`
 /// mask (sf OFF at speed 0; kept for the gated arm).
 pub const AV1_DERIVED_CHROMA_INTRA_MODE_USED_FLAG: [u16; 13] = [
-    0x2201, 0x2203, 0x2205, 0x2209, 0x2211, 0x2221, 0x2241, 0x2281, 0x2301, 0x2201, 0x2601,
-    0x2a01, 0x3201,
+    0x2201, 0x2203, 0x2205, 0x2209, 0x2211, 0x2221, 0x2241, 0x2281, 0x2301, 0x2201, 0x2601, 0x2a01,
+    0x3201,
 ];
 
 /// `av1_is_diagonal_mode` (reconintra.h): D45..D67.
@@ -1143,9 +1222,15 @@ fn pick_intra_angle_routine_sbuv(
     best_rd: &mut i64,
     best_stats: &mut Option<(i32, i64, bool)>,
 ) -> i64 {
-    let Some((tokenonly, _wu, _wv)) =
-        txfm_uvrd(env, recon_u, recon_v, uv_mode, angle_delta_uv, best_rd_in, pol)
-    else {
+    let Some((tokenonly, _wu, _wv)) = txfm_uvrd(
+        env,
+        recon_u,
+        recon_v,
+        uv_mode,
+        angle_delta_uv,
+        best_rd_in,
+        pol,
+    ) else {
         return i64::MAX;
     };
     let this_rate = tokenonly.rate
@@ -1299,7 +1384,10 @@ pub fn rd_pick_intra_sbuv_mode(
     let _ = sqr_up; // the caller resolved intra_uv_mode_mask by this class
 
     for &uv_mode in UV_RD_SEARCH_MODE_ORDER.iter() {
-        let mut visit = UvModeVisit { uv_mode, this_rd: None };
+        let mut visit = UvModeVisit {
+            uv_mode,
+            this_rd: None,
+        };
         // Mode-signaling-rate early skip (strict >).
         let mode_rate = uv_mode_costs[env.luma_mode][uv_mode];
         if rdcost(env.rdmult, mode_rate, 0) > best.best_rd {
@@ -1348,8 +1436,7 @@ pub fn rd_pick_intra_sbuv_mode(
                 continue;
             }
             debug_assert!(!is_directional);
-            let uv_tx_size =
-                av1_get_tx_size_uv(env.bsize, env.lossless, env.ss_x, env.ss_y);
+            let uv_tx_size = av1_get_tx_size_uv(env.bsize, env.lossless, env.ss_x, env.ss_y);
             let Some(r) = cfl_rd_pick_alpha(
                 env,
                 recon_u,

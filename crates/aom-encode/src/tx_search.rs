@@ -35,15 +35,15 @@ pub const AV1_EXT_TX_USED_FLAG: [u16; 6] = [0x0001, 0x0201, 0x020F, 0x0E0F, 0x0F
 /// `av1_reduced_intra_tx_used_flag[INTRA_MODES]` (blockd.h): the reduced
 /// intra tx set (sf `use_reduced_intra_txset >= 1`), per intra direction.
 pub const AV1_REDUCED_INTRA_TX_USED_FLAG: [u16; 13] = [
-    0x080F, 0x040F, 0x080F, 0x020F, 0x080F, 0x040F, 0x080F, 0x080F, 0x040F, 0x080F, 0x040F,
-    0x080F, 0x0C0E,
+    0x080F, 0x040F, 0x080F, 0x020F, 0x080F, 0x040F, 0x080F, 0x080F, 0x040F, 0x080F, 0x040F, 0x080F,
+    0x0C0E,
 ];
 
 /// `av1_derived_intra_tx_used_flag[INTRA_MODES]` (blockd.h): the
 /// residual-statistics-derived set (sf `use_reduced_intra_txset == 2`).
 pub const AV1_DERIVED_INTRA_TX_USED_FLAG: [u16; 13] = [
-    0x0209, 0x0403, 0x0805, 0x020F, 0x0009, 0x0009, 0x0009, 0x0805, 0x0403, 0x0205, 0x0403,
-    0x0805, 0x0209,
+    0x0209, 0x0403, 0x0805, 0x020F, 0x0009, 0x0009, 0x0009, 0x0805, 0x0403, 0x0205, 0x0403, 0x0805,
+    0x0209,
 ];
 
 /// `fimode_to_intradir[FILTER_INTRA_MODES]` (blockd.h): the intra direction a
@@ -56,7 +56,8 @@ pub const DCT_ADST_TX_MASK: u16 = 0x000F;
 
 /// `txsize_sqr_up_map[TX_SIZES_ALL]` (common_data.h): TX_SIZE -> square
 /// TX_SIZE class rounding UP (0..4 = 4x4..64x64).
-pub const TXSIZE_SQR_UP_MAP: [usize; 19] = [0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4];
+pub const TXSIZE_SQR_UP_MAP: [usize; 19] =
+    [0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4];
 
 /// `EXT_TX_SET_DTT4_IDTX_1DDCT` (enums.h `TxSetType`, value 3 — after
 /// DCTONLY=0, DCT_IDTX=1, DTT4_IDTX=2): the intra set the reduced-txset sf
@@ -113,7 +114,11 @@ pub fn get_tx_mask_intra(
     let mut txk_allowed = TX_TYPES; // "all"
     let tx_set_type = ext_tx_set_type(tx_size, false, reduced_tx_set_used);
 
-    let intra_dir = if use_filter_intra { FIMODE_TO_INTRADIR[filter_intra_mode] } else { mode };
+    let intra_dir = if use_filter_intra {
+        FIMODE_TO_INTRADIR[filter_intra_mode]
+    } else {
+        mode
+    };
     let mut ext_tx_used_flag =
         if p.use_reduced_intra_txset != 0 && tx_set_type == EXT_TX_SET_DTT4_IDTX_1DDCT {
             AV1_REDUCED_INTRA_TX_USED_FLAG[intra_dir]
@@ -124,7 +129,10 @@ pub fn get_tx_mask_intra(
         ext_tx_used_flag &= AV1_DERIVED_INTRA_TX_USED_FLAG[intra_dir];
     }
 
-    if lossless || TXSIZE_SQR_UP_MAP[tx_size] > 3 || ext_tx_used_flag == 0x0001 || p.use_intra_dct_only
+    if lossless
+        || TXSIZE_SQR_UP_MAP[tx_size] > 3
+        || ext_tx_used_flag == 0x0001
+        || p.use_intra_dct_only
     {
         txk_allowed = 0; // DCT_DCT
     }
@@ -148,7 +156,11 @@ pub fn get_tx_mask_intra(
         allowed_tx_mask = 1 << txk_allowed;
     }
 
-    let single = if txk_allowed < TX_TYPES { Some(txk_allowed) } else { None };
+    let single = if txk_allowed < TX_TYPES {
+        Some(txk_allowed)
+    } else {
+        None
+    };
     debug_assert!(single.is_none_or(|t| allowed_tx_mask == 1 << t));
     (allowed_tx_mask, single)
 }
@@ -241,7 +253,10 @@ pub fn get_tx_mask_uv_intra(
         ext_tx_used_flag &= AV1_DERIVED_INTRA_TX_USED_FLAG[intra_dir];
     }
 
-    if lossless || TXSIZE_SQR_UP_MAP[tx_size] > 3 || ext_tx_used_flag == 0x0001 || p.use_intra_dct_only
+    if lossless
+        || TXSIZE_SQR_UP_MAP[tx_size] > 3
+        || ext_tx_used_flag == 0x0001
+        || p.use_intra_dct_only
     {
         txk_allowed = 0; // DCT_DCT
     }
@@ -322,19 +337,22 @@ pub fn av1_pixel_diff_dist(
 
 use crate::rd::rdcost;
 use crate::{
-    dist_block_tx_domain, xform_quant, xform_quant_optimize, BlockContext, OptimizeInputs,
-    QuantKind, QuantParams, XformQuantOptResult,
+    BlockContext, OptimizeInputs, QuantKind, QuantParams, XformQuantOptResult,
+    dist_block_tx_domain, xform_quant, xform_quant_optimize,
 };
-use aom_txb::{cost_coeffs_txb, get_tx_type_cost, CoeffCostTables, TxTypeCosts};
+use aom_txb::{CoeffCostSet, CoeffCostTables, TxTypeCosts, cost_coeffs_txb, get_tx_type_cost};
 
 /// `tx_size_2d[TX_SIZES_ALL]` (av1/common/common_data.h): pel count per tx.
-pub const TX_SIZE_2D_TBL: [i64; 19] =
-    [16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024];
+pub const TX_SIZE_2D_TBL: [i64; 19] = [
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+];
 
-pub(crate) const TXS_W: [usize; 19] =
-    [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-pub(crate) const TXS_H: [usize; 19] =
-    [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+pub(crate) const TXS_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+pub(crate) const TXS_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 /// `ROUND_POWER_OF_TWO` for i64.
 #[inline]
@@ -448,7 +466,10 @@ impl TxTypeSearchPolicy {
     /// equals the allintra value EXCEPT `use_chroma_trellis_rd_mult`
     /// (never set on the GOOD path — default 0, speed_features.c:2474).
     pub fn speed0_good() -> Self {
-        TxTypeSearchPolicy { use_chroma_trellis_rd_mult: false, ..Self::speed0_allintra() }
+        TxTypeSearchPolicy {
+            use_chroma_trellis_rd_mult: false,
+            ..Self::speed0_allintra()
+        }
     }
 }
 
@@ -540,8 +561,7 @@ pub fn search_tx_type_intra(
     let qstep = (i32::from(inp.rows.dequant[1]) >> dequant_shift) as u32;
 
     // Residual SSE + MSE (interior => visible == full).
-    let (mut block_sse_u, mut block_mse_q8) =
-        av1_pixel_diff_dist(inp.residual, w, 0, 0, w, h);
+    let (mut block_sse_u, mut block_mse_q8) = av1_pixel_diff_dist(inp.residual, w, 0, 0, w, h);
     let mut block_sse = block_sse_u as i64;
     if hbd {
         let s = 2 * (inp.bd as i32 - 8);
@@ -590,15 +610,17 @@ pub fn search_tx_type_intra(
         && TXSIZE_SQR_UP_MAP[tx_size] != 4;
     let mut calc_pixel_domain_distortion_final =
         pol.use_transform_domain_distortion == 1 && use_transform_domain_distortion;
-    if calc_pixel_domain_distortion_final
-        && (txk_allowed.is_some() || allowed_tx_mask == 0x0001)
-    {
+    if calc_pixel_domain_distortion_final && (txk_allowed.is_some() || allowed_tx_mask == 0x0001) {
         calc_pixel_domain_distortion_final = false;
         use_transform_domain_distortion = false;
     }
 
     // av1_setup_quant: FP with trellis, B without (USE_B_QUANT_NO_TRELLIS=1).
-    let kind = if skip_trellis { QuantKind::B } else { QuantKind::Fp };
+    let kind = if skip_trellis {
+        QuantKind::B
+    } else {
+        QuantKind::Fp
+    };
     let qp = QuantParams::from_plane_rows(inp.rows, kind, inp.bd);
     let trellis_rdmult = trellis_rdmult_intra(
         inp.rdmult,
@@ -633,15 +655,7 @@ pub fn search_tx_type_intra(
 
         // Forward transform + quantize (+ trellis + rate).
         let (res, rate_cost): (XformQuantOptResult, i32) = if !skip_trellis_this {
-            let r = xform_quant_optimize(
-                inp.residual,
-                tx_size,
-                tx_type,
-                kind,
-                &qp,
-                inp.bctx,
-                &opt,
-            );
+            let r = xform_quant_optimize(inp.residual, tx_size, tx_type, kind, &qp, inp.bctx, &opt);
             // av1_optimize_txb rate += tx_type cost when eob > 0.
             let ttc = if r.eob > 0 {
                 get_tx_type_cost(
@@ -819,8 +833,7 @@ pub fn dist_block_px_domain_interior(
         tx_size,
         i32::from(bd),
     );
-    let (_var, sse) =
-        aom_dist::highbd_variance(&src[src_off..], src_stride, &recon, w, w, h, bd);
+    let (_var, sse) = aom_dist::highbd_variance(&src[src_off..], src_stride, &recon, w, w, h, bd);
     16 * i64::from(sse)
 }
 
@@ -831,7 +844,7 @@ pub fn dist_block_px_domain_interior(
 // skip/no-skip + tx-size-rate RD assembly.
 // ---------------------------------------------------------------------------
 
-use crate::mode_costs::{block_signals_txsize, tx_size_cost, TxSizeCosts};
+use crate::mode_costs::{TxSizeCosts, block_signals_txsize, tx_size_cost};
 use aom_dist::highbd_subtract_block;
 use aom_entropy::partition::intra_avail;
 use aom_intra::predict_intra_high;
@@ -848,7 +861,12 @@ pub struct RdStats {
 impl RdStats {
     /// `av1_init_rd_stats` (zero, skip = 1).
     pub fn zero() -> Self {
-        RdStats { rate: 0, dist: 0, sse: 0, skip_txfm: true }
+        RdStats {
+            rate: 0,
+            dist: 0,
+            sse: 0,
+            skip_txfm: true,
+        }
     }
     /// `av1_merge_rd_stats` (rate saturates at `INT_MAX`).
     pub fn merge(&mut self, o: &RdStats) {
@@ -863,14 +881,18 @@ impl RdStats {
     }
 }
 
-pub(crate) const MI_SIZE_WIDE_B: [usize; 22] =
-    [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-pub(crate) const MI_SIZE_HIGH_B: [usize; 22] =
-    [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
-pub(crate) const BLK_W_B: [usize; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-pub(crate) const BLK_H_B: [usize; 22] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+pub(crate) const MI_SIZE_WIDE_B: [usize; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+pub(crate) const MI_SIZE_HIGH_B: [usize; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
+pub(crate) const BLK_W_B: [usize; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+pub(crate) const BLK_H_B: [usize; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 /// The frame/block environment of one luma coding block's tx search — the
 /// MACROBLOCK(D) state `block_rd_txfm` reads, expressed as plain data. The
@@ -910,7 +932,13 @@ pub struct TxfmYrdEnv<'a> {
     // Quantizer + RD.
     pub rows: &'a aom_quant::PlaneQuantRows<'a>,
     pub rdmult: i32,
-    pub coeff_costs: &'a CoeffCostTables<'a>,
+    /// The full REAL per-(txs_ctx, eob_multi_size) luma cost-table set;
+    /// [`txfm_rd_in_plane_intra`] selects the table for the CANDIDATE
+    /// `tx_size` it is invoked with (this env is shared unchanged across a
+    /// block's whole tx-size depth search — see `CoeffCostSet`'s docs for why
+    /// a single representative table would bias the RD comparison across
+    /// depths).
+    pub coeff_costs: &'a CoeffCostSet,
     pub tx_type_costs: &'a TxTypeCosts,
     // Header rates: `skip_txfm_cost[skip_ctx][0/1]` (ctx = the
     // av1_get_skip_txfm_context facade, caller-supplied) and the tx-size cost
@@ -1059,6 +1087,11 @@ pub fn txfm_rd_in_plane_intra(
                 above: &t_above[blk_col..],
                 left: &t_left[blk_row..],
             };
+            // The real per-txs_ctx/eob_multi_size table for THIS CANDIDATE
+            // tx_size (env.coeff_costs is shared across every depth the
+            // caller's tx-size search tries; the lookup must happen here,
+            // per candidate, not once at env construction).
+            let coeff_tables = env.coeff_costs.tables(tx_size);
             let inp = TxTypeSearchInputs {
                 residual: &residual,
                 src: env.src,
@@ -1077,7 +1110,7 @@ pub fn txfm_rd_in_plane_intra(
                 rows: env.rows,
                 bctx: &bctx,
                 rdmult: env.rdmult,
-                coeff_costs: env.coeff_costs,
+                coeff_costs: &coeff_tables,
                 tx_type_costs: env.tx_type_costs,
             };
             // `block_rd_txfm` (tx_search.c:3104) computes
@@ -1201,7 +1234,11 @@ pub fn uniform_txfm_yrd_intra(
     }
 
     // Intra blocks are always signalled as non-skip.
-    let rd = rdcost(env.rdmult, stats.rate + no_skip_txfm_rate + tx_size_rate, stats.dist);
+    let rd = rdcost(
+        env.rdmult,
+        stats.rate + no_skip_txfm_rate + tx_size_rate,
+        stats.dist,
+    );
     stats.rate += tx_size_rate;
     (rd, Some((stats, winners)))
 }
@@ -1212,12 +1249,12 @@ pub fn uniform_txfm_yrd_intra(
 // ---------------------------------------------------------------------------
 
 /// `max_txsize_rect_lookup[BLOCK_SIZES_ALL]` (common_data.h).
-pub const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] =
-    [0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18];
+pub const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] = [
+    0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18,
+];
 /// `sub_tx_size_map[TX_SIZES_ALL]` (common_data.h): rect sizes halve the LONG
 /// side.
-pub const SUB_TX_SIZE_MAP: [usize; 19] =
-    [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
+pub const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
 /// `MAX_TX_DEPTH` (blockd.h).
 pub const MAX_TX_DEPTH: i32 = 2;
 
@@ -1276,10 +1313,8 @@ pub fn choose_tx_size_type_from_rd_intra(
     // tx_select is TX_MODE_SELECT here (the LARGESTALL/ONLY_4X4 arms are the
     // caller's — see av1_pick_uniform_tx_size_type_yrd).
     let mut start_tx = max_rect_tx_size;
-    let init_depth = get_search_init_depth_intra_speed0(
-        MI_SIZE_WIDE_B[bsize],
-        MI_SIZE_HIGH_B[bsize],
-    );
+    let init_depth =
+        get_search_init_depth_intra_speed0(MI_SIZE_WIDE_B[bsize], MI_SIZE_HIGH_B[bsize]);
     if init_depth == MAX_TX_DEPTH && !enable_tx64 && TXSIZE_SQR_UP_MAP[start_tx] == 4 {
         start_tx = SUB_TX_SIZE_MAP[start_tx];
     }
@@ -1303,7 +1338,12 @@ pub fn choose_tx_size_type_from_rd_intra(
         if this_rd < best_rd {
             let (stats, winners) = res.expect("valid rd implies stats");
             best_rd = this_rd;
-            best = Some(TxSizeChoice { best_tx_size: tx_size, best_rd, stats, winners });
+            best = Some(TxSizeChoice {
+                best_tx_size: tx_size,
+                best_rd,
+                stats,
+                winners,
+            });
         }
         if tx_size == 0 {
             break; // TX_4X4

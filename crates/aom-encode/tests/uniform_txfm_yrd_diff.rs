@@ -12,16 +12,14 @@
 //! planes are compared (verifying the recon feedback the next txb predicts
 //! from), plus (rd, rate, dist, sse, skip).
 
-use aom_encode::mode_costs::{fill_tx_size_costs, tx_size_cost, TxSizeCosts};
-use aom_encode::tx_search::{uniform_txfm_yrd_intra, TxTypeSearchPolicy, TxfmYrdEnv};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_encode::mode_costs::{TxSizeCosts, fill_tx_size_costs, tx_size_cost};
+use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv, uniform_txfm_yrd_intra};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{fill_tx_type_costs, CoeffCostTables, TxTypeCosts};
+use aom_txb::{TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
-
-
 
 #[test]
 fn uniform_txfm_yrd_intra_matches_c_walk() {
@@ -29,8 +27,7 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
     let mut rng = Rng(0x0a11_ab0a_2d5e_a4c4);
     const STRIDE: usize = 256;
     // (bsize, tx_size): multi-txb walks + single-txb controls.
-    let pairs: [(usize, usize); 7] =
-        [(3, 0), (6, 1), (6, 2), (5, 1), (4, 0), (9, 2), (5, 8)];
+    let pairs: [(usize, usize); 7] = [(3, 0), (6, 1), (6, 2), (5, 1), (4, 0), (9, 2), (5, 8)];
     let mut multi_txb_valid = 0usize;
     let mut invalid_cases = 0usize;
     let mut recon_changed = 0usize;
@@ -41,14 +38,24 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
         for iter in 0..10 {
             let bd: u8 = if iter % 3 == 2 { 12 } else { 8 };
             let amp = match iter % 4 {
-                0 => if bd > 8 { 4095 } else { 255 },
+                0 => {
+                    if bd > 8 {
+                        4095
+                    } else {
+                        255
+                    }
+                }
                 1 => 24,
                 2 => 6,
                 _ => 96,
             };
             let qindex = [16, 64, 128, 200, 255][iter % 5] as usize;
             let mode = (rng.next() % 13) as usize;
-            let angle_delta = if (1..=8).contains(&mode) { rng.range(-3, 4) } else { 0 };
+            let angle_delta = if (1..=8).contains(&mode) {
+                rng.range(-3, 4)
+            } else {
+                0
+            };
             let reduced = iter % 4 == 3;
 
             // Frame geometry: interior block at (mi 8, mi 8) of a large frame.
@@ -57,8 +64,9 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
             let src_off = 32 * STRIDE + 32;
 
             // Planes.
-            let recon0: Vec<u16> =
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let recon0: Vec<u16> = (0..STRIDE * 96)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let mut src = recon0.clone();
             for r in 0..bh {
                 for cx in 0..bw {
@@ -84,15 +92,9 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
             let dc_sign = tbl(&mut rng, 3 * 2);
             let lps = tbl(&mut rng, 21 * 26);
             let eob_tbl = tbl(&mut rng, 2 * 11);
-            let coeff_costs = CoeffCostTables {
-                txb_skip: &txb_skip,
-                base_eob: &base_eob,
-                base: &base,
-                eob_extra: &eob_extra,
-                dc_sign: &dc_sign,
-                lps: &lps,
-                eob: &eob_tbl,
-            };
+            let coeff_costs = coeff_cost_set_from_tables(
+                &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl,
+            );
             const NUM_EXT_TX_SET: [usize; 6] = [1, 2, 5, 7, 12, 16];
             const IDX_TO_TYPE: [[usize; 4]; 2] = [[0, 3, 2, 0], [0, 5, 4, 1]];
             let mut ttc_intra_cdf = Vec::new();
@@ -120,16 +122,27 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
             }
             let mut tx_size_costs = TxSizeCosts::zeroed();
             fill_tx_size_costs(&mut tx_size_costs, &ts_cdf);
-            let ts_flat: Vec<i32> = tx_size_costs.0.iter().flatten().flatten().copied().collect();
-            let skip_costs =
-                [[rng.cost(), rng.cost()], [rng.cost(), rng.cost()], [rng.cost(), rng.cost()]];
+            let ts_flat: Vec<i32> = tx_size_costs
+                .0
+                .iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect();
+            let skip_costs = [
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+            ];
             let skip_ctx = (rng.next() % 3) as usize;
             let tx_size_ctx = (rng.next() % 3) as usize;
 
-            let above_ctx: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_ctx: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above_ctx: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_ctx: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 22);
             let ref_best_rd = if iter == 9 { 1 << 8 } else { i64::MAX };
             let pol = TxTypeSearchPolicy::speed0_allintra();
@@ -178,8 +191,13 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
                 uniform_txfm_yrd_intra(&env, &mut recon_rust, tx_size, ref_best_rd, &pol);
 
             // ---- C-side walk ----
-            let tx_size_rate =
-                c::ref_tx_size_cost(&ts_flat, true, bsize as i32, tx_size as i32, tx_size_ctx as i32);
+            let tx_size_rate = c::ref_tx_size_cost(
+                &ts_flat,
+                true,
+                bsize as i32,
+                tx_size as i32,
+                tx_size_ctx as i32,
+            );
             assert_eq!(
                 tx_size_rate,
                 tx_size_cost(&tx_size_costs, true, bsize, tx_size, tx_size_ctx),
@@ -283,7 +301,9 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
                         bsize,
                         rdmult,
                         ref_best_rd - current_rd,
-                        (&txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl),
+                        (
+                            &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl,
+                        ),
                         (&c_ttc_intra, &c_ttc_inter),
                     );
                     if weob > 0 {
@@ -322,8 +342,7 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
                 continue;
             }
             let rate_total = rate_sum.min(i64::from(i32::MAX)) as i32;
-            let rd_c =
-                c::ref_rdcost(rdmult, rate_total + no_skip_rate + tx_size_rate, dist_sum);
+            let rd_c = c::ref_rdcost(rdmult, rate_total + no_skip_rate + tx_size_rate, dist_sum);
             let (s, wins) = stats_rust.unwrap_or_else(|| panic!("stats missing {m}"));
             assert_eq!(rd_rust, rd_c, "rd {m}");
             assert_eq!(s.rate, rate_total + tx_size_rate, "rate {m}");
@@ -348,22 +367,31 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
         }
     }
     assert!(multi_txb_valid > 25, "multi-txb walks: {multi_txb_valid}");
-    assert!(invalid_cases > 3, "invalid (early-exit) cases: {invalid_cases}");
-    assert!(recon_changed > 40, "recon feedback unexercised: {recon_changed}");
+    assert!(
+        invalid_cases > 3,
+        "invalid (early-exit) cases: {invalid_cases}"
+    );
+    assert!(
+        recon_changed > 40,
+        "recon feedback unexercised: {recon_changed}"
+    );
 }
-
 
 #[test]
 fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
     use aom_encode::tx_search::{
-        get_search_init_depth_intra_speed0, pick_uniform_tx_size_type_yrd_intra,
-        MAX_TXSIZE_RECT_LOOKUP, SUB_TX_SIZE_MAP,
+        MAX_TXSIZE_RECT_LOOKUP, SUB_TX_SIZE_MAP, get_search_init_depth_intra_speed0,
+        pick_uniform_tx_size_type_yrd_intra,
     };
     c::ref_init();
     let mut rng = Rng(0xdee_bd00_2026_0714 ^ 0x0f00_0000_0000_0000);
     const STRIDE: usize = 256;
-    const MI_W: [usize; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-    const MI_H: [usize; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
+    const MI_W: [usize; 22] = [
+        1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+    ];
+    const MI_H: [usize; 22] = [
+        1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+    ];
     let bsizes = [3usize, 6, 5, 9]; // 8x8, 16x16, 16x8, 32x32
     let mut deeper_won = 0usize;
     let mut top_won = 0usize;
@@ -375,23 +403,38 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
         for iter in 0..12 {
             let bd: u8 = if iter % 3 == 2 { 12 } else { 8 };
             let amp = match iter % 4 {
-                0 => if bd > 8 { 2048 } else { 160 },
+                0 => {
+                    if bd > 8 {
+                        2048
+                    } else {
+                        160
+                    }
+                }
                 1 => 24,
                 2 => 6,
                 _ => 64,
             };
             let qindex = [16, 64, 128, 200][iter % 4] as usize;
             let mode = (rng.next() % 13) as usize;
-            let angle_delta = if (1..=8).contains(&mode) { rng.range(-3, 4) } else { 0 };
+            let angle_delta = if (1..=8).contains(&mode) {
+                rng.range(-3, 4)
+            } else {
+                0
+            };
             let reduced = iter % 4 == 3;
             let lossless = iter == 11;
-            let source_variance = if iter % 3 == 0 { rng.range(0, 256) as u32 } else { 256 + rng.range(0, 4096) as u32 };
+            let source_variance = if iter % 3 == 0 {
+                rng.range(0, 256) as u32
+            } else {
+                256 + rng.range(0, 4096) as u32
+            };
             let (mi_row, mi_col) = (8, 8);
             let ref_off = 32 * STRIDE + 32;
             let src_off = ref_off;
 
-            let recon0: Vec<u16> =
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let recon0: Vec<u16> = (0..STRIDE * 96)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let mut src = recon0.clone();
             for r in 0..bh {
                 for cx in 0..bw {
@@ -414,15 +457,9 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
             let dc_sign = tbl(&mut rng, 3 * 2);
             let lps = tbl(&mut rng, 21 * 26);
             let eob_tbl = tbl(&mut rng, 2 * 11);
-            let coeff_costs = CoeffCostTables {
-                txb_skip: &txb_skip,
-                base_eob: &base_eob,
-                base: &base,
-                eob_extra: &eob_extra,
-                dc_sign: &dc_sign,
-                lps: &lps,
-                eob: &eob_tbl,
-            };
+            let coeff_costs = coeff_cost_set_from_tables(
+                &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl,
+            );
             const NUM_EXT_TX_SET: [usize; 6] = [1, 2, 5, 7, 12, 16];
             const IDX_TO_TYPE: [[usize; 4]; 2] = [[0, 3, 2, 0], [0, 5, 4, 1]];
             let mut ttc_intra_cdf = Vec::new();
@@ -449,15 +486,26 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
             }
             let mut tx_size_costs = TxSizeCosts::zeroed();
             fill_tx_size_costs(&mut tx_size_costs, &ts_cdf);
-            let ts_flat: Vec<i32> = tx_size_costs.0.iter().flatten().flatten().copied().collect();
-            let skip_costs =
-                [[rng.cost(), rng.cost()], [rng.cost(), rng.cost()], [rng.cost(), rng.cost()]];
+            let ts_flat: Vec<i32> = tx_size_costs
+                .0
+                .iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect();
+            let skip_costs = [
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+            ];
             let skip_ctx = (rng.next() % 3) as usize;
             let tx_size_ctx = (rng.next() % 3) as usize;
-            let above_ctx: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_ctx: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above_ctx: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_ctx: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 22);
             let ref_best_rd = i64::MAX;
             let pol = TxTypeSearchPolicy::speed0_allintra();
@@ -514,18 +562,45 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
             // ---- C-side depth loop (choose_tx_size_type_from_rd transcribed) ----
             let mut recon_c = recon0.clone();
             let geometry = (mi_row, mi_col, ref_off, src_off, STRIDE);
-            let coeff_tbls =
-                (&txb_skip[..], &base_eob[..], &base[..], &eob_extra[..], &dc_sign[..], &lps[..], &eob_tbl[..]);
+            let coeff_tbls = (
+                &txb_skip[..],
+                &base_eob[..],
+                &base[..],
+                &eob_extra[..],
+                &dc_sign[..],
+                &lps[..],
+                &eob_tbl[..],
+            );
             let ttc_tables = (&c_ttc_intra[..], &c_ttc_inter[..]);
             let dequant = [rows.dequant[0], rows.dequant[1]];
             #[allow(clippy::type_complexity)] // (tx, rd, rate, dist, sse, winners)
             let mut best_c: Option<(usize, i64, i32, i64, i64, Vec<(usize, u16, u8)>)> = None;
             if lossless {
                 let (rd, res) = c_uniform_txfm_yrd(
-                    bsize, 0, geometry, &mut recon_c, &src, mode, angle_delta, false, 0,
-                    lossless, reduced, bd, plane_rows_c, dequant, &above_ctx, &left_ctx,
-                    rdmult, ref_best_rd, coeff_tbls, ttc_tables, &skip_costs, skip_ctx,
-                    &ts_flat, tx_size_ctx,
+                    bsize,
+                    0,
+                    geometry,
+                    &mut recon_c,
+                    &src,
+                    mode,
+                    angle_delta,
+                    false,
+                    0,
+                    lossless,
+                    reduced,
+                    bd,
+                    plane_rows_c,
+                    dequant,
+                    &above_ctx,
+                    &left_ctx,
+                    rdmult,
+                    ref_best_rd,
+                    coeff_tbls,
+                    ttc_tables,
+                    &skip_costs,
+                    skip_ctx,
+                    &ts_flat,
+                    tx_size_ctx,
                 );
                 if let Some((rate, dist, sse, w)) = res {
                     best_c = Some((0, rd, rate, dist, sse, w));
@@ -540,10 +615,30 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                 let mut depth = init_depth;
                 while depth <= 2 {
                     let (rd, res) = c_uniform_txfm_yrd(
-                        bsize, tx, geometry, &mut recon_c, &src, mode, angle_delta, false, 0,
-                        false, reduced, bd, plane_rows_c, dequant, &above_ctx, &left_ctx,
-                        rdmult, ref_best_rd, coeff_tbls, ttc_tables, &skip_costs, skip_ctx,
-                        &ts_flat, tx_size_ctx,
+                        bsize,
+                        tx,
+                        geometry,
+                        &mut recon_c,
+                        &src,
+                        mode,
+                        angle_delta,
+                        false,
+                        0,
+                        false,
+                        reduced,
+                        bd,
+                        plane_rows_c,
+                        dequant,
+                        &above_ctx,
+                        &left_ctx,
+                        rdmult,
+                        ref_best_rd,
+                        coeff_tbls,
+                        ttc_tables,
+                        &skip_costs,
+                        skip_ctx,
+                        &ts_flat,
+                        tx_size_ctx,
                     );
                     rd_arr[depth as usize] = rd;
                     if rd < best_rd_c {
@@ -578,8 +673,11 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                     assert_eq!(g.stats.rate, cb.2, "rate {m}");
                     assert_eq!(g.stats.dist, cb.3, "dist {m}");
                     assert_eq!(g.stats.sse, cb.4, "sse {m}");
-                    let wins: Vec<(usize, u16, u8)> =
-                        g.winners.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+                    let wins: Vec<(usize, u16, u8)> = g
+                        .winners
+                        .iter()
+                        .map(|w| (w.tx_type, w.eob, w.txb_ctx))
+                        .collect();
                     assert_eq!(wins, cb.5, "winners {m}");
                     assert_eq!(recon_rust, recon_c, "recon plane {m}");
                     if g.best_tx_size == MAX_TXSIZE_RECT_LOOKUP[bsize] {
@@ -589,12 +687,19 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                     }
                 }
                 (None, None) => {}
-                (g, cb) => panic!("presence mismatch {m}: rust={} c={}", g.is_some(), cb.is_some()),
+                (g, cb) => panic!(
+                    "presence mismatch {m}: rust={} c={}",
+                    g.is_some(),
+                    cb.is_some()
+                ),
             }
         }
     }
     assert!(top_won > 10, "top-size winners: {top_won}");
     assert!(deeper_won > 5, "deeper-size winners: {deeper_won}");
-    assert!(prune_fired > 2, "low-contrast prune never fired: {prune_fired}");
+    assert!(
+        prune_fired > 2,
+        "low-contrast prune never fired: {prune_fired}"
+    );
     assert!(lossless_cases >= 4, "lossless arm: {lossless_cases}");
 }

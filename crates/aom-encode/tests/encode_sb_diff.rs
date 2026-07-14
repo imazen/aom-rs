@@ -33,26 +33,30 @@
 //! usage arms of the chroma trellis table (ALLINTRA 13 / GOOD 20).
 
 use aom_encode::encode_intra::TrellisOptType;
-use aom_encode::encode_sb::{
-    encode_sb_dry, LeafWinner, SbEncodeEnv, SbTree, TileCtxState,
-};
+use aom_encode::encode_sb::{LeafWinner, SbEncodeEnv, SbTree, TileCtxState, encode_sb_dry};
 use aom_encode::intra_uv_rd::chroma_plane_offset;
 use aom_encode::tx_search::AV1_EXT_TX_USED_FLAG;
-use aom_intra::cfl::{CflCtx, CFL_BUF_SQUARE};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_intra::cfl::{CFL_BUF_SQUARE, CflCtx};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{ext_tx_set_type, CoeffCostTables, TxTypeCosts};
+use aom_txb::{TxTypeCosts, ext_tx_set_type};
 
 mod common;
 use common::*;
 
 const STRIDE: usize = 256;
-const MI_W_B: [usize; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_H_B: [usize; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
-const BLK_W_L: [usize; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLK_H_L: [usize; 22] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const MI_W_B: [usize; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const MI_H_B: [usize; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
+const BLK_W_L: [usize; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BLK_H_L: [usize; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 fn in_set_types(tx_size: usize, reduced: bool) -> Vec<usize> {
     let set = ext_tx_set_type(tx_size, false, reduced);
@@ -64,19 +68,19 @@ fn in_set_types(tx_size: usize, reduced: bool) -> Vec<usize> {
 /// C's max_txsize_rect_lookup depth chain, MAX_TX_DEPTH 2).
 fn tx_choices(bsize: usize) -> &'static [usize] {
     match bsize {
-        0 => &[0],          // 4x4
-        3 => &[1, 0],       // 8x8
-        6 => &[2, 1, 0],    // 16x16
-        9 => &[3, 2, 1],    // 32x32
-        12 => &[4, 3, 2],   // 64x64
-        1 => &[5, 0],       // 4x8: TX_4X8 -> TX_4X4
-        2 => &[6, 0],       // 8x4: TX_8X4 -> TX_4X4
-        4 => &[7, 1, 0],    // 8x16: TX_8X16 -> TX_8X8 -> TX_4X4
-        5 => &[8, 1, 0],    // 16x8: TX_16X8 -> TX_8X8 -> TX_4X4
-        7 => &[9, 2, 1],    // 16x32: TX_16X32 -> TX_16X16 -> TX_8X8
-        8 => &[10, 2, 1],   // 32x16: TX_32X16 -> TX_16X16 -> TX_8X8
-        10 => &[11, 3, 2],  // 32x64: TX_32X64 -> TX_32X32 -> TX_16X16
-        11 => &[12, 3, 2],  // 64x32: TX_64X32 -> TX_32X32 -> TX_16X16
+        0 => &[0],         // 4x4
+        3 => &[1, 0],      // 8x8
+        6 => &[2, 1, 0],   // 16x16
+        9 => &[3, 2, 1],   // 32x32
+        12 => &[4, 3, 2],  // 64x64
+        1 => &[5, 0],      // 4x8: TX_4X8 -> TX_4X4
+        2 => &[6, 0],      // 8x4: TX_8X4 -> TX_4X4
+        4 => &[7, 1, 0],   // 8x16: TX_8X16 -> TX_8X8 -> TX_4X4
+        5 => &[8, 1, 0],   // 16x8: TX_16X8 -> TX_8X8 -> TX_4X4
+        7 => &[9, 2, 1],   // 16x32: TX_16X32 -> TX_16X16 -> TX_8X8
+        8 => &[10, 2, 1],  // 32x16: TX_32X16 -> TX_16X16 -> TX_8X8
+        10 => &[11, 3, 2], // 32x64: TX_32X64 -> TX_32X32 -> TX_16X16
+        11 => &[12, 3, 2], // 64x32: TX_64X32 -> TX_32X32 -> TX_16X16
         _ => unreachable!("64x64-partitionable bsizes only"),
     }
 }
@@ -94,13 +98,13 @@ fn split_subsize(bsize: usize) -> usize {
 /// `get_partition_subsize(bsize, HORZ/VERT)` for the square parents.
 fn rect_subsize(bsize: usize, horz: bool) -> usize {
     match (bsize, horz) {
-        (3, true) => 2,   // 8x8 -> 8x4
-        (3, false) => 1,  // 8x8 -> 4x8
-        (6, true) => 5,   // 16x16 -> 16x8
-        (6, false) => 4,  // 16x16 -> 8x16
-        (9, true) => 8,   // 32x32 -> 32x16
-        (9, false) => 7,  // 32x32 -> 16x32
-        (12, true) => 11, // 64x64 -> 64x32
+        (3, true) => 2,    // 8x8 -> 8x4
+        (3, false) => 1,   // 8x8 -> 4x8
+        (6, true) => 5,    // 16x16 -> 16x8
+        (6, false) => 4,   // 16x16 -> 8x16
+        (9, true) => 8,    // 32x32 -> 32x16
+        (9, false) => 7,   // 32x32 -> 16x32
+        (12, true) => 11,  // 64x64 -> 64x32
         (12, false) => 10, // 64x64 -> 32x64
         _ => unreachable!(),
     }
@@ -113,7 +117,11 @@ fn gen_winner(rng: &mut Rng, bsize: usize, reduced: bool) -> LeafWinner {
     let choices = tx_choices(bsize);
     let tx_size = choices[(rng.next() as usize) % choices.len()];
     let mode = (rng.next() % 13) as usize;
-    let angle_delta_y = if (1..=8).contains(&mode) { rng.range(-3, 4) } else { 0 };
+    let angle_delta_y = if (1..=8).contains(&mode) {
+        rng.range(-3, 4)
+    } else {
+        0
+    };
     let use_fi = mode == 0 && bw <= 32 && bh <= 32 && rng.next().is_multiple_of(4);
     let filter_intra_mode = if use_fi { (rng.next() % 5) as usize } else { 0 };
     let cfl_allowed = bw <= 32 && bh <= 32;
@@ -122,8 +130,11 @@ fn gen_winner(rng: &mut Rng, bsize: usize, reduced: bool) -> LeafWinner {
     } else {
         (rng.next() % 13) as usize
     };
-    let angle_delta_uv =
-        if (1..=8).contains(&uv_mode) { rng.range(-3, 4) } else { 0 };
+    let angle_delta_uv = if (1..=8).contains(&uv_mode) {
+        rng.range(-3, 4)
+    } else {
+        0
+    };
     let (mbw, mbh) = (MI_W_B[bsize], MI_H_B[bsize]);
     let (txwu, txhu) = (TX_W[tx_size] >> 2, TX_H[tx_size] >> 2);
     let allowed = in_set_types(tx_size, reduced);
@@ -158,7 +169,11 @@ fn gen_tree(rng: &mut Rng, bsize: usize, reduced: bool, force_deep: bool, rect: 
         let horz = rng.next().is_multiple_of(2);
         let sub = rect_subsize(bsize, horz);
         let pair = Box::new([gen_winner(rng, sub, reduced), gen_winner(rng, sub, reduced)]);
-        return if horz { SbTree::Horz(pair) } else { SbTree::Vert(pair) };
+        return if horz {
+            SbTree::Horz(pair)
+        } else {
+            SbTree::Vert(pair)
+        };
     }
     let do_split = can_split && (force_deep || rng.next().is_multiple_of(3));
     if do_split {
@@ -166,9 +181,7 @@ fn gen_tree(rng: &mut Rng, bsize: usize, reduced: bool, force_deep: bool, rect: 
         let kids: Vec<SbTree> = (0..4)
             .map(|i| gen_tree(rng, sub, reduced, force_deep && i == 0, rect))
             .collect();
-        SbTree::Split(Box::new(
-            <[SbTree; 4]>::try_from(kids).ok().unwrap(),
-        ))
+        SbTree::Split(Box::new(<[SbTree; 4]>::try_from(kids).ok().unwrap()))
     } else {
         SbTree::Leaf(gen_winner(rng, bsize, reduced))
     }
@@ -191,7 +204,11 @@ fn encode_sb_dry_run_matches_c_walk() {
     let mut good_arm = 0usize;
 
     for case in 0..14 {
-        let (ss_x, ss_y) = if case % 2 == 0 { (1usize, 1usize) } else { (0usize, 0usize) };
+        let (ss_x, ss_y) = if case % 2 == 0 {
+            (1usize, 1usize)
+        } else {
+            (0usize, 0usize)
+        };
         let bd: u8 = if case % 3 == 2 { 12 } else { 8 };
         let qindex: usize = [16, 64, 128, 200][case % 4];
         let reduced = case % 4 == 3;
@@ -234,12 +251,15 @@ fn encode_sb_dry_run_matches_c_walk() {
 
         // Planes: random recon state + correlated source.
         let maxv = (1i64 << bd) - 1;
-        let recon_y0: Vec<u16> =
-            (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-        let recon_u0: Vec<u16> =
-            (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-        let recon_v0: Vec<u16> =
-            (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+        let recon_y0: Vec<u16> = (0..STRIDE * 128)
+            .map(|_| (rng.next() % (1u64 << bd)) as u16)
+            .collect();
+        let recon_u0: Vec<u16> = (0..STRIDE * 128)
+            .map(|_| (rng.next() % (1u64 << bd)) as u16)
+            .collect();
+        let recon_v0: Vec<u16> = (0..STRIDE * 128)
+            .map(|_| (rng.next() % (1u64 << bd)) as u16)
+            .collect();
         let mut src_y = recon_y0.clone();
         let mut src_u = recon_u0.clone();
         let mut src_v = recon_v0.clone();
@@ -250,8 +270,8 @@ fn encode_sb_dry_run_matches_c_walk() {
         for r in 0..64usize {
             for cx in 0..64usize {
                 let i = y_org + r * STRIDE + cx;
-                src_y[i] =
-                    (i64::from(src_y[i]) + i64::from(rng.range(-amp, amp + 1))).clamp(0, maxv) as u16;
+                src_y[i] = (i64::from(src_y[i]) + i64::from(rng.range(-amp, amp + 1)))
+                    .clamp(0, maxv) as u16;
             }
         }
         let uv_org = chroma_plane_offset(base_uv, STRIDE, mi_row0, mi_col0, sb_bsize, ss_x, ss_y);
@@ -259,10 +279,10 @@ fn encode_sb_dry_run_matches_c_walk() {
         for r in 0..ch {
             for cx in 0..cw {
                 let i = uv_org + r * STRIDE + cx;
-                src_u[i] =
-                    (i64::from(src_u[i]) + i64::from(rng.range(-amp, amp + 1))).clamp(0, maxv) as u16;
-                src_v[i] =
-                    (i64::from(src_v[i]) + i64::from(rng.range(-amp, amp + 1))).clamp(0, maxv) as u16;
+                src_u[i] = (i64::from(src_u[i]) + i64::from(rng.range(-amp, amp + 1)))
+                    .clamp(0, maxv) as u16;
+                src_v[i] = (i64::from(src_v[i]) + i64::from(rng.range(-amp, amp + 1)))
+                    .clamp(0, maxv) as u16;
             }
         }
 
@@ -295,24 +315,30 @@ fn encode_sb_dry_run_matches_c_walk() {
         let u_dc_sign = tbl(&mut rng, 3 * 2);
         let u_lps = tbl(&mut rng, 21 * 26);
         let u_eob = tbl(&mut rng, 2 * 11);
-        let coeff_costs_y = CoeffCostTables {
-            txb_skip: &y_txb_skip,
-            base_eob: &y_base_eob,
-            base: &y_base,
-            eob_extra: &y_eob_extra,
-            dc_sign: &y_dc_sign,
-            lps: &y_lps,
-            eob: &y_eob,
-        };
-        let coeff_costs_uv = CoeffCostTables {
-            txb_skip: &u_txb_skip,
-            base_eob: &u_base_eob,
-            base: &u_base,
-            eob_extra: &u_eob_extra,
-            dc_sign: &u_dc_sign,
-            lps: &u_lps,
-            eob: &u_eob,
-        };
+        // SbEncodeEnv::coeff_costs_y/_uv is now the full per-txs_ctx
+        // CoeffCostSet; the C oracle still takes the 7 flat arrays directly
+        // (coeff_tbls_y/coeff_tbls_uv below), so replicating them across
+        // every txs_ctx/eob_multi_size slot reproduces the exact same values
+        // this harness compared before (see coeff_cost_set_from_tables' doc
+        // comment).
+        let coeff_costs_y = coeff_cost_set_from_tables(
+            &y_txb_skip,
+            &y_base_eob,
+            &y_base,
+            &y_eob_extra,
+            &y_dc_sign,
+            &y_lps,
+            &y_eob,
+        );
+        let coeff_costs_uv = coeff_cost_set_from_tables(
+            &u_txb_skip,
+            &u_base_eob,
+            &u_base,
+            &u_eob_extra,
+            &u_dc_sign,
+            &u_lps,
+            &u_eob,
+        );
         let ttc = TxTypeCosts::zeroed();
         let ttc_intra = vec![0i32; 3 * 4 * 13 * 16];
         let ttc_inter = vec![0i32; 4 * 4 * 16];
@@ -387,8 +413,17 @@ fn encode_sb_dry_run_matches_c_walk() {
         let mut cfl_rust = CflCtx::new(ss_x as i32, ss_y as i32);
         let mut leaves = Vec::new();
         encode_sb_dry(
-            &env, &mut state, &mut ry, &mut ru, &mut rv, &mut cfl_rust, &mut tree, mi_row0,
-            mi_col0, sb_bsize, &mut leaves,
+            &env,
+            &mut state,
+            &mut ry,
+            &mut ru,
+            &mut rv,
+            &mut cfl_rust,
+            &mut tree,
+            mi_row0,
+            mi_col0,
+            sb_bsize,
+            &mut leaves,
         );
 
         // ---- C walk (REAL pieces), seeded from the same snapshot ----
@@ -419,10 +454,22 @@ fn encode_sb_dry_run_matches_c_walk() {
             dequant_u,
             dequant_v,
             coeff_tbls_y: (
-                &y_txb_skip, &y_base_eob, &y_base, &y_eob_extra, &y_dc_sign, &y_lps, &y_eob,
+                &y_txb_skip,
+                &y_base_eob,
+                &y_base,
+                &y_eob_extra,
+                &y_dc_sign,
+                &y_lps,
+                &y_eob,
             ),
             coeff_tbls_uv: (
-                &u_txb_skip, &u_base_eob, &u_base, &u_eob_extra, &u_dc_sign, &u_lps, &u_eob,
+                &u_txb_skip,
+                &u_base_eob,
+                &u_base,
+                &u_eob_extra,
+                &u_dc_sign,
+                &u_lps,
+                &u_eob,
             ),
             ttc: (&ttc_intra, &ttc_inter),
             above_e: [
@@ -442,7 +489,14 @@ fn encode_sb_dry_run_matches_c_walk() {
         let mut cfl_c = c::RefCflState::default();
         let mut c_leaves: Vec<CLeafOut> = Vec::new();
         oracle.encode_sb(
-            &mut cy, &mut cu, &mut cv, &mut cfl_c, &mut tree_c, mi_row0, mi_col0, sb_bsize,
+            &mut cy,
+            &mut cu,
+            &mut cv,
+            &mut cfl_c,
+            &mut tree_c,
+            mi_row0,
+            mi_col0,
+            sb_bsize,
             &mut c_leaves,
         );
 
@@ -454,8 +508,15 @@ fn encode_sb_dry_run_matches_c_walk() {
         assert_eq!(leaves.len(), c_leaves.len(), "leaf count: {tag}");
         let mut any_store = false;
         for (k, (r, cc)) in leaves.iter().zip(c_leaves.iter()).enumerate() {
-            let ltag = format!("leaf {k} @({},{}) bs {}: {tag}", r.mi_row, r.mi_col, r.bsize);
-            assert_eq!((r.mi_row, r.mi_col, r.bsize), (cc.0, cc.1, cc.2), "order: {ltag}");
+            let ltag = format!(
+                "leaf {k} @({},{}) bs {}: {tag}",
+                r.mi_row, r.mi_col, r.bsize
+            );
+            assert_eq!(
+                (r.mi_row, r.mi_col, r.bsize),
+                (cc.0, cc.1, cc.2),
+                "order: {ltag}"
+            );
             assert_eq!(r.is_chroma_ref, cc.3, "chroma_ref: {ltag}");
             assert_eq!(r.store_y, cc.4, "store_y: {ltag}");
             assert_eq!(r.y.txbs.len(), cc.5.len(), "y txb count: {ltag}");
@@ -467,9 +528,7 @@ fn encode_sb_dry_run_matches_c_walk() {
                 assert_eq!(rt.dqcoeff, ct.4, "y txb {j} dqcoeff: {ltag}");
             }
             assert_eq!(r.u.is_some(), cc.6.is_some(), "u presence: {ltag}");
-            for (plane, (ro, co)) in
-                [(&r.u, &cc.6), (&r.v, &cc.7)].into_iter().enumerate()
-            {
+            for (plane, (ro, co)) in [(&r.u, &cc.6), (&r.v, &cc.7)].into_iter().enumerate() {
                 if let (Some(ro), Some(co)) = (ro.as_ref(), co.as_ref()) {
                     assert_eq!(ro.txbs.len(), co.len(), "uv{plane} txb count: {ltag}");
                     for (j, (rt, ct)) in ro.txbs.iter().zip(co.iter()).enumerate() {
@@ -482,10 +541,14 @@ fn encode_sb_dry_run_matches_c_walk() {
             }
             leaves_total += 1;
             {
-                const W: [usize; 22] =
-                    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-                const H: [usize; 22] =
-                    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+                const W: [usize; 22] = [
+                    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16,
+                    64,
+                ];
+                const H: [usize; 22] = [
+                    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64,
+                    16,
+                ];
                 if W[r.bsize] != H[r.bsize] {
                     rect_leaves += 1;
                 }
@@ -526,8 +589,7 @@ fn encode_sb_dry_run_matches_c_walk() {
                         cmp_maps(x, y, tag);
                     }
                 }
-                (SbTree::Horz(xs), SbTree::Horz(ys))
-                | (SbTree::Vert(xs), SbTree::Vert(ys)) => {
+                (SbTree::Horz(xs), SbTree::Horz(ys)) | (SbTree::Vert(xs), SbTree::Vert(ys)) => {
                     for (x, y) in xs.iter().zip(ys.iter()) {
                         assert_eq!(x.tx_type_map, y.tx_type_map, "rect winner map: {tag}");
                     }
@@ -537,11 +599,24 @@ fn encode_sb_dry_run_matches_c_walk() {
         }
         cmp_maps(&tree, &tree_c, &tag);
         // Tile context state.
-        assert_eq!(state.above_ectx[0], oracle.above_e[0], "above ectx Y: {tag}");
-        assert_eq!(state.above_ectx[1], oracle.above_e[1], "above ectx U: {tag}");
-        assert_eq!(state.above_ectx[2], oracle.above_e[2], "above ectx V: {tag}");
+        assert_eq!(
+            state.above_ectx[0], oracle.above_e[0],
+            "above ectx Y: {tag}"
+        );
+        assert_eq!(
+            state.above_ectx[1], oracle.above_e[1],
+            "above ectx U: {tag}"
+        );
+        assert_eq!(
+            state.above_ectx[2], oracle.above_e[2],
+            "above ectx V: {tag}"
+        );
         assert_eq!(state.left_ectx, oracle.left_e, "left ectx: {tag}");
-        assert_eq!(&state.above_pctx[..], &oracle.above_p[..], "above pctx: {tag}");
+        assert_eq!(
+            &state.above_pctx[..],
+            &oracle.above_p[..],
+            "above pctx: {tag}"
+        );
         assert_eq!(state.left_pctx, oracle.left_p, "left pctx: {tag}");
         assert_eq!(state.above_tctx, oracle.above_t, "above tctx: {tag}");
         assert_eq!(state.left_tctx, oracle.left_t, "left tctx: {tag}");
@@ -559,10 +634,22 @@ fn encode_sb_dry_run_matches_c_walk() {
 
     // Coverage floors.
     assert!(leaves_total >= 60, "leaves exercised: {leaves_total}");
-    assert!(store_leaves >= 15, "store_y leaves exercised: {store_leaves}");
-    assert!(cfl_leaves >= 4, "chroma-ref CfL-storing leaves: {cfl_leaves}");
-    assert!(nonref_leaves >= 6, "!chroma_ref leaves exercised: {nonref_leaves}");
+    assert!(
+        store_leaves >= 15,
+        "store_y leaves exercised: {store_leaves}"
+    );
+    assert!(
+        cfl_leaves >= 4,
+        "chroma-ref CfL-storing leaves: {cfl_leaves}"
+    );
+    assert!(
+        nonref_leaves >= 6,
+        "!chroma_ref leaves exercised: {nonref_leaves}"
+    );
     assert!(deep_420 >= 6, "420 sub-8x8 leaves exercised: {deep_420}");
     assert!(good_arm >= 6, "GOOD trellis-table cases: {good_arm}");
-    assert!(rect_leaves >= 8, "HORZ/VERT rect leaves exercised: {rect_leaves}");
+    assert!(
+        rect_leaves >= 8,
+        "HORZ/VERT rect leaves exercised: {rect_leaves}"
+    );
 }

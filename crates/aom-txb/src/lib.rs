@@ -27,15 +27,20 @@ pub use cost::{cost_coeffs_txb, CoeffCostTables};
 mod prob_cost;
 pub use prob_cost::{cost_symbol, cost_tokens_from_cdf};
 mod fill;
-pub use fill::{fill_lv_map_coeff_cost, fill_lv_map_coeff_cost_from_arena, LvMapCoeffCost};
+pub use fill::{
+    fill_coeff_cost_set_from_arena, fill_eob_cost_from_arena, fill_lv_map_coeff_cost,
+    fill_lv_map_coeff_cost_from_arena, CoeffCostSet, LvMapCoeffCost,
+};
 mod ext_tx;
 pub use ext_tx::{
-    ext_tx_derive, ext_tx_set, ext_tx_set_type, fill_tx_type_costs, get_tx_type_cost,
-    read_tx_type, write_tx_type, ExtTxDeriv, TxTypeCosts, EXT_TX_SETS_INTER, EXT_TX_SETS_INTRA,
-    EXT_TX_SIZES, INTRA_MODES, TX_TYPES,
+    ext_tx_derive, ext_tx_set, ext_tx_set_type, fill_tx_type_costs, get_tx_type_cost, read_tx_type,
+    write_tx_type, ExtTxDeriv, TxTypeCosts, EXT_TX_SETS_INTER, EXT_TX_SETS_INTRA, EXT_TX_SIZES,
+    INTRA_MODES, TX_TYPES,
 };
 mod trellis_cost;
-pub use trellis_cost::{br_cost_with_diff, coeff_cost_eob, coeff_cost_general, two_coeff_cost_simple};
+pub use trellis_cost::{
+    br_cost_with_diff, coeff_cost_eob, coeff_cost_general, two_coeff_cost_simple,
+};
 mod optimize;
 pub use optimize::{optimize_txb, optimize_txb_qm, OptimizeResult};
 mod entropy_ctx;
@@ -94,17 +99,21 @@ pub const TX_TYPE_TO_CLASS: [TxClass; 16] = [
 ];
 
 // Per-TX_SIZE dimensions (enums.h tables), index order = libaom TX_SIZE 0..18.
-const TX_SIZE_WIDE: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_SIZE_HIGH: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_SIZE_WIDE: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_SIZE_HIGH: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 /// `av1_get_adjusted_tx_size` (av1_common_int.h): 64-point sizes cap to 32.
 pub fn adjusted_tx_size(tx_size: usize) -> usize {
     match tx_size {
-        4 => 3,        // TX_64X64 -> TX_32X32
-        12 => 3,       // TX_64X32 -> TX_32X32
-        11 => 3,       // TX_32X64 -> TX_32X32
-        18 => 10,      // TX_64X16 -> TX_32X16
-        17 => 9,       // TX_16X64 -> TX_16X32
+        4 => 3,   // TX_64X64 -> TX_32X32
+        12 => 3,  // TX_64X32 -> TX_32X32
+        11 => 3,  // TX_32X64 -> TX_32X32
+        18 => 10, // TX_64X16 -> TX_32X16
+        17 => 9,  // TX_16X64 -> TX_16X32
         other => other,
     }
 }
@@ -300,24 +309,44 @@ fn get_nz_map_ctx(
     get_nz_map_ctx_from_stats(stats, coeff_idx, bhl, tx_size, tx_class)
 }
 
-
 /// `get_lower_levels_ctx` (txb_common.h): base context from neighbour stats.
-pub(crate) fn get_lower_levels_ctx(levels: &[u8], coeff_idx: usize, bhl: u32, tx_size: usize, tx_class: TxClass) -> i32 {
+pub(crate) fn get_lower_levels_ctx(
+    levels: &[u8],
+    coeff_idx: usize,
+    bhl: u32,
+    tx_size: usize,
+    tx_class: TxClass,
+) -> i32 {
     let stats = get_nz_mag(levels, get_padded_idx(coeff_idx, bhl), bhl, tx_class);
     get_nz_map_ctx_from_stats(stats, coeff_idx, bhl, tx_size, tx_class)
 }
 
 /// `get_lower_levels_ctx_eob`.
 pub(crate) fn get_lower_levels_ctx_eob(bhl: u32, width: usize, scan_idx: usize) -> i32 {
-    if scan_idx == 0 { return 0; }
-    if scan_idx <= (width << bhl) / 8 { return 1; }
-    if scan_idx <= (width << bhl) / 4 { return 2; }
+    if scan_idx == 0 {
+        return 0;
+    }
+    if scan_idx <= (width << bhl) / 8 {
+        return 1;
+    }
+    if scan_idx <= (width << bhl) / 4 {
+        return 2;
+    }
     3
 }
 
 /// `get_lower_levels_ctx_general`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn get_lower_levels_ctx_general(is_last: bool, scan_idx: usize, bhl: u32, width: usize, levels: &[u8], coeff_idx: usize, tx_size: usize, tx_class: TxClass) -> i32 {
+pub(crate) fn get_lower_levels_ctx_general(
+    is_last: bool,
+    scan_idx: usize,
+    bhl: u32,
+    width: usize,
+    levels: &[u8],
+    coeff_idx: usize,
+    tx_size: usize,
+    tx_class: TxClass,
+) -> i32 {
     if is_last {
         return get_lower_levels_ctx_eob(bhl, width, scan_idx);
     }
@@ -325,7 +354,9 @@ pub(crate) fn get_lower_levels_ctx_general(is_last: bool, scan_idx: usize, bhl: 
 }
 
 /// `get_padded_idx` re-export for the optimize module.
-pub(crate) fn padded_idx(idx: usize, bhl: u32) -> usize { get_padded_idx(idx, bhl) }
+pub(crate) fn padded_idx(idx: usize, bhl: u32) -> usize {
+    get_padded_idx(idx, bhl)
+}
 
 /// `av1_get_nz_map_contexts_c`: compute the entropy context for every coded
 /// coefficient of a transform block. `scan` is the (tx_size, tx_type) scan

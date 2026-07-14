@@ -183,7 +183,8 @@ use crate::encode_sb::{
 use crate::hog::prune_intra_mode_with_hog_y;
 use crate::intra_rd::{Block4x4VarInfo, IntraSbyGates, IntraSbySearchCfg};
 use crate::intra_uv_rd::{
-    UV_CFL_PRED, UvLoopPolicy, UvRdEnv, chroma_plane_offset, is_chroma_reference,
+    UV_CFL_PRED, UvLoopPolicy, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset,
+    is_chroma_reference,
 };
 use crate::mode_costs::TxSizeCosts;
 use crate::mode_costs::{CflCosts, IntraModeCosts};
@@ -579,6 +580,13 @@ fn leaf_pick_sb_modes(
         4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
     ];
     let cfl_allowed = !env.lossless && BLK_W[bsize] <= 32 && BLK_H[bsize] <= 32;
+    // Chroma has no tx-size depth search (av1_get_tx_size_uv is a pure
+    // function of bsize/lossless/subsampling) -- pre-select the ONE real
+    // per-txs_ctx table this leaf's whole UV search+encode lifetime uses,
+    // matching `av1_get_tx_size(AOM_PLANE_U, xd)` re-derived later inside
+    // `rd_pick_intra_mode_sb` (same inputs, same value).
+    let uv_tx_size = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
+    let uv_coeff_tables = env.coeff_costs_uv.tables(uv_tx_size);
     let mut uv_env = UvRdEnv {
         sb_size: env.sb_size,
         bsize,
@@ -610,7 +618,7 @@ fn leaf_pick_sb_modes(
         rows_u: env.rows_u,
         rows_v: env.rows_v,
         rdmult: env.rdmult,
-        coeff_costs: env.coeff_costs_uv,
+        coeff_costs: &uv_coeff_tables,
         tx_type_costs: env.tx_type_costs,
         above_ctx: [&above_u, &above_v],
         left_ctx: [&left_u, &left_v],

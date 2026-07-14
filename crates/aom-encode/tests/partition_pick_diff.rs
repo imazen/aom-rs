@@ -44,29 +44,34 @@ use aom_encode::encode_intra::TrellisOptType;
 use aom_encode::encode_sb::{SbEncodeEnv, SbTree, TileCtxState};
 use aom_encode::hog::prune_intra_mode_with_hog_y as _rust_hog; // (symmetry doc)
 use aom_encode::intra_rd::{Block4x4VarInfo, IntraSbyGates, IntraSbySearchCfg};
-use aom_encode::intra_uv_rd::{chroma_plane_offset, is_chroma_reference, UvLoopPolicy, UvRdEnv};
-use aom_encode::mode_costs::{
-    fill_cfl_costs, CflCosts, IntraModeCosts, TxSizeCosts,
+use aom_encode::intra_uv_rd::{
+    UvLoopPolicy, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
+use aom_encode::mode_costs::{CflCosts, IntraModeCosts, TxSizeCosts, fill_cfl_costs};
 use aom_encode::partition::PartRdStats;
 use aom_encode::partition_pick::{
-    perpixel_variance_y, rd_pick_partition_real, LeafVisit, ModeGrid, PickFrameCfg,
+    LeafVisit, ModeGrid, PickFrameCfg, perpixel_variance_y, rd_pick_partition_real,
 };
-use aom_encode::rd_pick::{rd_pick_intra_mode_sb, RdPickUvArgs, RdPickUvOutcome, ReencodeParams};
+use aom_encode::rd_pick::{RdPickUvArgs, RdPickUvOutcome, ReencodeParams, rd_pick_intra_mode_sb};
 use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv};
 use aom_intra::cfl::CflCtx;
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{fill_tx_type_costs, CoeffCostTables, TxTypeCosts};
+use aom_txb::{CoeffCostSet, TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
 
 const STRIDE: usize = 256;
-const MI_WB: [usize; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_HB: [usize; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
-const BLK_1D: [usize; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
+const MI_WB: [usize; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const MI_HB: [usize; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
+const BLK_1D: [usize; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
 
 fn c_split_sub(bsize: usize) -> usize {
     match bsize {
@@ -103,8 +108,15 @@ struct CPick<'a> {
     rows_y: &'a aom_quant::PlaneQuantRows<'a>,
     rows_u: &'a aom_quant::PlaneQuantRows<'a>,
     rows_v: &'a aom_quant::PlaneQuantRows<'a>,
-    coeff_costs_y: &'a CoeffCostTables<'a>,
-    coeff_costs_uv: &'a CoeffCostTables<'a>,
+    // Frame-level (multi-txs_ctx) sets, mirroring SbEncodeEnv::coeff_costs_y/
+    // _uv -- the recursion visits many leaf bsizes/tx_sizes, so this cannot
+    // be a single pre-selected CoeffCostTables (luma) the way EncodeIntraYEnv/
+    // the winner re-encode can be. UvRdEnv's per-leaf construction below
+    // still pre-selects its OWN single CoeffCostTables via
+    // `coeff_costs_uv.tables(uv_tx_size)`, matching `UvRdEnv::coeff_costs`'s
+    // pre-selected-by-caller contract (chroma has no tx-size depth search).
+    coeff_costs_y: &'a CoeffCostSet,
+    coeff_costs_uv: &'a CoeffCostSet,
     ttc_dummy: &'a TxTypeCosts,
     max_partition_size: usize,
     min_partition_size: usize,
@@ -177,8 +189,9 @@ impl CPick<'_> {
         // kernel index (fixes the chunk-7 harness slip of passing the enum
         // straight through — wrong dims for every size above 4x8; the
         // tx-depth low-contrast gate `source_variance < 256` is live).
-        const BSIZE_VAR_IDX: [usize; 22] =
-            [0, 1, 3, 4, 5, 8, 9, 10, 13, 14, 15, 17, 18, 19, 20, 21, 2, 7, 6, 12, 11, 16];
+        const BSIZE_VAR_IDX: [usize; 22] = [
+            0, 1, 3, 4, 5, 8, 9, 10, 13, 14, 15, 17, 18, 19, 20, 21, 2, 7, 6, 12, 11, 16,
+        ];
         let offs = vec![128u16 << (self.o.bd - 8); 128];
         let (var, _sse) = c::ref_hbd_variance(
             BSIZE_VAR_IDX[bsize],
@@ -188,8 +201,9 @@ impl CPick<'_> {
             &offs,
             0,
         );
-        const NUM_PELS_LOG2: [u32; 22] =
-            [4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12, 13, 13, 14, 6, 6, 8, 8, 10, 10];
+        const NUM_PELS_LOG2: [u32; 22] = [
+            4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12, 13, 13, 14, 6, 6, 8, 8, 10, 10,
+        ];
         let bits = NUM_PELS_LOG2[bsize];
         let source_variance = (var + (1 << (bits - 1))) >> bits;
 
@@ -209,12 +223,16 @@ impl CPick<'_> {
         let gates = IntraSbyGates::speed0(skip_mask);
 
         let above_mode = if up {
-            Some(i32::from(self.grid[(mi_row - 1) as usize * self.grid_stride + mi_col as usize]))
+            Some(i32::from(
+                self.grid[(mi_row - 1) as usize * self.grid_stride + mi_col as usize],
+            ))
         } else {
             None
         };
         let left_mode = if left {
-            Some(i32::from(self.grid[mi_row as usize * self.grid_stride + (mi_col - 1) as usize]))
+            Some(i32::from(
+                self.grid[mi_row as usize * self.grid_stride + (mi_col - 1) as usize],
+            ))
         } else {
             None
         };
@@ -318,10 +336,16 @@ impl CPick<'_> {
         let above_v: Vec<i8> = self.o.above_e[2][au..au + pmw].to_vec();
         let left_v: Vec<i8> = self.o.left_e[2][lu..lu + pmh].to_vec();
         let cfl_allowed = !self.lossless && BLK_1D[bsize] <= 32 && BLK_1D[bsize] <= 32 && {
-            const BLK_H: [usize; 22] =
-                [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+            const BLK_H: [usize; 22] = [
+                4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+            ];
             BLK_H[bsize] <= 32
         };
+        // Chroma has no tx-size depth search -- pre-select the ONE real
+        // per-txs_ctx table THIS leaf's uv_tx_size uses (mirrors
+        // partition_pick.rs::leaf_pick_sb_modes's fix).
+        let uv_tx_size = av1_get_tx_size_uv(bsize, self.lossless, ss_x, ss_y);
+        let uv_coeff_tables = self.coeff_costs_uv.tables(uv_tx_size);
         let mut uv_env = UvRdEnv {
             sb_size: self.sb_size,
             bsize,
@@ -353,7 +377,7 @@ impl CPick<'_> {
             rows_u: self.rows_u,
             rows_v: self.rows_v,
             rdmult: self.o.rdmult,
-            coeff_costs: self.coeff_costs_uv,
+            coeff_costs: &uv_coeff_tables,
             tx_type_costs: self.ttc_dummy,
             above_ctx: [&above_u, &above_v],
             left_ctx: [&left_u, &left_v],
@@ -390,8 +414,11 @@ impl CPick<'_> {
         match outcome.best {
             None => (PartRdStats::invalid(), None),
             Some(best) => {
-                let stats =
-                    PartRdStats { rate: best.rate, dist: best.dist, rdcost: best.rdcost };
+                let stats = PartRdStats {
+                    rate: best.rate,
+                    dist: best.dist,
+                    rdcost: best.rdcost,
+                };
                 let (uv_mode, ad_uv, ci, cs) = match &best.uv {
                     RdPickUvOutcome::Searched(w, _) => (
                         w.uv_mode,
@@ -455,10 +482,10 @@ impl CPick<'_> {
         if do_rectangular_split {
             let horz_sub = c::ref_get_partition_subsize(bsize as i32, 1) as usize;
             let vert_sub = c::ref_get_partition_subsize(bsize as i32, 2) as usize;
-            partition_rect_allowed[0] = has_cols
-                && c::ref_get_plane_block_size(horz_sub, self.o.ss.0, self.o.ss.1) != 255;
-            partition_rect_allowed[1] = has_rows
-                && c::ref_get_plane_block_size(vert_sub, self.o.ss.0, self.o.ss.1) != 255;
+            partition_rect_allowed[0] =
+                has_cols && c::ref_get_plane_block_size(horz_sub, self.o.ss.0, self.o.ss.1) != 255;
+            partition_rect_allowed[1] =
+                has_rows && c::ref_get_plane_block_size(vert_sub, self.o.ss.0, self.o.ss.1) != 255;
         }
         if BLK_1D[bsize] > BLK_1D[self.max_partition_size] {
             // av1_set_square_split_only.
@@ -490,7 +517,11 @@ impl CPick<'_> {
         // REAL av1_rd_cost_update.
         let (r, d, cst) =
             c::ref_rd_cost_update(self.o.rdmult, best_rdc.rate, best_rdc.dist, best_rdc.rdcost);
-        best_rdc = PartRdStats { rate: r, dist: d, rdcost: cst };
+        best_rdc = PartRdStats {
+            rate: r,
+            dist: d,
+            rdcost: cst,
+        };
 
         // av1_save_context (transcribed slice copies).
         let saved_e: Vec<Vec<i8>> = (0..3)
@@ -508,7 +539,10 @@ impl CPick<'_> {
                 let (s0, h) = if p == 0 {
                     ((mi_row & 31) as usize, MI_HB[bsize])
                 } else {
-                    (((mi_row & 31) >> self.o.ss.1) as usize, MI_HB[bsize] >> self.o.ss.1)
+                    (
+                        ((mi_row & 31) >> self.o.ss.1) as usize,
+                        MI_HB[bsize] >> self.o.ss.1,
+                    )
                 };
                 self.o.left_e[p][s0..s0 + h].to_vec()
             })
@@ -521,17 +555,9 @@ impl CPick<'_> {
         let saved_lt: Vec<u8> = self.o.left_t[l0..l0 + MI_HB[bsize]].to_vec();
         let restore = |o: &mut COracle| {
             for p in 0..3 {
-                let (s0, _) = if p == 0 {
-                    (a0, 0)
-                } else {
-                    (a0 >> o.ss.0, 0)
-                };
+                let (s0, _) = if p == 0 { (a0, 0) } else { (a0 >> o.ss.0, 0) };
                 o.above_e[p][s0..s0 + saved_e[p].len()].copy_from_slice(&saved_e[p]);
-                let (t0, _) = if p == 0 {
-                    (l0, 0)
-                } else {
-                    (l0 >> o.ss.1, 0)
-                };
+                let (t0, _) = if p == 0 { (l0, 0) } else { (l0 >> o.ss.1, 0) };
                 o.left_e[p][t0..t0 + saved_le[p].len()].copy_from_slice(&saved_le[p]);
             }
             o.above_p[a0..a0 + saved_p.len()].copy_from_slice(&saved_p);
@@ -548,7 +574,13 @@ impl CPick<'_> {
             let mb_right = (self.o.mi_cols - mi_w as i32 - mi_col) * 4 * 8;
             let mb_bottom = (self.o.mi_rows - MI_HB[bsize] as i32 - mi_row) * 4 * 8;
             let (var_min, var_max) = c::ref_log_sub_block_var(
-                self.o.src_y, ref_off_y, STRIDE, bsize, mb_right, mb_bottom, self.o.bd,
+                self.o.src_y,
+                ref_off_y,
+                STRIDE,
+                bsize,
+                mb_right,
+                mb_bottom,
+                self.o.bd,
             );
             if var_min < 0.272 && (var_max - var_min) > 3.0 {
                 partition_none_allowed = false;
@@ -565,7 +597,11 @@ impl CPick<'_> {
         if partition_none_allowed {
             let mut pt_cost = 0i32;
             if bsize_at_least_8x8 {
-                pt_cost = if partition_cost[0] < i32::MAX { partition_cost[0] } else { 0 };
+                pt_cost = if partition_cost[0] < i32::MAX {
+                    partition_cost[0]
+                } else {
+                    0
+                };
             }
             let (_pr, _pd, ptc) = c::ref_rd_cost_update(self.o.rdmult, pt_cost, 0, 0);
             let _ = ptc;
@@ -575,7 +611,15 @@ impl CPick<'_> {
                 (pt_cost, 0, ptc),
             );
             let (mut this_rdc, winner) = self.leaf(
-                recon_y, recon_u, recon_v, cfl_search, mi_row, mi_col, bsize, 0, best_remain,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl_search,
+                mi_row,
+                mi_col,
+                bsize,
+                0,
+                best_remain,
             );
             visits.push(LeafVisit {
                 mi_row,
@@ -631,7 +675,11 @@ impl CPick<'_> {
                     y,
                     x,
                     subsize,
-                    PartRdStats { rate: best_remain.0, dist: best_remain.1, rdcost: best_remain.2 },
+                    PartRdStats {
+                        rate: best_remain.0,
+                        dist: best_remain.1,
+                        rdcost: best_remain.2,
+                    },
                     idx,
                     visits,
                 );
@@ -642,22 +690,29 @@ impl CPick<'_> {
                 }
                 sum_rdc.rate += crdc.rate;
                 sum_rdc.dist += crdc.dist;
-                let (nr, nd, nc) =
-                    c::ref_rd_cost_update(self.o.rdmult, sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost);
-                sum_rdc = PartRdStats { rate: nr, dist: nd, rdcost: nc };
+                let (nr, nd, nc) = c::ref_rd_cost_update(
+                    self.o.rdmult,
+                    sum_rdc.rate,
+                    sum_rdc.dist,
+                    sum_rdc.rdcost,
+                );
+                sum_rdc = PartRdStats {
+                    rate: nr,
+                    dist: nd,
+                    rdcost: nc,
+                };
                 children.push(t);
                 idx += 1;
             }
             if idx == 4 && sum_rdc.rdcost < best_rdc.rdcost {
-                sum_rdc.rdcost =
-                    aom_encode::rd::rdcost(self.o.rdmult, sum_rdc.rate, sum_rdc.dist);
+                sum_rdc.rdcost = aom_encode::rd::rdcost(self.o.rdmult, sum_rdc.rate, sum_rdc.dist);
                 if sum_rdc.rdcost < best_rdc.rdcost {
                     best_rdc = sum_rdc;
                     found = true;
-                    let kids: Vec<SbTree> =
-                        children.into_iter().map(|t| t.unwrap()).collect();
-                    best_tree =
-                        Some(SbTree::Split(Box::new(<[SbTree; 4]>::try_from(kids).ok().unwrap())));
+                    let kids: Vec<SbTree> = children.into_iter().map(|t| t.unwrap()).collect();
+                    best_tree = Some(SbTree::Split(Box::new(
+                        <[SbTree; 4]>::try_from(kids).ok().unwrap(),
+                    )));
                 }
             } else if self.less_rectangular_check_level > 0 {
                 // :4630-4640 (ALLINTRA level 1 at speed 0): kill rect when
@@ -680,8 +735,11 @@ impl CPick<'_> {
         for i in 0..2usize {
             // is_rect_part_allowed (:3506) + av1_active_h/v_edge at the
             // one-pass shape (top/left edge 0, bottom/right edge mi dims).
-            let (mi_pos, dim_end) =
-                if i == 0 { (mi_row, self.o.mi_rows) } else { (mi_col, self.o.mi_cols) };
+            let (mi_pos, dim_end) = if i == 0 {
+                (mi_row, self.o.mi_rows)
+            } else {
+                (mi_col, self.o.mi_cols)
+            };
             let active_edge = (0 >= mi_pos && 0 < mi_pos + mi_step)
                 || (dim_end >= mi_pos && dim_end < mi_pos + mi_step);
             if !partition_rect_allowed[i] || !(do_rectangular_split || active_edge) {
@@ -703,8 +761,15 @@ impl CPick<'_> {
                     (sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost),
                 );
                 let (this_rdc, w) = self.leaf(
-                    recon_y, recon_u, recon_v, cfl_search, mi_row, mi_col, subsize,
-                    partition_type, best_remain,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl_search,
+                    mi_row,
+                    mi_col,
+                    subsize,
+                    partition_type,
+                    best_remain,
                 );
                 visits.push(LeafVisit {
                     mi_row,
@@ -721,9 +786,16 @@ impl CPick<'_> {
                     sum_rdc.rate += this_rdc.rate;
                     sum_rdc.dist += this_rdc.dist;
                     let (nr, nd, nc) = c::ref_rd_cost_update(
-                        self.o.rdmult, sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost,
+                        self.o.rdmult,
+                        sum_rdc.rate,
+                        sum_rdc.dist,
+                        sum_rdc.rdcost,
                     );
-                    sum_rdc = PartRdStats { rate: nr, dist: nd, rdcost: nc };
+                    sum_rdc = PartRdStats {
+                        rate: nr,
+                        dist: nd,
+                        rdcost: nc,
+                    };
                 }
                 w
             };
@@ -737,7 +809,14 @@ impl CPick<'_> {
                 let w0m = w0.as_mut().unwrap();
                 let mut outs: Vec<CLeafOut> = Vec::new();
                 self.o.encode_b(
-                    recon_y, recon_u, recon_v, cfl_enc, w0m, mi_row, mi_col, partition_type,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl_enc,
+                    w0m,
+                    mi_row,
+                    mi_col,
+                    partition_type,
                     &mut outs,
                 );
                 for rr in 0..MI_HB[subsize] {
@@ -746,15 +825,25 @@ impl CPick<'_> {
                 }
                 self.stats.rect_mid_encodes += 1;
                 // Sub-block 1 at the edge position (+ mi_step).
-                let (r1, c1) =
-                    if i == 0 { (mi_row + mi_step, mi_col) } else { (mi_row, mi_col + mi_step) };
+                let (r1, c1) = if i == 0 {
+                    (mi_row + mi_step, mi_col)
+                } else {
+                    (mi_row, mi_col + mi_step)
+                };
                 let best_remain = c::ref_rd_stats_subtraction(
                     self.o.rdmult,
                     (best_rdc.rate, best_rdc.dist, best_rdc.rdcost),
                     (sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost),
                 );
                 let (this_rdc, w) = self.leaf(
-                    recon_y, recon_u, recon_v, cfl_search, r1, c1, subsize, partition_type,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl_search,
+                    r1,
+                    c1,
+                    subsize,
+                    partition_type,
                     best_remain,
                 );
                 visits.push(LeafVisit {
@@ -772,23 +861,32 @@ impl CPick<'_> {
                     sum_rdc.rate += this_rdc.rate;
                     sum_rdc.dist += this_rdc.dist;
                     let (nr, nd, nc) = c::ref_rd_cost_update(
-                        self.o.rdmult, sum_rdc.rate, sum_rdc.dist, sum_rdc.rdcost,
+                        self.o.rdmult,
+                        sum_rdc.rate,
+                        sum_rdc.dist,
+                        sum_rdc.rdcost,
                     );
-                    sum_rdc = PartRdStats { rate: nr, dist: nd, rdcost: nc };
+                    sum_rdc = PartRdStats {
+                        rate: nr,
+                        dist: nd,
+                        rdcost: nc,
+                    };
                 }
                 w1 = w;
             }
             // Best update (:3626-3632).
             if sum_rdc.rdcost < best_rdc.rdcost {
-                sum_rdc.rdcost =
-                    aom_encode::rd::rdcost(self.o.rdmult, sum_rdc.rate, sum_rdc.dist);
+                sum_rdc.rdcost = aom_encode::rd::rdcost(self.o.rdmult, sum_rdc.rate, sum_rdc.dist);
                 if sum_rdc.rdcost < best_rdc.rdcost {
                     best_rdc = sum_rdc;
                     found = true;
                     self.stats.rect_wins[i] += 1;
                     let pair = Box::new([w0.take().unwrap(), w1.take().unwrap()]);
-                    best_tree =
-                        Some(if i == 0 { SbTree::Horz(pair) } else { SbTree::Vert(pair) });
+                    best_tree = Some(if i == 0 {
+                        SbTree::Horz(pair)
+                    } else {
+                        SbTree::Vert(pair)
+                    });
                 }
             }
             // av1_restore_context at EACH type's loop tail (:3644).
@@ -804,21 +902,40 @@ impl CPick<'_> {
             } else if pc_index != 3 {
                 true
             } else {
-                bsize == self.max_partition_size && c_split_sub(self.sb_size) != self.max_partition_size
+                bsize == self.max_partition_size
+                    && c_split_sub(self.sb_size) != self.max_partition_size
             };
             if do_encode {
                 let mut outs: Vec<CLeafOut> = Vec::new();
                 self.o.encode_sb(
                     recon_y, recon_u, recon_v, cfl_enc, tree, mi_row, mi_col, bsize, &mut outs,
                 );
-                stamp_grid(&mut self.grid, self.grid_stride, tree, mi_row, mi_col, bsize);
+                stamp_grid(
+                    &mut self.grid,
+                    self.grid_stride,
+                    tree,
+                    mi_row,
+                    mi_col,
+                    bsize,
+                );
             }
         }
-        if found { (best_tree, best_rdc, true) } else { (None, best_rdc, false) }
+        if found {
+            (best_tree, best_rdc, true)
+        } else {
+            (None, best_rdc, false)
+        }
     }
 }
 
-fn stamp_grid(grid: &mut [u8], stride: usize, tree: &SbTree, mi_row: i32, mi_col: i32, bsize: usize) {
+fn stamp_grid(
+    grid: &mut [u8],
+    stride: usize,
+    tree: &SbTree,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) {
     match tree {
         SbTree::Leaf(w) => {
             for r in 0..MI_HB[bsize] {
@@ -865,17 +982,27 @@ fn stamp_grid(grid: &mut [u8], stride: usize, tree: &SbTree, mi_row: i32, mi_col
     }
 }
 
-fn leaf_eq(x: &aom_encode::encode_sb::LeafWinner, y: &aom_encode::encode_sb::LeafWinner, tag: &str) {
+fn leaf_eq(
+    x: &aom_encode::encode_sb::LeafWinner,
+    y: &aom_encode::encode_sb::LeafWinner,
+    tag: &str,
+) {
     assert_eq!(x.bsize, y.bsize, "leaf bsize: {tag}");
     assert_eq!(x.mode, y.mode, "leaf mode: {tag}");
     assert_eq!(x.angle_delta_y, y.angle_delta_y, "leaf angle: {tag}");
     assert_eq!(x.use_filter_intra, y.use_filter_intra, "leaf fi: {tag}");
-    assert_eq!(x.filter_intra_mode, y.filter_intra_mode, "leaf fi mode: {tag}");
+    assert_eq!(
+        x.filter_intra_mode, y.filter_intra_mode,
+        "leaf fi mode: {tag}"
+    );
     assert_eq!(x.tx_size, y.tx_size, "leaf tx: {tag}");
     assert_eq!(x.uv_mode, y.uv_mode, "leaf uv_mode: {tag}");
     assert_eq!(x.angle_delta_uv, y.angle_delta_uv, "leaf uv angle: {tag}");
     assert_eq!(x.cfl_alpha_idx, y.cfl_alpha_idx, "leaf cfl idx: {tag}");
-    assert_eq!(x.cfl_alpha_signs, y.cfl_alpha_signs, "leaf cfl signs: {tag}");
+    assert_eq!(
+        x.cfl_alpha_signs, y.cfl_alpha_signs,
+        "leaf cfl signs: {tag}"
+    );
     assert_eq!(x.tx_type_map, y.tx_type_map, "leaf map: {tag}");
 }
 
@@ -920,20 +1047,22 @@ fn rd_pick_partition_real_matches_c_recursion() {
     #[allow(clippy::type_complexity)]
     let cases: [((usize, usize), usize, bool, usize, bool, bool); 8] = [
         // Chunk-7 regression baselines (rect off).
-        ((1, 1), 64, true, 6, false, false),   // 420, ALLINTRA arm, min 16x16
+        ((1, 1), 64, true, 6, false, false), // 420, ALLINTRA arm, min 16x16
         ((0, 0), 128, false, 6, false, false), // 444, GOOD arm, min 16x16
         // Rect ON over the flat-ish quadrant content: NONE dominates ->
         // the ALLINTRA less_rectangular_check arm gets to kill rect.
         ((1, 1), 200, true, 6, true, false), // 420 high q, min 16x16
         ((1, 1), 128, false, 3, false, false), // 420, min 8x8 (3-level recursion)
         // Rect-structured (banded) content: HORZ/VERT genuinely win.
-        ((1, 1), 128, true, 3, true, true),  // 420 ALLINTRA min 8x8
+        ((1, 1), 128, true, 3, true, true), // 420 ALLINTRA min 8x8
         ((0, 0), 128, false, 3, true, true), // 444 GOOD min 8x8
-        ((1, 1), 64, true, 6, true, true),   // 420 ALLINTRA min 16x16
+        ((1, 1), 64, true, 6, true, true),  // 420 ALLINTRA min 16x16
         ((1, 1), 200, false, 6, true, true), // 420 GOOD high q min 16x16
     ];
 
-    for (case, &((ss_x, ss_y), qindex, allintra, min_part, rect_on, banded)) in cases.iter().enumerate() {
+    for (case, &((ss_x, ss_y), qindex, allintra, min_part, rect_on, banded)) in
+        cases.iter().enumerate()
+    {
         let bd: u8 = 8;
         let maxv = 255i64;
         let reduced = false;
@@ -947,12 +1076,15 @@ fn rd_pick_partition_real_matches_c_recursion() {
         // Content: quadrant-mixed — flat-ish TL, detailed BR, gradients
         // elsewhere; neighbours seeded (the rows above / cols left of the SB
         // hold "previously coded" content).
-        let recon_y0: Vec<u16> =
-            (0..STRIDE * 128).map(|_| (rng.next() % 256) as u16).collect();
-        let recon_u0: Vec<u16> =
-            (0..STRIDE * 128).map(|_| (rng.next() % 256) as u16).collect();
-        let recon_v0: Vec<u16> =
-            (0..STRIDE * 128).map(|_| (rng.next() % 256) as u16).collect();
+        let recon_y0: Vec<u16> = (0..STRIDE * 128)
+            .map(|_| (rng.next() % 256) as u16)
+            .collect();
+        let recon_u0: Vec<u16> = (0..STRIDE * 128)
+            .map(|_| (rng.next() % 256) as u16)
+            .collect();
+        let recon_v0: Vec<u16> = (0..STRIDE * 128)
+            .map(|_| (rng.next() % 256) as u16)
+            .collect();
         let mut src_y = recon_y0.clone();
         let mut src_u = recon_u0.clone();
         let mut src_v = recon_v0.clone();
@@ -1050,24 +1182,19 @@ fn rd_pick_partition_real_matches_c_recursion() {
             .iter()
             .map(|&n| tbl(&mut rng, n))
             .collect();
-        let coeff_costs_y = CoeffCostTables {
-            txb_skip: &y_tbls[0],
-            base_eob: &y_tbls[1],
-            base: &y_tbls[2],
-            eob_extra: &y_tbls[3],
-            dc_sign: &y_tbls[4],
-            lps: &y_tbls[5],
-            eob: &y_tbls[6],
-        };
-        let coeff_costs_uv = CoeffCostTables {
-            txb_skip: &u_tbls[0],
-            base_eob: &u_tbls[1],
-            base: &u_tbls[2],
-            eob_extra: &u_tbls[3],
-            dc_sign: &u_tbls[4],
-            lps: &u_tbls[5],
-            eob: &u_tbls[6],
-        };
+        // CPick::coeff_costs_y/_uv (+ the SbEncodeEnv built below, which
+        // shares these same values) are the full per-txs_ctx CoeffCostSet;
+        // the C oracle (COracle::coeff_tbls_y/_uv) still takes the 7 flat
+        // arrays directly at any tx_size, so replicating them across every
+        // txs_ctx/eob_multi_size slot reproduces the exact "identical
+        // fixture values both sides" this harness relies on (see
+        // coeff_cost_set_from_tables' doc comment).
+        let coeff_costs_y = coeff_cost_set_from_tables(
+            &y_tbls[0], &y_tbls[1], &y_tbls[2], &y_tbls[3], &y_tbls[4], &y_tbls[5], &y_tbls[6],
+        );
+        let coeff_costs_uv = coeff_cost_set_from_tables(
+            &u_tbls[0], &u_tbls[1], &u_tbls[2], &u_tbls[3], &u_tbls[4], &u_tbls[5], &u_tbls[6],
+        );
         // Real ext-tx cost fill (both sides share the values).
         let mut rng2 = Rng(rng.next() | 1);
         let mut ext_cdfs: Vec<u16> = Vec::new();
@@ -1359,15 +1486,18 @@ fn rd_pick_partition_real_matches_c_recursion() {
         );
 
         // ---- compare ----
-        let tag = format!(
-            "case {case} ss {ss_x}{ss_y} q {qindex} allintra {allintra} min {min_part}"
-        );
+        let tag =
+            format!("case {case} ss {ss_x}{ss_y} q {qindex} allintra {allintra} min {min_part}");
         assert_eq!(found, c_found, "found: {tag}");
         assert_eq!(visits.len(), c_visits.len(), "visit count: {tag}");
         for (k, (a, b)) in visits.iter().zip(c_visits.iter()).enumerate() {
             assert_eq!(a, b, "leaf visit {k}: {tag}");
         }
-        assert_eq!((best.rate, best.dist, best.rdcost), (c_best.rate, c_best.dist, c_best.rdcost), "best stats: {tag}");
+        assert_eq!(
+            (best.rate, best.dist, best.rdcost),
+            (c_best.rate, c_best.dist, c_best.rdcost),
+            "best stats: {tag}"
+        );
         let (tree, c_tree) = (tree.expect("found"), c_tree.expect("found"));
         tree_eq(&tree, &c_tree, &tag);
         assert_eq!(ry, cy, "recon Y: {tag}");
@@ -1417,24 +1547,53 @@ fn rd_pick_partition_real_matches_c_recursion() {
     }
 
     // Coverage floors: both partition outcomes must genuinely occur.
-    assert!(split_roots >= 1, "at least one SB picked SPLIT: {split_roots}");
+    assert!(
+        split_roots >= 1,
+        "at least one SB picked SPLIT: {split_roots}"
+    );
     assert!(none_nodes >= 6, "NONE leaves across cases: {none_nodes}");
     assert!(split_nodes >= 2, "SPLIT nodes across cases: {split_nodes}");
-    assert!(total_visits >= 40, "leaf evaluations exercised: {total_visits}");
+    assert!(
+        total_visits >= 40,
+        "leaf evaluations exercised: {total_visits}"
+    );
     // Rect-stage coverage floors: HORZ and VERT must both genuinely win
     // somewhere, the mid-stage sub-0 propagation must run, and the ALLINTRA
     // arms (less_rect kill + var force-split) must fire.
     assert!(horz_nodes >= 1, "HORZ winners across cases: {horz_nodes}");
     assert!(vert_nodes >= 1, "VERT winners across cases: {vert_nodes}");
-    assert!(tot.rect_evals >= 8, "rect types evaluated: {}", tot.rect_evals);
-    assert!(tot.rect_mid_encodes >= 4, "rect mid-stage encodes: {}", tot.rect_mid_encodes);
-    assert!(tot.rect_wins[0] >= 1 && tot.rect_wins[1] >= 1, "rect wins: {:?}", tot.rect_wins);
-    assert!(tot.less_rect_kills >= 1, "less_rect kills: {}", tot.less_rect_kills);
-    assert!(tot.var_force_split >= 1, "ALLINTRA var force-splits: {}", tot.var_force_split);
+    assert!(
+        tot.rect_evals >= 8,
+        "rect types evaluated: {}",
+        tot.rect_evals
+    );
+    assert!(
+        tot.rect_mid_encodes >= 4,
+        "rect mid-stage encodes: {}",
+        tot.rect_mid_encodes
+    );
+    assert!(
+        tot.rect_wins[0] >= 1 && tot.rect_wins[1] >= 1,
+        "rect wins: {:?}",
+        tot.rect_wins
+    );
+    assert!(
+        tot.less_rect_kills >= 1,
+        "less_rect kills: {}",
+        tot.less_rect_kills
+    );
+    assert!(
+        tot.var_force_split >= 1,
+        "ALLINTRA var force-splits: {}",
+        tot.var_force_split
+    );
     eprintln!(
         "coverage: none={none_nodes} split={split_nodes} horz={horz_nodes} vert={vert_nodes} \
          visits={total_visits} rect_evals={} mid_encodes={} wins={:?} less_rect={} var_split={}",
-        tot.rect_evals, tot.rect_mid_encodes, tot.rect_wins, tot.less_rect_kills,
+        tot.rect_evals,
+        tot.rect_mid_encodes,
+        tot.rect_wins,
+        tot.less_rect_kills,
         tot.var_force_split
     );
     let _ = (_rust_hog, perpixel_variance_y, is_chroma_reference);

@@ -21,14 +21,14 @@
 
 use aom_encode::hog::prune_intra_mode_with_hog_y;
 use aom_encode::intra_rd::{
-    rd_pick_intra_sby_mode_y, Block4x4VarInfo, IntraSbyGates, IntraSbySearchCfg, INTRA_MODES,
-    TOP_INTRA_MODEL_COUNT,
+    Block4x4VarInfo, INTRA_MODES, IntraSbyGates, IntraSbySearchCfg, TOP_INTRA_MODEL_COUNT,
+    rd_pick_intra_sby_mode_y,
 };
-use aom_encode::mode_costs::{fill_tx_size_costs, TxSizeCosts};
+use aom_encode::mode_costs::{TxSizeCosts, fill_tx_size_costs};
 use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{fill_tx_type_costs, CoeffCostTables, TxTypeCosts};
+use aom_txb::{TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
@@ -80,13 +80,24 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
             let qindex = [16, 64, 200, 255][iter % 4] as usize;
             let reduced = iter % 4 == 3;
             let allintra = iter % 3 != 1; // ALLINTRA on for most cases
-            let source_variance =
-                if iter % 3 == 0 { rng.range(0, 256) as u32 } else { 256 + rng.range(0, 4096) as u32 };
+            let source_variance = if iter % 3 == 0 {
+                rng.range(0, 256) as u32
+            } else {
+                256 + rng.range(0, 4096) as u32
+            };
             // best_rd_in: mostly MAX; some tight budgets force no-beat + the
             // running-best-rd early exits inside pick_uniform.
             let best_rd_in = if iter == 7 { 1 << 10 } else { i64::MAX };
-            let above_mode = if rng.next().is_multiple_of(4) { None } else { Some((rng.next() % 13) as i32) };
-            let left_mode = if rng.next().is_multiple_of(4) { None } else { Some((rng.next() % 13) as i32) };
+            let above_mode = if rng.next().is_multiple_of(4) {
+                None
+            } else {
+                Some((rng.next() % 13) as i32)
+            };
+            let left_mode = if rng.next().is_multiple_of(4) {
+                None
+            } else {
+                Some((rng.next() % 13) as i32)
+            };
 
             let ref_off = 32 * STRIDE + 32;
             let src_off = ref_off;
@@ -101,7 +112,9 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                     .map(|_| (base + i64::from(rng.range(0, 8))) as u16)
                     .collect()
             } else {
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << bd)) as u16).collect()
+                (0..STRIDE * 96)
+                    .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                    .collect()
             };
             let src_amp = if flat_recon { (1 << bd) / 2 } else { amp };
             let mut src = recon0.clone();
@@ -121,10 +134,24 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
             let mut skip_mask = [false; INTRA_MODES];
             if iter % 4 == 2 {
                 prune_intra_mode_with_hog_y(
-                    &src, src_off, STRIDE, bsize, 1 << 12, 1 << 12, -1.2, &mut skip_mask,
+                    &src,
+                    src_off,
+                    STRIDE,
+                    bsize,
+                    1 << 12,
+                    1 << 12,
+                    -1.2,
+                    &mut skip_mask,
                 );
                 let mask_c = c::ref_prune_intra_mode_with_hog_y(
-                    &src, src_off, STRIDE, bsize, 1 << 12, 1 << 12, bd, -1.2,
+                    &src,
+                    src_off,
+                    STRIDE,
+                    bsize,
+                    1 << 12,
+                    1 << 12,
+                    bd,
+                    -1.2,
                 );
                 assert_eq!(skip_mask, mask_c, "hog mask ci={ci} iter={iter} bd={bd}");
                 if skip_mask.iter().any(|&b| b) {
@@ -148,15 +175,9 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
             let dc_sign = tbl(&mut rng, 3 * 2);
             let lps = tbl(&mut rng, 21 * 26);
             let eob_tbl = tbl(&mut rng, 2 * 11);
-            let coeff_costs = CoeffCostTables {
-                txb_skip: &txb_skip,
-                base_eob: &base_eob,
-                base: &base,
-                eob_extra: &eob_extra,
-                dc_sign: &dc_sign,
-                lps: &lps,
-                eob: &eob_tbl,
-            };
+            let coeff_costs = coeff_cost_set_from_tables(
+                &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl,
+            );
             const NUM_EXT_TX_SET: [usize; 6] = [1, 2, 5, 7, 12, 16];
             const IDX_TO_TYPE: [[usize; 4]; 2] = [[0, 3, 2, 0], [0, 5, 4, 1]];
             let mut ttc_intra_cdf = Vec::new();
@@ -184,15 +205,26 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
             }
             let mut tx_size_costs = TxSizeCosts::zeroed();
             fill_tx_size_costs(&mut tx_size_costs, &ts_cdf);
-            let ts_flat: Vec<i32> = tx_size_costs.0.iter().flatten().flatten().copied().collect();
-            let skip_costs =
-                [[rng.cost(), rng.cost()], [rng.cost(), rng.cost()], [rng.cost(), rng.cost()]];
+            let ts_flat: Vec<i32> = tx_size_costs
+                .0
+                .iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect();
+            let skip_costs = [
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+            ];
             let skip_ctx = (rng.next() % 3) as usize;
             let tx_size_ctx = (rng.next() % 3) as usize;
-            let above_ctx: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_ctx: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above_ctx: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_ctx: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 22);
 
             // Mode-info cost tables (random CDFs through the dual fill).
@@ -267,8 +299,13 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
             };
             let mut recon_rust = recon0.clone();
             let mut var_cache_rust = Block4x4VarInfo::sb_cache(sb_size);
-            let got =
-                rd_pick_intra_sby_mode_y(&mut env, &mut recon_rust, &cfg, &mut var_cache_rust, best_rd_in);
+            let got = rd_pick_intra_sby_mode_y(
+                &mut env,
+                &mut recon_rust,
+                &cfg,
+                &mut var_cache_rust,
+                best_rd_in,
+            );
 
             // ---- C-side loop ----
             let mut recon_c = recon0.clone();
@@ -289,7 +326,9 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                 &left_ctx,
                 rdmult,
                 best_rd_in,
-                (&txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl),
+                (
+                    &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl,
+                ),
                 (&c_ttc_intra, &c_ttc_inter),
                 &skip_costs,
                 skip_ctx,
@@ -333,8 +372,11 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                     assert_eq!(g.mode, cb.0, "mode {m}");
                     assert_eq!(g.angle_delta, cb.1, "angle_delta {m}");
                     assert_eq!(g.tx_size, cb.2, "tx_size {m}");
-                    let wins: Vec<(usize, u16, u8)> =
-                        g.winners.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+                    let wins: Vec<(usize, u16, u8)> = g
+                        .winners
+                        .iter()
+                        .map(|w| (w.tx_type, w.eob, w.txb_ctx))
+                        .collect();
                     assert_eq!(wins, cb.3, "winners {m}");
                     assert_eq!(g.rate, cb.4, "rate {m}");
                     assert_eq!(g.rate_tokenonly, cb.5, "rate_tokenonly {m}");
@@ -353,16 +395,31 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                     nobeat_cases += 1;
                 }
                 (g, cb) => {
-                    panic!("presence mismatch {m}: rust={} c={}", g.is_some(), cb.is_some())
+                    panic!(
+                        "presence mismatch {m}: rust={} c={}",
+                        g.is_some(),
+                        cb.is_some()
+                    )
                 }
             }
         }
     }
     assert!(beat_cases > 24, "winning searches: {beat_cases}");
-    assert!(nobeat_cases > 2, "no-beat (tight budget) searches: {nobeat_cases}");
-    assert!(prune_survivor_variety.len() > 3, "winner variety: {prune_survivor_variety:?}");
-    assert!(factor_fired_total > 20, "variance-factor != 1.0 candidates: {factor_fired_total}");
-    assert!(hog_masked_cases > 4, "real-HOG masked cases: {hog_masked_cases}");
+    assert!(
+        nobeat_cases > 2,
+        "no-beat (tight budget) searches: {nobeat_cases}"
+    );
+    assert!(
+        prune_survivor_variety.len() > 3,
+        "winner variety: {prune_survivor_variety:?}"
+    );
+    assert!(
+        factor_fired_total > 20,
+        "variance-factor != 1.0 candidates: {factor_fired_total}"
+    );
+    assert!(
+        hog_masked_cases > 4,
+        "real-HOG masked cases: {hog_masked_cases}"
+    );
     assert!(fi_winners > 4, "filter-intra winners: {fi_winners}");
 }
-

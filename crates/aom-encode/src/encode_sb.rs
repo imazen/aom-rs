@@ -80,16 +80,16 @@
 //! guards but interior fixtures never take them); SB128.
 
 use crate::encode_intra::{
-    encode_intra_block_plane_uv, encode_intra_block_plane_y, EncodeIntraPlaneOutcome,
-    EncodeIntraYEnv, TrellisOptType, UvEncodeParams, UvWinner,
+    EncodeIntraPlaneOutcome, EncodeIntraYEnv, TrellisOptType, UvEncodeParams, UvWinner,
+    encode_intra_block_plane_uv, encode_intra_block_plane_y,
 };
 use crate::intra_uv_rd::{
-    av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference, UvRdEnv, UV_CFL_PRED,
+    UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W};
 use aom_entropy::partition::{get_plane_block_size, update_ext_partition_context};
 use aom_intra::cfl::CflCtx;
-use aom_txb::{txb_entropy_context, CoeffCostTables};
+use aom_txb::{CoeffCostSet, txb_entropy_context};
 
 /// `store_cfl_required` (cfl.h:38) — the NON-rdo `store_y` gate of
 /// `encode_superblock`, intra arm (`is_inter_block == 0`).
@@ -204,10 +204,12 @@ pub struct SbEncodeEnv<'a> {
     pub enable_optimize_b: TrellisOptType,
     /// sf `tx_sf.use_chroma_trellis_rd_mult` (ALLINTRA 1 / GOOD 0).
     pub use_chroma_trellis_rd_mult: bool,
-    /// Coefficient cost tables: luma at the luma (txs_ctx, PLANE_TYPE_Y) and
-    /// chroma at the UV (txs_ctx, PLANE_TYPE_UV) — the trellis rate inputs.
-    pub coeff_costs_y: &'a CoeffCostTables<'a>,
-    pub coeff_costs_uv: &'a CoeffCostTables<'a>,
+    /// Coefficient cost tables: the full REAL per-(txs_ctx, eob_multi_size)
+    /// luma (PLANE_TYPE_Y) and chroma (PLANE_TYPE_UV) sets — the trellis rate
+    /// inputs. Callers select the per-tx_size view via `CoeffCostSet::tables`
+    /// at each construction site that knows the txb's actual tx_size.
+    pub coeff_costs_y: &'a CoeffCostSet,
+    pub coeff_costs_uv: &'a CoeffCostSet,
     /// UV tx-type cost tables — REQUIRED by [`UvRdEnv`] but never read by
     /// the encode arm (chroma codes no tx-type bits); zeroed tables are
     /// fine.
@@ -307,6 +309,9 @@ pub fn encode_b_intra_dry(
     let l0 = (mi_row & 31) as usize;
     let above_y: Vec<i8> = state.above_ectx[0][a0..a0 + mi_w].to_vec();
     let left_y: Vec<i8> = state.left_ectx[0][l0..l0 + mi_h].to_vec();
+    // The real per-txs_ctx table for THIS leaf's winner tx_size (uniform tx
+    // only, so one lookup covers the whole leaf's luma plane).
+    let y_tables = env.coeff_costs_y.tables(winner.tx_size);
     let y_env = EncodeIntraYEnv {
         sb_size: env.sb_size,
         bsize,
@@ -338,7 +343,7 @@ pub fn encode_b_intra_dry(
         rows: env.rows_y,
         rdmult: env.rdmult,
         sharpness: env.sharpness,
-        coeff_costs: env.coeff_costs_y,
+        coeff_costs: &y_tables,
         enable_optimize_b: env.enable_optimize_b,
         // DRY_RUN_NORMAL.
         dry_run_output_enabled: false,
@@ -357,8 +362,15 @@ pub fn encode_b_intra_dry(
     let mut v_out = None;
     let uv_tx = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
     if !env.monochrome && is_chroma_ref {
-        let ref_off_uv =
-            chroma_plane_offset(env.base_uv, env.stride, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+        let ref_off_uv = chroma_plane_offset(
+            env.base_uv,
+            env.stride,
+            mi_row,
+            mi_col,
+            bsize,
+            env.ss_x,
+            env.ss_y,
+        );
         let plane_bsize = get_plane_block_size(bsize, env.ss_x, env.ss_y);
         let (pmw, pmh) = (MI_SIZE_WIDE_B[plane_bsize], MI_SIZE_HIGH_B[plane_bsize]);
         let au = (mi_col >> env.ss_x) as usize;
@@ -367,6 +379,8 @@ pub fn encode_b_intra_dry(
         let left_u: Vec<i8> = state.left_ectx[1][lu..lu + pmh].to_vec();
         let above_v: Vec<i8> = state.above_ectx[2][au..au + pmw].to_vec();
         let left_v: Vec<i8> = state.left_ectx[2][lu..lu + pmh].to_vec();
+        // The real per-txs_ctx table for THIS leaf's uniform UV tx_size.
+        let uv_tables = env.coeff_costs_uv.tables(uv_tx);
         let uv_env = UvRdEnv {
             sb_size: env.sb_size,
             bsize,
@@ -401,7 +415,7 @@ pub fn encode_b_intra_dry(
             rows_u: env.rows_u,
             rows_v: env.rows_v,
             rdmult: env.rdmult,
-            coeff_costs: env.coeff_costs_uv,
+            coeff_costs: &uv_tables,
             tx_type_costs: env.tx_type_costs,
             above_ctx: [&above_u, &above_v],
             left_ctx: [&left_u, &left_v],
@@ -420,8 +434,12 @@ pub fn encode_b_intra_dry(
             dry_run_output_enabled: false,
             use_chroma_trellis_rd_mult: env.use_chroma_trellis_rd_mult,
         };
-        u_out = Some(encode_intra_block_plane_uv(&uv_env, &uv_winner, &prm, 1, recon_u, cfl));
-        v_out = Some(encode_intra_block_plane_uv(&uv_env, &uv_winner, &prm, 2, recon_v, cfl));
+        u_out = Some(encode_intra_block_plane_uv(
+            &uv_env, &uv_winner, &prm, 1, recon_u, cfl,
+        ));
+        v_out = Some(encode_intra_block_plane_uv(
+            &uv_env, &uv_winner, &prm, 2, recon_v, cfl,
+        ));
     }
 
     // Step 4: av1_update_intra_mb_txb_context at DRY_RUN — the tile-level
@@ -447,8 +465,7 @@ pub fn encode_b_intra_dry(
                     blk_col,
                 );
                 let txb = &y_out.txbs[k];
-                let cul =
-                    txb_entropy_context(&txb.qcoeff, winner.tx_size, tt, txb.eob as usize);
+                let cul = txb_entropy_context(&txb.qcoeff, winner.tx_size, tt, txb.eob as usize);
                 // The recompute equals the encode walk's stored ctx: eob==0
                 // gives 0 under any scan, and eob>0 txbs kept their map type
                 // (only eob-0 origins reset to DCT).
@@ -487,18 +504,15 @@ pub fn encode_b_intra_dry(
                     let mut blk_col = 0usize;
                     while blk_col < pmw {
                         let txb = &out.txbs[k];
-                        let cul =
-                            txb_entropy_context(&txb.qcoeff, uv_tx, uv_tt, txb.eob as usize);
+                        let cul = txb_entropy_context(&txb.qcoeff, uv_tx, uv_tt, txb.eob as usize);
                         debug_assert_eq!(cul, txb.txb_entropy_ctx, "uv tokenize cul == encode ctx");
-                        for x in state.above_ectx[plane]
-                            [au + blk_col..au + blk_col + ptxw_u]
-                            .iter_mut()
+                        for x in
+                            state.above_ectx[plane][au + blk_col..au + blk_col + ptxw_u].iter_mut()
                         {
                             *x = cul as i8;
                         }
-                        for x in state.left_ectx[plane]
-                            [lu + blk_row..lu + blk_row + ptxh_u]
-                            .iter_mut()
+                        for x in
+                            state.left_ectx[plane][lu + blk_row..lu + blk_row + ptxh_u].iter_mut()
                         {
                             *x = cul as i8;
                         }
@@ -518,7 +532,10 @@ pub fn encode_b_intra_dry(
     // winner's tx_size is TX_4X4 already, so this is a no-op for picked
     // winners (asserted).
     let final_tx = if bsize > 0 { winner.tx_size } else { 0 };
-    debug_assert_eq!(final_tx, winner.tx_size, "picked winners already satisfy the stamp");
+    debug_assert_eq!(
+        final_tx, winner.tx_size,
+        "picked winners already satisfy the stamp"
+    );
     for x in state.above_tctx[a0..a0 + mi_w].iter_mut() {
         *x = TXS_W[final_tx] as u8;
     }
@@ -593,7 +610,9 @@ pub fn encode_sb_dry(
             for (idx, child) in children.iter_mut().enumerate() {
                 let y = mi_row + ((idx as i32) >> 1) * hbs;
                 let x = mi_col + ((idx as i32) & 1) * hbs;
-                encode_sb_dry(env, state, recon_y, recon_u, recon_v, cfl, child, y, x, subsize, leaves);
+                encode_sb_dry(
+                    env, state, recon_y, recon_u, recon_v, cfl, child, y, x, subsize, leaves,
+                );
             }
         }
         SbTree::Horz(subs) => {
@@ -602,14 +621,30 @@ pub fn encode_sb_dry(
             let [s0, s1] = &mut **subs;
             debug_assert_eq!(s0.bsize, subsize, "horz winner bsize == subsize");
             let out = encode_b_intra_dry(
-                env, state, recon_y, recon_u, recon_v, cfl, s0, mi_row, mi_col,
+                env,
+                state,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                s0,
+                mi_row,
+                mi_col,
                 PARTITION_HORZ as usize,
             );
             leaves.push(out);
             if mi_row + hbs < env.mi_rows {
                 debug_assert_eq!(s1.bsize, subsize, "horz winner bsize == subsize");
                 let out = encode_b_intra_dry(
-                    env, state, recon_y, recon_u, recon_v, cfl, s1, mi_row + hbs, mi_col,
+                    env,
+                    state,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s1,
+                    mi_row + hbs,
+                    mi_col,
                     PARTITION_HORZ as usize,
                 );
                 leaves.push(out);
@@ -621,14 +656,30 @@ pub fn encode_sb_dry(
             let [s0, s1] = &mut **subs;
             debug_assert_eq!(s0.bsize, subsize, "vert winner bsize == subsize");
             let out = encode_b_intra_dry(
-                env, state, recon_y, recon_u, recon_v, cfl, s0, mi_row, mi_col,
+                env,
+                state,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                s0,
+                mi_row,
+                mi_col,
                 PARTITION_VERT as usize,
             );
             leaves.push(out);
             if mi_col + hbs < env.mi_cols {
                 debug_assert_eq!(s1.bsize, subsize, "vert winner bsize == subsize");
                 let out = encode_b_intra_dry(
-                    env, state, recon_y, recon_u, recon_v, cfl, s1, mi_row, mi_col + hbs,
+                    env,
+                    state,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    s1,
+                    mi_row,
+                    mi_col + hbs,
                     PARTITION_VERT as usize,
                 );
                 leaves.push(out);

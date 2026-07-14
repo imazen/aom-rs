@@ -8,7 +8,7 @@
 
 use aom_encode::tx_search::TX_SIZE_2D_TBL;
 use aom_sys_ref as c;
-use aom_txb::{scan, txb_high, txb_wide};
+use aom_txb::{CoeffCostSet, LvMapCoeffCost, scan, txb_high, txb_wide};
 
 pub const TX_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
@@ -44,6 +44,42 @@ impl Rng {
 }
 pub fn tbl(rng: &mut Rng, n: usize) -> Vec<i32> {
     (0..n).map(|_| rng.cost()).collect()
+}
+
+/// Build a [`CoeffCostSet`] by replicating ONE synthetic-but-valid
+/// `LV_MAP_COEFF_COST`/`LV_MAP_EOB_COST` table (the 7 flat arrays these
+/// harnesses already generate via [`tbl`]) across every `txs_ctx` (0..5) and
+/// `eob_multi_size` (0..7) slot. Every C-side oracle in this test suite
+/// reads these SAME 7 arrays directly regardless of the tx_size under test
+/// (they are not themselves per-txs_ctx-indexed on the C shim side — see
+/// e.g. `c_uniform_txfm_yrd`'s `coeff_tbls` param), so
+/// `CoeffCostSet::tables(tx_size)` returning these exact values at ANY
+/// `tx_size` reproduces the pre-`CoeffCostSet` single-table behaviour
+/// byte-for-byte — this is glue for the `TxfmYrdEnv`/`SbEncodeEnv` struct
+/// field type, not a change to what values the search/pack sees.
+pub fn coeff_cost_set_from_tables(
+    txb_skip: &[i32],
+    base_eob: &[i32],
+    base: &[i32],
+    eob_extra: &[i32],
+    dc_sign: &[i32],
+    lps: &[i32],
+    eob: &[i32],
+) -> CoeffCostSet {
+    let single = LvMapCoeffCost {
+        txb_skip: txb_skip.to_vec(),
+        base_eob: base_eob.to_vec(),
+        base: base.to_vec(),
+        eob_extra: eob_extra.to_vec(),
+        dc_sign: dc_sign.to_vec(),
+        lps: lps.to_vec(),
+    };
+    let mut eob_row = [0i32; 22];
+    eob_row[..eob.len()].copy_from_slice(eob);
+    CoeffCostSet {
+        by_txs_ctx: core::array::from_fn(|_| single.clone()),
+        eob_by_multi_size: [eob_row; 7],
+    }
 }
 
 pub fn cdf_row4(rng: &mut Rng, nsymbs: usize) -> [u16; 4] {

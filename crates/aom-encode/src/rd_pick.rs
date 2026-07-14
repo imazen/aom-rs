@@ -77,20 +77,18 @@
 //! content for intra), frame-edge clipped walks (as everywhere upstream).
 
 use crate::encode_intra::{
-    encode_intra_block_plane_y, update_txk_array, EncodeIntraPlaneOutcome, EncodeIntraYEnv,
-    TrellisOptType,
+    EncodeIntraPlaneOutcome, EncodeIntraYEnv, TrellisOptType, encode_intra_block_plane_y,
+    update_txk_array,
 };
-use crate::intra_rd::{
-    rd_pick_intra_sby_mode_y, Block4x4VarInfo, IntraSbyBest, IntraSbySearchCfg,
-};
+use crate::intra_rd::{Block4x4VarInfo, IntraSbyBest, IntraSbySearchCfg, rd_pick_intra_sby_mode_y};
 use crate::intra_uv_rd::{
-    av1_get_tx_size_uv, rd_pick_intra_sbuv_mode, UvLoopPolicy, UvModeResult, UvModeVisit, UvRdEnv,
+    UvLoopPolicy, UvModeResult, UvModeVisit, UvRdEnv, av1_get_tx_size_uv, rd_pick_intra_sbuv_mode,
 };
 use crate::mode_costs::IntraModeCosts;
 use crate::rd::rdcost;
-use crate::tx_search::{TxfmYrdEnv, MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
+use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TxfmYrdEnv};
 use aom_intra::cfl::CflCtx;
-use aom_txb::CoeffCostTables;
+use aom_txb::CoeffCostSet;
 
 /// The chroma-side arguments of [`rd_pick_intra_mode_sb`] (present when
 /// `num_planes > 1`; `None` models monochrome, where the C never enters the
@@ -215,7 +213,14 @@ pub fn winner_tx_type_map(bsize: usize, y: &IntraSbyBest) -> Vec<u8> {
     while blk_row < mbh {
         let mut blk_col = 0usize;
         while blk_col < mbw {
-            update_txk_array(&mut map, mbw, blk_row, blk_col, y.tx_size, y.winners[k].tx_type);
+            update_txk_array(
+                &mut map,
+                mbw,
+                blk_row,
+                blk_col,
+                y.tx_size,
+                y.winners[k].tx_type,
+            );
             k += 1;
             blk_col += txwu;
         }
@@ -237,7 +242,7 @@ pub fn rd_pick_intra_mode_sb(
     sby_cfg: &IntraSbySearchCfg,
     var_cache: &mut [Block4x4VarInfo],
     best_rd: i64,
-    coeff_costs_y: &CoeffCostTables,
+    coeff_costs_y: &CoeffCostSet,
     re: ReencodeParams,
     mut uv: Option<RdPickUvArgs>,
 ) -> RdPickIntraOutcome {
@@ -246,7 +251,10 @@ pub fn rd_pick_intra_mode_sb(
     let rd_table = outcome.intra_modes_rd_cost;
     let Some(y) = outcome.best else {
         // !beat_best_rd => intra_yrd = INT64_MAX >= best_rd => rate INT_MAX.
-        return RdPickIntraOutcome { best: None, intra_modes_rd_cost: rd_table };
+        return RdPickIntraOutcome {
+            best: None,
+            intra_modes_rd_cost: rd_table,
+        };
     };
     // (3) set_mode_eval_params(DEFAULT_EVAL): state no-op at speed 0 (docs).
 
@@ -268,7 +276,10 @@ pub fn rd_pick_intra_mode_sb(
                 store_y = args.cfl_allowed;
                 if store_y {
                     // THE LUMA WINNER RE-ENCODE (DRY_RUN_NORMAL,
-                    // optimize_seg_arr[seg]) — loads args.cfl per txb.
+                    // optimize_seg_arr[seg]) — loads args.cfl per txb. The
+                    // real per-txs_ctx table for the WINNER's tx_size (a
+                    // single fixed size — the search already picked it).
+                    let coeff_tables_y = coeff_costs_y.tables(y.tx_size);
                     let enc_env = EncodeIntraYEnv {
                         sb_size: y_env.sb_size,
                         bsize: y_env.bsize,
@@ -302,7 +313,7 @@ pub fn rd_pick_intra_mode_sb(
                         rows: y_env.rows,
                         rdmult: y_env.rdmult,
                         sharpness: re.sharpness,
-                        coeff_costs: coeff_costs_y,
+                        coeff_costs: &coeff_tables_y,
                         enable_optimize_b: re.enable_optimize_b,
                         // DRY_RUN_NORMAL at this call site
                         // (intra_mode_search.c:897-899).
@@ -319,12 +330,8 @@ pub fn rd_pick_intra_mode_sb(
                     // xd->cfl.store_y = 0 (intra_mode_search.c:900).
                 }
                 // max_uv_tx_size = av1_get_tx_size(AOM_PLANE_U, xd).
-                let max_uv_tx_size = av1_get_tx_size_uv(
-                    y_env.bsize,
-                    y_env.lossless,
-                    args.env.ss_x,
-                    args.env.ss_y,
-                );
+                let max_uv_tx_size =
+                    av1_get_tx_size_uv(y_env.bsize, y_env.lossless, args.env.ss_x, args.env.ss_y);
                 // The uv loop reads the LUMA WINNER's mode fields from mbmi.
                 args.env.luma_mode = y.mode;
                 args.env.luma_use_fi = y.use_filter_intra;
@@ -349,8 +356,7 @@ pub fn rd_pick_intra_mode_sb(
     };
 
     // (5) assembly: intra is always coded non-skip.
-    let rate =
-        y.rate + uv_outcome.rate() + y_env.skip_costs[y_env.skip_ctx][0];
+    let rate = y.rate + uv_outcome.rate() + y_env.skip_costs[y_env.skip_ctx][0];
     let dist = y.dist + uv_outcome.dist();
     let rd = rdcost(y_env.rdmult, rate, dist);
     // (6) rd_pick_intrabc_mode_sb: envelope-excluded no-op (module docs).

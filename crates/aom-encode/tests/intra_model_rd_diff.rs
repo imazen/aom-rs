@@ -11,13 +11,10 @@ use aom_encode::mode_costs::TxSizeCosts;
 use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv, intra_model_rd_y};
 use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, TxTypeCosts};
+use aom_txb::{CoeffCostSet, LvMapCoeffCost, TxTypeCosts};
 
 mod common;
 use common::*;
-
-
-
 
 #[test]
 fn intra_model_rd_matches_c_chain() {
@@ -37,15 +34,21 @@ fn intra_model_rd_matches_c_chain() {
     let mut deq = Dequants::zeroed();
     av1_build_quantizer(8, 0, 0, 0, 0, 0, &mut quants, &mut deq, 0);
     let rows = set_q_index(&quants, &deq, 64, 0);
-    let zero_tbl = vec![0i32; 21 * 26];
-    let coeff_costs = CoeffCostTables {
-        txb_skip: &zero_tbl[..13 * 2],
-        base_eob: &zero_tbl[..4 * 3],
-        base: &zero_tbl[..42 * 8],
-        eob_extra: &zero_tbl[..9 * 2],
-        dc_sign: &zero_tbl[..3 * 2],
-        lps: &zero_tbl[..21 * 26],
-        eob: &zero_tbl[..2 * 11],
+    // intra_model_rd_y never reads the quantizer/cost fields (module docs) --
+    // an all-zero CoeffCostSet is filler, same as the all-zero table before
+    // the CoeffCostSet plumbing (TxfmYrdEnv::coeff_costs is now the full
+    // per-txs_ctx set).
+    let zero_lv_map = LvMapCoeffCost {
+        txb_skip: vec![0i32; 13 * 2],
+        base_eob: vec![0i32; 4 * 3],
+        base: vec![0i32; 42 * 8],
+        eob_extra: vec![0i32; 9 * 2],
+        dc_sign: vec![0i32; 3 * 2],
+        lps: vec![0i32; 21 * 26],
+    };
+    let coeff_costs = CoeffCostSet {
+        by_txs_ctx: core::array::from_fn(|_| zero_lv_map.clone()),
+        eob_by_multi_size: [[0i32; 22]; 7],
     };
     let tx_type_costs = TxTypeCosts::zeroed();
     let tx_size_costs = TxSizeCosts::zeroed();

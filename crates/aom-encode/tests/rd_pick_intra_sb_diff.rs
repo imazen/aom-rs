@@ -20,27 +20,27 @@
 //! and no-beat (tight best_rd) arms included.
 
 use aom_encode::encode_intra::TrellisOptType;
-use aom_encode::intra_rd::{Block4x4VarInfo, IntraSbyGates, TOP_INTRA_MODEL_COUNT};
-use aom_encode::intra_uv_rd::{chroma_plane_offset, is_chroma_reference, UvLoopPolicy, UvRdEnv};
-use aom_encode::mode_costs::{fill_cfl_costs, fill_tx_size_costs, CflCosts, TxSizeCosts};
-use aom_encode::rd_pick::{
-    rd_pick_intra_mode_sb, RdPickUvArgs, RdPickUvOutcome, ReencodeParams,
-};
-use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv};
 use aom_encode::intra_rd::IntraSbySearchCfg;
-use aom_intra::cfl::{CflCtx, CFL_BUF_SQUARE};
-use aom_quant::{av1_build_quantizer, set_q_index, Dequants, Quants};
+use aom_encode::intra_rd::{Block4x4VarInfo, IntraSbyGates, TOP_INTRA_MODEL_COUNT};
+use aom_encode::intra_uv_rd::{UvLoopPolicy, UvRdEnv, chroma_plane_offset, is_chroma_reference};
+use aom_encode::mode_costs::{CflCosts, TxSizeCosts, fill_cfl_costs, fill_tx_size_costs};
+use aom_encode::rd_pick::{RdPickUvArgs, RdPickUvOutcome, ReencodeParams, rd_pick_intra_mode_sb};
+use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv};
+use aom_intra::cfl::{CFL_BUF_SQUARE, CflCtx};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{fill_tx_type_costs, CoeffCostTables, TxTypeCosts};
+use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
 
 const STRIDE: usize = 256;
-const BLK_W_L: [usize; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLK_H_L: [usize; 22] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const BLK_W_L: [usize; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BLK_H_L: [usize; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 fn cdf_row(rng: &mut Rng, nsymbs: usize, padded: usize) -> Vec<u16> {
     let mut row = vec![0u16; padded];
@@ -60,26 +60,26 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
     // (bsize, ss_x, ss_y, mi_row, mi_col, mono)
     #[allow(clippy::type_complexity)]
     let cases: [(usize, usize, usize, i32, i32, bool); 12] = [
-        (3, 1, 1, 8, 8, false),  // 8x8 @420: store_y + uv + CfL
-        (6, 1, 1, 8, 8, false),  // 16x16 @420
-        (9, 0, 0, 8, 8, false),  // 32x32 @444 (still CfL-legal)
-        (0, 1, 1, 9, 9, false),  // 4x4 @420 sub-8x8 CHROMA-REF (odd mi)
-        (0, 1, 1, 8, 8, false),  // 4x4 @420 NOT chroma-ref: uv early return,
-                                 // NO store, NO re-encode
-        (4, 1, 1, 8, 8, false),  // 8x16 rect @420
-        (6, 1, 0, 8, 8, false),  // 16x16 @422
-        (3, 0, 0, 8, 8, true),   // 8x8 MONOCHROME: uv block never runs
+        (3, 1, 1, 8, 8, false), // 8x8 @420: store_y + uv + CfL
+        (6, 1, 1, 8, 8, false), // 16x16 @420
+        (9, 0, 0, 8, 8, false), // 32x32 @444 (still CfL-legal)
+        (0, 1, 1, 9, 9, false), // 4x4 @420 sub-8x8 CHROMA-REF (odd mi)
+        (0, 1, 1, 8, 8, false), // 4x4 @420 NOT chroma-ref: uv early return,
+        // NO store, NO re-encode
+        (4, 1, 1, 8, 8, false), // 8x16 rect @420
+        (6, 1, 0, 8, 8, false), // 16x16 @422
+        (3, 0, 0, 8, 8, true),  // 8x8 MONOCHROME: uv block never runs
         // The rect-partition-stage leaf bsizes (HORZ/VERT subsizes of the
         // 16..64 squares) — the rect-dims backstop for partition_pick_diff,
         // whose leaf evaluator is the SAME ported code on both sides.
-        (5, 1, 1, 8, 8, false),  // 16x8 @420 (HORZ of 16x16)
+        (5, 1, 1, 8, 8, false), // 16x8 @420 (HORZ of 16x16)
         (8, 0, 0, 8, 8, false), // 32x16 @444 (HORZ of 32x32; CfL-legal)
         (7, 1, 1, 8, 8, false), // 16x32 @420 (VERT of 32x32)
         (11, 1, 1, 16, 16, false), // 64x32 @420 (HORZ of 64x64; CfL-forbidden,
-                                   // the TX_64X32 tx64 chain) — SB-ALIGNED
-                                   // origin: a 64-wide block only exists at
-                                   // in-SB col 0 (the variance-factor cache
-                                   // indexes within one SB)
+                                // the TX_64X32 tx64 chain) — SB-ALIGNED
+                                // origin: a 64-wide block only exists at
+                                // in-SB col 0 (the variance-factor cache
+                                // indexes within one SB)
     ];
 
     let mut searched_uv = 0usize;
@@ -94,8 +94,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
     for (ci, &(bsize, ss_x, ss_y, mi_row, mi_col, mono)) in cases.iter().enumerate() {
         let (bw, bh) = (BLK_W_L[bsize], BLK_H_L[bsize]);
         let chroma_ref = is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
-        let cfl_allowed =
-            aom_entropy::partition::is_cfl_allowed(bsize, false, ss_x, ss_y);
+        let cfl_allowed = aom_entropy::partition::is_cfl_allowed(bsize, false, ss_x, ss_y);
         for iter in 0..6 {
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
@@ -108,14 +107,24 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 256 + rng.range(0, 4096) as u32
             };
             // no-beat arm: tight budget on the last iteration of case 1.
-            let best_rd_in = if ci == 1 && iter == 5 { 1 << 10 } else { i64::MAX };
+            let best_rd_in = if ci == 1 && iter == 5 {
+                1 << 10
+            } else {
+                i64::MAX
+            };
             // flat arm at max q: drives winner eob-0 -> map DCT resets in
             // the re-encode.
             let flat = ci == 0 && iter == 4;
-            let above_mode =
-                if rng.next().is_multiple_of(4) { None } else { Some((rng.next() % 13) as i32) };
-            let left_mode =
-                if rng.next().is_multiple_of(4) { None } else { Some((rng.next() % 13) as i32) };
+            let above_mode = if rng.next().is_multiple_of(4) {
+                None
+            } else {
+                Some((rng.next() % 13) as i32)
+            };
+            let left_mode = if rng.next().is_multiple_of(4) {
+                None
+            } else {
+                Some((rng.next() % 13) as i32)
+            };
             let qindex = if flat { 255 } else { qindex };
 
             // ---- luma planes ----
@@ -124,7 +133,9 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             let recon_y0: Vec<u16> = if flat {
                 vec![(1u16 << (bd - 1)) + 5; STRIDE * 96]
             } else {
-                (0..STRIDE * 96).map(|_| (rng.next() % (1u64 << bd)) as u16).collect()
+                (0..STRIDE * 96)
+                    .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                    .collect()
             };
             let amp: i32 = if flat { 0 } else { [160, 24, 96, 64][iter % 4] };
             let mut src_y = recon_y0.clone();
@@ -140,15 +151,16 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
 
             // ---- chroma planes (skipped for mono) ----
             let ref_off_uv = chroma_plane_offset(0, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
-            let mut recon_u0: Vec<u16> =
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-            let mut recon_v0: Vec<u16> =
-                (0..STRIDE * 128).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+            let mut recon_u0: Vec<u16> = (0..STRIDE * 128)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
+            let mut recon_v0: Vec<u16> = (0..STRIDE * 128)
+                .map(|_| (rng.next() % (1u64 << bd)) as u16)
+                .collect();
             let mut src_u = recon_u0.clone();
             let mut src_v = recon_v0.clone();
             if !mono {
-                let plane_bsize =
-                    aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+                let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
                 let (pw, ph) = (BLK_W_L[plane_bsize], BLK_H_L[plane_bsize]);
                 let base_u = rng.range(64, maxv as i32 - 63);
                 let base_v = rng.range(64, maxv as i32 - 63);
@@ -213,15 +225,21 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             let y_dc_sign = tbl(&mut rng, 3 * 2);
             let y_lps = tbl(&mut rng, 21 * 26);
             let y_eob = tbl(&mut rng, 2 * 11);
-            let coeff_costs_y = CoeffCostTables {
-                txb_skip: &y_txb_skip,
-                base_eob: &y_base_eob,
-                base: &y_base,
-                eob_extra: &y_eob_extra,
-                dc_sign: &y_dc_sign,
-                lps: &y_lps,
-                eob: &y_eob,
-            };
+            // TxfmYrdEnv::coeff_costs (+ rd_pick_intra_mode_sb's coeff_costs_y
+            // param) is now the full per-txs_ctx CoeffCostSet; the C oracle
+            // still takes the 7 flat arrays directly at any tx_size (see
+            // coeff_cost_set_from_tables' doc comment), so replicating them
+            // across every txs_ctx/eob_multi_size slot reproduces the exact
+            // same values this harness compared before.
+            let coeff_costs_y = coeff_cost_set_from_tables(
+                &y_txb_skip,
+                &y_base_eob,
+                &y_base,
+                &y_eob_extra,
+                &y_dc_sign,
+                &y_lps,
+                &y_eob,
+            );
             let u_txb_skip = tbl(&mut rng, 13 * 2);
             let u_base_eob = tbl(&mut rng, 4 * 3);
             let u_base = tbl(&mut rng, 42 * 8);
@@ -270,32 +288,55 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             }
             let mut tx_size_costs = TxSizeCosts::zeroed();
             fill_tx_size_costs(&mut tx_size_costs, &ts_cdf);
-            let ts_flat: Vec<i32> = tx_size_costs.0.iter().flatten().flatten().copied().collect();
-            let skip_costs =
-                [[rng.cost(), rng.cost()], [rng.cost(), rng.cost()], [rng.cost(), rng.cost()]];
+            let ts_flat: Vec<i32> = tx_size_costs
+                .0
+                .iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect();
+            let skip_costs = [
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+                [rng.cost(), rng.cost()],
+            ];
             let skip_ctx = (rng.next() % 3) as usize;
             let tx_size_ctx = (rng.next() % 3) as usize;
-            let above_ctx_y: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_ctx_y: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let above_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_u: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let above_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
-            let left_v: Vec<i8> =
-                (0..32).map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8).collect();
+            let above_ctx_y: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_ctx_y: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let above_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_u: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let above_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
+            let left_v: Vec<i8> = (0..32)
+                .map(|_| (rng.range(0, 8) | (rng.range(0, 3) << 3)) as i8)
+                .collect();
             let rdmult = rng.range(1, 1 << 22);
 
             // ---- mode-info + CfL cost tables (dual fill) ----
             let cdf_set = gen_all_cdfs(&mut rng);
             let (mode_costs, c_mode_costs) = fill_both(&cdf_set, true);
-            let angle_flat: Vec<i32> =
-                mode_costs.angle_delta_cost.iter().flatten().copied().collect();
-            let pal_flat: Vec<i32> =
-                mode_costs.palette_uv_mode_cost.iter().flatten().copied().collect();
+            let angle_flat: Vec<i32> = mode_costs
+                .angle_delta_cost
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            let pal_flat: Vec<i32> = mode_costs
+                .palette_uv_mode_cost
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
             let sign_cdf = cdf_row(&mut rng, 8, 9);
             let mut alpha_cdf = Vec::new();
             for _ in 0..6 {
@@ -484,7 +525,15 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 &left_ctx_y,
                 rdmult,
                 best_rd_in,
-                (&y_txb_skip, &y_base_eob, &y_base, &y_eob_extra, &y_dc_sign, &y_lps, &y_eob),
+                (
+                    &y_txb_skip,
+                    &y_base_eob,
+                    &y_base,
+                    &y_eob_extra,
+                    &y_dc_sign,
+                    &y_lps,
+                    &y_eob,
+                ),
                 (&c_ttc_intra, &c_ttc_inter),
                 &skip_costs,
                 skip_ctx,
@@ -530,7 +579,10 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             assert_eq!(g.y.angle_delta, cy.1, "y angle {m}");
             assert_eq!(g.y.tx_size, cy.2, "y tx_size {m}");
             let wins: Vec<(usize, u16, u8)> =
-                g.y.winners.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+                g.y.winners
+                    .iter()
+                    .map(|w| (w.tx_type, w.eob, w.txb_ctx))
+                    .collect();
             assert_eq!(wins, cy.3, "y winners {m}");
             assert_eq!(g.y.rate, cy.4, "y rate {m}");
             assert_eq!(g.y.rate_tokenonly, cy.5, "y rate_tokenonly {m}");
@@ -542,10 +594,12 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             // ---- the C-side composition tail ----
             // winner map: REAL update_txk_array stamps over a DCT-canonical
             // base (dead non-origin cells; see rd_pick.rs docs).
-            const MI_W_B: [usize; 22] =
-                [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-            const MI_H_B: [usize; 22] =
-                [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
+            const MI_W_B: [usize; 22] = [
+                1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+            ];
+            const MI_H_B: [usize; 22] = [
+                1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+            ];
             let (mbw, mbh) = (MI_W_B[bsize], MI_H_B[bsize]);
             let mut map_c = vec![0u8; mbw * mbh];
             {
@@ -553,9 +607,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 let mut k = 0usize;
                 for blk_row in (0..mbh).step_by(txhu) {
                     for blk_col in (0..mbw).step_by(txwu) {
-                        c::ref_update_txk_array(
-                            &mut map_c, mbw, blk_row, blk_col, cy.2, cy.3[k].0,
-                        );
+                        c::ref_update_txk_array(&mut map_c, mbw, blk_row, blk_col, cy.2, cy.3[k].0);
                         k += 1;
                     }
                 }
@@ -588,7 +640,12 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                     left_ctx: &left_ctx_y,
                     rdmult,
                     coeff_tbls: (
-                        &y_txb_skip, &y_base_eob, &y_base, &y_eob_extra, &y_dc_sign, &y_lps,
+                        &y_txb_skip,
+                        &y_base_eob,
+                        &y_base,
+                        &y_eob_extra,
+                        &y_dc_sign,
+                        &y_lps,
                         &y_eob,
                     ),
                     store: true,
@@ -618,7 +675,10 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                     }
                 }
                 (None, false) => {}
-                (r, s) => panic!("re-encode presence mismatch {m}: rust={} c={s}", r.is_some()),
+                (r, s) => panic!(
+                    "re-encode presence mismatch {m}: rust={} c={s}",
+                    r.is_some()
+                ),
             }
             assert_eq!(g.tx_type_map, map_c, "post-re-encode tx_type_map {m}");
             assert_eq!(recon_y, recon_y_c, "final Y recon {m}");
@@ -659,7 +719,12 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                     left_ctx: [&left_u, &left_v],
                     rdmult,
                     coeff_tbls: (
-                        &u_txb_skip, &u_base_eob, &u_base, &u_eob_extra, &u_dc_sign, &u_lps,
+                        &u_txb_skip,
+                        &u_base_eob,
+                        &u_base,
+                        &u_eob_extra,
+                        &u_dc_sign,
+                        &u_lps,
                         &u_eob,
                     ),
                     ttc_tables: (&uv_ttc_intra, &uv_ttc_inter),
@@ -737,7 +802,13 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
     assert!(mono_cases >= 5, "mono cases: {mono_cases}");
     assert!(nobeat >= 1, "no-beat cases: {nobeat}");
     assert!(stores >= 25, "store_y re-encodes: {stores}");
-    assert!(reencode_eobpos >= 25, "re-encode eob>0 txbs: {reencode_eobpos}");
-    assert!(reencode_eob0 >= 1, "re-encode eob-0 (map resets): {reencode_eob0}");
+    assert!(
+        reencode_eobpos >= 25,
+        "re-encode eob>0 txbs: {reencode_eobpos}"
+    );
+    assert!(
+        reencode_eob0 >= 1,
+        "re-encode eob-0 (map resets): {reencode_eob0}"
+    );
     assert!(cfl_uv_winners >= 1, "CfL uv winners: {cfl_uv_winners}");
 }

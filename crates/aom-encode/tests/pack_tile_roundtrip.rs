@@ -40,10 +40,10 @@ use aom_entropy::partition::{
     read_selected_tx_size, update_ext_partition_context,
 };
 use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
-use aom_txb::{CoeffCostTables, TxTypeCosts, ext_tx_derive, read_coeffs_txb_full};
+use aom_txb::{TxTypeCosts, ext_tx_derive, read_coeffs_txb_full};
 
 mod common;
-use common::{Rng, TX_H, TX_W, tbl};
+use common::{Rng, TX_H, TX_W, coeff_cost_set_from_tables, tbl};
 
 const STRIDE: usize = 320;
 const PARTITION_NONE: i32 = 0;
@@ -283,6 +283,9 @@ fn read_leaf(
         pack_cfg.enable_filter_intra,
         above_nbr,
         left_nbr,
+        // No palette in this envelope (matches pack.rs's write-side call).
+        None,
+        None,
     );
     assert_eq!(info.skip, 0, "KEY intra envelope: skip always 0");
 
@@ -566,24 +569,18 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             .iter()
             .map(|&n| tbl(&mut rng, n))
             .collect();
-        let coeff_costs_y = CoeffCostTables {
-            txb_skip: &y_tbls[0],
-            base_eob: &y_tbls[1],
-            base: &y_tbls[2],
-            eob_extra: &y_tbls[3],
-            dc_sign: &y_tbls[4],
-            lps: &y_tbls[5],
-            eob: &y_tbls[6],
-        };
-        let coeff_costs_uv = CoeffCostTables {
-            txb_skip: &u_tbls[0],
-            base_eob: &u_tbls[1],
-            base: &u_tbls[2],
-            eob_extra: &u_tbls[3],
-            dc_sign: &u_tbls[4],
-            lps: &u_tbls[5],
-            eob: &u_tbls[6],
-        };
+        // SbEncodeEnv::coeff_costs_y/_uv is the full per-txs_ctx CoeffCostSet;
+        // this harness has no C-side flat-array oracle to match (module docs
+        // -- it's a write/read self-consistency roundtrip), so replicating
+        // one synthetic-but-valid random table across every txs_ctx/
+        // eob_multi_size slot exactly preserves the numeric RD landscape
+        // every tx size read before this plumbing change.
+        let coeff_costs_y = coeff_cost_set_from_tables(
+            &y_tbls[0], &y_tbls[1], &y_tbls[2], &y_tbls[3], &y_tbls[4], &y_tbls[5], &y_tbls[6],
+        );
+        let coeff_costs_uv = coeff_cost_set_from_tables(
+            &u_tbls[0], &u_tbls[1], &u_tbls[2], &u_tbls[3], &u_tbls[4], &u_tbls[5], &u_tbls[6],
+        );
         let ttc_dummy = TxTypeCosts::zeroed();
 
         let mut mode_costs = IntraModeCosts::zeroed();
@@ -938,32 +935,37 @@ fn pack_tile_roundtrips_true_corner() {
     }
 }
 
-/// Task-2 slice: `rd_pick_partition_real`/the leaf search driven by REAL
-/// `av1_fill_mode_rates`-derived cost tables (`real_costs::derive_real_costs`)
-/// instead of the synthetic-but-valid random tables `run_pack_roundtrip_case`
-/// uses -- proves the wiring end to end (search -> pack -> read-back) rather
-/// than just unit-testing the fill functions in isolation. Deliberately
-/// SEPARATE from `run_pack_roundtrip_case` (not a parameter on it) so this
-/// exploratory wiring can never perturb the already-verified synthetic-cost
-/// tests above.
+/// Task-2/coeff-cost-parity slice: `rd_pick_partition_real`/the leaf search
+/// driven ENTIRELY by REAL `av1_fill_mode_rates` + `av1_fill_coeff_costs`
+/// -derived cost tables (`real_costs::derive_real_costs`) instead of the
+/// synthetic-but-valid random tables `run_pack_roundtrip_case` uses -- proves
+/// the wiring end to end (search -> pack -> read-back) rather than just
+/// unit-testing the fill functions in isolation. Deliberately SEPARATE from
+/// `run_pack_roundtrip_case` (not a parameter on it) so this exploratory
+/// wiring can never perturb the already-verified synthetic-cost tests above.
 ///
 /// Covered by `derive_real_costs` (real, from `KfFrameContext::
 /// default_for_qindex`'s CDFs -- the actual libaom default tables, matching
-/// what `av1_fill_mode_rates(cm, &x->mode_costs, cm->fc)` computes from a
+/// what `av1_fill_mode_rates(cm, &x->mode_costs, cm->fc)` +
+/// `av1_fill_coeff_costs(&x->coeff_costs, cm->fc, ...)` compute from a
 /// freshly-inited frame context): mode costs (Y/UV/filter-intra/angle-delta/
 /// intrabc/palette-Y-flag), partition costs, skip costs, tx-size costs, CfL
-/// costs, and the intra tx-type costs (`ext_tx_1ddct`/`ext_tx_dtt4`
-/// repacked). NOT yet real: `coeff_costs_y`/`coeff_costs_uv` -- real AV1
-/// has 5 (`txs_ctx`) x 2 (`plane`) distinct `LV_MAP_COEFF_COST` tables, but
-/// `SbEncodeEnv::coeff_costs_y`/`coeff_costs_uv` (and every downstream
-/// `TxTypeSearchInputs`/`TxfmYrdEnv`/`UvRdEnv` field threading them) is a
-/// SINGLE `&CoeffCostTables` used for every tx size -- so this uses
-/// `fill_lv_map_coeff_cost_from_arena` at ONE representative `txs_ctx` (2,
-/// mid-size) for all luma tx sizes and one for chroma, which is REAL
-/// CDF-derived data but not per-size-correct. Making it per-size needs
-/// `coeff_costs_y`/`coeff_costs_uv` to become `&[CoeffCostTables; 5]` (or
-/// equivalent) threaded through ~6 struct fields -- the next chunk (see
-/// STATUS.md).
+/// costs, the intra tx-type costs (`ext_tx_1ddct`/`ext_tx_dtt4` repacked),
+/// AND NOW the coefficient-coding costs: `real.coeff_costs_y`/
+/// `coeff_costs_uv` are the FULL per-`(txs_ctx, eob_multi_size)`
+/// `aom_txb::CoeffCostSet` (5 tx-size categories x 7 eob-position categories,
+/// both plane types) -- `SbEncodeEnv::coeff_costs_y`/`coeff_costs_uv` (and
+/// every downstream `TxfmYrdEnv`/`UvRdEnv`/`rd_pick_intra_mode_sb` field/
+/// parameter threading them) select the REAL per-tx_size table at each txb
+/// via `CoeffCostSet::tables(tx_size)`, closing the single-representative-
+/// `txs_ctx` + zeroed-`eob_multi_cost` gap the previous chunk left open.
+/// This is the FULL real-cost envelope: every table `rd_pick_partition_real`
+/// reads now matches what real aomenc's RD decisions are actually made
+/// against (mode/partition/skip/tx-size/cfl/tx-type/coeff, all live-CDF-
+/// derived) -- decision PARITY with aomenc's RDO still additionally requires
+/// the search's control flow itself (candidate order, pruning, early
+/// termination) to match, which is a separate, larger claim than "reads the
+/// same costs" and is not asserted by this harness.
 #[test]
 fn pack_tile_roundtrips_with_real_costs() {
     use aom_encode::real_costs::derive_real_costs;
@@ -1018,31 +1020,14 @@ fn pack_tile_roundtrips_with_real_costs() {
 
         // The live KfFrameContext this frame's entropy coder AND cost
         // derivation both read -- `derive_real_costs` snapshots it BEFORE
-        // the mutable borrow below, matching av1_fill_mode_rates being
-        // called once from the frame's freshly-inited context.
+        // the mutable borrow below, matching av1_fill_mode_rates +
+        // av1_fill_coeff_costs being called once from the frame's
+        // freshly-inited context. `real.coeff_costs_y`/`coeff_costs_uv` are
+        // now the FULL per-(txs_ctx, eob_multi_size) CoeffCostSet (all 5x7
+        // tables, both planes) -- SbEncodeEnv selects the real per-tx_size
+        // view at each txb via `CoeffCostSet::tables`.
         let mut kf_write = KfFrameContext::default_for_qindex(qindex as i32);
         let real = derive_real_costs(&kf_write, true);
-        const REPRESENTATIVE_TXS_CTX: usize = 2; // labelled simplification, see doc comment
-        let y_coeff = aom_txb::fill_lv_map_coeff_cost_from_arena(
-            &kf_write.coeff,
-            REPRESENTATIVE_TXS_CTX,
-            0,
-        );
-        let uv_coeff = aom_txb::fill_lv_map_coeff_cost_from_arena(
-            &kf_write.coeff,
-            REPRESENTATIVE_TXS_CTX,
-            1,
-        );
-        // `eob_multi*_cost` (`t.eob[eob_multi_ctx*11 + eob_pt-1]`, 2x11) is a
-        // SEPARATE table `av1_fill_coeff_costs` also derives that
-        // `fill_lv_map_coeff_cost`/`_from_arena` does not cover (only the
-        // `LV_MAP_COEFF_COST` fields: txb_skip/base_eob/base/eob_extra/
-        // dc_sign/lps) -- zeroed here, an ADDITIONAL known gap on top of the
-        // single-txs_ctx simplification documented above.
-        let y_eob = vec![0i32; 2 * 11];
-        let uv_eob = vec![0i32; 2 * 11];
-        let coeff_costs_y = y_coeff.tables(&y_eob);
-        let coeff_costs_uv = uv_coeff.tables(&uv_eob);
 
         let pol = if allintra {
             TxTypeSearchPolicy::speed0_allintra()
@@ -1081,8 +1066,8 @@ fn pack_tile_roundtrips_with_real_costs() {
             sharpness: 0,
             enable_optimize_b: TrellisOptType::FullTrellisOpt,
             use_chroma_trellis_rd_mult: allintra,
-            coeff_costs_y: &coeff_costs_y,
-            coeff_costs_uv: &coeff_costs_uv,
+            coeff_costs_y: &real.coeff_costs_y,
+            coeff_costs_uv: &real.coeff_costs_uv,
             tx_type_costs: &real.tx_type_costs_y,
         };
         let pick_cfg = PickFrameCfg {
@@ -1205,7 +1190,10 @@ fn pack_tile_roundtrips_with_real_costs() {
             kf_write.partition, kf_read.partition,
             "real-costs: partition CDFs must match"
         );
-        assert_eq!(kf_write.kf_y, kf_read.kf_y, "real-costs: kf_y CDFs must match");
+        assert_eq!(
+            kf_write.kf_y, kf_read.kf_y,
+            "real-costs: kf_y CDFs must match"
+        );
         assert_eq!(
             kf_write.tx_size, kf_read.tx_size,
             "real-costs: tx_size CDFs must match"
