@@ -6,7 +6,7 @@
 //! ENVELOPE (every constraint, honestly):
 //! - one shown KEY frame per stream (`g_limit=1`, forced KF) — all-intra.
 //! - encoder flags: `--cpu-used=0 --end-usage=q --cq-level=<q>
-//!   --enable-cdef=0 --enable-restoration=0 --sb-size=64 --deltaq-mode=0
+//!   --enable-cdef={0,1} --enable-restoration=0 --sb-size=64 --deltaq-mode=0
 //!   --aq-mode=0 --enable-palette=0 --enable-intrabc=0` (usage GOOD).
 //! - DEBLOCKING IS IN THE ENVELOPE: whatever loop-filter levels /
 //!   sharpness / mode-ref deltas the encoder picks are applied
@@ -15,6 +15,12 @@
 //!   the C decoder); the high-cq arms pick NONZERO levels and pin the real
 //!   deblock application byte-for-byte. The run asserts both populations
 //!   are present (`nonzero_lf` / luma+chroma coverage guards).
+//! - CDEF IS IN THE ENVELOPE: the `--enable-cdef=1` arms decode whatever
+//!   damping / strength grids / per-SB strength indices the speed-0 CDEF
+//!   search picks, applied after deblocking (aom-cdef::frame, C-diffed in
+//!   cdef_frame_diff.rs). The run recomposes each cdef stream WITHOUT the
+//!   CDEF stage and counts streams whose pixels genuinely changed —
+//!   `cdef_applied` floors keep that population from silently vanishing.
 //! - single tile, no superres / film grain / screen-content tools / qm /
 //!   segmentation / lossless / 128x128 SBs (decode_frame_obus hard-errors).
 //! - sizes include non-multiple-of-SB (96x80) and non-multiple-of-8 (100x76,
@@ -24,7 +30,9 @@
 //!   4:2:2 chroma path reads max_txsize_rect_lookup[BLOCK_INVALID] out of
 //!   bounds; see `deblocked_422_chroma_is_rejected`.)
 
-use aom_decode::frame::decode_frame_obus;
+use aom_decode::frame::{
+    apply_cdef, apply_deblock, decode_frame_obus, decode_frame_obus_prefilter,
+};
 use aom_sys_ref as c;
 
 struct Rng(u64);
@@ -69,9 +77,24 @@ struct Cfg {
     mono: bool,
     ss: (i32, i32),
     cq: i32,
+    /// `--enable-cdef` for the encode.
+    cdef: bool,
 }
 
-fn run_config(cfg: &Cfg) -> (usize, bool, i32, [i32; 4]) {
+/// Facts the sweep asserts floors over.
+struct RunFacts {
+    len: usize,
+    tx_select: bool,
+    base_qindex: i32,
+    filter_level: [i32; 4],
+    /// The stream carries CDEF syntax (the decoder's do_cdef gate held).
+    cdef_gated: bool,
+    /// CDEF genuinely changed at least one pixel (recomposed without the
+    /// CDEF stage and compared).
+    cdef_applied: bool,
+}
+
+fn run_config(cfg: &Cfg) -> RunFacts {
     let (cw, ch) = if cfg.mono {
         (0, 0)
     } else {
@@ -88,7 +111,7 @@ fn run_config(cfg: &Cfg) -> (usize, bool, i32, [i32; 4]) {
 
     // REAL encoder bytes (cpu-used=0).
     let bytes = c::ref_encode_av1_kf(
-        &y, &u, &v, cfg.w, cfg.h, cfg.bd, cfg.mono, cfg.ss.0, cfg.ss.1, cfg.cq, 0, false,
+        &y, &u, &v, cfg.w, cfg.h, cfg.bd, cfg.mono, cfg.ss.0, cfg.ss.1, cfg.cq, 0, cfg.cdef,
     );
 
     // Rust decode (hard-errors outside the envelope — that FAILS the test).
@@ -135,12 +158,36 @@ fn run_config(cfg: &Cfg) -> (usize, bool, i32, [i32; 4]) {
             cfg.w, cfg.h, cfg.bd, cfg.ss, cfg.cq
         );
     }
-    (
-        bytes.len(),
-        rust.tx_mode_select,
-        rust.base_qindex,
-        rust.filter_level,
-    )
+
+    // CDEF application detection: recompose the pipeline WITHOUT the CDEF
+    // stage and compare the mi-aligned planes. (A stream can carry CDEF
+    // syntax whose strengths/skip flags end up changing nothing — the floors
+    // below need the genuinely-changed population.)
+    let cdef_gated =
+        rust.cdef_bits != 0 || rust.cdef_strengths[0] != 0 || rust.cdef_uv_strengths[0] != 0;
+    assert!(
+        cfg.cdef || !cdef_gated,
+        "--enable-cdef=0 stream carries CDEF syntax"
+    );
+    let cdef_applied = if cdef_gated {
+        let (mut t, tcfg, header) = decode_frame_obus_prefilter(&bytes).unwrap();
+        if header.loopfilter.filter_level != [0, 0] {
+            apply_deblock(&mut t, &tcfg, &header);
+        }
+        let no_cdef = t.clone();
+        apply_cdef(&mut t, &tcfg, &header);
+        t.recon != no_cdef.recon || t.recon_u != no_cdef.recon_u || t.recon_v != no_cdef.recon_v
+    } else {
+        false
+    };
+    RunFacts {
+        len: bytes.len(),
+        tx_select: rust.tx_mode_select,
+        base_qindex: rust.base_qindex,
+        filter_level: rust.filter_level,
+        cdef_gated,
+        cdef_applied,
+    }
 }
 
 #[test]
@@ -167,17 +214,21 @@ fn real_bitstreams_decode_byte_identical_to_c() {
     let mut zero_lf = 0u32;
     let mut nonzero_luma_lf = 0u32;
     let mut nonzero_chroma_lf = 0u32;
-    let mut run = |w: usize, h: usize, bd: i32, ss: (i32, i32), mono: bool, cq: i32| {
-        let (len, sel, q, lf) = run_config(&Cfg {
+    let mut cdef_gated = 0u32;
+    let mut cdef_applied = 0u32;
+    let mut run = |w: usize, h: usize, bd: i32, ss: (i32, i32), mono: bool, cq: i32, cdef: bool| {
+        let f = run_config(&Cfg {
             w,
             h,
             bd,
             mono,
             ss,
             cq,
+            cdef,
         });
-        assert!(len > 50, "suspiciously small stream ({len} bytes)");
-        select_seen += sel as u32;
+        assert!(f.len > 50, "suspiciously small stream ({} bytes)", f.len);
+        select_seen += f.tx_select as u32;
+        let q = f.base_qindex;
         bands[if q <= 20 {
             0
         } else if q <= 60 {
@@ -187,36 +238,49 @@ fn real_bitstreams_decode_byte_identical_to_c() {
         } else {
             3
         }] += 1;
-        if lf == [0; 4] {
+        if f.filter_level == [0; 4] {
             zero_lf += 1;
         }
-        if lf[0] != 0 || lf[1] != 0 {
+        if f.filter_level[0] != 0 || f.filter_level[1] != 0 {
             nonzero_luma_lf += 1;
         }
-        if lf[2] != 0 || lf[3] != 0 {
+        if f.filter_level[2] != 0 || f.filter_level[3] != 0 {
             nonzero_chroma_lf += 1;
         }
+        cdef_gated += f.cdef_gated as u32;
+        cdef_applied += f.cdef_applied as u32;
         n += 1;
     };
     for &(w, h) in &sizes {
         for &(bd, ss, mono) in &combos {
             for &cq in &[2i32, 6] {
-                run(w, h, bd, ss, mono, cq);
+                run(w, h, bd, ss, mono, cq, false);
             }
             if bd == 8 {
                 for &cq in &[16i32, 28] {
-                    run(w, h, bd, ss, mono, cq);
+                    run(w, h, bd, ss, mono, cq, false);
                 }
                 // Deblocked arms: aggressive q picks nonzero filter levels.
                 for &cq in &[44i32, 52] {
-                    run(w, h, bd, ss, mono, cq);
+                    run(w, h, bd, ss, mono, cq, false);
                 }
             } else {
                 // bd10 picks nonzero levels from cq>=8 — previously excluded,
                 // now the deblocked bd10 arm.
                 for &cq in &[16i32, 36] {
-                    run(w, h, bd, ss, mono, cq);
+                    run(w, h, bd, ss, mono, cq, false);
                 }
+            }
+            // CDEF arms (--enable-cdef=1): the speed-0 CDEF search picks the
+            // damping + strength grids; moderate/aggressive q picks NONZERO
+            // strengths (probed 2026-07-14: 29/39 arms carry CDEF syntax —
+            // ten cq-6 high-quality arms pick all-zero and code none — and
+            // every gated arm changes pixels; cq 52 bd8 chains deblock+CDEF).
+            for &cq in &[6i32, 36] {
+                run(w, h, bd, ss, mono, cq, true);
+            }
+            if bd == 8 {
+                run(w, h, bd, ss, mono, 52, true);
             }
         }
     }
@@ -233,12 +297,13 @@ fn real_bitstreams_decode_byte_identical_to_c() {
         (100, 76, (0, 0), false),
         (100, 76, (1, 1), true),
     ] {
-        run(w, h, 8, ss, mono, 36);
+        run(w, h, 8, ss, mono, 36, false);
     }
     assert_eq!(
         n,
-        30 + 18 + 18 + 12 + 9,
-        "15 combos x cq{{2,6}} + 9 bd8 x cq{{16,28}} + 9 bd8 x cq{{44,52}} + 6 bd10 x cq{{16,36}} + 9 band-3"
+        30 + 18 + 18 + 12 + 9 + 30 + 9,
+        "15 combos x cq{{2,6}} + 9 bd8 x cq{{16,28}} + 9 bd8 x cq{{44,52}} + 6 bd10 x cq{{16,36}} \
+         + 9 band-3 + CDEF arms (15 combos x cq{{6,36}} + 9 bd8 cq52)"
     );
     // Speed-0 allintra codes TX_MODE_SELECT — the multi-txb path must be live.
     assert!(select_seen > 0, "no TX_MODE_SELECT stream decoded");
@@ -250,9 +315,11 @@ fn real_bitstreams_decode_byte_identical_to_c() {
     println!(
         "lf coverage: zero={zero_lf} nonzero_luma={nonzero_luma_lf} nonzero_chroma={nonzero_chroma_lf} of {n}"
     );
-    // Observed on this deterministic content (2026-07-14 probe): 76 zero,
-    // 11 nonzero-luma of which 6 nonzero-chroma — the floors keep both
-    // populations from silently vanishing.
+    println!("cdef coverage: gated={cdef_gated} applied={cdef_applied} of {n}");
+    // Observed on this deterministic content (2026-07-14 probe): 76+ zero,
+    // 11+ nonzero-luma of which 6+ nonzero-chroma — the floors keep both
+    // populations from silently vanishing. (The CDEF arms add more nonzero-lf
+    // streams at cq 36/52.)
     assert!(zero_lf >= 40, "level-0 population collapsed ({zero_lf})");
     assert!(
         nonzero_luma_lf >= 10,
@@ -261,6 +328,18 @@ fn real_bitstreams_decode_byte_identical_to_c() {
     assert!(
         nonzero_chroma_lf >= 5,
         "deblocked-chroma population too small ({nonzero_chroma_lf})"
+    );
+    // CDEF floors (probed 2026-07-14 on this content: 29 of the 39
+    // --enable-cdef=1 arms carry CDEF syntax — the speed-0 search picks
+    // all-zero strengths on ten of the cq-6 high-quality arms and then
+    // writes none — and all 29 gated streams genuinely change pixels).
+    assert!(
+        cdef_gated >= 25,
+        "CDEF-gated population too small ({cdef_gated})"
+    );
+    assert!(
+        cdef_applied >= 20,
+        "CDEF-applied population too small ({cdef_applied})"
     );
 }
 
@@ -272,18 +351,22 @@ fn high_q_deblocked_stream_decodes_byte_identical() {
     // chroma V) whose output must match the C decoder byte-for-byte.
     // (64x64 cq 60 — the old rejection-test config — actually picks level 0
     // on its content; its old Err-arm never fired.)
-    let (len, _, _, lf) = run_config(&Cfg {
+    let f = run_config(&Cfg {
         w: 100,
         h: 76,
         bd: 8,
         mono: false,
         ss: (1, 1),
         cq: 52,
+        cdef: false,
     });
-    println!("deblocked companion: {len} bytes, filter_level = {lf:?}");
+    println!(
+        "deblocked companion: {} bytes, filter_level = {:?}",
+        f.len, f.filter_level
+    );
     // This companion pins REAL deblocking: if the encoder ever stops picking
     // nonzero levels here the assertion below flags the lost coverage.
-    assert_ne!(lf, [0; 4], "cq 52 no longer picks deblocking");
+    assert_ne!(f.filter_level, [0; 4], "cq 52 no longer picks deblocking");
 }
 
 #[test]
@@ -326,20 +409,26 @@ fn deblocked_422_chroma_is_rejected_not_misdecoded() {
 }
 
 #[test]
-fn cdef_enabled_stream_is_rejected() {
-    // A REAL stream encoded with CDEF on: out of envelope by construction —
-    // the driver reads the per-SB strength literals but applies no CDEF
-    // filtering, so it must refuse rather than return unfiltered pixels.
-    let (w, h, bd) = (64usize, 64usize, 8);
-    let y = gen_plane(w, h, bd, 0xCCCC, false);
-    let u = gen_plane(w / 2, h / 2, bd, 0xDDDD, true);
-    let v = gen_plane(w / 2, h / 2, bd, 0xEEEE, true);
-    let bytes = c::ref_encode_av1_kf(&y, &u, &v, w, h, bd, false, 1, 1, 8, 0, true);
-    let e = decode_frame_obus(&bytes).expect_err("CDEF stream must be rejected");
-    assert!(
-        e.contains("CDEF"),
-        "expected the CDEF envelope error, got: {e}"
+fn cdef_stream_decodes_byte_identical_and_filters() {
+    // The old envelope boundary, now INSIDE the envelope: a REAL stream
+    // encoded with `--enable-cdef=1` decodes byte-identical to the C decoder
+    // (asserted inside run_config) AND the CDEF stage genuinely changes
+    // pixels (probed 2026-07-14: this config picks nonzero strengths).
+    let f = run_config(&Cfg {
+        w: 96,
+        h: 80,
+        bd: 8,
+        mono: false,
+        ss: (1, 1),
+        cq: 36,
+        cdef: true,
+    });
+    println!(
+        "cdef companion: {} bytes, gated={} applied={}",
+        f.len, f.cdef_gated, f.cdef_applied
     );
+    assert!(f.cdef_gated, "cq 36 stream lost its CDEF syntax");
+    assert!(f.cdef_applied, "cq 36 CDEF no longer changes any pixel");
 }
 
 #[test]

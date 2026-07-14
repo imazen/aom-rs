@@ -11,8 +11,13 @@
 //! - single tile (1x1), single tile group.
 //! - screen-content tools OFF (`allow_screen_content_tools` would put
 //!   palette/intrabc flags in the block layer).
-//! - CDEF / loop restoration / film grain disabled at the sequence level;
-//!   superres not scaled; no frame-size override (frame == sequence max dims).
+//! - loop restoration / film grain disabled at the sequence level; superres
+//!   not scaled; no frame-size override (frame == sequence max dims).
+//! - CDEF IS applied ([`aom_cdef::frame::cdef_frame`], C-diffed against the
+//!   real `av1_cdef_frame` walk in cdef_frame_diff.rs): any damping /
+//!   strength grids / per-64x64 strength indices, with the same gate as the
+//!   C decoder (`cdef_bits || cdef_strengths[0] || cdef_uv_strengths[0]`,
+//!   after deblocking).
 //! - deblocking IS applied ([`aom_loopfilter::frame::loop_filter_frame`],
 //!   C-diffed against the real `av1_filter_block_plane_vert/horz` walk) —
 //!   any filter levels, sharpness, mode/ref deltas, and per-block delta-lf
@@ -29,12 +34,12 @@
 //! byte-identically against the REAL C decoder (`aom_codec_av1_dx`) on
 //! bitstreams produced by the REAL encoder at `--cpu-used=0 --end-usage=q`.
 
-use crate::{decode_tile_kf, KfTileConfig, KfTileDecode, MI_SIZE_WIDE, MI_SIZE_HIGH};
+use crate::{KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE, decode_tile_kf};
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::header::{
-    read_sequence_header_obu, read_tile_group_header, read_uncompressed_header, CdefHeader,
-    FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader, RestorationHeader,
-    SequenceHeaderObu, TileInfoHeader,
+    CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
+    RestorationHeader, SequenceHeaderObu, TileInfoHeader, read_sequence_header_obu,
+    read_tile_group_header, read_uncompressed_header,
 };
 use aom_entropy::leb128::uleb_decode;
 use aom_entropy::obu::read_obu_header;
@@ -66,6 +71,12 @@ pub struct FrameDecode {
     /// `[y0, y1, u, v]` loop-filter levels as coded — deblocking was applied
     /// with them (a gated no-op when both luma levels are 0, like C).
     pub filter_level: [i32; 4],
+    /// CDEF params as coded — CDEF was applied with them when the C decoder
+    /// gate (`cdef_bits || cdef_strengths[0] || cdef_uv_strengths[0]`) holds.
+    pub cdef_damping: i32,
+    pub cdef_bits: i32,
+    pub cdef_strengths: [i32; 8],
+    pub cdef_uv_strengths: [i32; 8],
     /// `features.tx_mode` was TX_MODE_SELECT (vs LARGEST).
     pub tx_mode_select: bool,
     pub reduced_tx_set: bool,
@@ -298,6 +309,14 @@ pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, String> {
     if header.loopfilter.filter_level != [0, 0] {
         apply_deblock(&mut t, &cfg, &header);
     }
+    // The C decoder's do_cdef gate (decodeframe.c:5417): !skip_loop_filter
+    // (a decoder option, always off here) && !coded_lossless (rejected
+    // upstream) && any CDEF syntax present. allow_intrabc (which would force
+    // cdef_bits == 0) and multi-tile large-scale decoding are rejected too.
+    let cd = &header.cdef;
+    if cd.cdef_bits != 0 || cd.cdef_strengths[0] != 0 || cd.cdef_uv_strengths[0] != 0 {
+        apply_cdef(&mut t, &cfg, &header);
+    }
     Ok(finish_frame(t, &cfg, &header))
 }
 
@@ -339,9 +358,6 @@ pub fn decode_frame_obus_prefilter(
                 let s = &sh.seq_header;
                 if s.sb_size_128 {
                     return Err("128x128 superblocks".into());
-                }
-                if s.enable_cdef {
-                    return Err("CDEF enabled (sequence) — not applied by this driver".into());
                 }
                 if s.enable_restoration {
                     return Err("loop restoration enabled (sequence)".into());
@@ -492,6 +508,10 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
             p.loopfilter.filter_level_u,
             p.loopfilter.filter_level_v,
         ],
+        cdef_damping: p.cdef.cdef_damping,
+        cdef_bits: p.cdef.cdef_bits,
+        cdef_strengths: p.cdef.cdef_strengths,
+        cdef_uv_strengths: p.cdef.cdef_uv_strengths,
         tx_mode_select: p.tx_mode_select,
         reduced_tx_set: p.reduced_tx_set_used,
         delta_q_present: p.delta_q.delta_q_present,
@@ -512,7 +532,10 @@ pub fn build_lf_inputs(
     t: &KfTileDecode,
     cfg: &KfTileConfig,
     p: &FrameHeaderObu,
-) -> (Vec<aom_loopfilter::frame::LfMi>, aom_loopfilter::frame::LfParams) {
+) -> (
+    Vec<aom_loopfilter::frame::LfMi>,
+    aom_loopfilter::frame::LfParams,
+) {
     use aom_loopfilter::frame::{LfMi, LfParams, MODE_LF_LUT};
 
     let mi_rows = cfg.mi_rows as usize;
@@ -563,9 +586,11 @@ pub fn build_lf_inputs(
 }
 
 /// Run [`aom_loopfilter::frame::loop_filter_frame`] over the (mi-aligned)
-/// recon planes, exactly as the C decoder does after tile decode.
-fn apply_deblock(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) {
-    use aom_loopfilter::frame::{loop_filter_frame, LfFrameBuf, LfMiGrid};
+/// recon planes, exactly as the C decoder does after tile decode. Hidden:
+/// harnesses recompose the filter pipeline stage by stage.
+#[doc(hidden)]
+pub fn apply_deblock(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) {
+    use aom_loopfilter::frame::{LfFrameBuf, LfMiGrid, loop_filter_frame};
 
     let (mi, params) = build_lf_inputs(t, cfg, p);
     let grid = LfMiGrid {
@@ -591,4 +616,62 @@ fn apply_deblock(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) {
         bd: cfg.bd,
     };
     loop_filter_frame(&mut buf, &grid, &params, 0, num_planes);
+}
+
+/// Run [`aom_cdef::frame::cdef_frame`] over the (mi-aligned, deblocked)
+/// recon planes, exactly as the C decoder does after deblocking.
+///
+/// Input flattening mirrors the C mi grid the walk reads:
+/// - per-mi `skip_txfm` from each block's footprint (frame-cropped stamps);
+/// - per-64x64-unit strength index from the ONE block per unit whose
+///   `read_cdef` returned the literal (the first non-skip block; the C
+///   stores it on the unit's top-left grid mbmi and the frame walk reads it
+///   back from there — cdef.c:304-308). Units where no block read a
+///   strength (all-skip) keep `-1`: they are skipped either way (empty
+///   dlist / the -1 arm), matching the C's stale-field-never-consumed
+///   behavior. Hidden: harness entry.
+#[doc(hidden)]
+pub fn apply_cdef(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) {
+    use aom_cdef::frame::{CdefFrameParams, cdef_frame};
+
+    let mi_rows = cfg.mi_rows as usize;
+    let mi_cols = cfg.mi_cols as usize;
+    let nhfb = mi_cols.div_ceil(16);
+    let nvfb = mi_rows.div_ceil(16);
+    let mut skip = vec![false; mi_rows * mi_cols];
+    let mut unit_strength = vec![-1i32; nvfb * nhfb];
+    for b in &t.blocks {
+        let h = (MI_SIZE_HIGH[b.bsize] as usize).min(mi_rows - b.mi_row as usize);
+        let w = (MI_SIZE_WIDE[b.bsize] as usize).min(mi_cols - b.mi_col as usize);
+        let sk = b.info.skip != 0;
+        for r in 0..h {
+            let row0 = (b.mi_row as usize + r) * mi_cols + b.mi_col as usize;
+            skip[row0..row0 + w].fill(sk);
+        }
+        if b.info.cdef_strength >= 0 {
+            unit_strength[(b.mi_row as usize / 16) * nhfb + b.mi_col as usize / 16] =
+                b.info.cdef_strength;
+        }
+    }
+    let params = CdefFrameParams {
+        mi_rows: cfg.mi_rows,
+        mi_cols: cfg.mi_cols,
+        num_planes: if cfg.monochrome { 1 } else { 3 },
+        ss_x: cfg.subsampling_x,
+        ss_y: cfg.subsampling_y,
+        bit_depth: cfg.bd,
+        damping: p.cdef.cdef_damping,
+        cdef_strengths: p.cdef.cdef_strengths,
+        cdef_uv_strengths: p.cdef.cdef_uv_strengths,
+        skip_txfm: &skip,
+        unit_strength: &unit_strength,
+    };
+    cdef_frame(
+        &mut t.recon,
+        t.stride,
+        &mut t.recon_u,
+        &mut t.recon_v,
+        t.stride_uv,
+        &params,
+    );
 }

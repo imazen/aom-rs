@@ -20,6 +20,7 @@ dependencies = [
 name = "aom-decode"
 version = "0.0.1"
 dependencies = [
+ "aom-cdef",
  "aom-encode",
  "aom-entropy",
  "aom-intra",
