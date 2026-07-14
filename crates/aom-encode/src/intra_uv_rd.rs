@@ -14,6 +14,37 @@
 //!   `setup_pred_plane` mi rounding).
 //!
 //! Frame-interior blocks (`max_blocks_*` unclipped), matching the luma walk.
+//!
+//! # Integration point: `av1_rd_pick_intra_mode_sb` (rdopt.c:3655-3690)
+//!
+//! The whole-block KEY-frame intra search composes this module as:
+//! 1. `av1_rd_pick_intra_sby_mode` (the landed luma pick) -> `intra_yrd`;
+//! 2. `set_mode_eval_params(DEFAULT_EVAL)`;
+//! 3. when `intra_yrd < best_rd && num_planes > 1`:
+//!    a. if `xd->is_chroma_ref && store_cfl_required_rdo(cm, x)` (=
+//!    `is_cfl_allowed(xd)` for a chroma-ref block): restore the LUMA
+//!    winner's `tx_type_map` from the pick ctx (`av1_copy_array`) — the
+//!    luma re-encode below replays the winner's tx types;
+//!    b. `max_uv_tx_size = av1_get_tx_size(AOM_PLANE_U)` =
+//!    [`av1_get_tx_size_uv`];
+//!    c. `av1_rd_pick_intra_sbuv_mode(..., bsize, max_uv_tx_size)` =
+//!    [`rd_pick_intra_sbuv_mode`] — whose own preamble (the CALLER contract
+//!    here) is `init_sbuv_mode`, the `!is_chroma_ref` early return
+//!    (`rate = rate_tokenonly = dist = 0, skippable = 1`, INT64_MAX), and
+//!    `xd->cfl.store_y = store_cfl_required_rdo` gating one
+//!    `av1_encode_intra_block_plane(AOM_PLANE_Y, DRY_RUN_NORMAL,
+//!    optimize_seg_arr[segment_id])` — the luma-winner re-encode that fills
+//!    the luma recon AND `cfl.recon_buf_q3` (per-txb `cfl_store_tx` from
+//!    `encode_block_intra`), i.e. the loaded [`CflCtx`] this module takes
+//!    as input;
+//! 4. `rd_cost->rate = rate_y + rate_uv + skip_txfm_cost[skip_ctx][0]`,
+//!    `dist = dist_y + dist_uv`, `RDCOST` — intra blocks always signal
+//!    non-skip.
+//!
+//! MISSING for that composition (next chunks): `av1_encode_intra_block_plane`
+//! (compose the landed predict/xform/quant/trellis/recon pieces over the
+//! winner tx sizes/types + per-txb `cfl_store_tx`), then the partition RDO
+//! above it. `rd_pick_intrabc_mode_sb` is a no-op without `allow_intrabc`.
 
 use crate::rd::rdcost;
 use crate::tx_search::{
