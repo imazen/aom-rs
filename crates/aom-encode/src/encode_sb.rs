@@ -83,6 +83,7 @@ use crate::encode_intra::{
     EncodeIntraPlaneOutcome, EncodeIntraYEnv, TrellisOptType, UvEncodeParams, UvWinner,
     encode_intra_block_plane_uv, encode_intra_block_plane_y,
 };
+use crate::partition::PartRdStats;
 use crate::intra_uv_rd::{
     UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
@@ -163,6 +164,16 @@ pub struct LeafWinner {
     pub tx_type_map: Vec<u8>,
     /// `mbmi->skip_txfm` (0 throughout the KEY intra path).
     pub skip_txfm: bool,
+    /// `ctx->rd_stats` (the PICK_MODE_CONTEXT's own raw mode-search RD,
+    /// BEFORE any enclosing stage adds its partition-type `pt_cost` —
+    /// `leaf_pick_sb_modes`'s own returned [`PartRdStats`], unconditionally
+    /// stored here too). Needed by the AB `reuse_prev_rd_results_for_part_ab`
+    /// mechanism (`pick_sb_modes`'s `rd_mode_is_ready` early-return copies
+    /// exactly `ctx->rd_stats`, partition_search.c:854-861) — a NONE-leaf
+    /// SPLIT child or a rect stage's sub-0 winner exposes this so a later AB
+    /// sub-block at the SAME position/size can be seeded from it verbatim
+    /// instead of re-searching under a different (tighter) budget.
+    pub raw_rdstats: PartRdStats,
 }
 
 /// The frame/tile environment shared by every leaf of one dry-run walk.

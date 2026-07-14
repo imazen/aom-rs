@@ -738,6 +738,8 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             // NONE/SPLIT/HORZ/VERT-only -- keep 4-way off (see the
             // count_tree panic arm above). Not yet cross-checked here.
             enable_1to4_partitions: false,
+            // Same reasoning: AB shapes are not yet cross-checked here either.
+            enable_ab_partitions: false,
         };
         let pack_cfg = PackCfg {
             enable_filter_intra: true,
@@ -1178,6 +1180,8 @@ fn pack_tile_roundtrips_with_real_costs() {
             // NONE/SPLIT/HORZ/VERT-only -- keep 4-way off (see the
             // count_tree panic arm above). Not yet cross-checked here.
             enable_1to4_partitions: false,
+            // Same reasoning: AB shapes are not yet cross-checked here either.
+            enable_ab_partitions: false,
         };
         let pack_cfg = PackCfg {
             enable_filter_intra: true,

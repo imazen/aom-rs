@@ -715,6 +715,14 @@ pub fn pack_tile(
 
             let mut cfl_search = CflCtx::new(env.ss_x as i32, env.ss_y as i32);
             let mut visits = Vec::new();
+            // x->source_variance: 0 at the top of a fresh SB in this
+            // single-SB-frame-scoped harness (no prior-SB carry-over
+            // modelled — see rd_pick_partition_real's own module docs on
+            // this in/out param). By the time any AB stage actually reads
+            // it (bsize >= 16x16), an earlier leaf search within THIS SAME
+            // node's own NONE/SPLIT/RECT stages has always already
+            // overwritten it in every case this port's envelope reaches.
+            let mut last_source_variance = 0u32;
             let (tree, _stats, found) = rd_pick_partition_real(
                 &sb_env,
                 pick_cfg,
@@ -731,6 +739,7 @@ pub fn pack_tile(
                 0,
                 None,
                 &mut visits,
+                &mut last_source_variance,
             );
             assert!(
                 found,

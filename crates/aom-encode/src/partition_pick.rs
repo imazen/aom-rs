@@ -393,6 +393,16 @@ pub struct PickFrameCfg<'a> {
     /// to reproduce this port's pre-4-way behavior exactly (existing
     /// callers that don't yet cross-check 4-way trees use this).
     pub enable_1to4_partitions: bool,
+    /// `oxcf.part_cfg.enable_ab_partitions` (aomenc default true —
+    /// `disable_ab_partition_type == 0`; same pattern as
+    /// `enable_1to4_partitions`). Gates the WHOLE `PARTITION_HORZ_A/HORZ_B/
+    /// VERT_A/VERT_B` stage — `false` at every pre-existing call site,
+    /// preserving their established (NONE/SPLIT/HORZ/VERT[/4-way])
+    /// behavior/assertions exactly; `true` only at the AB-relevant test
+    /// files, matching the established convention from the 4-way port
+    /// (module docs on the "4-way partitions ported" milestone in
+    /// STATUS.md).
+    pub enable_ab_partitions: bool,
 }
 
 /// One leaf evaluation's differential-visibility record.
@@ -415,7 +425,12 @@ pub struct LeafVisit {
 /// [`rd_pick_intra_mode_sb`]. `partition` is the `mbmi->partition = partition`
 /// install (:887) — the has_top_right/has_bottom_left availability input.
 /// Returns the normalized rd stats + the winner as an [`LeafWinner`] (None
-/// when `rate == INT_MAX`).
+/// when `rate == INT_MAX`) + `x->source_variance` (`get_perpixel_variance_
+/// facade`'s result for THIS leaf — gotcha #1 in STATUS.md's AB-partition
+/// plan: this is returned UNCONDITIONALLY, win or lose, matching the C
+/// setting the MACROBLOCK-level mutable field before the mode search can
+/// fail; `ml_prune_ab_partition`'s NN feature reads whatever the LAST such
+/// call left it at, not the node's own correctly-scoped `pb_source_variance`).
 #[allow(clippy::too_many_arguments)]
 fn leaf_pick_sb_modes(
     env: &SbEncodeEnv,
@@ -431,7 +446,7 @@ fn leaf_pick_sb_modes(
     bsize: usize,
     partition: usize,
     best_remain: &PartRdStats,
-) -> (PartRdStats, Option<LeafWinner>) {
+) -> (PartRdStats, Option<LeafWinner>, u32) {
     // av1_rd_cost_update(x->rdmult, &best_rd) on entry (pick_sb_modes:927).
     let mut best_rd = *best_remain;
     rd_cost_update(env.rdmult, &mut best_rd);
@@ -681,8 +696,10 @@ fn leaf_pick_sb_modes(
     match outcome.best {
         None => {
             // rd_cost->rate == INT_MAX -> rdcost = INT64_MAX
-            // (pick_sb_modes:969-970).
-            (PartRdStats::invalid(), None)
+            // (pick_sb_modes:969-970). x->source_variance was STILL set
+            // above (unconditionally, before the mode search could fail) --
+            // returned regardless of the loss.
+            (PartRdStats::invalid(), None, source_variance)
         }
         Some(best) => {
             let stats = PartRdStats {
@@ -715,8 +732,9 @@ fn leaf_pick_sb_modes(
                 cfl_alpha_signs,
                 tx_type_map: best.tx_type_map,
                 skip_txfm: false,
+                raw_rdstats: stats,
             };
-            (stats, Some(winner))
+            (stats, Some(winner), source_variance)
         }
     }
 }
@@ -809,7 +827,8 @@ fn restore_context(
 /// pick — the `best - sum` budget subtraction, the leaf at
 /// `partition_type`, and the `sum_rdc` accumulation (rate `INT_MAX` -> sum
 /// rdcost `INT64_MAX`). Returns `(this_rdc.rdcost — the `rect_part_rd`
-/// record, the winner)`.
+/// record, the winner, x->source_variance as of this call — gotcha #1,
+/// module docs on [`leaf_pick_sb_modes`])`.
 #[allow(clippy::too_many_arguments)]
 fn rd_pick_rect_partition(
     env: &SbEncodeEnv,
@@ -827,9 +846,9 @@ fn rd_pick_rect_partition(
     best_rdc: &PartRdStats,
     sum_rdc: &mut PartRdStats,
     visits: &mut Vec<LeafVisit>,
-) -> (i64, Option<LeafWinner>) {
+) -> (i64, Option<LeafWinner>, u32) {
     let best_remain = rd_stats_subtraction(env.rdmult, best_rdc, sum_rdc);
-    let (this_rdc, winner) = leaf_pick_sb_modes(
+    let (this_rdc, winner, source_variance) = leaf_pick_sb_modes(
         env,
         cfg,
         tile,
@@ -862,7 +881,7 @@ fn rd_pick_rect_partition(
         sum_rdc.dist += this_rdc.dist;
         rd_cost_update(env.rdmult, sum_rdc);
     }
-    (this_rdc.rdcost, winner)
+    (this_rdc.rdcost, winner, source_variance)
 }
 
 /// `rd_pick_4partition` (partition_search.c:3919): the HORZ_4/VERT_4
@@ -903,6 +922,7 @@ fn rd_pick_4partition(
     partition_cost: &[i32; 10],
     best_rdc: &PartRdStats,
     visits: &mut Vec<LeafVisit>,
+    last_source_variance: &mut u32,
 ) -> (PartRdStats, Option<Box<[LeafWinner; 4]>>) {
     // set_4_part_ctx_and_rdcost (:3898-3916).
     let mut sum_rdc = PartRdStats::init();
@@ -926,7 +946,7 @@ fn rd_pick_4partition(
             },
             "caller must only invoke rd_pick_4partition when all 4 strips fit (module docs)"
         );
-        let (_rd_i, winner) = rd_pick_rect_partition(
+        let (_rd_i, winner, source_variance) = rd_pick_rect_partition(
             env,
             cfg,
             tile,
@@ -943,6 +963,9 @@ fn rd_pick_4partition(
             &mut sum_rdc,
             visits,
         );
+        // x->source_variance mutates unconditionally on every subblock
+        // attempt, win or lose (gotcha #1, module docs on leaf_pick_sb_modes).
+        *last_source_variance = source_variance;
         w[i] = winner;
         // rd_try_subblock's own early-bail (:3161-3164), checked by the
         // caller loop here exactly as rd_pick_rect_partition's own caller
@@ -1003,6 +1026,17 @@ pub fn rd_pick_partition_real(
     pc_index: usize,
     mut none_rd_out: Option<&mut i64>,
     visits: &mut Vec<LeafVisit>,
+    // `x->source_variance` (gotcha #1, module docs on `leaf_pick_sb_modes`):
+    // a MACROBLOCK-level (i.e. truly frame-global, not node-scoped) mutable
+    // field every leaf search overwrites unconditionally, win or lose. An
+    // in/out threading param (mirrors the established `none_rd_out`
+    // out-param pattern in this same function): read on entry (whatever the
+    // caller's own last leaf search left it at), updated after EVERY leaf
+    // search this call makes (NONE, every SPLIT child's own recursion,
+    // RECT's sub-0/sub-1, AB's sub-blocks, 4-way's sub-blocks) in
+    // chronological C-execution order, so by the time this call returns it
+    // holds exactly what the real `x->source_variance` would.
+    last_source_variance: &mut u32,
 ) -> (Option<SbTree>, PartRdStats, bool) {
     // if (none_rd) *none_rd = 0 (:5682).
     if let Some(out) = none_rd_out.as_deref_mut() {
@@ -1121,7 +1155,7 @@ pub fn rd_pick_partition_real(
         rd_cost_update(env.rdmult, &mut partition_rdcost);
         let best_remain = rd_stats_subtraction(env.rdmult, &best_rdc, &partition_rdcost);
 
-        let (mut this_rdc, winner) = leaf_pick_sb_modes(
+        let (mut this_rdc, winner, source_variance) = leaf_pick_sb_modes(
             env,
             cfg,
             tile,
@@ -1136,6 +1170,7 @@ pub fn rd_pick_partition_real(
             0,
             &best_remain,
         );
+        *last_source_variance = source_variance;
         visits.push(LeafVisit {
             mi_row,
             mi_col,
@@ -1210,6 +1245,7 @@ pub fn rd_pick_partition_real(
                 idx,
                 Some(&mut split_rd[idx]),
                 visits,
+                last_source_variance,
             );
             if !child_found {
                 sum_rdc = PartRdStats::invalid();
@@ -1291,7 +1327,7 @@ pub fn rd_pick_partition_real(
         sum_rdc.rdcost = crate::rd::rdcost(env.rdmult, sum_rdc.rate, 0);
 
         // Sub-block 0 at the origin (:3596).
-        let (rd0, mut w0) = rd_pick_rect_partition(
+        let (rd0, mut w0, sv0) = rd_pick_rect_partition(
             env,
             cfg,
             tile,
@@ -1308,6 +1344,7 @@ pub fn rd_pick_partition_real(
             &mut sum_rdc,
             visits,
         );
+        *last_source_variance = sv0;
         rect_part_rd[i][0] = rd0;
 
         // is_not_edge_block[i] (:3550): has_rows for HORZ / has_cols VERT.
@@ -1354,7 +1391,7 @@ pub fn rd_pick_partition_real(
             } else {
                 (mi_row, mi_col + mi_step)
             };
-            let (rd1, got) = rd_pick_rect_partition(
+            let (rd1, got, sv1) = rd_pick_rect_partition(
                 env,
                 cfg,
                 tile,
@@ -1371,6 +1408,7 @@ pub fn rd_pick_partition_real(
                 &mut sum_rdc,
                 visits,
             );
+            *last_source_variance = sv1;
             rect_part_rd[i][1] = rd1;
             w1 = got;
         }
@@ -1550,6 +1588,7 @@ pub fn rd_pick_partition_real(
                 partition_cost,
                 &best_rdc,
                 visits,
+                last_source_variance,
             );
             if let Some(w) = winners {
                 best_rdc = sum_rdc;

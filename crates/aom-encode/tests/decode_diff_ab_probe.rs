@@ -1,57 +1,39 @@
-//! Task 1 (decode-diff), ORIGINAL FINDING (now fixed, kept as a regression
-//! gate): this test originally isolated the exact first divergent encode
-//! DECISION in the `encoder_gate_e2e_textured_attempt` "pseudo-random
-//! noise" case (the one textured case out of 7 that did NOT byte-match real
-//! aomenc -- first mismatched byte at offset 1139 of ~1520-1536 total
-//! tile-group bytes). The decode-diff below found the first divergence at
-//! (mi_row=8, mi_col=8, bsize=BLOCK_16X16): real aomenc chose
-//! `PARTITION_VERT_4`, this port's search chose `PARTITION_VERT` (VERT_4
-//! wasn't in its candidate set) -- confirming the "missing AB/4-way
-//! partition types" gap documented in STATUS.md. HORZ_4/VERT_4 (with their
-//! real ML prune, `av1_ml_prune_4_partition`) are now ported
-//! (`crates/aom-encode/src/partition_pick.rs`'s 4-way stage,
-//! `part4_prune.rs`) and this exact case now byte-matches end-to-end (see
-//! `encoder_gate_e2e_byte_match.rs`'s `encoder_gate_e2e_textured_attempt`:
-//! 7/7, up from 6/7). AB (HORZ_A/B, VERT_A/B) is still unported --
-//! `STATUS.md`'s MISSING list is the honest source of truth on remaining
-//! partition-type coverage.
+//! Decode-diff investigation for the two AB-probe cases
+//! (`encoder_gate_e2e_ab_attempt` in `encoder_gate_e2e_byte_match.rs`) whose
+//! loop-filter level EXACTLY agrees with real aomenc ("top split (2 freqs) /
+//! bottom flat" and "left flat / right split (2 freqs)") -- i.e. the two
+//! cases where the header-region byte-0 confound (fixed, `aom-entropy`
+//! commit `0d144b6`) AND the separate LF-level near-miss (STATUS.md's
+//! "Loop-filter-level RD search ported" milestone, unrelated to AB) are BOTH
+//! absent, so a mismatch can only come from tile-group (partition/mode/tx)
+//! data. The other two AB-probe cases ("top flat / bottom split" and "left
+//! split / right flat") still have an LF-level near-miss and mismatch INSIDE
+//! the header (byte 2, before `tile_data_start`) -- not a clean read, not
+//! attempted here.
 //!
-//! Method: encode the SAME noise content with real aomenc (`ref_encode_av1_kf`)
-//! and with this port's own pipeline (`rd_pick_partition_real` + `pack_tile`,
-//! exactly as `encoder_gate_e2e_byte_match.rs` does), then DECODE BOTH
-//! bitstreams -- real bytes as-is, and our own tile bytes rewrapped into a
-//! real OBU_FRAME (reusing the real, already-verified-byte-identical
-//! sequence-header OBU) -- with the SAME (already bit-exact vs the C
-//! decoder, `real_bitstream.rs`) decoder,
-//! `aom_decode::frame::decode_frame_obus_prefilter`. Both decodes expose
-//! `KfTileDecode::tree` (the pre-order partition-symbol sequence, EVERY
-//! visited node) and `KfTileDecode::blocks` (per-leaf mode/tx records).
+//! Method: identical to `decode_diff_noise_case.rs`'s (the VERT_4-finding
+//! precedent) -- encode with real aomenc, bootstrap the frame header from the
+//! real parse, run THIS PORT'S OWN `pack_tile` over the identical source
+//! pixels, derive loop-filter level with `pick_filter_level` (confirmed
+//! EXACT agreement for both cases below via `encoder_gate_e2e_ab_attempt`'s
+//! own eprintln output), decode BOTH bitstreams with the already bit-exact
+//! decoder (`aom_decode::frame::decode_frame_obus_prefilter`), and diff
+//! `KfTileDecode::tree` (the pre-order partition-symbol sequence) index-by-
+//! index -- byte offset alone doesn't localize the true first divergent
+//! symbol because range-coder carry propagation can shift the visible effect
+//! later than the actual diverging decision.
 //!
-//! Byte offset 1139 does NOT directly localize the divergent DECISION: the
-//! arithmetic range coder mixes many symbols into each byte and carry
-//! propagation can shift the visible byte effect later than the true first
-//! diverging symbol. Comparing the two decodes' `tree` sequences index-by-
-//! index instead finds the true first divergent partition decision
-//! structurally: both trees start at the identical SB root (mi_row=0,
-//! mi_col=0, bsize=BLOCK_64X64) and — by construction of the pre-order DFS
-//! `decode_partition` performs (verified by direct reading,
-//! `aom-decode/src/lib.rs:1847-1965`) — stay position-locked entry-for-entry
-//! for as long as the partition VALUES keep agreeing (only `PARTITION_SPLIT`
-//! recurses into further `decode_partition` calls that push more `tree`
-//! entries; every other type is a `tree` leaf). The first index where the
-//! partition values differ is therefore the true first divergent decision,
-//! unambiguously, with its exact (mi_row, mi_col, bsize) spatial position.
-//!
-//! NOW a hard regression gate (was a diagnostic while the divergence was
-//! still open): asserts the two decoded partition `tree`s are IDENTICAL
-//! (not just non-divergent in some prefix) -- if a future change reopens
-//! this gap (e.g. an AB port accidentally changing the 4-way RD budget so
-//! VERT_4 stops winning here), this test fails loudly instead of silently
-//! reverting to "diagnostic, not asserted."
+//! **NOT asserted (diagnostic only, matching decode_diff_noise_case.rs's OWN
+//! precedent before its underlying gap was fixed).** AB partitions
+//! (HORZ_A/HORZ_B/VERT_A/VERT_B) are unported -- a divergence here is
+//! EXPECTED, not a bug. This file exists to answer, with direct decode-side
+//! evidence (not a guess), whether real aomenc's own RDO actually picked an
+//! AB type on this content, and exactly where.
 
 use aom_encode::encode_intra::TrellisOptType;
 use aom_encode::encode_sb::SbEncodeEnv;
 use aom_encode::intra_uv_rd::UvLoopPolicy;
+use aom_encode::lf_search::{LfSearchFrame, build_lf_mi_grid, pick_filter_level};
 use aom_encode::obu_assemble::assemble_obu_frame_single_tile;
 use aom_encode::pack::pack_tile;
 use aom_encode::partition_pick::PickFrameCfg;
@@ -75,10 +57,9 @@ const OBU_FRAME: u32 = 6;
 const SB: usize = 12; // BLOCK_64X64
 const SB_MI: i32 = 16; // 64px / 4
 
-// `MI_SIZE_WIDE_B` (common_data.h) -- duplicated locally (pub(crate) in
-// aom_encode::tx_search, not reachable from an external test binary; see
-// `encoder_gate_e2e_byte_match.rs`'s own `walk_obus` comment on this test
-// family's established convention of small local duplication).
+// `MI_SIZE_WIDE_B` (common_data.h) -- duplicated locally, matching
+// `decode_diff_noise_case.rs`'s own established convention (not reachable
+// from an external test binary).
 const MI_SIZE_WIDE_B: [usize; 22] = [
     1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
 ];
@@ -107,9 +88,6 @@ fn walk_obus(bytes: &[u8]) -> Vec<(u32, &[u8])> {
     out
 }
 
-/// Same OBU walk, but returns the RAW byte span (header + leb128 size +
-/// payload) for the first OBU of the given type -- what's needed to splice a
-/// real sequence-header OBU verbatim in front of a reassembled OBU_FRAME.
 fn raw_obu_span(bytes: &[u8], want_type: u32) -> &[u8] {
     let mut pos = 0usize;
     while pos < bytes.len() {
@@ -169,24 +147,36 @@ fn mi_dim(px: i32) -> i32 {
 const KF_REF_DELTAS: [i8; 8] = [1, 0, 0, 0, -1, 0, -1, -1];
 const KF_MODE_DELTAS: [i8; 2] = [0, 0];
 
-/// The EXACT pseudo-random noise content from
-/// `encoder_gate_e2e_textured_attempt` (must reproduce the same source
-/// pixels bit-for-bit to hit the same divergence).
-fn noise_content(r: usize, c: usize) -> u8 {
-    let mut x = (r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (c as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    x ^= x >> 33;
-    (64 + (x % 129)) as u8
+/// EXACT content closures from `encoder_gate_e2e_byte_match.rs`'s
+/// `encoder_gate_e2e_ab_attempt` -- must reproduce the same source pixels
+/// bit-for-bit to hit the same divergence. Only the two LF-clean cases
+/// (indices 0 and 3 in that test's `cases` array) are included here.
+fn top_split_bottom_flat(r: usize, c: usize) -> u8 {
+    if r < 32 {
+        let period = if c < 32 { 4 } else { 6 };
+        if (r / period + c / period) % 2 == 0 {
+            80
+        } else {
+            176
+        }
+    } else {
+        128
+    }
 }
 
-/// One `KfTileDecode.tree` entry replayed with its spatial position: the
-/// exact recursion `decode_partition` performs (traced directly from
-/// `aom-decode/src/lib.rs:1847-1965`) -- only `PARTITION_SPLIT` recurses
-/// into further `tree`-pushing calls; every other partition type is a
-/// `tree` leaf (its sub-blocks are coded via `decode_block`, which does not
-/// push to `tree`).
+fn left_flat_right_split(r: usize, c: usize) -> u8 {
+    if c >= 32 {
+        let period = if r < 32 { 4 } else { 6 };
+        if (r / period + c / period) % 2 == 0 {
+            80
+        } else {
+            176
+        }
+    } else {
+        128
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn replay_tree(
     tree: &[i8],
@@ -242,8 +232,13 @@ fn replay_tree(
     }
 }
 
-#[test]
-fn decode_diff_pseudo_random_noise_case() {
+/// Runs one AB-probe case end-to-end (real-encode, bootstrap header, our own
+/// pack_tile + pick_filter_level, decode both with the shared decoder) and
+/// prints the first partition-tree divergence, if any. Mirrors
+/// `decode_diff_noise_case.rs::decode_diff_pseudo_random_noise_case` almost
+/// verbatim -- see that file for the full method writeup.
+fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
+    eprintln!("=== decode-diff AB-probe case: {name} ===");
     c::ref_init();
     let (w, h, mono, ss_x, ss_y, usage, cq_level) =
         (64usize, 64usize, true, 1usize, 1usize, 2u32, 32i32);
@@ -251,28 +246,14 @@ fn decode_diff_pseudo_random_noise_case() {
     let mut y = vec![128u16; w * h];
     for r in 0..h {
         for col in 0..w {
-            y[r * w + col] = u16::from(noise_content(r, col));
+            y[r * w + col] = u16::from(content(r, col));
         }
     }
     let u: Vec<u16> = Vec::new();
     let v: Vec<u16> = Vec::new();
 
     let bytes = c::ref_encode_av1_kf(
-        &y,
-        &u,
-        &v,
-        w,
-        h,
-        8,
-        mono,
-        ss_x as i32,
-        ss_y as i32,
-        cq_level,
-        0,
-        false,
-        false,
-        usage,
-        0,
+        &y, &u, &v, w, h, 8, mono, ss_x as i32, ss_y as i32, cq_level, 0, false, false, usage, 0,
         false,
     );
     assert!(!bytes.is_empty());
@@ -468,10 +449,9 @@ fn decode_diff_pseudo_random_noise_case() {
         less_rectangular_check_level: i32::from(allintra),
         max_partition_size: 15,
         min_partition_size: 0,
-        enable_1to4_partitions: true, // the true aomenc default (unset --enable-1to4-partitions)
-        // AB partitions unported until this gate's own scope grows to cover
-        // them; keep off so this hard-asserted regression gate's tree shape
-        // stays exactly what it already verified (module docs).
+        enable_1to4_partitions: true,
+        // TEMP false while the AB port lands -- flip once wired (see
+        // encoder_gate_e2e_byte_match.rs's matching TEMP comment).
         enable_ab_partitions: false,
     };
     let pack_cfg = aom_encode::pack::PackCfg {
@@ -508,8 +488,55 @@ fn decode_diff_pseudo_random_noise_case() {
 
     let tile_data_start = real_bit_len.div_ceil(8);
     let real_tile_bytes = &frame_payload[tile_data_start..];
+
+    // ---- loop-filter-level: same TRUE DERIVATION the e2e harness performs
+    //      (confirmed via encoder_gate_e2e_ab_attempt's own eprintln output
+    //      to EXACTLY agree with the real value for both cases run here --
+    //      re-derived here rather than reusing the bootstrapped value so this
+    //      diagnostic exercises the identical code path production does). ----
+    let mi_grid = build_lf_mi_grid(&trees, mi_rows, mi_cols, n_sb, SB_MI, SB);
+    let lf_frame = LfSearchFrame {
+        recon_y: &recon_y,
+        recon_u: &recon_u,
+        recon_v: &recon_v,
+        src_y: &src_y_strided,
+        src_u: &src_u_strided,
+        src_v: &src_v_strided,
+        stride: STRIDE,
+        crop_width: w as u32,
+        crop_height: h as u32,
+        ss_x,
+        ss_y,
+        bd: i32::from(bd),
+        monochrome: mono,
+        mi: &mi_grid,
+        mi_rows,
+        mi_cols,
+    };
+    let derived_lf = pick_filter_level(&lf_frame, allintra, 0);
     eprintln!(
-        "noise case: real_tile_bytes.len()={} our_tile_bytes.len()={}",
+        "{name}: DERIVED lf_level={:?} -- REAL(bootstrapped) lf_level={:?} -- {}",
+        derived_lf.filter_level,
+        p.loopfilter.filter_level,
+        if derived_lf.filter_level == p.loopfilter.filter_level {
+            "LF-LEVEL AGREES (clean read, as established by encoder_gate_e2e_ab_attempt)"
+        } else {
+            "LF-LEVEL DISAGREES (NOT a clean read -- this case should not have been run here)"
+        }
+    );
+    assert_eq!(
+        derived_lf.filter_level, p.loopfilter.filter_level,
+        "{name}: this case was selected BECAUSE encoder_gate_e2e_ab_attempt found exact LF \
+         agreement -- a disagreement here means something upstream changed; re-run the AB-probe \
+         to pick a still-clean case before trusting this decode-diff's localization"
+    );
+    let mut p = p;
+    p.loopfilter.filter_level = derived_lf.filter_level;
+    p.loopfilter.filter_level_u = derived_lf.filter_level_u;
+    p.loopfilter.filter_level_v = derived_lf.filter_level_v;
+
+    eprintln!(
+        "{name}: real_tile_bytes.len()={} our_tile_bytes.len()={}",
         real_tile_bytes.len(),
         our_tile_bytes.len()
     );
@@ -523,13 +550,13 @@ fn decode_diff_pseudo_random_noise_case() {
 
     // ---- decode BOTH with the (already bit-exact vs C, real_bitstream.rs) decoder ----
     let (t_real, _cfg_real, _hdr_real) = aom_decode::frame::decode_frame_obus_prefilter(&bytes)
-        .unwrap_or_else(|e| panic!("decode of REAL aomenc bytes failed: {e}"));
+        .unwrap_or_else(|e| panic!("{name}: decode of REAL aomenc bytes failed: {e}"));
     let (t_ours, _cfg_ours, _hdr_ours) =
         aom_decode::frame::decode_frame_obus_prefilter(&our_stream)
-            .unwrap_or_else(|e| panic!("decode of OUR OWN rewrapped bytes failed: {e}"));
+            .unwrap_or_else(|e| panic!("{name}: decode of OUR OWN rewrapped bytes failed: {e}"));
 
     eprintln!(
-        "real tree len={} blocks={} | ours tree len={} blocks={}",
+        "{name}: real tree len={} blocks={} | ours tree len={} blocks={}",
         t_real.tree.len(),
         t_real.blocks.len(),
         t_ours.tree.len(),
@@ -537,32 +564,32 @@ fn decode_diff_pseudo_random_noise_case() {
     );
 
     // Smoking-gun scan: did real aomenc use ANY partition type this port's
-    // search cannot produce (AB: 4-7, 4-way: 8-9) anywhere in the tree?
-    let ab_4way_nodes: Vec<(usize, i8)> = t_real
+    // search cannot produce (AB: 4-7; 4-way (8/9) IS ported) anywhere in the
+    // tree?
+    let unported_nodes: Vec<(usize, i8)> = t_real
         .tree
         .iter()
         .enumerate()
-        .filter(|&(_, &p)| p >= 4)
+        .filter(|&(_, &p)| (4..=7).contains(&p))
         .map(|(i, &p)| (i, p))
         .collect();
-    if ab_4way_nodes.is_empty() {
+    if unported_nodes.is_empty() {
         eprintln!(
-            "SCAN: real aomenc's tree uses ONLY NONE/SPLIT/HORZ/VERT (no AB/4-way anywhere) \
-             -- the divergence is NOT explained by missing partition types alone."
+            "{name}: SCAN: real aomenc's tree uses NO AB partition type anywhere -- a \
+             divergence (if any) is NOT explained by missing AB support."
         );
     } else {
         eprintln!(
-            "SCAN: real aomenc's tree uses {} AB/4-way node(s) this port's search cannot \
+            "{name}: SCAN: real aomenc's tree uses {} AB node(s) this port's search cannot \
              produce: {:?}",
-            ab_4way_nodes.len(),
-            ab_4way_nodes
+            unported_nodes.len(),
+            unported_nodes
                 .iter()
                 .map(|&(i, p)| format!("tree[{i}]={}", PARTITION_NAMES[p as usize]))
                 .collect::<Vec<_>>()
         );
     }
 
-    // Replay both trees to (mi_row, mi_col, bsize, partition) with position.
     let mut real_seq = Vec::new();
     let mut ours_seq = Vec::new();
     replay_tree(
@@ -587,18 +614,31 @@ fn decode_diff_pseudo_random_noise_case() {
     );
 
     eprintln!(
-        "replayed real_seq.len()={} ours_seq.len()={}",
+        "{name}: replayed real_seq.len()={} ours_seq.len()={}",
         real_seq.len(),
         ours_seq.len()
+    );
+    eprintln!(
+        "{name}: FULL real tree dump: {}",
+        real_seq
+            .iter()
+            .enumerate()
+            .map(|(i, &(r, c, b, p))| format!(
+                "[{i}](mr={r},mc={c},bs={b},{})",
+                PARTITION_NAMES[p as usize]
+            ))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
 
     let mut first_divergence: Option<(i32, i32, usize, i8, i8)> = None;
     for (r, o) in real_seq.iter().zip(ours_seq.iter()) {
-        assert_eq!(
-            (r.0, r.1, r.2),
-            (o.0, o.1, o.2),
-            "positions must stay locked until the first `p` divergence (replay bug if not)"
-        );
+        if (r.0, r.1, r.2) != (o.0, o.1, o.2) {
+            // Positions diverged before the partition VALUE did -- can only
+            // happen once an earlier `p` divergence already changed the
+            // recursion shape; report the SAME earlier index instead.
+            break;
+        }
         if r.3 != o.3 {
             first_divergence = Some((r.0, r.1, r.2, r.3, o.3));
             break;
@@ -606,96 +646,39 @@ fn decode_diff_pseudo_random_noise_case() {
     }
 
     match first_divergence {
+        None if real_seq.len() == ours_seq.len() => {
+            eprintln!(
+                "{name}: NO partition-tree divergence found -- trees are IDENTICAL. Any \
+                 remaining byte mismatch (if present) must come from leaf mode/tx/coefficient \
+                 data, not partition choice."
+            );
+        }
         None => {
             eprintln!(
-                "NO partition-tree divergence found (real_seq.len()={} ours_seq.len()={}) -- \
-                 cross-checking per-leaf mode/tx for full confirmation.",
+                "{name}: partition VALUES agree on the shared prefix but tree LENGTH differs \
+                 (real_seq.len()={} ours_seq.len()={}) -- one side's tree is a strict subset \
+                 (recursion depth differs without a value divergence being visible in this \
+                 replay -- inspect raw tree arrays directly).",
                 real_seq.len(),
                 ours_seq.len()
             );
-            // Hard gate (module docs): the trees must be the SAME LENGTH, not
-            // just non-divergent in the shared prefix -- a length mismatch
-            // with an otherwise-matching prefix would mean one side's tree is
-            // a strict subset (e.g. this port stopped recursing early), which
-            // `first_divergence == None` alone would NOT catch.
-            assert_eq!(
-                real_seq.len(),
-                ours_seq.len(),
-                "partition tree LENGTH must match exactly, not just agree on a shared prefix"
-            );
-            assert_eq!(
-                t_real.blocks.len(),
-                t_ours.blocks.len(),
-                "decoded leaf-block COUNT must match exactly"
-            );
-            let mut leaf_mismatch: Option<(i32, i32)> = None;
-            #[allow(clippy::collapsible_if)]
-            'outer: for rb in &t_real.blocks {
-                if let Some(ob) = t_ours
-                    .blocks
-                    .iter()
-                    .find(|b| b.mi_row == rb.mi_row && b.mi_col == rb.mi_col)
-                {
-                    if ob.bsize != rb.bsize
-                        || ob.partition != rb.partition
-                        || ob.info.y_mode != rb.info.y_mode
-                        || ob.info.angle_delta_y != rb.info.angle_delta_y
-                        || ob.info.use_filter_intra != rb.info.use_filter_intra
-                        || ob.tx_size != rb.tx_size
-                        || ob.info.uv_mode != rb.info.uv_mode
-                    {
-                        eprintln!(
-                            "LEAF MISMATCH at (mi_row={}, mi_col={}): real bsize={} partition={} \
-                             y_mode={} angle_delta_y={} use_fi={} tx_size={} uv_mode={} | \
-                             ours bsize={} partition={} y_mode={} angle_delta_y={} use_fi={} \
-                             tx_size={} uv_mode={}",
-                            rb.mi_row,
-                            rb.mi_col,
-                            rb.bsize,
-                            rb.partition,
-                            rb.info.y_mode,
-                            rb.info.angle_delta_y,
-                            rb.info.use_filter_intra,
-                            rb.tx_size,
-                            rb.info.uv_mode,
-                            ob.bsize,
-                            ob.partition,
-                            ob.info.y_mode,
-                            ob.info.angle_delta_y,
-                            ob.info.use_filter_intra,
-                            ob.tx_size,
-                            ob.info.uv_mode
-                        );
-                        leaf_mismatch = Some((rb.mi_row, rb.mi_col));
-                        break 'outer;
-                    }
-                }
-            }
-            assert!(
-                leaf_mismatch.is_none(),
-                "leaf-level (mode/tx) mismatch found at {leaf_mismatch:?} even though the \
-                 partition trees matched exactly -- see the LEAF MISMATCH eprintln above for \
-                 the field-by-field diff; this is a regression, not the expected state \
-                 (encoder_gate_e2e_textured_attempt's pseudo-random-noise case now byte-matches \
-                 end-to-end, so this decode-diff must find zero divergence of any kind)"
-            );
-            eprintln!(
-                "CONFIRMED: partition trees AND every shared leaf's mode/tx fields match \
-                 exactly -- the 4-way partition port (HORZ_4/VERT_4 + av1_ml_prune_4_partition) \
-                 fully resolves this case's original VERT_4 divergence."
-            );
         }
         Some((mi_row, mi_col, bsize, p_real, p_ours)) => {
-            panic!(
-                "REGRESSION: partition-tree divergence reappeared at (mi_row={mi_row}, \
-                 mi_col={mi_col}, bsize={bsize}) -- real chose PARTITION_{} ({p_real}), ours \
-                 chose PARTITION_{} ({p_ours}). This case was fixed by the 4-way partition port \
-                 (HORZ_4/VERT_4 + av1_ml_prune_4_partition, crates/aom-encode/src/\
-                 partition_pick.rs + part4_prune.rs) -- if this fires, something (e.g. a later \
-                 AB-partition change to the RD budget flowing into the 4-way stage) reopened the \
-                 gap. Re-run the SCAN/decode-diff logic above for a fresh root-cause read.",
+            eprintln!(
+                "{name}: FIRST DIVERGENCE at (mi_row={mi_row}, mi_col={mi_col}, bsize={bsize}): \
+                 real aomenc chose PARTITION_{} ({p_real}), ours chose PARTITION_{} ({p_ours}).",
                 PARTITION_NAMES[p_real as usize], PARTITION_NAMES[p_ours as usize]
             );
         }
     }
+}
+
+/// Diagnostic only -- see module docs. Prints the first partition-tree
+/// divergence (if any) for both LF-clean AB-probe cases; does not assert,
+/// because a divergence is the EXPECTED state until AB partitions are
+/// ported.
+#[test]
+fn decode_diff_ab_probe_clean_cases() {
+    run_one("top split (2 freqs) / bottom flat", top_split_bottom_flat);
+    run_one("left flat / right split (2 freqs)", left_flat_right_split);
 }

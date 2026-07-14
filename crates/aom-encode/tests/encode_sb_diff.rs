@@ -157,6 +157,11 @@ fn gen_winner(rng: &mut Rng, bsize: usize, reduced: bool) -> LeafWinner {
         cfl_alpha_signs: rng.range(1, 8),
         tx_type_map: map,
         skip_txfm: false,
+        // Synthetic fixture: this file drives encode_b_intra_dry/pack_leaf
+        // directly from a hand-rolled winner, never through
+        // leaf_pick_sb_modes's real AB-reuse-relevant path -- a placeholder
+        // is fine, nothing in this test's scope reads it.
+        raw_rdstats: aom_encode::partition::PartRdStats::invalid(),
     }
 }
 

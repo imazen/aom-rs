@@ -486,6 +486,14 @@ fn attempt_case_content_uv(
         max_partition_size: 15, // BLOCK_64X64 == sb_size for this envelope
         min_partition_size: 0,  // BLOCK_4X4: the true aomenc default (unset --min-partition-size)
         enable_1to4_partitions: true, // the true aomenc default (unset --enable-1to4-partitions)
+        // TEMP false while the AB port lands in this same commit series --
+        // flipped to true (the true aomenc default) once the AB stage
+        // itself is wired into rd_pick_partition_real, at which point this
+        // file's hard gates (encoder_gate_e2e_attempt/_textured_attempt)
+        // get re-verified with it on, matching the established
+        // enable_1to4_partitions rollout precedent (module docs on the
+        // "4-way partitions ported" milestone in STATUS.md).
+        enable_ab_partitions: false,
     };
     let pack_cfg = aom_encode::pack::PackCfg {
         enable_filter_intra: s.enable_filter_intra,

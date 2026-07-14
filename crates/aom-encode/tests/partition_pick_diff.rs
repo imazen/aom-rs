@@ -441,6 +441,7 @@ impl CPick<'_> {
                     cfl_alpha_signs: cs,
                     tx_type_map: best.tx_type_map,
                     skip_txfm: false,
+                    raw_rdstats: stats,
                 };
                 (stats, Some(winner))
             }
@@ -1371,6 +1372,8 @@ fn rd_pick_partition_real_matches_c_recursion() {
             // rd_pick_partition_real never produces a shape they can't
             // handle. Not yet cross-checked against the C reference here.
             enable_1to4_partitions: false,
+            // Same reasoning: AB shapes are not yet cross-checked here either.
+            enable_ab_partitions: false,
         };
 
         // ---- Rust recursion ----
@@ -1379,6 +1382,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
         let mut rv = recon_v0.clone();
         let mut cfl_rust = CflCtx::new(ss_x as i32, ss_y as i32);
         let mut visits = Vec::new();
+        let mut last_source_variance = 0u32;
         let (tree, best, found) = rd_pick_partition_real(
             &env,
             &cfg,
@@ -1395,6 +1399,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
             0,
             None,
             &mut visits,
+            &mut last_source_variance,
         );
 
         // ---- C-side transcribed recursion ----
