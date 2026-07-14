@@ -562,6 +562,57 @@ after this chunk: film grain, palette/screen-content, multi-tile, superres,
 qm, lossless, intrabc, 4:2:2-chroma-deblock still rejected; SB size (64/128)
 has NO residual constraint.
 
+## Coded-lossless applied — lossless rejection DROPPED (2026-07-14, decoder track)
+
+**Coded-lossless (`--lossless=1`) is in the envelope** (ca3de30 WHT, a90b0e7
+decoder+oracle+gate). `AV1E_SET_LOSSLESS=1` forces `base_qindex 0` +
+`coded_lossless`, which flips every block's transform to forced `TX_4X4` + the
+4x4 Walsh–Hadamard (WHT), narrows `is_cfl_allowed` to `BLOCK_4X4`, and gates the
+header's loop-filter / CDEF / restoration / tx-mode reads off.
+
+- **WHT** (`aom-transform`): `av1_highbd_iwht4x4_add`
+  (`av1/common/av1_inv_txfm2d.c` + the `idct.c` `xd->lossless` routing), the 4x4
+  reversible Walsh–Hadamard, dispatched on `eob` (>1 full 16-point / else the
+  DC-only special case, which idct.c flags as significant for lossless, not an
+  optimization). One bd-parameterized highbd kernel (this build has only the
+  highbd WHT; u16 planes). Diffed vs the exported `_c` kernels
+  (`inv_txfm2d_diff.rs::highbd_iwht4x4_add_matches_c`, ~72k cases: bd 8/10/12 x
+  both eob arms x tight+strided dest, full dequant clamp range).
+- **Header parse** (`aom-decode` `frame.rs`): a TWO-PHASE parse.
+  `read_uncompressed_header` gates LF/CDEF/restoration/tx-mode on
+  `cfg.coded_lossless` — a writer-mirror INPUT the minimal-header anchor tests
+  rely on — but the decoder derives lossless status from the parsed quant +
+  segmentation like `decodeframe.c` does mid-header. Those parse BEFORE the
+  gated sections, so a probe pass yields exact quant/seg; recompute
+  `coded_lossless` (`frame_coded_lossless`, matching C's `is_coded_lossless`) and
+  re-parse with correct gating when lossless. The two blanket lossless rejects
+  become ONE narrowed reject for a genuinely MIXED frame (some-but-not-all
+  segments lossless) — never emitted by the real encoder, not differentially
+  testable, and it would need per-segment `cfl_allowed`.
+- **Driver** (`aom-decode` `lib.rs`): `TileKf::new` computes `coded_lossless` ->
+  `st.coded_lossless` (also suppresses the header CDEF-strength read, already
+  threaded). Per block: `tx_size` preempts to `TX_4X4` + the `TX_4X4`
+  `set_txfm_ctxs` stamp; chroma `uv_tx` forced `TX_4X4`; `cfl_allowed` threads
+  lossless; `reconstruct_txb_wht` (`dequant_txb` + WHT) replaces
+  `reconstruct_txb` for luma + chroma. The tx-type gate already emits `DCT_DCT`
+  at qindex 0 and `self.dequants` is already the qindex-0 row, so neither
+  changed.
+- **Oracle** (`aom-sys-ref`, APPEND-ONLY): `shim_encode_av1_kf_lossless` /
+  `ref_encode_av1_kf_lossless` (real `aom_codec_av1_cx` at `AV1E_SET_LOSSLESS=1`,
+  threaded through the existing shared encode impl; existing wrappers pass
+  `lossless=0`, a no-op) + `shim_highbd_iwht4x4_add` (the WHT unit oracle).
+
+**GATE: `lossless_streams_decode_byte_identical_to_c`, 8 arms** (8/10-bit x
+4:2:0 / 4:4:4 / monochrome x SB-multiple 64x64 + non-SB 96x80 + non-8-multiple
+100x76 crops x GOOD + ALL_INTRA). Each arm asserts BOTH byte-identity vs the
+REAL C decoder AND — since the stream is truly lossless — equality to the
+ORIGINAL source pixels. Anti-vacuous: every block is `TX_4X4` and the run
+exercises **3547 luma + 2918 chroma WHT txbs**. Envelope after this chunk:
+film grain, quant matrices, superres, `disable_cdf_update`, 4:2:2-chroma-deblock
+(nonzero chroma levels), mixed-lossless-segments, and multi-tile-GROUP (>1
+`OBU_TILE_GROUP`) still rejected; whole-frame lossless has NO residual
+constraint.
+
 ## Perf gate honest number
 
 Like-for-like vs C's production AVX2 (`aom_sad64x64_avx2`): Rust AVX2 SAD is
