@@ -4,15 +4,26 @@
 //! header parsing through the validated aom-entropy readers, default
 //! FRAME_CONTEXT init by `base_qindex`, and the KEY-frame tile decode driver.
 //!
-//! ENVELOPE — the feature set [`decode_tile_kf`] models. Anything outside it
-//! is a hard [`Err`], never a mis-decode:
+//! ENVELOPE — the feature set [`decode_tile_kf`] / [`decode_frame_tiles_kf`]
+//! models. Anything outside it is a hard [`Err`], never a mis-decode:
 //! - KEY frame, shown, not show-existing; `error_resilient` accepted.
 //! - 64x64 AND 128x128 superblocks (`use_128x128_superblock`): the
 //!   sequence-header flag drives `mib_size_log2` (4 or 5), the partition-tree
 //!   root bsize (`BLOCK_64X64` / `BLOCK_128X128`), the CDEF
 //!   per-64x64-unit strength indexing, and the loop-restoration
 //!   corners-in-sb SB extent. Gated by `sb128_streams_decode_byte_identical_to_c`.
-//! - single tile (1x1), single tile group.
+//! - ANY tile grid (`TileInfoHeader::{cols,rows}`, uniform spacing — the only
+//!   shape `AV1E_SET_TILE_COLUMNS`/`_ROWS` produces): each tile independently
+//!   decoded ([`split_tiles`] + [`decode_frame_tiles_kf`] — per-tile context
+//!   resets, tile-relative neighbour availability, a fresh `KfFrameContext`
+//!   per tile) into one shared frame reconstruction. Gated by
+//!   `multi_tile_streams_decode_byte_identical_to_c`. ONE tile GROUP per
+//!   frame only (`--num-tile-groups=1`, the default — a real encoder splits
+//!   into `OBU_TILE_GROUP`s only when explicitly configured otherwise);
+//!   [`read_full_tile_group`] hard-errors on a partial tile-group range.
+//!   Large-scale tile mode (`enable_large_scale_tile`) is not modelled —
+//!   structurally unreachable here since nothing in this parse path signals
+//!   or sets `large_scale`.
 //! - screen-content tools OFF (`allow_screen_content_tools` would put
 //!   palette/intrabc flags in the block layer).
 //! - film grain disabled at the sequence level; superres not scaled; no
@@ -52,8 +63,10 @@
 //! byte-identically against the REAL C decoder (`aom_codec_av1_dx`) on
 //! bitstreams produced by the REAL encoder at `--cpu-used=0 --end-usage=q`.
 
-use crate::{KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE, decode_tile_kf};
-use aom_entropy::dec::OdEcDec;
+use crate::{
+    KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE, TileBoundsKf, TileBytesKf,
+    decode_frame_tiles_kf,
+};
 use aom_entropy::header::{
     CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
     RestorationHeader, SequenceHeaderObu, TileInfoHeader, read_sequence_header_obu,
@@ -61,7 +74,7 @@ use aom_entropy::header::{
 };
 use aom_entropy::leb128::uleb_decode;
 use aom_entropy::obu::read_obu_header;
-use aom_entropy::partition::{KfFrameContext, TxMode};
+use aom_entropy::partition::TxMode;
 use aom_entropy::rb::ReadBitBuffer;
 use aom_quant::av1_get_qindex;
 
@@ -113,22 +126,40 @@ pub struct FrameDecode {
     /// Restoration-unit populations actually decoded+applied across all
     /// planes: `(wiener, sgrproj, none)` counts (for harness floors).
     pub lr_unit_counts: (usize, usize, usize),
+    /// `TileInfoHeader::{cols,rows}` as coded — the tile grid this frame was
+    /// decoded with (independently-decoded tiles when either exceeds 1).
+    pub tile_cols: usize,
+    pub tile_rows: usize,
 }
 
-/// `av1_get_tile_limits` (av1/common/tile_common.c) for the single-tile
-/// envelope: the min/max tile log2 bounds the tile-info reader consumes.
-/// `min_log2_rows` is `max(min_log2_tiles - log2_cols, 0)` in C with the CODED
-/// `log2_cols`; passing `log2_cols = min_log2_cols` is exact whenever the
-/// stream codes the minimum (a 1x1 tiling always does — the caller hard-errors
-/// on any other tiling immediately after the parse).
+/// `av1_get_tile_limits` (av1/common/tile_common.c): the min/max tile log2
+/// bounds the tile-info reader consumes (needed to correctly parse the
+/// unary log2_cols/log2_rows increment bits for ANY tile count, not just the
+/// single-tile envelope this was first written for — `min_log2_rows` is
+/// `max(min_log2_tiles - log2_cols, 0)` in C with the CODED `log2_cols`, and
+/// `log2_cols = min_log2_cols` is exact whenever the stream codes the
+/// minimum, e.g. a 1x1 tiling always does).
 fn tile_limits(mi_cols: i32, mi_rows: i32, mib_size_log2: u32) -> TileInfoHeader {
     const MAX_TILE_WIDTH: i32 = 4096;
     const MAX_TILE_AREA: i32 = 4096 * 2304;
     const MAX_TILE_COLS: i32 = 64;
     const MAX_TILE_ROWS: i32 = 64;
+    // `tile_log2` (tile_common.c): smallest k with `blk_size << k >= target`.
+    // NOTE (2026-07-14): this previously read `blk_size << (2 * k)` — a
+    // latent bug from the single-tile-only era, invisible because every
+    // prior test image had <= 2 SBs per axis (`tile_log2(1, sb_cols)` only
+    // diverges from the correct value once `sb_cols >= 4`, since the wrong
+    // exponent `2*k` first differs from the right one `k` at k=1: `1<<2=4`
+    // vs `1<<1=2`, both still `< 2` — or rather both still failing `< 2` —
+    // so k=1 is reached identically for sb_cols<=2 either way). Multi-tile
+    // streams on 4+ SB-wide/tall images (`multi_tile_streams_decode_
+    // byte_identical_to_c`) exposed it: a too-small `max_log2_cols`/
+    // `max_log2_rows` truncates the unary increment read loop early,
+    // misaligning every bit read after it (`context_update_tile_id`,
+    // `tile_size_bytes`, and the entire tile-group payload).
     fn tile_log2(blk_size: i32, target: i32) -> i32 {
         let mut k = 0;
-        while (blk_size << (2 * k)) < target {
+        while (blk_size << k) < target {
             k += 1;
         }
         k
@@ -159,6 +190,97 @@ fn tile_limits(mi_cols: i32, mi_rows: i32, mib_size_log2: u32) -> TileInfoHeader
 /// `set_mb_mi` (av1/common/alloccommon.c): frame mi dims, 8-pixel aligned.
 fn mi_dim(px: i32) -> i32 {
     ((px + 7) & !7) >> 2
+}
+
+/// `read_tile_group_header`'s caller in `obu.c` (`read_one_tile_group_obu` /
+/// the `is_obu_frame` inline in [`parse_frame_header`]): parse the
+/// `tile_start_and_end_present_flag` + optional explicit `tiles_log2`-bit
+/// start/end from `rb` (continuing wherever it is — mid-payload for a
+/// combined OBU_FRAME, fresh for a standalone OBU_TILE_GROUP), inferring the
+/// full tile range when the flag is absent (`num_tiles == 1` or the flag
+/// reads 0), then byte-aligning — same as the real decoder's
+/// `read_tile_group_header` + `byte_alignment` pair (obu.c). Hard-errors when
+/// the group doesn't cover every tile: a frame whose tiles are split across
+/// MORE THAN ONE tile-group OBU (`--num-tile-groups>1`) is out of envelope —
+/// aomenc only emits that when explicitly configured; the default (and every
+/// stream this driver's own oracle produces) is one tile group per frame.
+fn read_full_tile_group(rb: &mut ReadBitBuffer, ti: &TileInfoHeader) -> Result<(), String> {
+    let num_tiles = ti.cols as i32 * ti.rows as i32;
+    let tiles_log2 = ti.log2_cols + ti.log2_rows;
+    let (ts, te, present) = read_tile_group_header(rb, tiles_log2);
+    let (start_tile, end_tile) = if present {
+        (ts, te)
+    } else {
+        (0, num_tiles - 1)
+    };
+    if (start_tile, end_tile) != (0, num_tiles - 1) {
+        return Err(format!(
+            "partial tile group [{start_tile}..={end_tile}] of {num_tiles} tiles \
+             (multiple tile groups per frame not supported)"
+        ));
+    }
+    rb.byte_align();
+    Ok(())
+}
+
+/// `mem_get_varsize` (`aom_ports/mem_ops.h`): an `n`-byte (1..=4) little-endian
+/// unsigned read — the width `read_tile_info` parsed as `tile_size_bytes`.
+fn mem_get_varsize(data: &[u8], n: usize) -> usize {
+    let mut v = 0usize;
+    for (i, &b) in data.iter().take(n).enumerate() {
+        v |= (b as usize) << (8 * i);
+    }
+    v
+}
+
+/// `get_tile_buffers` / `get_tile_buffer` (decodeframe.c, the non-large-scale
+/// path): split the tile-group payload into `ti.cols * ti.rows` per-tile
+/// byte slices + their mi-space bounds (`av1_tile_set_row` / `_col`,
+/// tile_common.c — `row_start_sb[row] << mib_size_log2`, clamped to the
+/// frame's `mi_rows`/`mi_cols`, UNCONDITIONALLY — matches C's `AOMMIN` being
+/// applied to every tile, not just the last), in raster (`tile_row`-major)
+/// order. Every tile except the LAST is prefixed by a `tile_size_bytes`-byte
+/// little-endian `tile_size_minus_1`; actual size = decoded value +
+/// `AV1_MIN_TILE_SIZE_BYTES` (1). The last tile takes the remainder.
+fn split_tiles<'a>(
+    tile_data: &'a [u8],
+    ti: &TileInfoHeader,
+    tile_size_bytes: i32,
+) -> Result<Vec<TileBytesKf<'a>>, String> {
+    let num_tiles = ti.cols * ti.rows;
+    let n = tile_size_bytes as usize;
+    let mut out = Vec::with_capacity(num_tiles);
+    let mut data = tile_data;
+    let mut tc = 0usize;
+    for row in 0..ti.rows {
+        for col in 0..ti.cols {
+            let is_last = tc == num_tiles - 1;
+            let bounds = TileBoundsKf {
+                mi_row_start: ti.row_start_sb[row] << ti.mib_size_log2,
+                mi_row_end: (ti.row_start_sb[row + 1] << ti.mib_size_log2).min(ti.mi_rows),
+                mi_col_start: ti.col_start_sb[col] << ti.mib_size_log2,
+                mi_col_end: (ti.col_start_sb[col + 1] << ti.mib_size_log2).min(ti.mi_cols),
+            };
+            let size = if is_last {
+                data.len()
+            } else {
+                if data.len() < n {
+                    return Err("truncated tile-size prefix".into());
+                }
+                let sz = mem_get_varsize(data, n) + 1; // AV1_MIN_TILE_SIZE_BYTES
+                data = &data[n..];
+                sz
+            };
+            if data.len() < size {
+                return Err("truncated tile payload".into());
+            }
+            let (bytes, rest) = data.split_at(size);
+            out.push(TileBytesKf { bytes, bounds });
+            data = rest;
+            tc += 1;
+        }
+    }
+    Ok(out)
 }
 
 /// Bridge the parsed segmentation frame header into the quantizer-layer
@@ -298,12 +420,6 @@ fn parse_frame_header(
     if p.allow_intrabc {
         return Err("intrabc".into());
     }
-    if p.tile_info.cols != 1 || p.tile_info.rows != 1 {
-        return Err(format!(
-            "{}x{} tiles (single tile only)",
-            p.tile_info.cols, p.tile_info.rows
-        ));
-    }
     if p.quant.using_qmatrix {
         return Err("quantization matrices".into());
     }
@@ -360,11 +476,7 @@ fn parse_frame_header(
 
     let tile_data_off = if is_obu_frame {
         rb.byte_align();
-        // Single tile group, single tile: the tile-group header codes nothing
-        // (tiles_log2 == 0), then byte-aligns — the tile data starts here.
-        let (ts, te, _) = read_tile_group_header(&mut rb, 0);
-        debug_assert_eq!((ts, te), (0, 0));
-        rb.byte_align();
+        read_full_tile_group(&mut rb, &p.tile_info)?;
         Some(rb.bytes_read())
     } else {
         None
@@ -526,9 +638,12 @@ pub fn decode_frame_obus_prefilter(
                     let header = pending_header
                         .take()
                         .ok_or("tile group without frame header")?;
-                    // tiles_log2 == 0 (single tile): the tile-group header
-                    // codes nothing; data starts byte-aligned at offset 0.
-                    (header, payload)
+                    // A standalone OBU_TILE_GROUP payload starts fresh (no
+                    // preceding uncompressed-header bytes to continue from).
+                    let mut rb = ReadBitBuffer::new(payload);
+                    read_full_tile_group(&mut rb, &header.tile_info)?;
+                    let off = rb.bytes_read();
+                    (header, &payload[off..])
                 };
                 decoded = Some(decode_tile_payload(sh, &header, tile_data)?);
             }
@@ -593,9 +708,8 @@ fn decode_tile_payload(
         seg: bridge_segmentation(&p.segmentation),
         sb_size_128: s.sb_size_128,
     };
-    let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
-    let mut dec = OdEcDec::new(tile_data);
-    let t = decode_tile_kf(&mut dec, &cfg, &mut cdfs, 0);
+    let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
+    let t = decode_frame_tiles_kf(&tiles, &cfg, 0);
     Ok((t, cfg, p.clone()))
 }
 
@@ -668,6 +782,8 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
             }
             c
         },
+        tile_cols: p.tile_info.cols,
+        tile_rows: p.tile_info.rows,
     }
 }
 

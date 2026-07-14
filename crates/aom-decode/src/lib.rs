@@ -517,6 +517,44 @@ pub struct KfTileDecode {
     pub lr_units: [Vec<aom_entropy::lr::LrUnitInfo>; 3],
 }
 
+/// One tile's mi-space extent within the frame (`TileInfo::mi_row_start` /
+/// `mi_row_end` / `mi_col_start` / `mi_col_end`, `av1_tile_set_row` /
+/// `av1_tile_set_col`, tile_common.c: `row_start_sb[row] << mib_size_log2`,
+/// clamped to the frame's `mi_rows`/`mi_cols`). Drives tile-relative
+/// `up_available`/`left_available` (`mi_row/col > mi_row/col_start` — NOT
+/// `> 0`: a block at a tile's own top/left edge has no available neighbour
+/// even when the tile itself sits interior to the frame) and
+/// [`aom_entropy::partition::intra_avail`]'s `tile_col_end`/`tile_row_end`
+/// (has_top_right/has_bottom_left must not reach across a tile boundary).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileBoundsKf {
+    pub mi_row_start: i32,
+    pub mi_row_end: i32,
+    pub mi_col_start: i32,
+    pub mi_col_end: i32,
+}
+
+impl TileBoundsKf {
+    /// The single-tile envelope: one tile spanning the whole frame — what
+    /// [`decode_tile_kf`] always uses.
+    fn whole_frame(cfg: &KfTileConfig) -> Self {
+        TileBoundsKf {
+            mi_row_start: 0,
+            mi_row_end: cfg.mi_rows,
+            mi_col_start: 0,
+            mi_col_end: cfg.mi_cols,
+        }
+    }
+}
+
+/// One tile's entropy-coded byte payload + mi-space bounds, in raster
+/// `(tile_row, tile_col)` order — the input to [`decode_frame_tiles_kf`].
+#[derive(Clone, Copy, Debug)]
+pub struct TileBytesKf<'a> {
+    pub bytes: &'a [u8],
+    pub bounds: TileBoundsKf,
+}
+
 // ---- shared driver helpers (also used by the roundtrip mirror encoder) ----------
 
 /// `max_block_wide` / `max_block_high` (av1/common/blockd.h), luma: the block's
@@ -630,6 +668,9 @@ struct TileKf<'c> {
     /// `xd->wiener_info` / `xd->sgrproj_info` — the per-plane RU-params
     /// prediction references (`av1_reset_loop_restoration` at tile start).
     lr_refs: aom_entropy::lr::LrRefState,
+    /// This tile's mi-space extent (`xd->tile`) — see [`TileBoundsKf`]. Set
+    /// by `start_tile` at the beginning of each tile's decode.
+    tile: TileBoundsKf,
 }
 
 impl<'c> TileKf<'c> {
@@ -741,7 +782,7 @@ impl<'c> TileKf<'c> {
             xd_delta_lf: [0; 4],
             xd_delta_lf_from_base: 0,
         };
-        TileKf {
+        let mut t = TileKf {
             cfg,
             recon: vec![recon_init; stride * aligned_mi_rows * 4],
             stride,
@@ -783,16 +824,138 @@ impl<'c> TileKf<'c> {
                 }
             }),
             lr_refs: aom_entropy::lr::LrRefState::default(),
+            tile: TileBoundsKf::whole_frame(cfg),
+        };
+        // Run the same per-tile reset `start_tile` applies to any later tile
+        // — for the first (or only) tile this re-touches already-fresh state
+        // (the arrays above are already zeroed/defaulted), but keeps `new`
+        // and `start_tile` as the ONE place that logic lives.
+        let whole_frame = TileBoundsKf::whole_frame(cfg);
+        t.start_tile(whole_frame);
+        t
+    }
+
+    /// Reset the per-TILE transient state at the start of a new tile's
+    /// decode (`decode_tile`'s prologue + `decode_tiles`' per-tile setup,
+    /// decodeframe.c): `av1_zero_above_context` — the tile's OWN column-range
+    /// slice of `above_e`/`above_p`/`above_t` (chroma planes additionally
+    /// ss_x-scaled), NOT the whole frame-wide array: tiles in the same tile
+    /// row conceptually share one underlying per-tile-row buffer in C
+    /// (`above_contexts->entropy[plane][tile_row]`, absolute-mi_col-indexed);
+    /// reusing ONE array across every tile (rows and columns alike) and
+    /// zeroing only the incoming tile's own slice is bit-exact for a
+    /// single-threaded sequential tile walk (no tile ever reads outside its
+    /// own column range, and every tile's own slice is freshly zeroed right
+    /// before that tile's first read of it) — `av1_reset_loop_filter_delta`
+    /// (delta-lf carries), `av1_reset_loop_restoration` (wiener/sgrproj
+    /// prediction refs), `cfl_init` (the CfL store — `av1_init_macroblockd`,
+    /// called per tile in `decode_tiles`, resets it via `cfl_init`), and
+    /// `xd->current_base_qindex = quant_params.base_qindex` (the delta-q
+    /// carry restarts at the frame base every tile, `decode_tiles`) + the
+    /// frame-level dequant recompute that follows from it. Left context
+    /// (`av1_zero_left_context`) is NOT reset here — it is a per-SB-ROW
+    /// reset (`decode_one_tile`'s row loop), independent of tile boundaries
+    /// (it already fires for the first SB row of every tile, same as any
+    /// other row).
+    fn start_tile(&mut self, tile: TileBoundsKf) {
+        let cfg = self.cfg;
+        let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
+        let mib_size = self.st.mib_size as usize;
+        let width = (tile.mi_col_end - tile.mi_col_start) as usize;
+        let aligned_width = width.div_ceil(mib_size) * mib_size;
+        let a0 = tile.mi_col_start as usize;
+        self.above_e[0][a0..a0 + aligned_width].fill(0);
+        if !cfg.monochrome {
+            let uv_a0 = a0 >> ss_x;
+            let uv_len = aligned_width >> ss_x;
+            self.above_e[1][uv_a0..uv_a0 + uv_len].fill(0);
+            self.above_e[2][uv_a0..uv_a0 + uv_len].fill(0);
+        }
+        self.above_p[a0..a0 + aligned_width].fill(0);
+        self.above_t[a0..a0 + aligned_width].fill(TXFM_CTX_INIT);
+
+        self.cfl = CflCtx::new(ss_x as i32, ss_y as i32);
+        self.lr_refs = aom_entropy::lr::LrRefState::default();
+        self.st.xd_delta_lf = [0; 4];
+        self.st.xd_delta_lf_from_base = 0;
+        self.st.current_base_qindex = cfg.base_qindex;
+        self.dequants = plane_dequants(cfg, cfg.base_qindex);
+        self.tile = tile;
+    }
+
+    /// Decode one tile: the `decode_tile` SB row/col loop within
+    /// `self.tile`'s bounds (`start_tile` must have been called first — sets
+    /// `self.tile` plus the per-tile context/CfL/LR-ref/delta-lf/qindex
+    /// resets). Left contexts are zeroed once per SB row (fires for every
+    /// row of every tile, matching `av1_zero_left_context`'s per-row call
+    /// inside `decode_tile`), each superblock decoded through the recursive
+    /// partition walk. The SB-bound checks inside the recursion itself
+    /// (`decode_partition`'s early return, `has_rows`/`has_cols`) stay
+    /// FRAME-relative (`self.cfg.mi_rows`/`mi_cols`), matching the C
+    /// (`cm->mi_params.mi_rows`/`mi_cols`, decodeframe.c) exactly: every
+    /// non-final tile boundary is SB-grid-aligned by construction (only the
+    /// frame's true bottom/right edge ever clips a partial superblock), so a
+    /// tile-rooted SB's recursion never needs to distinguish "my tile's edge"
+    /// from "the frame's edge" — they coincide whenever it matters.
+    fn decode_one_tile(&mut self, dec: &mut OdEcDec, cdfs: &mut KfFrameContext) {
+        let sb_size = self.st.sb_size;
+        let mib_size = self.st.mib_size;
+        let mut mi_row = self.tile.mi_row_start;
+        while mi_row < self.tile.mi_row_end {
+            self.left_e = [[0; 32]; 3]; // av1_zero_left_context per SB row (all planes)
+            self.left_p = [0; 32];
+            self.left_t = [TXFM_CTX_INIT; 32]; // ..incl the left txfm-context bytes
+            let mut mi_col = self.tile.mi_col_start;
+            while mi_col < self.tile.mi_col_end {
+                self.decode_partition(dec, cdfs, mi_row, mi_col, sb_size);
+                mi_col += mib_size;
+            }
+            mi_row += mib_size;
+        }
+    }
+
+    /// Assemble the [`KfTileDecode`] result from the (possibly multi-tile)
+    /// accumulated frame state.
+    fn into_decode(self) -> KfTileDecode {
+        let cfg = self.cfg;
+        KfTileDecode {
+            recon: self.recon,
+            stride: self.stride,
+            width: cfg.mi_cols as usize * 4,
+            height: cfg.mi_rows as usize * 4,
+            recon_u: self.recon_u,
+            recon_v: self.recon_v,
+            stride_uv: self.stride_uv,
+            width_uv: if cfg.monochrome {
+                0
+            } else {
+                (cfg.mi_cols as usize * 4) >> cfg.subsampling_x
+            },
+            height_uv: if cfg.monochrome {
+                0
+            } else {
+                (cfg.mi_rows as usize * 4) >> cfg.subsampling_y
+            },
+            tree: self.tree,
+            blocks: self.blocks,
+            lr_units: self.lr_units,
         }
     }
 
     /// The `xd->above_mbmi` / `xd->left_mbmi` neighbours of the block at
     /// `(mi_row, mi_col)`: the mi-grid entries directly above / left of the
-    /// block origin, `None` when off the tile (`up_available`/`left_available`).
+    /// block origin, `None` when off the tile (`up_available`/`left_available`
+    /// — `set_mi_row_col` gates `above_mbmi`/`left_mbmi` by exactly these,
+    /// TILE-relative, not frame-relative: a block at a tile's own top/left
+    /// edge has no available neighbour even when interior to the frame,
+    /// though the underlying `mi` grid is frame-persistent and may still
+    /// hold a previous tile's stamped data there).
     fn neighbours(&self, mi_row: i32, mi_col: i32) -> (Option<MiNbrKf>, Option<MiNbrKf>) {
         let cols = self.cfg.mi_cols;
-        let above = (mi_row > 0).then(|| self.mi[((mi_row - 1) * cols + mi_col) as usize]);
-        let left = (mi_col > 0).then(|| self.mi[(mi_row * cols + mi_col - 1) as usize]);
+        let above = (mi_row > self.tile.mi_row_start)
+            .then(|| self.mi[((mi_row - 1) * cols + mi_col) as usize]);
+        let left = (mi_col > self.tile.mi_col_start)
+            .then(|| self.mi[(mi_row * cols + mi_col - 1) as usize]);
         (above, left)
     }
 
@@ -860,8 +1023,12 @@ impl<'c> TileKf<'c> {
         partition: usize,
     ) {
         let cfg = self.cfg;
-        let up_available = mi_row > 0;
-        let left_available = mi_col > 0;
+        // set_mi_row_col (av1_common_int.h): TILE-relative, not frame-relative
+        // — `xd->up_available = (mi_row > tile->mi_row_start)`. A block at a
+        // tile's own top/left edge has no available neighbour even when the
+        // tile itself sits interior to the frame (tiles code independently).
+        let up_available = mi_row > self.tile.mi_row_start;
+        let left_available = mi_col > self.tile.mi_col_start;
         let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
         // xd->is_chroma_ref (set_mi_row_col): does this block carry the (merged)
         // chroma information? Gates the UV mode-info symbols and the chroma
@@ -1129,8 +1296,8 @@ impl<'c> TileKf<'c> {
                     mi_col,
                     up_available,
                     left_available,
-                    cfg.mi_cols,
-                    cfg.mi_rows,
+                    self.tile.mi_col_end,
+                    self.tile.mi_row_end,
                     partition,
                     tx_size,
                     0,
@@ -1239,8 +1406,14 @@ impl<'c> TileKf<'c> {
             let wpx = ((MI_SIZE_WIDE[bsize] * 4) >> ss_x).max(4);
             let hpx = ((MI_SIZE_HIGH[bsize] * 4) >> ss_y).max(4);
             let bsize_uv = scale_chroma_bsize(bsize, ss_x, ss_y);
-            let up_uv = adj_row > 0;
-            let left_uv = adj_col > 0;
+            // set_mi_row_col's chroma_up_available/chroma_left_available:
+            // equal to the luma up_available/left_available EXCEPT the
+            // sub-8x8-odd-position group case, where it's `(mi_row/col - 1) >
+            // tile->mi_row/col_start` — exactly `adj_row/col >
+            // tile.mi_row/col_start` in both cases (adj_row/adj_col already
+            // encode the "-1 when sub-8x8 odd position" shift above).
+            let up_uv = adj_row > self.tile.mi_row_start;
+            let left_uv = adj_col > self.tile.mi_col_start;
             // get_filt_type(xd, plane > 0): smoothness of the chroma
             // above/left neighbours — the bottom-right-most mi of the
             // neighbouring chroma region (set_mi_row_col's chroma_above_mbmi /
@@ -1326,8 +1499,8 @@ impl<'c> TileKf<'c> {
                             adj_col,
                             up_uv,
                             left_uv,
-                            cfg.mi_cols,
-                            cfg.mi_rows,
+                            self.tile.mi_col_end,
+                            self.tile.mi_row_end,
                             partition,
                             uv_tx,
                             ss_x as i32,
@@ -1622,15 +1795,18 @@ impl<'c> TileKf<'c> {
     }
 }
 
-/// Decode one KEY-frame luma tile (the whole frame): the `decode_tile` SB
-/// row/col loop — above contexts zeroed once, left contexts zeroed per SB row,
-/// each superblock decoded through the recursive partition walk with the
-/// per-leaf mode-info → coefficient → predict → reconstruct interleave.
+/// Decode one KEY-frame luma tile spanning the WHOLE FRAME (the single-tile
+/// envelope, `TileBoundsKf::whole_frame`): the `decode_tile` SB row/col loop
+/// — above contexts zeroed once, left contexts zeroed per SB row, each
+/// superblock decoded through the recursive partition walk with the per-leaf
+/// mode-info → coefficient → predict → reconstruct interleave.
 ///
 /// `recon_init` fills the reconstruction plane before decoding; a conformant
 /// walk never *reads* an unwritten pixel (the availability logic only exposes
 /// previously reconstructed samples), so the roundtrip test gives encoder and
 /// decoder different fills to turn any availability bug into a hard mismatch.
+///
+/// For `TileInfoHeader::{cols,rows}` > 1x1, use [`decode_frame_tiles_kf`].
 pub fn decode_tile_kf(
     dec: &mut OdEcDec,
     cfg: &KfTileConfig,
@@ -1638,43 +1814,47 @@ pub fn decode_tile_kf(
     recon_init: u16,
 ) -> KfTileDecode {
     let mut t = TileKf::new(cfg, recon_init);
-    // The tile's actual SB geometry (`seq_params->sb_size`/`mib_size`), fixed
-    // by `TileKf::new` for the whole tile — read back rather than
-    // recomputed so this loop can never drift from `KfBlockState`'s value.
-    let sb_size = t.st.sb_size;
-    let mib_size = t.st.mib_size;
-    let mut mi_row = 0;
-    while mi_row < cfg.mi_rows {
-        t.left_e = [[0; 32]; 3]; // av1_zero_left_context per SB row (all planes)
-        t.left_p = [0; 32];
-        t.left_t = [TXFM_CTX_INIT; 32]; // ..incl the left txfm-context bytes
-        let mut mi_col = 0;
-        while mi_col < cfg.mi_cols {
-            t.decode_partition(dec, cdfs, mi_row, mi_col, sb_size);
-            mi_col += mib_size;
-        }
-        mi_row += mib_size;
+    t.decode_one_tile(dec, cdfs);
+    t.into_decode()
+}
+
+/// Decode a KEY frame with `tiles.len()` tiles (`tiles.len() == 1` is exactly
+/// [`decode_tile_kf`]'s envelope, byte-for-byte — both build a fresh
+/// [`TileKf`], `start_tile` it once, and run one [`TileKf::decode_one_tile`]).
+///
+/// Each tile gets: `av1_tile_init`'s bounds ([`TileBytesKf::bounds`]), a
+/// FRESH [`KfFrameContext`] (`tile_data->tctx = *cm->fc`, decodeframe.c's
+/// per-tile setup — CDF adaptation does NOT carry across tiles; every tile
+/// starts from the same default/base-qindex context and independently
+/// adapts), and a fresh [`OdEcDec`] over its own byte slice. Tiles are
+/// decoded in the given (raster, `tile_row`-major) order into ONE shared
+/// frame-aligned reconstruction: the recon planes and the mi/seg_map grids
+/// are frame-persistent across all tiles (each tile writes only its own
+/// `[mi_row_start, mi_row_end) x [mi_col_start, mi_col_end)` region; a block
+/// at a tile's own top/left edge never reads a neighbouring tile's data even
+/// though the underlying grids are shared — see [`TileBoundsKf`]).
+///
+/// NOT modelled: the `context_update_tile_id` tile's post-decode adapted
+/// CDFs becoming the frame's saved context (`REFRESH_FRAME_CONTEXT_BACKWARD`,
+/// decodeframe.c:5489, `*cm->fc = pbi->tile_data[context_update_tile_id].tctx`).
+/// That save only affects OTHER frames that reference this one as
+/// `primary_ref_frame` (inter prediction's CDF carry-in) — it has zero effect
+/// on this frame's own pixels, and this driver decodes exactly one KEY frame
+/// per call with no forward reference chain, so the saved context is never
+/// read back. Multiple tile GROUPS (a frame's tiles split across more than
+/// one `OBU_TILE_GROUP`) are also out of scope — see `frame.rs`.
+pub fn decode_frame_tiles_kf(
+    tiles: &[TileBytesKf],
+    cfg: &KfTileConfig,
+    recon_init: u16,
+) -> KfTileDecode {
+    assert!(!tiles.is_empty(), "at least one tile");
+    let mut t = TileKf::new(cfg, recon_init);
+    for tb in tiles {
+        let mut dec = OdEcDec::new(tb.bytes);
+        let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
+        t.start_tile(tb.bounds);
+        t.decode_one_tile(&mut dec, &mut cdfs);
     }
-    KfTileDecode {
-        recon: t.recon,
-        stride: t.stride,
-        width: cfg.mi_cols as usize * 4,
-        height: cfg.mi_rows as usize * 4,
-        recon_u: t.recon_u,
-        recon_v: t.recon_v,
-        stride_uv: t.stride_uv,
-        width_uv: if cfg.monochrome {
-            0
-        } else {
-            (cfg.mi_cols as usize * 4) >> cfg.subsampling_x
-        },
-        height_uv: if cfg.monochrome {
-            0
-        } else {
-            (cfg.mi_rows as usize * 4) >> cfg.subsampling_y
-        },
-        tree: t.tree,
-        blocks: t.blocks,
-        lr_units: t.lr_units,
-    }
+    t.into_decode()
 }
