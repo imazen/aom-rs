@@ -354,6 +354,20 @@ pub fn trellis_rdmult_intra_y(rdmult: i32, sharpness: i32, bd: u8) -> i64 {
     )
 }
 
+/// The intra trellis RD multiplier for any plane: the speed-0 allintra sf
+/// `use_chroma_trellis_rd_mult = 1` (speed_features.c:370) selects
+/// `plane_rd_mult_chroma[is_inter=0] = {17, 13}` (encodetxb.h:266;
+/// txb_rdopt.c:387-395) — 17 for luma (== the default table, no-op), **13**
+/// for chroma.
+#[inline]
+pub fn trellis_rdmult_intra(rdmult: i32, sharpness: i32, bd: u8, plane: usize) -> i64 {
+    let mult: i64 = if plane == 0 { 17 } else { 13 };
+    round_power_of_two_i64(
+        (rdmult as i64) * ((8 - sharpness) as i64) * (mult << (2 * (bd as i32 - 8))),
+        5,
+    )
+}
+
 /// The speed-0 policy knobs of `search_tx_type` (each documented with its
 /// speed-0 value in the module docs / commit message).
 #[derive(Clone, Copy, Debug)]
@@ -401,7 +415,9 @@ impl TxTypeSearchPolicy {
     }
 }
 
-/// Everything `search_tx_type` reads for one interior luma intra txb.
+/// Everything `search_tx_type` reads for one interior intra txb (luma or
+/// chroma — `plane` selects the tx-mask arm, the trellis rd multiplier, and
+/// the tx-type-rate gate).
 pub struct TxTypeSearchInputs<'a> {
     /// Residual (src - pred), full `TX_W x TX_H`, stride = TX_W.
     pub residual: &'a [i16],
@@ -412,7 +428,17 @@ pub struct TxTypeSearchInputs<'a> {
     /// The intra prediction, full `TX_W x TX_H` contiguous (stride = TX_W).
     pub pred: &'a [u16],
     pub tx_size: usize,
-    /// Intra mode + filter-intra state (tx-set + tx-type-rate selection).
+    /// Plane (0 = luma; 1/2 = chroma). Chroma pins the tx type to
+    /// [`uv_intra_tx_type`], uses the chroma trellis rd multiplier
+    /// (`plane_rd_mult_chroma[0][1] = 13` under the speed-0 allintra sf
+    /// `use_chroma_trellis_rd_mult = 1`), and codes no tx-type bits.
+    pub plane: usize,
+    /// The block's UV prediction mode (read when `plane > 0` for the UV tx
+    /// type; `UV_CFL_PRED = 13` maps to DC).
+    pub uv_mode: usize,
+    /// LUMA intra mode + filter-intra state (tx-set + tx-type-rate selection
+    /// — the chroma reduced-txset flag is also selected by the LUMA
+    /// direction).
     pub mode: usize,
     pub use_filter_intra: bool,
     pub filter_intra_mode: usize,
@@ -489,16 +515,31 @@ pub fn search_tx_type_intra(
     let _ = block_sse_u;
     block_sse *= 16;
 
-    // Allowed tx-type set (identity txk_map at speed 0).
-    let (allowed_tx_mask, txk_allowed) = get_tx_mask_intra(
-        tx_size,
-        inp.mode,
-        inp.use_filter_intra,
-        inp.filter_intra_mode,
-        inp.lossless,
-        inp.reduced_tx_set_used,
-        &TxMaskParams::speed0_allintra(),
-    );
+    // Allowed tx-type set (identity txk_map at speed 0); the chroma arm pins
+    // the UV tx type.
+    let (allowed_tx_mask, txk_allowed) = if inp.plane == 0 {
+        get_tx_mask_intra(
+            tx_size,
+            inp.mode,
+            inp.use_filter_intra,
+            inp.filter_intra_mode,
+            inp.lossless,
+            inp.reduced_tx_set_used,
+            &TxMaskParams::speed0_allintra(),
+        )
+    } else {
+        let (m, t) = get_tx_mask_uv_intra(
+            tx_size,
+            inp.uv_mode,
+            inp.mode,
+            inp.use_filter_intra,
+            inp.filter_intra_mode,
+            inp.lossless,
+            inp.reduced_tx_set_used,
+            &TxMaskParams::speed0_allintra(),
+        );
+        (m, Some(t))
+    };
 
     // Trellis gating: block-MSE / qstep^2 threshold.
     let mut skip_trellis = pol.skip_trellis;
@@ -522,7 +563,7 @@ pub fn search_tx_type_intra(
     // av1_setup_quant: FP with trellis, B without (USE_B_QUANT_NO_TRELLIS=1).
     let kind = if skip_trellis { QuantKind::B } else { QuantKind::Fp };
     let qp = QuantParams::from_plane_rows(inp.rows, kind, inp.bd);
-    let trellis_rdmult = trellis_rdmult_intra_y(inp.rdmult, pol.sharpness, inp.bd);
+    let trellis_rdmult = trellis_rdmult_intra(inp.rdmult, pol.sharpness, inp.bd, inp.plane);
     let opt = OptimizeInputs {
         cost: inp.coeff_costs,
         rdmult: trellis_rdmult,
@@ -562,7 +603,7 @@ pub fn search_tx_type_intra(
             let ttc = if r.eob > 0 {
                 get_tx_type_cost(
                     inp.tx_type_costs,
-                    0,
+                    inp.plane,
                     tx_size,
                     tx_type,
                     false,
@@ -599,7 +640,7 @@ pub fn search_tx_type_intra(
             ) + if xq.eob > 0 {
                 get_tx_type_cost(
                     inp.tx_type_costs,
-                    0,
+                    inp.plane,
                     tx_size,
                     tx_type,
                     false,
@@ -982,6 +1023,8 @@ pub fn txfm_rd_in_plane_intra(
                 src_stride: env.src_stride,
                 pred: &pred,
                 tx_size,
+                plane: 0,
+                uv_mode: 0,
                 mode: env.mode,
                 use_filter_intra: env.use_filter_intra,
                 filter_intra_mode: env.filter_intra_mode,

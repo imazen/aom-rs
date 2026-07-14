@@ -190,6 +190,8 @@ fn search_tx_type_intra_matches_c_chain() {
                 src_stride: STRIDE,
                 pred: &pred,
                 tx_size,
+                plane: 0,
+                uv_mode: 0,
                 mode,
                 use_filter_intra: use_fi,
                 filter_intra_mode: fi_mode,

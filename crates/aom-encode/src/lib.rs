@@ -15,6 +15,7 @@
 
 pub mod hog;
 pub mod intra_rd;
+pub mod intra_uv_rd;
 pub mod mode_costs;
 pub mod rd;
 pub mod tx_search;
