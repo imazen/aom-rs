@@ -271,6 +271,60 @@ pub fn ref_cdef_find_dir(img: &[u16], stride: usize, coeff_shift: i32) -> (i32, 
     (dir, var)
 }
 
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_cdef_filter16(
+        variant: i32,
+        dst: *mut u16,
+        dstride: i32,
+        in_buf: *const u16,
+        pri: i32,
+        sec: i32,
+        dir: i32,
+        prid: i32,
+        secd: i32,
+        cshift: i32,
+        bw: i32,
+        bh: i32,
+    );
+}
+
+/// Reference `cdef_filter_16_<variant>_c` (u16 store). Same layout contract
+/// as [`ref_cdef_filter8`].
+#[allow(clippy::too_many_arguments)]
+pub fn ref_cdef_filter16(
+    variant: i32,
+    in_buf: &[u16],
+    in_off: usize,
+    pri: i32,
+    sec: i32,
+    dir: i32,
+    prid: i32,
+    secd: i32,
+    cshift: i32,
+    bw: usize,
+    bh: usize,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; bw * bh];
+    unsafe {
+        shim_cdef_filter16(
+            variant,
+            dst.as_mut_ptr(),
+            bw as i32,
+            in_buf.as_ptr().add(in_off),
+            pri,
+            sec,
+            dir,
+            prid,
+            secd,
+            cshift,
+            bw as i32,
+            bh as i32,
+        )
+    }
+    dst
+}
+
 // sadvar_shim.c — SAD / variance / sub-pixel variance dispatch (22 sizes).
 extern "C" {
     fn shim_sad(idx: i32, s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
@@ -8147,6 +8201,90 @@ pub fn ref_lf_filter_frame(
         )
     };
     assert_eq!(rc, 0, "shim_lf_filter_frame failed ({rc})");
+}
+
+// dec_shim.c §5 — the REAL av1_cdef_frame walk over a synthetic
+// AV1_COMMON + mi grid (skip_txfm per mi, cdef_strength per 64x64 unit).
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_cdef_frame(
+        y: *mut u16,
+        y_stride: i32,
+        u: *mut u16,
+        v: *mut u16,
+        uv_stride: i32,
+        mi_rows: i32,
+        mi_cols: i32,
+        num_planes: i32,
+        ss_x: i32,
+        ss_y: i32,
+        bd: i32,
+        damping: i32,
+        strengths: *const i32,
+        uv_strengths: *const i32,
+        skip: *const i32,
+        unit_strength: *const i32,
+    ) -> i32;
+}
+
+/// Drive the REAL `av1_cdef_frame` (single-threaded decoder path) in place
+/// over u16 planes (bd 8 runs the real lowbd u8 path internally). `skip` is
+/// per-mi `skip_txfm` (`mi_rows x mi_cols`); `unit_strength` the per-64x64-fb
+/// decoded `cdef_strength` index (`ceil(mi_rows/16) x ceil(mi_cols/16)`,
+/// -1 = none read). Plane strides must be >= `align16(mi_cols*4) >> ss`.
+/// Calls `ref_init()` first (the walk dispatches `cdef_copy_rect8_*`,
+/// `cdef_find_dir[_dual]` and `cdef_filter_{8,16}_*` through RTCD).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_cdef_frame(
+    y: &mut [u16],
+    y_stride: usize,
+    u: &mut [u16],
+    v: &mut [u16],
+    uv_stride: usize,
+    mi_rows: i32,
+    mi_cols: i32,
+    num_planes: usize,
+    ss_x: usize,
+    ss_y: usize,
+    bd: i32,
+    damping: i32,
+    strengths: &[i32; 8],
+    uv_strengths: &[i32; 8],
+    skip: &[i32],
+    unit_strength: &[i32],
+) {
+    ref_init();
+    let nvfb = (mi_rows as usize).div_ceil(16);
+    let nhfb = (mi_cols as usize).div_ceil(16);
+    let luma_stride = ((mi_cols as usize * 4) + 15) & !15;
+    assert_eq!(skip.len(), (mi_rows * mi_cols) as usize);
+    assert_eq!(unit_strength.len(), nvfb * nhfb);
+    assert!(y_stride >= luma_stride && y.len() >= y_stride * (mi_rows as usize * 4));
+    if num_planes > 1 {
+        assert!(uv_stride >= luma_stride >> ss_x);
+        assert!(u.len() >= uv_stride * ((mi_rows as usize * 4) >> ss_y) && v.len() == u.len());
+    }
+    let rc = unsafe {
+        shim_cdef_frame(
+            y.as_mut_ptr(),
+            y_stride as i32,
+            u.as_mut_ptr(),
+            v.as_mut_ptr(),
+            uv_stride as i32,
+            mi_rows,
+            mi_cols,
+            num_planes as i32,
+            ss_x as i32,
+            ss_y as i32,
+            bd,
+            damping,
+            strengths.as_ptr(),
+            uv_strengths.as_ptr(),
+            skip.as_ptr(),
+            unit_strength.as_ptr(),
+        )
+    };
+    assert_eq!(rc, 0, "shim_cdef_frame failed ({rc})");
 }
 
 // av1/encoder/rd.c + rd.h (RD multiplier / RDCOST) and av1/common/quant_common.c

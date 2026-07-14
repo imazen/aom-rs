@@ -695,3 +695,152 @@ int shim_lf_filter_frame(
   free(cells);
   return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* 5. CDEF frame-application oracle                                    */
+/*                                                                     */
+/* Drives the REAL exported av1_cdef_frame (av1/common/cdef.c) —       */
+/* including av1_cdef_init_fb_row, cdef_fb_col, cdef_prepare_fb and    */
+/* av1_cdef_filter_fb — over a synthetic AV1_COMMON + per-cell         */
+/* MB_MODE_INFO grid + YV12 frame. No CDEF logic is transcribed.       */
+/*                                                                     */
+/* Per-cell flattening: skip_txfm per mi; cdef_strength stamped on     */
+/* EVERY cell of its 64x64 unit (the walk reads only the unit's        */
+/* top-left grid pointer, cdef.c:304-308; the decoder stores the       */
+/* per-unit literal there). unit_strength -1 exercises the skip arm.   */
+/* bd==8 runs the real LOWBD path (u8 planes, use_highbitdepth=0);     */
+/* bd>8 the real highbd path via CONVERT_TO_BYTEPTR.                   */
+/*                                                                     */
+/* Work buffers (linebuf/colbuf/srcbuf) are malloc'd per the           */
+/* av1_alloc_cdef_buffers single-worker formulas (alloccommon.c).      */
+/* Plane buffers MUST be >= ALIGN_POWER_OF_TWO(mi_cols*4,4) >> ss      */
+/* wide: the line-buffer copies read full aligned rows (into the YV12  */
+/* border in production).                                              */
+/* ------------------------------------------------------------------ */
+
+#include "av1/common/cdef.h"
+
+int shim_cdef_frame(uint16_t *y, int y_stride, uint16_t *u, uint16_t *v,
+                    int uv_stride, int mi_rows, int mi_cols, int num_planes,
+                    int ss_x, int ss_y, int bd, int damping,
+                    const int32_t *strengths /*[8]*/,
+                    const int32_t *uv_strengths /*[8]*/,
+                    const int32_t *skip /*mi_rows*mi_cols*/,
+                    const int32_t *unit_strength /*nvfb*nhfb*/) {
+  const int nvfb = (mi_rows + MI_SIZE_64X64 - 1) / MI_SIZE_64X64;
+  const int nhfb = (mi_cols + MI_SIZE_64X64 - 1) / MI_SIZE_64X64;
+  const int luma_stride = ALIGN_POWER_OF_TWO(mi_cols << MI_SIZE_LOG2, 4);
+  const int ncells = mi_rows * mi_cols;
+  MB_MODE_INFO *cells = (MB_MODE_INFO *)calloc(ncells, sizeof(*cells));
+  MB_MODE_INFO **grid = (MB_MODE_INFO **)calloc(ncells, sizeof(*grid));
+  AV1_COMMON *cm = (AV1_COMMON *)calloc(1, sizeof(*cm));
+  SequenceHeader *seq = (SequenceHeader *)calloc(1, sizeof(*seq));
+  MACROBLOCKD *xd = (MACROBLOCKD *)calloc(1, sizeof(*xd));
+  if (!cells || !grid || !cm || !seq || !xd) return -1;
+
+  for (int r = 0; r < mi_rows; r++) {
+    for (int c = 0; c < mi_cols; c++) {
+      const int i = r * mi_cols + c;
+      cells[i].skip_txfm = (uint8_t)skip[i];
+      cells[i].cdef_strength =
+          (int8_t)unit_strength[(r / MI_SIZE_64X64) * nhfb + (c / MI_SIZE_64X64)];
+      grid[i] = &cells[i];
+    }
+  }
+  cm->mi_params.mi_grid_base = grid;
+  cm->mi_params.mi_stride = mi_cols;
+  cm->mi_params.mi_rows = mi_rows;
+  cm->mi_params.mi_cols = mi_cols;
+
+  CdefInfo *ci = &cm->cdef_info;
+  ci->cdef_damping = damping;
+  ci->nb_cdef_strengths = 8;
+  for (int i = 0; i < 8; i++) {
+    ci->cdef_strengths[i] = strengths[i];
+    ci->cdef_uv_strengths[i] = uv_strengths[i];
+  }
+  /* av1_alloc_cdef_buffers single-worker (num_bufs=3) formulas. */
+  ci->srcbuf = (uint16_t *)malloc(sizeof(uint16_t) * CDEF_INBUF_SIZE);
+  if (!ci->srcbuf) return -2;
+  for (int plane = 0; plane < num_planes; plane++) {
+    const int shift = plane == 0 ? 0 : ss_x;
+    ci->linebuf[plane] = (uint16_t *)malloc(
+        sizeof(uint16_t) * 3 * (CDEF_VBORDER << 1) * (luma_stride >> shift));
+    const int block_height =
+        (CDEF_BLOCKSIZE << (MI_SIZE_LOG2 - shift)) * 2 * CDEF_VBORDER;
+    ci->colbuf[plane] =
+        (uint16_t *)malloc(sizeof(uint16_t) * block_height * CDEF_HBORDER);
+    if (!ci->linebuf[plane] || !ci->colbuf[plane]) return -2;
+  }
+
+  seq->monochrome = num_planes == 1;
+  seq->subsampling_x = ss_x;
+  seq->subsampling_y = ss_y;
+  seq->bit_depth = (aom_bit_depth_t)bd;
+  seq->use_highbitdepth = bd > 8;
+  seq->sb_size = BLOCK_64X64;
+  cm->seq_params = seq;
+
+  for (int plane = 0; plane < MAX_MB_PLANE; plane++) {
+    xd->plane[plane].subsampling_x = plane == 0 ? 0 : ss_x;
+    xd->plane[plane].subsampling_y = plane == 0 ? 0 : ss_y;
+  }
+
+  /* Plane buffers: bd==8 -> real lowbd path on u8 copies; bd>8 -> highbd
+   * path on the u16 buffers via CONVERT_TO_BYTEPTR. */
+  const int y_rows = mi_rows * MI_SIZE;
+  const int uv_rows = num_planes > 1 ? (y_rows >> ss_y) : 0;
+  const long uv_len = (long)uv_stride * uv_rows;
+  uint8_t *y8 = NULL, *u8b = NULL, *v8b = NULL;
+
+  YV12_BUFFER_CONFIG frame;
+  memset(&frame, 0, sizeof(frame));
+  frame.crop_widths[0] = mi_cols * MI_SIZE;
+  frame.crop_heights[0] = y_rows;
+  frame.crop_widths[1] = (mi_cols * MI_SIZE) >> ss_x;
+  frame.crop_heights[1] = uv_rows;
+  frame.strides[0] = y_stride;
+  frame.strides[1] = uv_stride;
+  if (bd == 8) {
+    y8 = (uint8_t *)malloc((size_t)y_stride * y_rows);
+    u8b = (uint8_t *)malloc(uv_len ? (size_t)uv_len : 1);
+    v8b = (uint8_t *)malloc(uv_len ? (size_t)uv_len : 1);
+    if (!y8 || !u8b || !v8b) return -2;
+    for (long i = 0; i < (long)y_stride * y_rows; i++) y8[i] = (uint8_t)y[i];
+    for (long i = 0; i < uv_len; i++) {
+      u8b[i] = (uint8_t)u[i];
+      v8b[i] = (uint8_t)v[i];
+    }
+    frame.buffers[0] = y8;
+    frame.buffers[1] = u8b;
+    frame.buffers[2] = v8b;
+  } else {
+    frame.buffers[0] = CONVERT_TO_BYTEPTR(y);
+    frame.buffers[1] = CONVERT_TO_BYTEPTR(u);
+    frame.buffers[2] = CONVERT_TO_BYTEPTR(v);
+  }
+
+  av1_cdef_frame(&frame, cm, xd, av1_cdef_init_fb_row);
+
+  if (bd == 8) {
+    for (long i = 0; i < (long)y_stride * y_rows; i++) y[i] = y8[i];
+    for (long i = 0; i < uv_len; i++) {
+      u[i] = u8b[i];
+      v[i] = v8b[i];
+    }
+    free(y8);
+    free(u8b);
+    free(v8b);
+  }
+  for (int plane = 0; plane < num_planes; plane++) {
+    free(ci->linebuf[plane]);
+    free(ci->colbuf[plane]);
+  }
+  free(ci->srcbuf);
+  free(xd);
+  free(seq);
+  free(cm);
+  free(grid);
+  free(cells);
+  return 0;
+}

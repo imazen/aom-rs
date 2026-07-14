@@ -1,9 +1,12 @@
 //! aom-cdef — bit-exact CDEF (Constrained Directional Enhancement Filter)
 //! kernels, port of libaom v3.14.1 `av1/common/cdef_block.c`. Both tracks.
-//! Starts with `cdef_find_dir` (the 8x8 direction search).
-
+//! `cdef_find_dir` (the 8x8 direction search) + the `cdef_filter_block`
+//! variants + the [`frame`] module (the `av1_cdef_frame` decoder walk).
 
 #![forbid(unsafe_code)]
+
+pub mod frame;
+
 pub const CDEF_BSTRIDE: usize = 144; // ALIGN_POWER_OF_TWO(128 + 16, 3)
 pub const CDEF_VERY_LARGE: i32 = 0x4000;
 
@@ -43,14 +46,24 @@ fn constrain(diff: i32, threshold: i32, damping: i32) -> i32 {
     sign * (threshold - (a >> shift)).clamp(0, a)
 }
 
-/// Bit-exact port of `cdef_filter_block_internal` (8-bit). `in_buf`/`in_off`
-/// give the block origin; stride is `CDEF_BSTRIDE`. Writes `dst`/`dstride`.
+/// The shared `cdef_filter_block_internal` body: identical filter math for
+/// every store width; `store(i, j, y)` receives the (possibly clamped) i32
+/// result whose C store is `(uint8_t)y` / `(uint16_t)y`.
 #[allow(clippy::too_many_arguments)]
-pub fn cdef_filter_block(
-    dst: &mut [u8], dstride: usize, in_buf: &[u16], in_off: usize,
-    pri_strength: i32, sec_strength: i32, dir: i32, pri_damping: i32, sec_damping: i32,
-    coeff_shift: i32, block_width: usize, block_height: usize,
-    enable_primary: bool, enable_secondary: bool,
+fn cdef_filter_block_core(
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_width: usize,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+    mut store: impl FnMut(usize, usize, i32),
 ) {
     let clipping_required = enable_primary && enable_secondary;
     let s = CDEF_BSTRIDE as i32;
@@ -67,11 +80,19 @@ pub fn cdef_filter_block(
                 if enable_primary {
                     let p0 = g(i * s + j + cdef_dir(dir, k));
                     let p1 = g(i * s + j - cdef_dir(dir, k));
-                    sum = sum.wrapping_add((pri_taps[k] * constrain(p0 - x, pri_strength, pri_damping)) as i16);
-                    sum = sum.wrapping_add((pri_taps[k] * constrain(p1 - x, pri_strength, pri_damping)) as i16);
+                    sum = sum.wrapping_add(
+                        (pri_taps[k] * constrain(p0 - x, pri_strength, pri_damping)) as i16,
+                    );
+                    sum = sum.wrapping_add(
+                        (pri_taps[k] * constrain(p1 - x, pri_strength, pri_damping)) as i16,
+                    );
                     if clipping_required {
-                        if p0 != CDEF_VERY_LARGE { max = max.max(p0); }
-                        if p1 != CDEF_VERY_LARGE { max = max.max(p1); }
+                        if p0 != CDEF_VERY_LARGE {
+                            max = max.max(p0);
+                        }
+                        if p1 != CDEF_VERY_LARGE {
+                            max = max.max(p1);
+                        }
                         min = min.min(p0);
                         min = min.min(p1);
                     }
@@ -82,19 +103,35 @@ pub fn cdef_filter_block(
                     let s2 = g(i * s + j + cdef_dir(dir - 2, k));
                     let s3 = g(i * s + j - cdef_dir(dir - 2, k));
                     if clipping_required {
-                        if s0 != CDEF_VERY_LARGE { max = max.max(s0); }
-                        if s1 != CDEF_VERY_LARGE { max = max.max(s1); }
-                        if s2 != CDEF_VERY_LARGE { max = max.max(s2); }
-                        if s3 != CDEF_VERY_LARGE { max = max.max(s3); }
+                        if s0 != CDEF_VERY_LARGE {
+                            max = max.max(s0);
+                        }
+                        if s1 != CDEF_VERY_LARGE {
+                            max = max.max(s1);
+                        }
+                        if s2 != CDEF_VERY_LARGE {
+                            max = max.max(s2);
+                        }
+                        if s3 != CDEF_VERY_LARGE {
+                            max = max.max(s3);
+                        }
                         min = min.min(s0);
                         min = min.min(s1);
                         min = min.min(s2);
                         min = min.min(s3);
                     }
-                    sum = sum.wrapping_add((sec_taps[k] * constrain(s0 - x, sec_strength, sec_damping)) as i16);
-                    sum = sum.wrapping_add((sec_taps[k] * constrain(s1 - x, sec_strength, sec_damping)) as i16);
-                    sum = sum.wrapping_add((sec_taps[k] * constrain(s2 - x, sec_strength, sec_damping)) as i16);
-                    sum = sum.wrapping_add((sec_taps[k] * constrain(s3 - x, sec_strength, sec_damping)) as i16);
+                    sum = sum.wrapping_add(
+                        (sec_taps[k] * constrain(s0 - x, sec_strength, sec_damping)) as i16,
+                    );
+                    sum = sum.wrapping_add(
+                        (sec_taps[k] * constrain(s1 - x, sec_strength, sec_damping)) as i16,
+                    );
+                    sum = sum.wrapping_add(
+                        (sec_taps[k] * constrain(s2 - x, sec_strength, sec_damping)) as i16,
+                    );
+                    sum = sum.wrapping_add(
+                        (sec_taps[k] * constrain(s3 - x, sec_strength, sec_damping)) as i16,
+                    );
                 }
             }
             let sneg = (sum < 0) as i32;
@@ -102,13 +139,95 @@ pub fn cdef_filter_block(
             if clipping_required {
                 y = y.clamp(min, max);
             }
-            dst[(i as usize) * dstride + j as usize] = y as u8;
+            store(i as usize, j as usize, y);
         }
     }
 }
 
+/// Bit-exact port of `cdef_filter_block_internal` (8-bit store,
+/// `cdef_filter_8_*`). `in_buf`/`in_off` give the block origin; stride is
+/// `CDEF_BSTRIDE`. Writes `dst`/`dstride`.
+#[allow(clippy::too_many_arguments)]
+pub fn cdef_filter_block(
+    dst: &mut [u8],
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_width: usize,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    cdef_filter_block_core(
+        in_buf,
+        in_off,
+        pri_strength,
+        sec_strength,
+        dir,
+        pri_damping,
+        sec_damping,
+        coeff_shift,
+        block_width,
+        block_height,
+        enable_primary,
+        enable_secondary,
+        |i, j, y| dst[i * dstride + j] = y as u8,
+    );
+}
+
+/// Bit-exact port of `cdef_filter_block_internal` with the 16-bit store
+/// (`cdef_filter_16_*`): identical math, `(uint16_t)y` store. Used by the
+/// frame walk for highbd frames AND for bd-8 frames held in u16 planes (a
+/// valid bd-8 filter result always fits u8: with clipping the result is
+/// clamped to real-neighbour min/max, without it the `constrain()` bound
+/// `|contribution| <= |diff|` keeps `x + (sum+8-neg)>>4` inside `[0, 255]`,
+/// so the u8 and u16 stores agree — cdef_frame_diff.rs pins this against the
+/// real C lowbd path).
+#[allow(clippy::too_many_arguments)]
+pub fn cdef_filter_block_16(
+    dst: &mut [u16],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_width: usize,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    cdef_filter_block_core(
+        in_buf,
+        in_off,
+        pri_strength,
+        sec_strength,
+        dir,
+        pri_damping,
+        sec_damping,
+        coeff_shift,
+        block_width,
+        block_height,
+        enable_primary,
+        enable_secondary,
+        |i, j, y| dst[dst_off + i * dstride + j] = y as u16,
+    );
+}
+
 /// Bit-exact port of `cdef_find_dir_c`. Operates on an 8x8 window of `img`
 /// (row stride `stride`). Returns `(best_dir, var)`.
+// The indexed loops mirror the C's cost/partial table walk verbatim.
+#[allow(clippy::needless_range_loop)]
 pub fn cdef_find_dir(img: &[u16], stride: usize, coeff_shift: i32) -> (i32, i32) {
     const DIV_TABLE: [i32; 9] = [0, 840, 420, 280, 210, 168, 140, 120, 105];
     let mut cost = [0i32; 8];
@@ -139,10 +258,16 @@ pub fn cdef_find_dir(img: &[u16], stride: usize, coeff_shift: i32) -> (i32, i32)
     cost[6] = cost[6].wrapping_mul(DIV_TABLE[8]);
 
     for i in 0..7 {
-        cost[0] = cost[0]
-            .wrapping_add(sq(partial[0][i]).wrapping_add(sq(partial[0][14 - i])).wrapping_mul(DIV_TABLE[i + 1]));
-        cost[4] = cost[4]
-            .wrapping_add(sq(partial[4][i]).wrapping_add(sq(partial[4][14 - i])).wrapping_mul(DIV_TABLE[i + 1]));
+        cost[0] = cost[0].wrapping_add(
+            sq(partial[0][i])
+                .wrapping_add(sq(partial[0][14 - i]))
+                .wrapping_mul(DIV_TABLE[i + 1]),
+        );
+        cost[4] = cost[4].wrapping_add(
+            sq(partial[4][i])
+                .wrapping_add(sq(partial[4][14 - i]))
+                .wrapping_mul(DIV_TABLE[i + 1]),
+        );
     }
     cost[0] = cost[0].wrapping_add(sq(partial[0][7]).wrapping_mul(DIV_TABLE[8]));
     cost[4] = cost[4].wrapping_add(sq(partial[4][7]).wrapping_mul(DIV_TABLE[8]));
