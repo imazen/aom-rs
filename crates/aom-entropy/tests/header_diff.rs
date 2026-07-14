@@ -1638,6 +1638,8 @@ fn minimal_frame_header_obu() -> aom_entropy::header::FrameHeaderObu {
         allow_ref_frame_mvs: false,
         refresh_frame_context_disabled: false,
         tile_info,
+        context_update_tile_id: 0,
+        tile_size_bytes: 1,
         quant: QuantParamsHeader {
             base_qindex: 0x20,
             y_dc_delta_q: 0,

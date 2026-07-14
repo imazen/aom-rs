@@ -970,7 +970,41 @@ fn read_tile_info_inverts_write() {
                 1 + (rng.next() % 4096) as i32,
                 1 + (rng.next() % 4096) as i32,
             );
-            let (cols, rows) = (1usize << log2_c, 1usize << log2_r);
+            // av1_calculate_tile_cols / _rows (tile_common.c): the REAL C
+            // decoder's read_tile_info_max_tile (decodeframe.c) calls these
+            // UNCONDITIONALLY after reading log2_cols/log2_rows — even in the
+            // uniform branch — deriving col/row_start_sb (and re-deriving
+            // cols/rows as the resulting loop count) from mi_cols/mi_rows, NOT
+            // simply `1 << log2_cols`. A real ENCODER populates its own
+            // TileInfoHeader the same way before ever calling write_tile_info
+            // (so the writer's `t.rows * t.cols > 1` ctx/tile_size_bytes gate
+            // agrees with what the reader re-derives); mirror that derivation
+            // here for a self-consistent writer-side fixture instead of the
+            // `1 << log2_cols` shortcut (min_c/max_c/log2_c are constructed
+            // independently of mi_cols above, unlike av1_get_tile_limits, so
+            // the two need not coincide).
+            let sb_cols = (mi_cols + (1 << mib) - 1) >> mib;
+            let sb_rows = (mi_rows + (1 << mib) - 1) >> mib;
+            let size_sb_c = (sb_cols + (1 << log2_c) - 1) >> log2_c;
+            let mut exp_col_start_sb = [0i32; 65];
+            let (mut start_sb, mut i) = (0, 0usize);
+            while start_sb < sb_cols {
+                exp_col_start_sb[i] = start_sb;
+                start_sb += size_sb_c;
+                i += 1;
+            }
+            exp_col_start_sb[i] = sb_cols;
+            let exp_cols = i;
+            let size_sb_r = (sb_rows + (1 << log2_r) - 1) >> log2_r;
+            let mut exp_row_start_sb = [0i32; 65];
+            let (mut start_sb, mut j) = (0, 0usize);
+            while start_sb < sb_rows {
+                exp_row_start_sb[j] = start_sb;
+                start_sb += size_sb_r;
+                j += 1;
+            }
+            exp_row_start_sb[j] = sb_rows;
+            let exp_rows = j;
             let t = TileInfoHeader {
                 mi_cols,
                 mi_rows,
@@ -982,10 +1016,10 @@ fn read_tile_info_inverts_write() {
                 log2_rows: log2_r,
                 min_log2_rows: min_r,
                 max_log2_rows: max_r,
-                cols,
-                rows,
-                col_start_sb: [0; 65],
-                row_start_sb: [0; 65],
+                cols: exp_cols,
+                rows: exp_rows,
+                col_start_sb: exp_col_start_sb,
+                row_start_sb: exp_row_start_sb,
                 max_width_sb: 64,
                 max_height_sb: 64,
             };
@@ -998,8 +1032,14 @@ fn read_tile_info_inverts_write() {
             );
             assert!(g.uniform_spacing, "uniform flag");
             assert_eq!((g.log2_cols, g.log2_rows), (log2_c, log2_r), "uniform log2");
-            assert_eq!((g.cols, g.rows), (cols, rows), "uniform cols/rows");
-            if rows * cols > 1 {
+            assert_eq!(
+                (g.cols, g.rows),
+                (exp_cols, exp_rows),
+                "uniform cols/rows sb=({sb_cols},{sb_rows}) log2=({log2_c},{log2_r})"
+            );
+            assert_eq!(g.col_start_sb, exp_col_start_sb, "uniform col_start_sb");
+            assert_eq!(g.row_start_sb, exp_row_start_sb, "uniform row_start_sb");
+            if exp_rows * exp_cols > 1 {
                 assert_eq!((ctx, tsb), (0, 4), "ctx/tile_size_bytes");
             }
         } else {
@@ -2267,6 +2307,8 @@ fn read_uncompressed_header_key_frame_roundtrips() {
                 max_width_sb: 64,
                 max_height_sb: 64,
             },
+            context_update_tile_id: 0,
+            tile_size_bytes: 1,
             quant: QuantParamsHeader {
                 base_qindex: base_q,
                 y_dc_delta_q: 0,
@@ -2578,6 +2620,8 @@ fn read_uncompressed_header_inter_frame_roundtrips() {
                 max_width_sb: 64,
                 max_height_sb: 64,
             },
+            context_update_tile_id: 0,
+            tile_size_bytes: 1,
             quant: QuantParamsHeader {
                 base_qindex: base_q,
                 y_dc_delta_q: 0,

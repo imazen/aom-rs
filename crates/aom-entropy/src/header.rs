@@ -1427,6 +1427,14 @@ pub struct FrameHeaderObu {
     pub refresh_frame_context_disabled: bool,
     // tail
     pub tile_info: TileInfoHeader,
+    /// `pbi->context_update_tile_id` / `pbi->tile_size_bytes` (`read_tile_info`,
+    /// only meaningful when `tile_info.cols * tile_info.rows > 1`): the tile
+    /// whose post-decode adapted CDFs become the saved frame context (backward
+    /// update — irrelevant to a single decoded frame's own pixels, only to
+    /// frames that reference it), and the LE byte width of each non-last
+    /// tile's `tile_size_minus_1` length prefix in the tile-group payload.
+    pub context_update_tile_id: i32,
+    pub tile_size_bytes: i32,
     pub quant: QuantParamsHeader,
     pub num_planes: usize,
     pub separate_uv_delta_q: bool,
@@ -2274,8 +2282,34 @@ pub fn read_tile_info_max_tile(
             }
             t.log2_rows += 1;
         }
-        t.cols = 1usize << t.log2_cols;
-        t.rows = 1usize << t.log2_rows;
+        // av1_calculate_tile_cols / av1_calculate_tile_rows (uniform-spacing
+        // branch, tile_common.c): derive the per-tile SB-grid start offsets
+        // from the coded log2 counts — needed by any per-tile consumer (the
+        // multi-tile decode driver's TileInfo::mi_row/col_start/end) since
+        // only the non-uniform branch below filled these before. `tiles->cols`
+        // /`rows` are re-derived as the loop count (== 1 << log2_cols/rows for
+        // every conformant stream, but computed exactly as the C does it).
+        let size_sb_c = ceil_power_of_two(sb_cols, t.log2_cols as u32);
+        let mut start_sb = 0;
+        let mut i = 0;
+        while start_sb < sb_cols {
+            t.col_start_sb[i] = start_sb;
+            start_sb += size_sb_c;
+            i += 1;
+        }
+        t.cols = i;
+        t.col_start_sb[i] = sb_cols;
+
+        let size_sb_r = ceil_power_of_two(sb_rows, t.log2_rows as u32);
+        let mut start_sb = 0;
+        let mut j = 0;
+        while start_sb < sb_rows {
+            t.row_start_sb[j] = start_sb;
+            start_sb += size_sb_r;
+            j += 1;
+        }
+        t.rows = j;
+        t.row_start_sb[j] = sb_rows;
     } else {
         let mut width_sb = sb_cols;
         let mut start_sb = 0;
@@ -2985,7 +3019,7 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
         p.prefix.disable_cdf_update,
     );
     let ti = &cfg.tile_info;
-    let (tile_info, _ctx, _tsb) = read_tile_info(
+    let (tile_info, ctx_update_tile_id, tile_size_bytes) = read_tile_info(
         rb,
         ti.mi_cols,
         ti.mi_rows,
@@ -2998,6 +3032,8 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
         ti.max_height_sb,
     );
     p.tile_info = tile_info;
+    p.context_update_tile_id = ctx_update_tile_id;
+    p.tile_size_bytes = tile_size_bytes;
     p.quant = read_quantization(rb, cfg.num_planes, cfg.separate_uv_delta_q);
     let has_primary_ref = p.prefix.primary_ref_frame != 7;
     p.segmentation = read_segmentation(rb, has_primary_ref);
