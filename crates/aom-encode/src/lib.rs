@@ -13,6 +13,7 @@
 //! forward transform lands.
 #![forbid(unsafe_code)]
 
+pub mod hog;
 pub mod intra_rd;
 pub mod mode_costs;
 pub mod rd;

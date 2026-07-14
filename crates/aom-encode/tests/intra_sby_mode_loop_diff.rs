@@ -19,6 +19,7 @@
 //! intra_modes_rd_cost table, the final recon planes (the cross-candidate
 //! prediction/reconstruction state), and the variance-factor caches.
 
+use aom_encode::hog::prune_intra_mode_with_hog_y;
 use aom_encode::intra_rd::{
     rd_pick_intra_sby_mode_y, Block4x4VarInfo, IntraSbyGates, IntraSbySearchCfg,
     INTRA_MODES, MAX_ANGLE_DELTA, TOP_INTRA_MODEL_COUNT,
@@ -112,17 +113,6 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
             let allintra = iter % 3 != 1; // ALLINTRA on for most cases
             let source_variance =
                 if iter % 3 == 0 { rng.range(0, 256) as u32 } else { 256 + rng.range(0, 4096) as u32 };
-            // HOG skip mask: mostly all-false; some iters mask directional
-            // modes (the HOG prune's caller-supplied output shape).
-            let mut skip_mask = [false; INTRA_MODES];
-            if iter % 4 == 2 {
-                for slot in skip_mask.iter_mut().take(9).skip(1) {
-                    if rng.next().is_multiple_of(3) {
-                        *slot = true;
-                    }
-                }
-                hog_masked_cases += 1;
-            }
             // best_rd_in: mostly MAX; some tight budgets force no-beat + the
             // running-best-rd early exits inside pick_uniform.
             let best_rd_in = if iter == 7 { 1 << 10 } else { i64::MAX };
@@ -151,6 +141,25 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                     let idx = src_off + r * STRIDE + cx;
                     let v = i64::from(recon0[idx]) + i64::from(rng.range(-src_amp, src_amp + 1));
                     src[idx] = v.clamp(0, (1 << bd) - 1) as u16;
+                }
+            }
+
+            // HOG skip mask: the REAL speed-0 prune (thresh -1.2) computed
+            // from the source pixels by BOTH sides (mask equality asserted),
+            // exactly as av1_rd_pick_intra_sby_mode fills it before the loop
+            // (intra_mode_search.c:1501-1510) — interior blocks, so
+            // mb_to_*_edge are large positive.
+            let mut skip_mask = [false; INTRA_MODES];
+            if iter % 4 == 2 {
+                prune_intra_mode_with_hog_y(
+                    &src, src_off, STRIDE, bsize, 1 << 12, 1 << 12, -1.2, &mut skip_mask,
+                );
+                let mask_c = c::ref_prune_intra_mode_with_hog_y(
+                    &src, src_off, STRIDE, bsize, 1 << 12, 1 << 12, bd, -1.2,
+                );
+                assert_eq!(skip_mask, mask_c, "hog mask ci={ci} iter={iter} bd={bd}");
+                if skip_mask.iter().any(|&b| b) {
+                    hog_masked_cases += 1;
                 }
             }
 
@@ -379,7 +388,7 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
     assert!(nobeat_cases > 2, "no-beat (tight budget) searches: {nobeat_cases}");
     assert!(prune_survivor_variety.len() > 3, "winner variety: {prune_survivor_variety:?}");
     assert!(factor_fired_total > 20, "variance-factor != 1.0 candidates: {factor_fired_total}");
-    assert!(hog_masked_cases > 6, "HOG-masked cases: {hog_masked_cases}");
+    assert!(hog_masked_cases > 4, "real-HOG masked cases: {hog_masked_cases}");
 }
 
 /// The mode-info CDF set + the dual fill (Rust tables + the C reference

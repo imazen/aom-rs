@@ -4034,3 +4034,110 @@ pub fn ref_intra_rd_variance_factor(
         )
     }
 }
+
+// HOG intra-mode prune (intra_mode_search_utils.h) — hog_shim.c includes the
+// REAL header (its own static weights/nnconfig + the real static-inline
+// generate_hog bodies). The NN oracle is av1_nn_predict_avx2 — the variant
+// RTCD resolves to on the AVX2-capable reference environment (f32 accumulation
+// order differs from the C/SSE3 variants).
+extern "C" {
+    fn shim_hog_nn_predict(hist: *const f32, reduce_prec: i32, scores: *mut f32);
+    fn shim_hog_nn_predict_dispatched(hist: *const f32, reduce_prec: i32, scores: *mut f32);
+    fn shim_generate_hog(
+        src: *const u16,
+        src_off: i32,
+        stride: i32,
+        rows: i32,
+        cols: i32,
+        bd: i32,
+        hist: *mut f32,
+    );
+    #[allow(clippy::too_many_arguments)]
+    fn shim_prune_intra_mode_with_hog_y(
+        src: *const u16,
+        src_off: i32,
+        stride: i32,
+        bsize: i32,
+        mb_to_right_edge: i32,
+        mb_to_bottom_edge: i32,
+        bd: i32,
+        th: f32,
+        mask: *mut u8,
+    );
+}
+
+/// Reference HOG-model NN predict (`av1_nn_predict_avx2` on the real
+/// `av1_intra_hog_model_nnconfig`).
+pub fn ref_hog_nn_predict(hist: &[f32; 32], reduce_prec: bool) -> [f32; 8] {
+    let mut scores = [0f32; 8];
+    unsafe { shim_hog_nn_predict(hist.as_ptr(), reduce_prec as i32, scores.as_mut_ptr()) };
+    scores
+}
+
+/// The RTCD-dispatched `av1_nn_predict` on the same config (call `ref_init`
+/// first) — lets a harness prove the dispatch resolves to the AVX2 variant on
+/// the running machine.
+pub fn ref_hog_nn_predict_dispatched(hist: &[f32; 32], reduce_prec: bool) -> [f32; 8] {
+    let mut scores = [0f32; 8];
+    unsafe {
+        shim_hog_nn_predict_dispatched(hist.as_ptr(), reduce_prec as i32, scores.as_mut_ptr())
+    };
+    scores
+}
+
+/// Reference `generate_hog` (the REAL `lowbd_generate_hog` /
+/// `highbd_generate_hog` static inlines; bd selects the variant + buffer
+/// depth). `rows`/`cols` are the caller's edge-clipped dims.
+pub fn ref_generate_hog(
+    src: &[u16],
+    src_off: usize,
+    stride: usize,
+    rows: usize,
+    cols: usize,
+    bd: u8,
+) -> [f32; 32] {
+    let mut hist = [0f32; 32];
+    unsafe {
+        shim_generate_hog(
+            src.as_ptr(),
+            src_off as i32,
+            stride as i32,
+            rows as i32,
+            cols as i32,
+            bd as i32,
+            hist.as_mut_ptr(),
+        )
+    };
+    hist
+}
+
+/// Reference `prune_intra_mode_with_hog` (luma): transcribed
+/// clip/scale/threshold wrapper over the REAL generate_hog +
+/// av1_nn_predict_avx2. Returns the 13-entry directional skip mask.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_prune_intra_mode_with_hog_y(
+    src: &[u16],
+    src_off: usize,
+    stride: usize,
+    bsize: usize,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    bd: u8,
+    th: f32,
+) -> [bool; 13] {
+    let mut mask = [0u8; 13];
+    unsafe {
+        shim_prune_intra_mode_with_hog_y(
+            src.as_ptr(),
+            src_off as i32,
+            stride as i32,
+            bsize as i32,
+            mb_to_right_edge,
+            mb_to_bottom_edge,
+            bd as i32,
+            th,
+            mask.as_mut_ptr(),
+        )
+    };
+    mask.map(|b| b != 0)
+}
