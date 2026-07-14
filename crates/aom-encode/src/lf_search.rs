@@ -69,7 +69,9 @@
 
 use crate::encode_sb::{LeafWinner, SbTree};
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
-use aom_loopfilter::frame::{LfFrameBuf, LfMi, LfMiGrid, LfParams, MAX_LOOP_FILTER, loop_filter_frame};
+use aom_loopfilter::frame::{
+    LfFrameBuf, LfMi, LfMiGrid, LfParams, MAX_LOOP_FILTER, loop_filter_frame,
+};
 
 /// `av1_set_default_ref_deltas`/`av1_set_default_mode_deltas`
 /// (`av1/common/entropymode.c`) — the KEY-frame reset values, applied via
@@ -90,7 +92,14 @@ const DEFAULT_MODE_DELTAS: [i8; 2] = [0, 0];
 /// 65535^2 ~= 2.9e14, far under `i64::MAX`), so this straight row-major sum
 /// reproduces the bit-identical i64 total regardless of tiling order — no
 /// need to replicate the tiling itself.
-pub fn sse_plane(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> i64 {
+pub fn sse_plane(
+    a: &[u16],
+    a_stride: usize,
+    b: &[u16],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> i64 {
     let mut total: i64 = 0;
     for row in 0..h {
         let ar = &a[row * a_stride..row * a_stride + w];
@@ -208,7 +217,14 @@ fn try_filter_plane(
                 bd: f.bd,
             };
             loop_filter_frame(&mut buf, &grid, &p, 0, 1);
-            sse_plane(f.src_y, f.stride, &y, f.stride, f.crop_width as usize, f.crop_height as usize)
+            sse_plane(
+                f.src_y,
+                f.stride,
+                &y,
+                f.stride,
+                f.crop_width as usize,
+                f.crop_height as usize,
+            )
         }
         1 => {
             let mut u = f.recon_u.to_vec();
@@ -252,7 +268,13 @@ fn try_filter_plane(
 /// `dir`: 2 = combined Y search (both directions equal the candidate), 0 =
 /// vertical-only (horizontal held at `held_horiz`), 1 = horizontal-only
 /// (vertical held at `held_vert`); irrelevant for chroma (`plane != 0`).
-fn filt_pair(plane: usize, dir: usize, level: i32, held_vert: i32, held_horiz: i32) -> ([i32; 2], i32, i32) {
+fn filt_pair(
+    plane: usize,
+    dir: usize,
+    level: i32,
+    held_vert: i32,
+    held_horiz: i32,
+) -> ([i32; 2], i32, i32) {
     if plane == 0 {
         let fl = match dir {
             0 => [level, held_horiz],
@@ -345,7 +367,11 @@ fn search_filter_level(
 /// selects the ALLINTRA-vs-GOOD sharpness derivation (`sharpness` is this
 /// port's `--sharpness`-equivalent input, 0 for every case actually
 /// exercised so far).
-pub fn pick_filter_level(f: &LfSearchFrame, allintra: bool, sharpness_cfg: i32) -> LoopFilterLevels {
+pub fn pick_filter_level(
+    f: &LfSearchFrame,
+    allintra: bool,
+    sharpness_cfg: i32,
+) -> LoopFilterLevels {
     let sharpness = if allintra { sharpness_cfg } else { 0 };
 
     // Y: combined search first (both directions equal), then refine vertical
@@ -366,7 +392,12 @@ pub fn pick_filter_level(f: &LfSearchFrame, allintra: bool, sharpness_cfg: i32) 
         )
     };
 
-    LoopFilterLevels { filter_level, filter_level_u, filter_level_v, sharpness }
+    LoopFilterLevels {
+        filter_level,
+        filter_level_u,
+        filter_level_v,
+        sharpness,
+    }
 }
 
 // ---- mi-grid construction from this port's OWN picked+packed trees -------
@@ -381,13 +412,29 @@ pub fn pick_filter_level(f: &LfSearchFrame, allintra: bool, sharpness_cfg: i32) 
 /// frame constants (no segmentation; every block is intra, `ref0 ==
 /// INTRA_FRAME == 0`; every intra mode maps to `mode_lf == 0` via
 /// `MODE_LF_LUT`; no delta-lf signaling in this envelope).
-pub fn build_lf_mi_grid(trees: &[SbTree], mi_rows: i32, mi_cols: i32, n_sb_cols: i32, sb_mi: i32, sb_size: usize) -> Vec<LfMi> {
+pub fn build_lf_mi_grid(
+    trees: &[SbTree],
+    mi_rows: i32,
+    mi_cols: i32,
+    n_sb_cols: i32,
+    sb_mi: i32,
+    sb_size: usize,
+) -> Vec<LfMi> {
     let mut mi = vec![LfMi::default(); mi_rows as usize * mi_cols as usize];
     let stride = mi_cols as usize;
     for (idx, tree) in trees.iter().enumerate() {
         let r = idx as i32 / n_sb_cols;
         let c = idx as i32 % n_sb_cols;
-        stamp_lf_tree(&mut mi, stride, tree, r * sb_mi, c * sb_mi, sb_size, mi_rows, mi_cols);
+        stamp_lf_tree(
+            &mut mi,
+            stride,
+            tree,
+            r * sb_mi,
+            c * sb_mi,
+            sb_size,
+            mi_rows,
+            mi_cols,
+        );
     }
     mi
 }
@@ -406,7 +453,17 @@ fn lf_cell(bsize: usize, w: &LeafWinner) -> LfMi {
     }
 }
 
-fn stamp_lf(mi: &mut [LfMi], stride: usize, mi_row: i32, mi_col: i32, bsize: usize, w: &LeafWinner, mi_rows: i32, mi_cols: i32) {
+#[allow(clippy::too_many_arguments)]
+fn stamp_lf(
+    mi: &mut [LfMi],
+    stride: usize,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    w: &LeafWinner,
+    mi_rows: i32,
+    mi_cols: i32,
+) {
     let rows = (MI_SIZE_HIGH_B[bsize] as i32).min(mi_rows - mi_row) as usize;
     let cols = (MI_SIZE_WIDE_B[bsize] as i32).min(mi_cols - mi_col) as usize;
     let cell = lf_cell(bsize, w);
@@ -430,7 +487,16 @@ const PARTITION_VERT_4: i32 = 9;
 /// rect/4-way second+ sub-block), stamping [`LfMi`] cells instead of a mode
 /// byte.
 #[allow(clippy::too_many_arguments)]
-fn stamp_lf_tree(mi: &mut [LfMi], stride: usize, tree: &SbTree, mi_row: i32, mi_col: i32, bsize: usize, mi_rows: i32, mi_cols: i32) {
+fn stamp_lf_tree(
+    mi: &mut [LfMi],
+    stride: usize,
+    tree: &SbTree,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    mi_rows: i32,
+    mi_cols: i32,
+) {
     if mi_row >= mi_rows || mi_col >= mi_cols {
         return;
     }
@@ -457,7 +523,16 @@ fn stamp_lf_tree(mi: &mut [LfMi], stride: usize, tree: &SbTree, mi_row: i32, mi_
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(mi, stride, mi_row, mi_col, sub, &subs[0], mi_rows, mi_cols);
             if mi_row + hbs < mi_rows {
-                stamp_lf(mi, stride, mi_row + hbs, mi_col, sub, &subs[1], mi_rows, mi_cols);
+                stamp_lf(
+                    mi,
+                    stride,
+                    mi_row + hbs,
+                    mi_col,
+                    sub,
+                    &subs[1],
+                    mi_rows,
+                    mi_cols,
+                );
             }
         }
         SbTree::Vert(subs) => {
@@ -465,11 +540,21 @@ fn stamp_lf_tree(mi: &mut [LfMi], stride: usize, tree: &SbTree, mi_row: i32, mi_
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(mi, stride, mi_row, mi_col, sub, &subs[0], mi_rows, mi_cols);
             if mi_col + hbs < mi_cols {
-                stamp_lf(mi, stride, mi_row, mi_col + hbs, sub, &subs[1], mi_rows, mi_cols);
+                stamp_lf(
+                    mi,
+                    stride,
+                    mi_row,
+                    mi_col + hbs,
+                    sub,
+                    &subs[1],
+                    mi_rows,
+                    mi_cols,
+                );
             }
         }
         SbTree::Horz4(subs) => {
-            let sub = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_4) as usize;
+            let sub =
+                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_4) as usize;
             let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
             for (i, w) in subs.iter().enumerate() {
                 let this_mi_row = mi_row + (i as i32) * quarter_step;
@@ -480,7 +565,8 @@ fn stamp_lf_tree(mi: &mut [LfMi], stride: usize, tree: &SbTree, mi_row: i32, mi_
             }
         }
         SbTree::Vert4(subs) => {
-            let sub = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_4) as usize;
+            let sub =
+                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_4) as usize;
             let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
             for (i, w) in subs.iter().enumerate() {
                 let this_mi_col = mi_col + (i as i32) * quarter_step;

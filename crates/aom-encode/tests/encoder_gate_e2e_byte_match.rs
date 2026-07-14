@@ -125,6 +125,21 @@ fn mi_dim(px: i32) -> i32 {
 const KF_REF_DELTAS: [i8; 8] = [1, 0, 0, 0, -1, 0, -1, -1];
 const KF_MODE_DELTAS: [i8; 2] = [0, 0];
 
+/// Deterministic pseudo-random "noise" (xorshift, no external RNG
+/// dependency) -- the SAME content family as
+/// `encoder_gate_e2e_textured_attempt`'s "pseudo-random noise" case
+/// (duplicated as a named `fn` here so [`encoder_gate_e2e_nonzero_lf_sweep`]
+/// can reuse it across multiple `cq_level`s in a `&[(.., fn(..) -> u8)]`
+/// table).
+fn noise_content(r: usize, c: usize) -> u8 {
+    let mut x = (r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (c as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    (64 + (x % 129)) as u8
+}
+
 /// Attempt the full derivation for one (w, h, mono, ss_x, ss_y, usage,
 /// cq_level) case with FLAT constant-128 source content. Returns `true` iff
 /// the assembled bytes matched the real stream byte-for-byte end to end.
@@ -160,6 +175,36 @@ fn attempt_case_content(
     cq_level: i32,
     content: impl Fn(usize, usize) -> u8,
 ) -> bool {
+    attempt_case_content_uv(
+        w,
+        h,
+        mono,
+        ss_x,
+        ss_y,
+        usage,
+        cq_level,
+        content,
+        |_r, _c| 128,
+    )
+}
+
+/// Same as [`attempt_case_content`] but ALSO accepts caller-supplied chroma
+/// content (`uv_content(row, col) -> u8`, same value used for both U and V)
+/// instead of flat mid-grey 128 -- lets a case stress ONLY the chroma
+/// search's decision space (luma stays whatever `content` produces,
+/// typically flat) while keeping the luma partition/mode landscape trivial.
+#[allow(clippy::too_many_arguments)]
+fn attempt_case_content_uv(
+    w: usize,
+    h: usize,
+    mono: bool,
+    ss_x: usize,
+    ss_y: usize,
+    usage: u32,
+    cq_level: i32,
+    content: impl Fn(usize, usize) -> u8,
+    uv_content: impl Fn(usize, usize) -> u8,
+) -> bool {
     c::ref_init();
     let mut y = vec![128u16; w * h];
     for r in 0..h {
@@ -172,8 +217,17 @@ fn attempt_case_content(
     } else {
         ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
     };
-    let u = vec![128u16; cw * ch];
-    let v = vec![128u16; cw * ch];
+    let mut u = vec![128u16; cw * ch];
+    let mut v = vec![128u16; cw * ch];
+    if !mono {
+        for r in 0..ch {
+            for col in 0..cw {
+                let val = u16::from(uv_content(r, col));
+                u[r * cw + col] = val;
+                v[r * cw + col] = val;
+            }
+        }
+    }
 
     let bytes = c::ref_encode_av1_kf(
         &y,
@@ -301,21 +355,15 @@ fn attempt_case_content(
     let allintra = usage == 2;
     let ctx = format!(
         "w={w} h={h} mono={mono} ss=({ss_x},{ss_y}) usage={usage} cq={cq_level} \
-         qindex={} lf_level={:?} tiles_log2={tiles_log2} tx_mode_select={} lossless={}",
-        p.quant.base_qindex, p.loopfilter.filter_level, p.tx_mode_select, p.coded_lossless,
+         qindex={} lf_level={:?} tiles_log2={tiles_log2} tx_mode_select={} lossless={} \
+         screen_content={}",
+        p.quant.base_qindex,
+        p.loopfilter.filter_level,
+        p.tx_mode_select,
+        p.coded_lossless,
+        p.prefix.allow_screen_content_tools,
     );
     eprintln!("{ctx}");
-    if std::env::var("DUMP_HDR").is_ok() {
-        eprintln!(
-            "{ctx}: DUMP prefix.allow_screen_content_tools={} outer.allow_screen_content_tools={} \
-             superres_scaled={} allow_intrabc={} frame_size={:?}",
-            p.prefix.allow_screen_content_tools,
-            p.allow_screen_content_tools,
-            p.superres_scaled,
-            p.allow_intrabc,
-            p.frame_size,
-        );
-    }
     assert_eq!(tiles_log2, 0, "{ctx}: single-tile envelope only");
 
     let tile_data_start = real_bit_len.div_ceil(8);
@@ -781,6 +829,181 @@ fn encoder_gate_e2e_ab_attempt() {
     eprintln!(
         "encoder_gate_e2e_ab_attempt: {matched}/{} AB-probe cases byte-identical end-to-end \
          (exploratory -- AB partitions unported, see module docs; not asserted)",
+        cases.len()
+    );
+}
+
+/// EXPLORATORY, unasserted: sweep content/cq_level candidates looking for a
+/// case that (a) drives a genuinely NONZERO luma LF level, (b) does NOT
+/// trigger real aomenc's screen-content-tools auto-detection (avoids the
+/// separate, unrelated `aom-entropy` bug documented in STATUS.md — see the
+/// "Loop-filter-level RD search ported" milestone), and (c) stays within
+/// this port's ported partition types (no AB needed — checked via
+/// `real_tile_bytes.len() == our_tile_bytes.len()` as a necessary, not
+/// sufficient, proxy). Print-only; the follow-up chunk promotes any winner
+/// into an asserted regression gate. NOT part of the AB-probe family
+/// (deliberately avoids short-period repeating patterns, which the AB-probe
+/// findings show trip screen-content-tools).
+#[test]
+fn encoder_gate_e2e_nonzero_lf_sweep() {
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, i32, fn(usize, usize) -> u8)] = &[
+        ("steep gradient cq32", 32, |r, _c| (r * 4).min(255) as u8),
+        ("steep gradient cq48", 48, |r, _c| (r * 4).min(255) as u8),
+        ("steep gradient cq60", 60, |r, _c| (r * 4).min(255) as u8),
+        ("high-contrast two-tone split cq32", 32, |_r, c| {
+            if c < 32 { 16 } else { 235 }
+        }),
+        ("high-contrast two-tone split cq48", 48, |_r, c| {
+            if c < 32 { 16 } else { 235 }
+        }),
+        ("high-contrast two-tone split cq60", 60, |_r, c| {
+            if c < 32 { 16 } else { 235 }
+        }),
+        ("bright bar on dark cq32", 32, |_r, c| {
+            if (28..36).contains(&c) { 230 } else { 30 }
+        }),
+        ("bright bar on dark cq48", 48, |_r, c| {
+            if (28..36).contains(&c) { 230 } else { 30 }
+        }),
+        ("bright bar on dark cq60", 60, |_r, c| {
+            if (28..36).contains(&c) { 230 } else { 30 }
+        }),
+        ("radial blob cq32", 32, |r, c| {
+            let dr = r as i32 - 32;
+            let dc = c as i32 - 32;
+            let d = ((dr * dr + dc * dc) as f64).sqrt();
+            (255.0 - d * 5.0).clamp(0.0, 255.0) as u8
+        }),
+        ("radial blob cq48", 48, |r, c| {
+            let dr = r as i32 - 32;
+            let dc = c as i32 - 32;
+            let d = ((dr * dr + dc * dc) as f64).sqrt();
+            (255.0 - d * 5.0).clamp(0.0, 255.0) as u8
+        }),
+        ("steep gradient both axes cq48", 48, |r, c| {
+            ((r + c) * 2).min(255) as u8
+        }),
+        ("steep gradient both axes cq60", 60, |r, c| {
+            ((r + c) * 2).min(255) as u8
+        }),
+        ("noise cq48", 48, noise_content),
+        ("noise cq60", 60, noise_content),
+        ("noise cq50", 50, noise_content),
+        ("noise cq63", 63, noise_content),
+        ("fine non-repeating ripple cq48", 48, |r, c| {
+            // Amplitude-varying "ripple": period 3 but the AMPLITUDE itself
+            // drifts across the block (not an exact repeat -- avoids
+            // screen-content-tools' exact-repeat heuristic while keeping
+            // high spatial frequency for quantization sensitivity).
+            let base = 128i32 + (r as i32 - 32);
+            let amp = 20 + (c as i32 / 8) * 10;
+            let ripple = if (r + c) % 3 == 0 { amp } else { -amp };
+            (base + ripple).clamp(0, 255) as u8
+        }),
+        ("fine non-repeating ripple cq60", 60, |r, c| {
+            let base = 128i32 + (r as i32 - 32);
+            let amp = 20 + (c as i32 / 8) * 10;
+            let ripple = if (r + c) % 3 == 0 { amp } else { -amp };
+            (base + ripple).clamp(0, 255) as u8
+        }),
+    ];
+    let mut winners = Vec::new();
+    for &(name, cq, content) in cases {
+        eprintln!("--- nonzero-LF sweep case: {name} (cq={cq}) ---");
+        if attempt_case_content(64, 64, true, 1, 1, 2, cq, content) {
+            winners.push(name);
+        }
+    }
+    // Larger frames (more SBs -> more internal edges -> more potential
+    // deblocking benefit) with 1-D stripes (not a 2-D checkerboard --
+    // avoids the AB-probe's exact "screen content" shape) at fine periods.
+    #[allow(clippy::type_complexity)]
+    let big_cases: &[(&str, usize, usize, i32, fn(usize, usize) -> u8)] = &[
+        ("128x128 vert stripes p4 cq48", 128, 128, 48, |_r, c| {
+            if (c / 4) % 2 == 0 { 70 } else { 186 }
+        }),
+        ("128x128 vert stripes p6 cq48", 128, 128, 48, |_r, c| {
+            if (c / 6) % 2 == 0 { 70 } else { 186 }
+        }),
+        ("128x128 vert stripes p4 cq32", 128, 128, 32, |_r, c| {
+            if (c / 4) % 2 == 0 { 70 } else { 186 }
+        }),
+        ("128x128 noise cq48", 128, 128, 48, noise_content),
+        ("256x256 vert stripes p4 cq48", 256, 256, 48, |_r, c| {
+            if (c / 4) % 2 == 0 { 70 } else { 186 }
+        }),
+        ("256x256 noise cq32", 256, 256, 32, noise_content),
+    ];
+    let mut big_winners = Vec::new();
+    for &(name, w, h, cq, content) in big_cases {
+        eprintln!("--- nonzero-LF sweep (multi-SB) case: {name} ---");
+        if attempt_case_content(w, h, true, 1, 1, 2, cq, content) {
+            big_winners.push(name);
+        }
+    }
+    eprintln!(
+        "encoder_gate_e2e_nonzero_lf_sweep: {}/{} single-SB cases + {}/{} multi-SB cases \
+         byte-identical end-to-end (exploratory -- see per-case eprintln output for \
+         lf_level/screen-content-tools/tile-byte-length diagnostics; not asserted, this test \
+         is a discovery tool)",
+        winners.len(),
+        cases.len(),
+        big_winners.len(),
+        big_cases.len(),
+    );
+}
+
+/// EXPLORATORY, unasserted: keep LUMA flat (128 -- trivial partition/mode
+/// landscape, matches the already-asserted flat cases) and vary ONLY
+/// chroma, looking for content that drives `filter_level_u`/`filter_level_v`
+/// nonzero while (a) staying clear of screen-content-tools (which appears
+/// to key off luma, so should stay false here regardless of chroma
+/// content -- verified per-case below, not assumed) and (b) not needing AB
+/// partitions (flat luma trivially avoids that on the luma side; chroma has
+/// no tx-depth/partition search of its own to diverge on -- `av1_get_tx_size_uv`
+/// is a pure function of bsize/lossless/subsampling, module docs on
+/// `intra_uv_rd.rs`). This is the only chunk this session exercises the
+/// [`aom_encode::lf_search::pick_filter_level`] chroma path against a
+/// genuinely nonzero real value (every other case tried, single- or
+/// multi-SB, only ever reached `filter_level_u == filter_level_v == 0`).
+#[test]
+fn encoder_gate_e2e_nonzero_lf_chroma_sweep() {
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, i32, fn(usize, usize) -> u8)] = &[
+        ("chroma checkerboard p4 cq32", 32, |r, c| {
+            if (r / 4 + c / 4) % 2 == 0 { 90 } else { 166 }
+        }),
+        ("chroma checkerboard p4 cq48", 48, |r, c| {
+            if (r / 4 + c / 4) % 2 == 0 { 90 } else { 166 }
+        }),
+        ("chroma checkerboard p2 cq32", 32, |r, c| {
+            if (r / 2 + c / 2) % 2 == 0 { 90 } else { 166 }
+        }),
+        ("chroma checkerboard p2 cq48", 48, |r, c| {
+            if (r / 2 + c / 2) % 2 == 0 { 90 } else { 166 }
+        }),
+        ("chroma stripes p2 cq32", 32, |_r, c| {
+            if (c / 2) % 2 == 0 { 90 } else { 166 }
+        }),
+        ("chroma stripes p2 cq48", 48, |_r, c| {
+            if (c / 2) % 2 == 0 { 90 } else { 166 }
+        }),
+        ("chroma noise cq32", 32, |r, c| noise_content(r, c)),
+        ("chroma noise cq48", 48, |r, c| noise_content(r, c)),
+    ];
+    let mut winners = Vec::new();
+    for &(name, cq, uv_content) in cases {
+        eprintln!("--- chroma nonzero-LF sweep case: {name} (cq={cq}) ---");
+        if attempt_case_content_uv(64, 64, false, 1, 1, 2, cq, |_r, _c| 128, uv_content) {
+            winners.push(name);
+        }
+    }
+    eprintln!(
+        "encoder_gate_e2e_nonzero_lf_chroma_sweep: {}/{} cases byte-identical end-to-end \
+         (exploratory -- see per-case eprintln output for lf_level/screen-content-tools/\
+         tile-byte-length diagnostics; not asserted, this test is a discovery tool)",
+        winners.len(),
         cases.len()
     );
 }

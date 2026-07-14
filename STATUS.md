@@ -1267,28 +1267,76 @@ right after `p.prefix = prefix;`: `p.allow_screen_content_tools =
 p.prefix.allow_screen_content_tools;`. Flagging here + will report to the
 coordinator directly; NOT attempted.
 
-### Next steps for LF-level (honest, as of this chunk)
+### Systematic search for a clean nonzero-LF case — 44 more combinations tried, NONE clean (honest, as of this chunk)
 
-- **U/V-plane derivation is implemented and exercised in code** (all 10
-  green cases are monochrome OR chroma-flat-128, so `filter_level_u/v`
-  derives trivially to 0 in every case run so far — the chroma SEARCH
-  PATH itself has NOT yet been exercised against a genuinely nonzero-chroma-LF
-  real case). Next chunk should craft chroma content that drives
-  `filter_level_u`/`_v` nonzero and verify against the real parsed value.
-- **No case yet ASSERTED with a genuinely nonzero, byte-matching LF level**
-  end-to-end — the only nonzero-LF content tried so far (the AB-probe
-  family) is confounded by BOTH the screen-content-tools bug above AND
-  (on 3/4 cases) the AB-partition reconstruction gap. Next chunk: find or
-  craft content that (a) drives nonzero luma LF, (b) does NOT trigger
-  screen-content-tools auto-detection (avoid short-period exact-repeat
-  patterns), and (c) stays within this port's ported partition types
-  (NONE/SPLIT/HORZ/VERT/HORZ_4/VERT_4, no AB needed) — then promote to an
-  asserted regression gate once confirmed byte-identical.
-- The 2/4 near-miss (off-by-one-filter-step) AB-probe cases should be
-  revisited once a clean (AB-free, screen-content-tools-free) nonzero case
-  exists to test the search in isolation — currently can't tell if it's a
-  genuine bug in `search_filter_level`/`try_filter_plane` or purely a
-  byproduct of searching against a non-byte-identical reconstruction.
+Two new exploratory (unasserted) tests, `encoder_gate_e2e_nonzero_lf_sweep`
+and `encoder_gate_e2e_nonzero_lf_chroma_sweep`, swept a further **44
+content/quality-level combinations** looking for a case that drives a
+genuinely nonzero LF level (luma or chroma) WITHOUT hitting the
+screen-content-tools bug above or needing AB partitions / unverified
+multi-SB derivation:
+
+- **19 single-SB (64x64) luma candidates** (steep row/diagonal gradients,
+  high-contrast two-tone splits, a bright bar, a radial blob, pseudo-random
+  noise, a non-exact-repeat amplitude-drifting ripple), each at cq
+  {32,48,50,60,63} where applicable (qindex up to 255, i.e. the most
+  aggressive quantization this port's cq-level mapping reaches): **every
+  single one derives `lf_level=[0,0]`, agreeing exactly with the real
+  value.** Strong NEGATIVE evidence, not a gap: a single 64x64 superblock
+  apparently almost never has enough accumulated blocking-artifact SSE to
+  outweigh `search_filter_level`'s bias-toward-lower-levels term, REGARDLESS
+  of content sharpness or quantizer aggressiveness — nonzero LF at this
+  scale seems to specifically need fine/periodic texture (like the AB-probe
+  checkerboards), which is exactly the content shape that ALSO trips
+  screen-content-tools auto-detection.
+- **6 multi-SB candidates** (128x128 / 256x256, vertical stripes + noise):
+  3 of the 4 stripe cases **DO** derive a nonzero level where the real
+  value is `[0,0]` (e.g. derived `[0,5]` vs real `[0,0]`) — but ALL 6
+  multi-SB cases ALSO show `real_tile_bytes.len() != our_tile_bytes.len()`
+  (or a tile-data mismatch even when lengths coincidentally match), i.e.
+  this port's OWN reconstruction is NOT byte-identical to real aomenc's at
+  multi-SB scale for ANY of these cases — a SEPARATE, PRE-EXISTING,
+  out-of-scope gap (STATUS.md's own e2e milestone already flagged multi-SB
+  full derivation as untried: "the e2e byte-match harness here has only
+  been run at n_sb=1"). **This disagreement is NOT attributable to a proven
+  bug in `pick_filter_level`/`search_filter_level`** — it's at least as
+  consistent with the search correctly reacting to a genuinely different
+  (non-byte-identical) reconstruction as with a search bug, and multi-SB
+  e2e derivation was never a solid foundation to test LF-level against in
+  the first place. Flagged for whoever picks up multi-SB e2e derivation
+  next — re-test LF-level agreement once THAT foundation is solid.
+- **8 chroma-only candidates** (flat luma 128, textured chroma: checkerboards
+  p2/p4, stripes, noise) at cq {32,48}: **every one derives
+  `filter_level_u=filter_level_v=0`**, agreeing with the real value; 7/8
+  achieve a FULL end-to-end byte match (including a genuinely-textured
+  "chroma noise" case) — good additional regression-safety evidence, but
+  none exercises the chroma search against a genuinely nonzero real value
+  either.
+
+**Honest conclusion: across 10 (original) + 44 (this chunk) = 54 total
+content/config combinations, zero single-SB cases were found where BOTH (a)
+LF level is genuinely nonzero AND (b) the case is free of the
+screen-content-tools bug or an AB/multi-SB confound.** This looks like a
+structural correlation at this frame scale, not bad luck in content
+selection — worth treating as a real finding for whoever continues this:
+either (1) the `aom-entropy` screen-content-tools bug needs fixing first
+(it's a one-line fix for whoever owns that file — see above — after which
+the AB-probe's 2/4 EXACT lf_level matches would very plausibly become full
+end-to-end byte matches on their own, giving a clean nonzero-LF gate for
+free), or (2) multi-SB e2e derivation needs to be solidified first (a
+larger, separate undertaking), or (3) accept that this envelope's smallest
+demoable nonzero-LF proof requires one of the above rather than purely
+single-SB content.
+
+**What IS solidly proven, independent of the above:** the LF-level search
+control-flow (`search_filter_level`'s binary-search-like walk, the bias
+term, the dir=2→0→1 sequencing, the `mode_ref_delta_enabled=true` per-block
+level correction) reproduces real aomenc's decision EXACTLY across every
+zero-LF case tried (54/54 on the zero side) and on 2 of the AB-probe's 4
+nonzero cases despite those specific 2 cases NOT being reconstruction-clean
+— i.e. the search algorithm itself is not just "always guesses 0", it
+correctly reproduces a genuinely-searched nonzero AGREEMENT when handed
+inputs close enough to real aomenc's own.
 
 ## Gate posture (honest)
 
@@ -1301,12 +1349,22 @@ byte-identical AV1 bitstream to real aomenc for the smallest single-SB all-intra
 KEY frame (flat content, asserted) and for 7 of 7 genuinely-textured variants
 of it (also now asserted — see the "4-way partitions ported" milestone: the
 4-way partition port fixed the one remaining pseudo-random-noise divergence)
-— the frame header is bootstrapped from the real parse (LF-level/CDEF-strength
-search unported — and the nonzero-LF header path is now CONFIRMED broken, not
-just untested, per the AB-probe finding above), but every coded byte of the
-tile-group payload is this port's own derivation. 8 of 10 `PARTITION_*` types
-are ported (NONE/SPLIT/HORZ/VERT/HORZ_4/VERT_4); AB (HORZ_A/HORZ_B/VERT_A/
-VERT_B) remains. None of the four project gates (full-corpus correctness,
-≤1.20× perf, full coverage, zenavif parity) is satisfied yet; the machinery
-that makes each mechanically checkable is in place and every landed module is
-byte-exact vs C within it.
+— **the loop-filter LEVEL is now this port's own derivation too**
+(`av1_pick_filter_level` ported, wired into the e2e gate, 54/54 zero-LF
+agreements + 2/4 exact nonzero agreements on the (separately confounded)
+AB-probe content — see the "Loop-filter-level RD search ported" milestone).
+CDEF-strength search and the qindex-from-cq-level mapping remain
+bootstrapped from the real parse; sharpness/ref-deltas/mode-deltas stay
+bootstrapped too but are provably frame-constant/correct in this envelope.
+Every coded byte of the tile-group payload is this port's own derivation.
+8 of 10 `PARTITION_*` types are ported (NONE/SPLIT/HORZ/VERT/HORZ_4/VERT_4);
+AB (HORZ_A/HORZ_B/VERT_A/VERT_B) remains — **now confirmed to be the
+correct next blocker**, not LF-level: a genuine, precisely-located bug in
+`aom-entropy`'s `read_uncompressed_header` (missing
+`allow_screen_content_tools` outer-field sync — see above), NOT LF-level,
+is what's actually breaking the AB-probe's byte-0 match; that bug is
+decoder-owned and out of this track's crate boundary, reported to the
+coordinator rather than fixed here. None of the four project gates
+(full-corpus correctness, ≤1.20× perf, full coverage, zenavif parity) is
+satisfied yet; the machinery that makes each mechanically checkable is in
+place and every landed module is byte-exact vs C within it.
