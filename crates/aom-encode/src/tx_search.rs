@@ -632,3 +632,516 @@ pub fn dist_block_px_domain_interior(
         aom_dist::highbd_variance(&src[src_off..], src_stride, &recon, w, w, h, bd);
     16 * i64::from(sse)
 }
+
+// ---------------------------------------------------------------------------
+// av1_txfm_rd_in_plane + uniform_txfm_yrd (tx_search.c) — the per-tx-size
+// evaluator: foreach-txb walk (predict-from-recon -> subtract ->
+// search_tx_type -> recon feedback -> entropy-ctx threading) + the intra
+// skip/no-skip + tx-size-rate RD assembly.
+// ---------------------------------------------------------------------------
+
+use crate::mode_costs::{block_signals_txsize, tx_size_cost, TxSizeCosts};
+use aom_dist::highbd_subtract_block;
+use aom_entropy::partition::intra_avail;
+use aom_intra::predict_intra_high;
+
+/// `RD_STATS` as this walk uses it (rate `i32::MAX` = invalid).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RdStats {
+    pub rate: i32,
+    pub dist: i64,
+    pub sse: i64,
+    pub skip_txfm: bool,
+}
+
+impl RdStats {
+    /// `av1_init_rd_stats` (zero, skip = 1).
+    pub fn zero() -> Self {
+        RdStats { rate: 0, dist: 0, sse: 0, skip_txfm: true }
+    }
+    /// `av1_merge_rd_stats` (rate saturates at `INT_MAX`).
+    pub fn merge(&mut self, o: &RdStats) {
+        if self.rate == i32::MAX || o.rate == i32::MAX {
+            self.rate = i32::MAX;
+            return;
+        }
+        self.rate = (i64::from(self.rate) + i64::from(o.rate)).min(i64::from(i32::MAX)) as i32;
+        self.dist += o.dist;
+        self.sse += o.sse;
+        self.skip_txfm &= o.skip_txfm;
+    }
+}
+
+const MI_SIZE_WIDE_B: [usize; 22] =
+    [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
+const MI_SIZE_HIGH_B: [usize; 22] =
+    [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
+const BLK_W_B: [usize; 22] =
+    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
+const BLK_H_B: [usize; 22] =
+    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+
+/// The frame/block environment of one luma coding block's tx search — the
+/// MACROBLOCK(D) state `block_rd_txfm` reads, expressed as plain data. The
+/// mode fields are the CURRENT `mbmi` candidate under evaluation.
+pub struct TxfmYrdEnv<'a> {
+    // intra_avail frame geometry (see aom_entropy::partition::intra_avail).
+    pub sb_size: usize,
+    pub bsize: usize,
+    pub mi_row: i32,
+    pub mi_col: i32,
+    pub up_available: bool,
+    pub left_available: bool,
+    pub tile_col_end: i32,
+    pub tile_row_end: i32,
+    pub partition: usize,
+    pub mi_cols: i32,
+    pub mi_rows: i32,
+    // Pixel planes: `recon[ref_off]` is the block's top-left in the
+    // reconstruction plane (prediction reads + reconstruction writes);
+    // `src[src_off]` in the source plane.
+    pub ref_off: usize,
+    pub ref_stride: usize,
+    pub src: &'a [u16],
+    pub src_off: usize,
+    pub src_stride: usize,
+    // Prediction config.
+    pub disable_edge_filter: bool,
+    pub filter_type: i32,
+    // Candidate mode.
+    pub mode: usize,
+    pub angle_delta: i32,
+    pub use_filter_intra: bool,
+    pub filter_intra_mode: usize,
+    pub lossless: bool,
+    pub reduced_tx_set_used: bool,
+    pub bd: u8,
+    // Quantizer + RD.
+    pub rows: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rdmult: i32,
+    pub coeff_costs: &'a CoeffCostTables<'a>,
+    pub tx_type_costs: &'a TxTypeCosts,
+    // Header rates: `skip_txfm_cost[skip_ctx][0/1]` (ctx = the
+    // av1_get_skip_txfm_context facade, caller-supplied) and the tx-size cost
+    // table + context (get_tx_size_context facade, caller-supplied).
+    pub skip_costs: &'a [[i32; 2]; 3],
+    pub skip_ctx: usize,
+    pub tx_size_costs: &'a TxSizeCosts,
+    pub tx_size_ctx: usize,
+    /// `tx_mode_search_type == TX_MODE_SELECT` (speed-0 all-intra: true —
+    /// USE_FULL_RD; see rdopt_utils.h select_tx_mode).
+    pub tx_mode_is_select: bool,
+    /// The block's above/left entropy contexts (`av1_get_entropy_contexts`
+    /// copies these into the walk's working arrays).
+    pub above_ctx: &'a [i8],
+    pub left_ctx: &'a [i8],
+}
+
+/// One txb's winner within a walk (the `tx_type_map` / eob state the depth
+/// loop snapshots for the winning size).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TxbWinner {
+    pub tx_type: usize,
+    pub eob: u16,
+    pub txb_ctx: u8,
+}
+
+/// `av1_txfm_rd_in_plane` (tx_search.c) for a luma intra block at `tx_size`
+/// (uniform): the `av1_foreach_transformed_block_in_plane` raster walk; per
+/// txb predict-from-recon (`intra_avail` + `predict_intra_high` INTO the
+/// recon plane, matching `av1_predict_intra_block_facade`'s in-place dst
+/// write) -> subtract -> [`search_tx_type_intra`] -> reconstruct the winner
+/// into `recon` (the `recon_intra` feedback the next txb predicts from) ->
+/// entropy-context stamp. Interior blocks (`max_blocks_*` unclipped).
+///
+/// Returns `None` when the search exits early (`exit_early` — for intra ANY
+/// early exit invalidates, tx_search.c:3786) or `current_rd > ref_best_rd` on
+/// entry; `Some(stats)` otherwise. `recon` and the working contexts are
+/// modified as the C does (the caller snapshots/restores between tx sizes).
+#[allow(clippy::too_many_arguments)]
+pub fn txfm_rd_in_plane_intra(
+    env: &TxfmYrdEnv,
+    recon: &mut [u16],
+    tx_size: usize,
+    ref_best_rd: i64,
+    current_rd_in: i64,
+    pol: &TxTypeSearchPolicy,
+) -> Option<(RdStats, Vec<TxbWinner>)> {
+    if current_rd_in > ref_best_rd {
+        return None;
+    }
+    let bsize = env.bsize;
+    let (bw, bh) = (BLK_W_B[bsize], BLK_H_B[bsize]);
+    let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
+    let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
+    let max_blocks_wide = MI_SIZE_WIDE_B[bsize];
+    let max_blocks_high = MI_SIZE_HIGH_B[bsize];
+
+    // av1_get_entropy_contexts: working copies of the neighbour contexts.
+    let mut t_above: Vec<i8> = env.above_ctx[..max_blocks_wide].to_vec();
+    let mut t_left: Vec<i8> = env.left_ctx[..max_blocks_high].to_vec();
+
+    let mut stats = RdStats::zero();
+    let mut winners: Vec<TxbWinner> = Vec::new();
+    let mut current_rd = current_rd_in;
+    let mut exit_early = false;
+
+    let mut blk_row = 0usize;
+    while blk_row < max_blocks_high {
+        let mut blk_col = 0usize;
+        while blk_col < max_blocks_wide {
+            if exit_early {
+                // C: the next block_rd_txfm call marks incomplete_exit; for
+                // intra exit_early alone already invalidates.
+                return None;
+            }
+
+            // av1_predict_intra_block_facade: predict INTO the recon plane.
+            let (n_top, n_topright, n_left, n_bottomleft) = intra_avail(
+                env.sb_size,
+                bsize,
+                env.mi_row,
+                env.mi_col,
+                env.up_available,
+                env.left_available,
+                env.tile_col_end,
+                env.tile_row_end,
+                env.partition,
+                tx_size,
+                0,
+                0,
+                blk_row as i32,
+                blk_col as i32,
+                bw as i32,
+                bh as i32,
+                env.mi_cols,
+                env.mi_rows,
+                env.mode,
+                env.angle_delta * 3, // ANGLE_STEP
+                env.use_filter_intra,
+            );
+            let txb_off = env.ref_off + (blk_row * env.ref_stride + blk_col) * 4;
+            let mut pred = vec![0u16; txw * txh];
+            predict_intra_high(
+                recon,
+                txb_off,
+                env.ref_stride,
+                &mut pred,
+                txw,
+                env.mode,
+                env.angle_delta * 3,
+                env.use_filter_intra,
+                env.filter_intra_mode,
+                env.disable_edge_filter,
+                env.filter_type,
+                tx_size,
+                n_top as usize,
+                n_topright,
+                n_left as usize,
+                n_bottomleft,
+                env.bd as i32,
+            );
+            // The C facade writes the prediction into dst (the recon plane).
+            for r in 0..txh {
+                recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]
+                    .copy_from_slice(&pred[r * txw..r * txw + txw]);
+            }
+
+            // av1_subtract_txb.
+            let src_txb_off = env.src_off + (blk_row * env.src_stride + blk_col) * 4;
+            let mut residual = vec![0i16; txw * txh];
+            highbd_subtract_block(
+                txh,
+                txw,
+                &mut residual,
+                txw,
+                &env.src[src_txb_off..],
+                env.src_stride,
+                &pred,
+                txw,
+            );
+
+            // search_tx_type over the neighbour ctx at this txb position.
+            let bctx = crate::BlockContext {
+                plane_bsize: bsize,
+                plane: 0,
+                above: &t_above[blk_col..],
+                left: &t_left[blk_row..],
+            };
+            let inp = TxTypeSearchInputs {
+                residual: &residual,
+                src: env.src,
+                src_off: src_txb_off,
+                src_stride: env.src_stride,
+                pred: &pred,
+                tx_size,
+                mode: env.mode,
+                use_filter_intra: env.use_filter_intra,
+                filter_intra_mode: env.filter_intra_mode,
+                lossless: env.lossless,
+                reduced_tx_set_used: env.reduced_tx_set_used,
+                bd: env.bd,
+                rows: env.rows,
+                bctx: &bctx,
+                rdmult: env.rdmult,
+                coeff_costs: env.coeff_costs,
+                tx_type_costs: env.tx_type_costs,
+            };
+            let win = search_tx_type_intra(&inp, pol, ref_best_rd - current_rd)
+                .expect("search_tx_type always yields a winner");
+
+            // recon_intra: reconstruct the winner on top of the prediction so
+            // the next txb predicts from decoded pixels.
+            if win.best_eob > 0 {
+                let mut tight = pred.clone();
+                aom_transform::inv_txfm2d::av1_inv_txfm2d_add(
+                    &win.dqcoeff,
+                    &mut tight,
+                    txw,
+                    win.best_tx_type,
+                    tx_size,
+                    i32::from(env.bd),
+                );
+                for r in 0..txh {
+                    recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]
+                        .copy_from_slice(&tight[r * txw..r * txw + txw]);
+                }
+            }
+
+            winners.push(TxbWinner {
+                tx_type: win.best_tx_type,
+                eob: win.best_eob,
+                txb_ctx: win.best_txb_ctx,
+            });
+
+            // av1_set_txb_context (interior: stamp the winner's entropy ctx).
+            for a in t_above[blk_col..blk_col + txw_unit].iter_mut() {
+                *a = win.best_txb_ctx as i8;
+            }
+            for l in t_left[blk_row..blk_row + txh_unit].iter_mut() {
+                *l = win.best_txb_ctx as i8;
+            }
+
+            // Intra rd accumulation: signalled non-skip.
+            let this = RdStats {
+                rate: win.rate,
+                dist: win.dist,
+                sse: win.sse,
+                skip_txfm: false,
+            };
+            stats.merge(&this);
+            let rd = rdcost(env.rdmult, win.rate, win.dist);
+            current_rd += rd;
+            if current_rd > ref_best_rd {
+                exit_early = true;
+            }
+
+            blk_col += txw_unit;
+        }
+        blk_row += txh_unit;
+    }
+
+    if exit_early {
+        // Set on the LAST txb: intra still invalidates (invalid_rd =
+        // args.exit_early for !is_inter).
+        return None;
+    }
+    Some((stats, winners))
+}
+
+/// `uniform_txfm_yrd` (tx_search.c, intra arm): evaluate one uniform tx size
+/// for the block — tx-size rate (under TX_MODE_SELECT on signaling blocks),
+/// skip/no-skip header handling (intra: always signalled non-skip;
+/// `skip_txfm_rd = INT64_MAX`), the [`txfm_rd_in_plane_intra`] walk, and the
+/// final `RDCOST(rate + no_skip_rate + tx_size_rate, dist)` with
+/// `rate += tx_size_rate`. Returns `(rd, Some(stats))` or
+/// `(i64::MAX, None)` when invalid.
+pub fn uniform_txfm_yrd_intra(
+    env: &TxfmYrdEnv,
+    recon: &mut [u16],
+    tx_size: usize,
+    ref_best_rd: i64,
+    pol: &TxTypeSearchPolicy,
+) -> (i64, Option<(RdStats, Vec<TxbWinner>)>) {
+    let tx_select = env.tx_mode_is_select && block_signals_txsize(env.bsize);
+    let tx_size_rate = if tx_select {
+        tx_size_cost(env.tx_size_costs, true, env.bsize, tx_size, env.tx_size_ctx)
+    } else {
+        0
+    };
+    let no_skip_txfm_rate = env.skip_costs[env.skip_ctx][0];
+    // Intra: skip_txfm_rd = INT64_MAX; current_rd = no_this_rd.
+    let no_this_rd = rdcost(env.rdmult, no_skip_txfm_rate + tx_size_rate, 0);
+
+    let Some((mut stats, winners)) =
+        txfm_rd_in_plane_intra(env, recon, tx_size, ref_best_rd, no_this_rd, pol)
+    else {
+        return (i64::MAX, None);
+    };
+    if stats.rate == i32::MAX {
+        return (i64::MAX, None);
+    }
+
+    // Intra blocks are always signalled as non-skip.
+    let rd = rdcost(env.rdmult, stats.rate + no_skip_txfm_rate + tx_size_rate, stats.dist);
+    stats.rate += tx_size_rate;
+    (rd, Some((stats, winners)))
+}
+
+// ---------------------------------------------------------------------------
+// choose_tx_size_type_from_rd + av1_pick_uniform_tx_size_type_yrd
+// (tx_search.c) — the uniform tx-size depth search, luma intra.
+// ---------------------------------------------------------------------------
+
+/// `max_txsize_rect_lookup[BLOCK_SIZES_ALL]` (common_data.h).
+pub const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] =
+    [0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18];
+/// `sub_tx_size_map[TX_SIZES_ALL]` (common_data.h): rect sizes halve the LONG
+/// side.
+pub const SUB_TX_SIZE_MAP: [usize; 19] =
+    [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
+/// `MAX_TX_DEPTH` (blockd.h).
+pub const MAX_TX_DEPTH: i32 = 2;
+
+/// `get_search_init_depth` (tx_search.c) for intra at speed-0 all-intra:
+/// `intra_tx_size_search_init_depth_sqr = 1` (speed-0 allintra block),
+/// `intra_tx_size_search_init_depth_rect = 0` (default),
+/// `tx_size_search_lgr_block = 0` (default). USE_FULL_RD (never LARGESTALL
+/// here — that arm returns MAX_VARTX_DEPTH upstream).
+pub fn get_search_init_depth_intra_speed0(mi_width: usize, mi_height: usize) -> i32 {
+    if mi_height != mi_width {
+        0 // intra_tx_size_search_init_depth_rect
+    } else {
+        1 // intra_tx_size_search_init_depth_sqr
+    }
+}
+
+/// The outcome of the depth search: the chosen uniform tx size, its per-txb
+/// winners (the `tx_type_map` snapshot), and the block RD stats.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxSizeChoice {
+    pub best_tx_size: usize,
+    pub best_rd: i64,
+    pub stats: RdStats,
+    pub winners: Vec<TxbWinner>,
+}
+
+/// `choose_tx_size_type_from_rd` (tx_search.c, static) — the uniform-tx-size
+/// depth sweep for a luma intra block under `TX_MODE_SELECT` at the speed-0
+/// policy: start at `max_txsize_rect_lookup[bsize]` skipped down by
+/// `init_depth` steps, evaluate each depth with [`uniform_txfm_yrd_intra`],
+/// keep the strict-min, stop at TX_4X4 or on the low-contrast
+/// (`source_variance < 256`) regression prune.
+///
+/// Speed-0 resolution (each named): `init_depth` per
+/// [`get_search_init_depth_intra_speed0`]; `enable_tx64`/`enable_rect_tx`
+/// CLI-default ON (the disable arms are `continue`s, kept via params);
+/// `use_rd_based_breakout_for_intra_tx_search = false` (rd_thresh is always
+/// `ref_best_rd`); `prune_intra_tx_depths_using_nn = false` (no NN pruning);
+/// `x->rd_model = FULL_TXFM_RD`.
+///
+/// `source_variance` is `x->source_variance` (the source block's per-pixel
+/// variance, computed upstream by the encoder — caller-supplied).
+/// Returns `None` when no depth produced a valid RD (rate stays `INT_MAX`).
+#[allow(clippy::too_many_arguments)]
+pub fn choose_tx_size_type_from_rd_intra(
+    env: &TxfmYrdEnv,
+    recon: &mut [u16],
+    ref_best_rd: i64,
+    pol: &TxTypeSearchPolicy,
+    source_variance: u32,
+    enable_tx64: bool,
+    enable_rect_tx: bool,
+) -> Option<TxSizeChoice> {
+    let bsize = env.bsize;
+    let max_rect_tx_size = MAX_TXSIZE_RECT_LOOKUP[bsize];
+    // tx_select is TX_MODE_SELECT here (the LARGESTALL/ONLY_4X4 arms are the
+    // caller's — see av1_pick_uniform_tx_size_type_yrd).
+    let mut start_tx = max_rect_tx_size;
+    let init_depth = get_search_init_depth_intra_speed0(
+        MI_SIZE_WIDE_B[bsize],
+        MI_SIZE_HIGH_B[bsize],
+    );
+    if init_depth == MAX_TX_DEPTH && !enable_tx64 && TXSIZE_SQR_UP_MAP[start_tx] == 4 {
+        start_tx = SUB_TX_SIZE_MAP[start_tx];
+    }
+
+    let mut best: Option<TxSizeChoice> = None;
+    let mut best_rd = i64::MAX;
+    let mut rd = [i64::MAX; MAX_TX_DEPTH as usize + 1];
+    let mut tx_size = start_tx;
+    let mut depth = init_depth;
+    while depth <= MAX_TX_DEPTH {
+        if (!enable_tx64 && TXSIZE_SQR_UP_MAP[tx_size] == 4)
+            || (!enable_rect_tx && TXS_W[tx_size] != TXS_H[tx_size])
+        {
+            depth += 1;
+            tx_size = SUB_TX_SIZE_MAP[tx_size];
+            continue;
+        }
+        // use_rd_based_breakout_for_intra_tx_search = false => ref_best_rd.
+        let (this_rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, ref_best_rd, pol);
+        rd[depth as usize] = this_rd;
+        if this_rd < best_rd {
+            let (stats, winners) = res.expect("valid rd implies stats");
+            best_rd = this_rd;
+            best = Some(TxSizeChoice { best_tx_size: tx_size, best_rd, stats, winners });
+        }
+        if tx_size == 0 {
+            break; // TX_4X4
+        }
+        // Low-contrast regression prune across the two searched depths.
+        if depth > init_depth && depth != MAX_TX_DEPTH && source_variance < 256 {
+            let prev = rd[depth as usize - 1];
+            if prev != i64::MAX && rd[depth as usize] > prev {
+                break;
+            }
+        }
+        depth += 1;
+        tx_size = SUB_TX_SIZE_MAP[tx_size];
+    }
+    best
+}
+
+/// `av1_pick_uniform_tx_size_type_yrd` (tx_search.c) — the luma intra slice:
+/// residue hashing and skip-prediction are inter-only; lossless picks the
+/// smallest (4x4) transform (`choose_smallest_tx_size` = one
+/// [`uniform_txfm_yrd_intra`] at TX_4X4); `USE_FULL_RD` runs the depth sweep.
+/// (`USE_LARGESTALL` / winner-mode arms are out of scope at speed-0
+/// MODE_EVAL.) Returns the chosen size + stats, or `None` (rate `INT_MAX`).
+#[allow(clippy::too_many_arguments)]
+pub fn pick_uniform_tx_size_type_yrd_intra(
+    env: &TxfmYrdEnv,
+    recon: &mut [u16],
+    ref_best_rd: i64,
+    pol: &TxTypeSearchPolicy,
+    source_variance: u32,
+    enable_tx64: bool,
+    enable_rect_tx: bool,
+) -> Option<TxSizeChoice> {
+    // select_tx_mode (rdopt_utils.h) couples the two at frame level:
+    // coded_lossless => ONLY_4X4, i.e. never TX_MODE_SELECT.
+    debug_assert!(
+        !(env.lossless && env.tx_mode_is_select),
+        "lossless implies ONLY_4X4 (tx_mode_is_select must be false)",
+    );
+    if env.lossless {
+        // choose_smallest_tx_size: evaluate TX_4X4 only.
+        let (rd, res) = uniform_txfm_yrd_intra(env, recon, 0, ref_best_rd, pol);
+        return res.map(|(stats, winners)| TxSizeChoice {
+            best_tx_size: 0,
+            best_rd: rd,
+            stats,
+            winners,
+        });
+    }
+    choose_tx_size_type_from_rd_intra(
+        env,
+        recon,
+        ref_best_rd,
+        pol,
+        source_variance,
+        enable_tx64,
+        enable_rect_tx,
+    )
+}

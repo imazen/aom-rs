@@ -75,6 +75,7 @@ fn tx_size_costs_match_c() {
 
         // tx_size_cost over every signaling bsize x its depth chain x ctx.
         let flat: Vec<i32> = costs.0.iter().flatten().flatten().copied().collect();
+        #[allow(clippy::needless_range_loop)] // bsize IS the domain being swept
         for bsize in 0..22usize {
             let select = case % 4 != 3;
             let ctx = (rng.next() % 3) as i32;
