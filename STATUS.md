@@ -667,6 +667,61 @@ combination isn't differentially pinned. Envelope after this chunk: film grain,
 superres, `disable_cdf_update`, 4:2:2-chroma-deblock (nonzero chroma levels),
 mixed-lossless-segments, and multi-tile-GROUP still rejected.
 
+## Film grain synthesis applied — `film_grain_params_present` rejection DROPPED (2026-07-14, decoder track)
+
+**Film-grain KEY streams are in the envelope** (9db05fc Y-only synthesis + oracle,
+f3f914c chroma + chroma-from-luma gate, 2bbac15 end-to-end decode wiring). Film
+grain is applied at the DECODER as the final post-reconstruction OUTPUT stage
+(`av1_add_film_grain`, `av1/decoder/grain_synthesis.c`): a seeded 16-bit LFSR
+builds grain templates from the fixed gaussian sequence, a piecewise-linear
+scaling LUT maps luma -> grain scale, and the scaled grain is blended into the
+decoded planes with 2-tap subblock overlap and optional chroma-from-luma.
+
+- **Synthesis** (`aom-decode` `film_grain.rs` + `film_grain_gaussian.rs`): a
+  faithful pure-Rust port of `grain_synthesis.c` (`av1_add_film_grain` /
+  `add_film_grain_run`): `get_random_number` LFSR + `init_random_generator`,
+  `generate_luma_grain_block` / `generate_chroma_grain_blocks` (AR grain with the
+  cfl luma-avg position), `init_scaling_function` / `scale_LUT` (10/12-bit
+  interpolation), `ver_/hor_boundary_overlap`, `extend_even`, and a UNIFIED
+  `add_noise_to_block` — the C lowbd (uint8_t) and hbd (uint16_t) noise-add paths
+  are numerically identical at `bit_depth==8` (offset/clip/scale-LUT formulas all
+  reduce to the lowbd constants when `bit_depth-8==0`), so one bit_depth-
+  parameterized kernel matches C at 8/10/12-bit. Planes are `u16`; arithmetic is
+  `i32` (matching C `int`). `#![forbid(unsafe_code)]` intact.
+- **Parse**: `read_film_grain_params` (already in `aom-entropy`) is now reachable
+  — `parse_frame_header` populates the reader's monochrome/subsampling context so
+  the chroma-absent gate parses mono/4:2:0/4:2:2/4:4:4 correctly.
+- **Wiring** (`frame.rs`): the seq-level reject is gone; after `finish_frame`,
+  when `film_grain.apply_grain`, `add_film_grain` runs on the cropped display
+  planes (mc_identity from `matrix_coefficients`, now threaded through
+  `KfTileConfig`), exactly as `aom_codec_get_frame` does.
+- **Oracle** (`aom-sys-ref`, APPEND-ONLY): (1) `shim_add_film_grain` /
+  `ref_add_film_grain` — the REAL exported `av1_add_film_grain` over two
+  constructed `aom_image_t`s (function-level synthesis oracle, NOT a
+  transcription); (2) `shim_encode_av1_kf_film_grain` /
+  `ref_encode_av1_kf_film_grain` — real `aom_codec_av1_cx` with
+  `AV1E_SET_FILM_GRAIN_TEST_VECTOR` (libaom's built-in `grain_test_vectors[]`),
+  producing streams that carry `film_grain_params_present=1` + per-frame params.
+
+**GATES (`film_grain_diff.rs`):**
+- Function-level synthesis, **1440 trials byte-identical** to `av1_add_film_grain`:
+  `film_grain_y_only_matches_c` (576), `film_grain_chroma_matches_c` (432,
+  independent cb/cr points + mult/offset), `film_grain_cfl_matches_c` (432,
+  chroma_scaling_from_luma) — 8/10/12-bit x mono/4:2:0/4:4:4/4:2:2 x 4 sizes
+  (incl. odd dims for `extend_even`) x overlap/clip on/off, 100% altering pixels.
+- End-to-end, **30 REAL streams byte-identical** to the C decoder (grain applied):
+  `film_grain_streams_decode_byte_identical_to_c` — grain vectors {1,2,15} x
+  8/10-bit x 4:2:0/4:4:4/mono x 64x64 & 96x80. Anti-vacuous: an ungrained
+  reconstruction of each stream differs from the grained output (proves the C
+  decoder applied grain, not the skip flag); chroma_grain=24, cfl=8.
+
+**Honest gaps**: single KEY frame only (inter grain-param `update`/ref-load path
+is unreachable here — the reader supports it but no inter frame enters the
+envelope); grain composed with CDEF/LR/segmentation/palette is orthogonal
+(post-reconstruction) but not a separately gated combination. Envelope after this
+chunk: superres, `disable_cdf_update`, 4:2:2-chroma-deblock (nonzero chroma
+levels), mixed-lossless-segments, and multi-tile-GROUP still rejected.
+
 ## Perf gate honest number
 
 Like-for-like vs C's production AVX2 (`aom_sad64x64_avx2`): Rust AVX2 SAD is
