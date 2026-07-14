@@ -527,7 +527,20 @@ fn leaf_pick_sb_modes(
         skip_ctx,
         tx_size_costs: cfg.tx_size_costs,
         tx_size_ctx,
-        tx_mode_is_select: true,
+        // select_tx_mode (rdopt_utils.h): coded_lossless => cm->features.tx_mode
+        // = ONLY_4X4, never TX_MODE_SELECT (`av1/decoder/decodeframe.c:141`'s
+        // `read_tx_mode` returns ONLY_4X4 unconditionally when coded_lossless).
+        // This port doesn't model TX_MODE_LARGEST (the other ONLY_4X4
+        // alternative), so within this envelope TX_MODE_SELECT holds exactly
+        // when NOT lossless. Was hardcoded `true` regardless of `env.lossless`
+        // -- harmless while every caller also hardcoded `lossless: false`, but
+        // a real bug once qindex=0 correctly threads `lossless: true`: it
+        // would violate `pick_uniform_tx_size_type_yrd_intra`'s own "lossless
+        // implies ONLY_4X4" debug_assert, and feeds a nonzero tx-size-signal
+        // rate cost (`tx_search.rs`'s `tx_select` gate) into the RD search for
+        // a symbol the pack stage never actually writes at lossless
+        // (`pack.rs`'s `cfg.tx_mode_is_select && !env.lossless` gate).
+        tx_mode_is_select: !env.lossless,
         above_ctx: &above_y,
         left_ctx: &left_y,
     };

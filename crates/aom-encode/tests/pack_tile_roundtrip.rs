@@ -674,7 +674,25 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             ss_x,
             ss_y,
             bd,
-            lossless: false,
+            // xd->lossless[segment_id] (av1/encoder/encodeframe.c:2263-2266):
+            // `qindex == 0 && y_dc_delta_q == 0 && u_dc_delta_q == 0 &&
+            // u_ac_delta_q == 0 && v_dc_delta_q == 0 && v_ac_delta_q == 0`.
+            // This envelope has no delta-q (frame-constant `base_qindex`, per
+            // `PackCfg::base_qindex`'s doc), so all five deltas are always 0
+            // and the derivation reduces to `qindex == 0`. Was hardcoded
+            // `false` unconditionally, which at qindex=0 desynced the
+            // write/read entropy coder: `get_tx_mask_intra`/
+            // `get_tx_mask_uv_intra` only force the tx-type search to
+            // DCT_DCT when `lossless` is true, so with the (wrong) constant
+            // `false` the search stayed free to pick a non-DCT_DCT winner at
+            // qindex=0 even though `signal_gate: qindex > 0` (below) never
+            // writes that choice into the bitstream (matching real AV1's
+            // `av1_write_tx_type`/`av1_read_tx_type` qindex=0 bypass) --
+            // `write_coeffs_txb_full` still scans coefficients with the
+            // real (possibly non-DCT_DCT) tx_type while `read_coeffs_txb_full`
+            // unconditionally assumes DCT_DCT when unsignaled, desyncing the
+            // scan order and, downstream, the whole entropy stream.
+            lossless: qindex == 0,
             reduced_tx_set_used: false,
             disable_edge_filter: false,
             filter_type: 0,
@@ -943,6 +961,60 @@ fn pack_tile_roundtrips_true_corner() {
         (1, 1, true, 98), // the confirmed pre-fix overflow trigger
     ] {
         run_pack_roundtrip_case(ss_x, ss_y, allintra, qindex, 0);
+    }
+}
+
+/// qindex=0 (finest quantizer) regression -- was STATUS.md's "Known Bugs".
+/// At `base_qindex == 0` with no delta-q (this envelope's constant
+/// assumption -- `pack.rs`'s `PackCfg::signal_gate` doc), real AV1 derives
+/// `xd->lossless[segment_id] = true` (`av1/encoder/encodeframe.c:2263-2266`:
+/// `qindex == 0 && y_dc_delta_q == 0 && u_dc_delta_q == 0 && u_ac_delta_q ==
+/// 0 && v_dc_delta_q == 0 && v_ac_delta_q == 0`) -- NOT just "a small
+/// quantizer step inside the normal DCT pipeline". Lossless forces
+/// `tx_mode = ONLY_4X4` (`av1/decoder/decodeframe.c:141`,
+/// `read_tx_mode`) and every tx-type search to DCT_DCT
+/// (`get_tx_mask`/`av1_get_tx_type`: `blockd.h:1288-1290`).
+///
+/// Both previously-tracked "Known Bugs" (a partition-population mismatch
+/// and a spurious decoded `skip == 1`) were the SAME root cause, not two
+/// bugs: `run_pack_roundtrip_case` hardcoded `SbEncodeEnv::lossless: false`
+/// unconditionally, so at qindex=0 the search's tx-type search stayed free
+/// to pick a non-DCT_DCT winner (this port's `get_tx_mask_intra`/
+/// `get_tx_mask_uv_intra` already force DCT_DCT when `lossless` -- they
+/// just never SAW `lossless = true`). Pack's `signal_gate: qindex > 0`
+/// correctly suppresses WRITING the tx_type symbol at qindex=0 (matches
+/// `av1_write_tx_type`'s `base_qindex > 0` gate, `bitstream.c:815-819`) --
+/// but `write_coeffs_txb_full` still SCANS/serializes the coefficients
+/// using the search's real (possibly non-DCT_DCT) `tx_type` regardless of
+/// `signal_gate`, matching C: `av1_write_tx_type` only gates the SYMBOL,
+/// the encoder's own `mbmi->tx_type` still has to be right independently
+/// (real aomenc never gets this wrong because its tx-type search itself
+/// is lossless-gated). Meanwhile `read_coeffs_txb_full`, since nothing was
+/// signaled, defaults to DCT_DCT unconditionally (`aom_txb::read_tx_type`,
+/// matching `av1_read_tx_type`'s `*tx_type = DCT_DCT; ... if (qindex == 0)
+/// return;`). Whenever the search's real winner wasn't DCT_DCT, write and
+/// read disagreed on scan order for that txb -> garbage coefficients ->
+/// the shared entropy-coder state desynced for the rest of the frame --
+/// which is what surfaced downstream as BOTH the partition-population
+/// mismatch AND the spurious `skip == 1` read (two symptoms of one cause).
+///
+/// Fix: thread `lossless = (qindex == 0)` into `SbEncodeEnv` (matching
+/// `encodeframe.c`'s derivation) instead of hardcoding it false, plus fix
+/// `partition_pick.rs`'s `TxfmYrdEnv.tx_mode_is_select` hardcode (was
+/// unconditionally `true`, which -- once `lossless` is threaded correctly
+/// -- would violate `pick_uniform_tx_size_type_yrd_intra`'s own "lossless
+/// implies ONLY_4X4" debug_assert; real AV1's `select_tx_mode`/
+/// `read_tx_mode` forces `ONLY_4X4`, never `TX_MODE_SELECT`, whenever
+/// `coded_lossless`).
+#[test]
+fn pack_tile_roundtrips_qindex_zero() {
+    for &(ss_x, ss_y, allintra) in &[
+        (0usize, 0usize, true), // Bug 1 repro: partition-population mismatch
+        (0, 0, false),          // Bug 1's 2nd repro (mission brief)
+        (1, 1, false),          // Bug 2 repro: "skip always 0" assumption
+        (1, 1, true),           // extra corner coverage
+    ] {
+        run_pack_roundtrip_case(ss_x, ss_y, allintra, 0, 0);
     }
 }
 

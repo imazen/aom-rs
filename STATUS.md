@@ -611,28 +611,74 @@ share setup). `partition_pick_diff.rs` and `uniform_txfm_yrd_diff.rs` still
 green (unaffected — neither's `ref_best_rd` ever wraps in the cases they
 sweep). Commit: (this session).
 
-### Known Bugs (tracked, NOT fixed this session — out of scope for the overflow fix)
+### qindex=0 partition-population mismatch + "skip always 0" violation — FIXED (2026-07-14, encoder track)
 
-- **qindex=0 partition-population mismatch** (`crates/aom-encode/tests/
-  pack_tile_roundtrip.rs:852`, found by the same true-corner sweep above,
-  `pad=0`): at `qindex=0` (both `allintra=true,ss=(0,0)` and
-  `allintra=false,ss=(0,0)`), the DECODED partition-type population
-  disagrees with the SEARCH's own winning trees (`assert_eq!` failure,
-  e.g. `left: (34,22,8,5,1) right: (42,2,6,10,10)` for
-  `(leaves,none,split,horz,vert)`). Not an overflow — a genuine read/write
-  divergence specific to the finest quantizer. Root cause NOT investigated
-  (out of scope here); repro: `run_pack_roundtrip_case(0, 0, true, 0, 0)`.
-- **qindex=0 "skip always 0" assumption violated** (`pack_tile_roundtrip.rs:
-  287`, same sweep, `allintra=false, ss=(1,1), qindex=0`): the read-side
-  harness asserts `info.skip == 0` (documented KEY-intra-envelope
-  assumption — matches `block_rd_txfm`'s C comment "Signal non-skip_txfm for
-  Intra blocks", i.e. the currently-ported scope always signals the TXB
-  loop as non-skip) but decodes `info.skip == 1` at this qindex. Unconfirmed
-  whether this is a genuine block-level skip/no-skip decision
-  (`av1_txfm_search`'s `choose_skip_txfm`, tx_search.c:3862-3869) reachable
-  at qindex=0 that the current port doesn't yet wire, or a decode-side
-  symptom of the same root cause as the partition-population bug above.
-  Repro: `run_pack_roundtrip_case(1, 1, false, 0, 0)`.
+**Both previously-tracked `qindex=0` bugs were ONE root cause, not two, and
+both are now fixed.** Traced via the real C source (`is_coded_lossless`,
+`av1_common_int.h:1862-1876`; `xd->lossless[i]` assignment,
+`av1/encoder/encodeframe.c:2263-2266`): at `base_qindex == 0` with no
+delta-q (this envelope's constant assumption — `PackCfg::base_qindex`'s
+doc), real AV1 derives `xd->lossless[segment_id] = true` — **qindex=0 is
+not "a small quantizer step inside the normal DCT pipeline", it's a
+completely different coding mode**: `tx_mode` is forced `ONLY_4X4`
+(`av1/decoder/decodeframe.c:141`'s `read_tx_mode`) and every tx-type
+search is forced to `DCT_DCT` (`av1_get_tx_type`, `blockd.h:1288-1290`).
+
+**Root cause (confirmed, not guessed): a write/read tx-type scan-order
+desync, not two independent bugs.** `crates/aom-encode/tests/
+pack_tile_roundtrip.rs`'s `run_pack_roundtrip_case` hardcoded
+`SbEncodeEnv::lossless: false` unconditionally, so at qindex=0 the search's
+tx-type search stayed free to pick a non-DCT_DCT winner — this port's own
+`get_tx_mask_intra`/`get_tx_mask_uv_intra` (`tx_search.rs`) already force
+DCT_DCT when `lossless`, they just never SAW `lossless = true`. Separately,
+`pack.rs`'s `signal_gate: qindex > 0` correctly suppresses WRITING the
+tx_type symbol at qindex=0 (matches `av1_write_tx_type`'s `base_qindex > 0`
+gate, `bitstream.c:815-819`) — but `aom_txb::write_coeffs_txb_full` still
+SCANS/serializes the coefficients using the search's real (possibly
+non-DCT_DCT) `tx_type` regardless of `signal_gate` (matches C:
+`av1_write_tx_type` only gates the SYMBOL — the encoder's own
+`mbmi->tx_type` still has to be right independently; real aomenc never
+gets this wrong because ITS tx-type search is itself lossless-gated).
+Meanwhile `aom_txb::read_tx_type`, since nothing was signaled, defaults to
+DCT_DCT unconditionally (matches `av1_read_tx_type`'s `*tx_type = DCT_DCT;
+... if (qindex == 0) return;`). Whenever the search's real winner wasn't
+DCT_DCT, write and read disagreed on scan order for that txb — garbage
+coefficients — the shared entropy-coder state desynced for the rest of the
+frame. That ONE desync is what surfaced as BOTH the partition-population
+mismatch (read_partition returning garbage after the desync point) AND the
+spurious `skip == 1` read (same garbage, different symbol) — confirmed by
+fixing the one root cause and seeing both symptoms disappear together in
+the same run.
+
+**Fix** (both sites are self-consistency bugs, not spec deviations —
+`aom-encode`'s lossless-forcing logic was already correct everywhere else
+it's threaded): (1) `pack_tile_roundtrip.rs`'s `run_pack_roundtrip_case`
+now sets `lossless: qindex == 0` instead of hardcoding `false`, matching
+`encodeframe.c`'s derivation exactly (no delta-q in this envelope, so the
+five-way AND reduces to the qindex check alone). (2)
+`crates/aom-encode/src/partition_pick.rs`'s `TxfmYrdEnv` construction
+hardcoded `tx_mode_is_select: true` regardless of `env.lossless` — harmless
+while every caller also hardcoded `lossless: false`, but once qindex=0
+correctly threads `lossless: true` this violated
+`pick_uniform_tx_size_type_yrd_intra`'s own "lossless implies ONLY_4X4"
+`debug_assert` (real AV1's `select_tx_mode`/`read_tx_mode`: `coded_lossless`
+forces `ONLY_4X4`, never `TX_MODE_SELECT`). Now `tx_mode_is_select:
+!env.lossless`. This source fix is a no-op for every other caller (all
+still hardcode `lossless: false`, so `!false == true`, unchanged) —
+confirmed by the full suite staying green with only the one new test added.
+
+**Verified.** New permanent regression test
+`pack_tile_roundtrips_qindex_zero` (`pack_tile_roundtrip.rs`) covers all 4
+qindex=0 combinations, including both original bug repros verbatim
+(`run_pack_roundtrip_case(0, 0, true, 0, 0)` and `(1, 1, false, 0, 0)`) —
+confirmed to reproduce the EXACT documented pre-fix failure (`left: (34,
+22, 8, 5, 1) right: (42, 2, 6, 10, 10)`) before the fix, and to pass
+(partition population match AND `skip == 0` holds for every leaf) after.
+Full `cargo test -p aom-encode --all-targets`: 71/71 passing before this
+chunk (0 failed) → 72/72 after (0 failed, +1 new permanent test); the 7/7
+`encoder_gate_e2e_textured_attempt` gate (qindex=128, unaffected) stays
+green. `cargo clippy -p aom-encode --all-targets --no-deps`: clean.
+Commit: (this session).
 
 ## Real (CDF-derived) cost tables wired into the search — PARTIAL (2026-07-14, encoder track)
 
