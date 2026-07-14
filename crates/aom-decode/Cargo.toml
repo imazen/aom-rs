@@ -12,3 +12,6 @@ aom-intra = { path = "../aom-intra" }
 aom-quant = { path = "../aom-quant" }
 aom-txb = { path = "../aom-txb" }
 aom-encode = { path = "../aom-encode" }
+
+[dev-dependencies]
+aom-sys-ref = { path = "../aom-sys-ref" }
