@@ -1788,6 +1788,61 @@ aomenc (AB-probe + all e2e gates), and the oracles now match real aomenc too.
 `encoder_gate_e2e_ab_attempt`, both `nonzero_lf` sweeps ok). Commits verified on
 `origin/main`: `f5ffa70` (fix + oracle corrections), `335c1c9` (ratcheted gate).
 
+## Loop-filter-LEVEL derivation PROVEN bit-exact — the AB-probe's last mismatch is NOT an LF bug (2026-07-14, encoder track)
+
+**Prior misdiagnosis corrected.** The "Loop-filter-level RD search ported"
+milestone (and the mission that followed it) framed the AB-probe's nonzero-LF
+near-miss (`[8,6]` derived vs `[8,3]` real on "top flat / bottom split") as a
+suspected bug in `search_filter_level` (a bias term / filter-step / dir
+sequencing / mode-ref-delta correction). **Direct measurement REFUTES that: the
+LF-level search is bit-exact.** The near-miss is a *reconstruction* divergence,
+not a search divergence.
+
+**Airtight isolation experiment (now an asserted gate,
+`encoder_gate_lf_level_bit_exact_vs_real`, commit `a358c92`).** For each AB-probe
+case, decode real aomenc's OWN bytes to recover its EXACT pre-loop-filter
+reconstruction + mi grid (`aom_decode::frame::{decode_frame_obus_prefilter,
+build_lf_inputs}` — both already bit-exact vs C), and run THIS PORT's
+`pick_filter_level` on THOSE pixels. Result: it reproduces real's coded level
+**EXACTLY on all four cases**, including `[8,3]` for "top flat / bottom split"
+(the case that "disagreed" end-to-end). Real codes GENUINELY NONZERO levels here
+(`[8,8]`/`[8,3]`/`[7,16]`/`[8,8]` at cq32), so this exercises the nonzero search
+path — not the trivial `[0,0]` every flat/textured e2e case reaches. The gate
+asserts `saw_nonzero` so it can never pass vacuously.
+
+**Why the e2e case still mismatches (localized, not guessed).** With a temp
+diagnostic (added, measured, reverted before commit) the failing case's coded
+tile is `TILE-BYTES-IDENTICAL=false` vs real (first differing byte 171), while
+the 3 passing AB cases are byte-identical AND agree on LF. Decoding both trees
+localizes the divergence to a SINGLE partition node: **`(mi_row=8, mi_col=12,
+BLOCK_16X16)` — real picks `PARTITION_HORZ`, this port's search picks
+`PARTITION_SPLIT`** (real tree `[3,0,0,3,8,8,8,8,3,7,1,…]` vs ours
+`[3,0,0,3,8,8,8,8,3,7,3,…]`, first divergence at pre-order index 10). So the LF
+search legitimately optimizes SSE against different pixels and picks `[8,6]`
+instead of `[8,3]`. This is the SAME class of deep partition-RD gap the AB
+milestone flagged ("NOT a full port-vs-real tree match yet"); the `recon_intra`
+fix closed the (2,12)/(8,12)-for-two-cases instances, this is a residual one on
+"top flat / bottom split" (real=HORZ vs ours=SPLIT — opposite direction from the
+`recon_intra`-resolved (8,12) case).
+
+**Net for the LF-level mission: DONE — the derivation is bit-exact and asserted.**
+54/54 zero-LF + 3/3 byte-identical nonzero-LF e2e agreements + 4/4 on-real-recon
+nonzero agreements. `encoder_gate_e2e_ab_attempt` is now 3/4 (was framed as
+LF-blocked; actually blocked on the partition-RD node above). Stale
+`encoder_gate_e2e_ab_attempt` docs ("AB partitions unported", "nonzero-LF header
+path broken") corrected in the same commit — AB is ported and the header path is
+exercised + correct on the 3 byte-matching nonzero-LF cases.
+
+**Next attempt for whoever picks up the residual partition-RD gap** (a separate,
+non-LF investigation): C-oracle the per-candidate rdcost at (8,12,BLOCK_16X16)
+for the "top flat / bottom split" content (NONE/HORZ/VERT/SPLIT) via a debug
+libaom trace or an append-only `rd_shim.c` hook, and diff against this port's
+`rd_pick_partition_real` costs at that node — the port's SPLIT must be beating
+HORZ where C's does not, so the divergent term is a per-node cost/context or
+sub-block-RD difference (the recon plane / `source_variance` feeding those leaves
+is the first suspect, as with `recon_intra`). Full `cargo test -p aom-encode
+--all-targets`: **74 tests, 0 failed**.
+
 ## Gate posture (honest)
 
 Real, verified, ratcheting progress across BOTH tracks — but still a fraction of
@@ -1799,10 +1854,13 @@ byte-identical AV1 bitstream to real aomenc for the smallest single-SB all-intra
 KEY frame (flat content, asserted) and for 7 of 7 genuinely-textured variants
 of it (also now asserted — see the "4-way partitions ported" milestone: the
 4-way partition port fixed the one remaining pseudo-random-noise divergence)
-— **the loop-filter LEVEL is now this port's own derivation too**
-(`av1_pick_filter_level` ported, wired into the e2e gate, 54/54 zero-LF
-agreements + 2/4 exact nonzero agreements on the (separately confounded)
-AB-probe content — see the "Loop-filter-level RD search ported" milestone).
+— **the loop-filter LEVEL is now this port's own derivation too, PROVEN
+bit-exact** (`av1_pick_filter_level` ported + wired into the e2e gate;
+54/54 zero-LF + 3/3 byte-identical nonzero-LF e2e agreements + a new
+asserted on-real-recon gate reproducing real's coded nonzero levels
+`[8,8]`/`[8,3]`/`[7,16]`/`[8,8]` EXACTLY — see the "Loop-filter-LEVEL
+derivation PROVEN bit-exact" milestone; the AB-probe's one remaining e2e
+mismatch is a separate partition-RD node, not an LF bug).
 CDEF-strength search and the qindex-from-cq-level mapping remain
 bootstrapped from the real parse; sharpness/ref-deltas/mode-deltas stay
 bootstrapped too but are provably frame-constant/correct in this envelope.
