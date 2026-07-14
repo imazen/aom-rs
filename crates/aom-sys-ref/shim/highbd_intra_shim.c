@@ -497,3 +497,122 @@ void shim_hbd_dr_predict(uint16_t *dst, ptrdiff_t stride, int tx_size,
   else if (angle == 180)
     shim_highbd_intra_pred(5, tx_size, dst, stride, above, left, bd); /* H_PRED */
 }
+
+/* ---- highbd directional intra builder (directional path) -------------------
+ * Verbatim transcription of highbd_build_directional_and_filter_intra_predictors
+ * (reconintra.c, minus the recursive filter-intra branch): edge assembly with
+ * above-right/below-left extension, corner filter, edge filter/upsample, then the
+ * angle dispatch (shim_hbd_dr_predict above). Reuses the intra_edge shim's
+ * strength / use-upsample transcriptions and the public highbd edge kernels. */
+int shim_intra_edge_strength(int bs0, int bs1, int delta, int type);
+int shim_use_intra_edge_upsample(int bs0, int bs1, int delta, int type);
+void av1_highbd_filter_intra_edge_c(uint16_t *p, int sz, int strength);
+void av1_highbd_upsample_intra_edge_c(uint16_t *p, int sz, int bd);
+
+void shim_hbd_build_dir_intra(const uint16_t *ref, int ref_stride, int p_angle,
+                              int disable_edge_filter, int filt_type, int tx_size,
+                              int n_top_px, int n_topright_px, int n_left_px,
+                              int n_bottomleft_px, int bd, uint16_t *dst,
+                              int dst_stride) {
+  static const int txw[19] = { 4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64 };
+  static const int txh[19] = { 4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16 };
+  const int txwpx = txw[tx_size], txhpx = txh[tx_size];
+  const int base = 128 << (bd - 8);
+  const uint16_t *const above_ref = ref - ref_stride;
+  const uint16_t *const left_ref = ref - 1;
+  uint16_t left_data[160], above_data[160];
+  uint16_t *const above_row = above_data + 16;
+  uint16_t *const left_col = left_data + 16;
+
+  int need_above, need_left, need_above_left;
+  if (p_angle <= 90) { need_above = 1; need_left = 0; need_above_left = 1; }
+  else if (p_angle < 180) { need_above = 1; need_left = 1; need_above_left = 1; }
+  else { need_above = 0; need_left = 1; need_above_left = 1; }
+
+  for (int i = 0; i < 160; i++) {
+    above_data[i] = (uint16_t)(base - 1);
+    left_data[i] = (uint16_t)(base + 1);
+  }
+
+  if ((!need_above && n_left_px == 0) || (!need_left && n_top_px == 0)) {
+    int val;
+    if (need_left) val = (n_top_px > 0) ? above_ref[0] : base + 1;
+    else val = (n_left_px > 0) ? left_ref[0] : base - 1;
+    for (int r = 0; r < txhpx; r++)
+      for (int c = 0; c < txwpx; c++) dst[r * dst_stride + c] = (uint16_t)val;
+    return;
+  }
+
+  if (need_left) {
+    const int num_left = txhpx + (n_bottomleft_px >= 0 ? txwpx : 0);
+    int i = 0;
+    if (n_left_px > 0) {
+      for (; i < n_left_px; i++) left_col[i] = left_ref[i * ref_stride];
+      if (n_bottomleft_px > 0)
+        for (; i < txhpx + n_bottomleft_px; i++) left_col[i] = left_ref[i * ref_stride];
+      if (i < num_left)
+        for (int k = i; k < num_left; k++) left_col[k] = left_col[i - 1];
+    } else if (n_top_px > 0) {
+      for (int k = 0; k < num_left; k++) left_col[k] = above_ref[0];
+    }
+  }
+  if (need_above) {
+    const int num_top = txwpx + (n_topright_px >= 0 ? txhpx : 0);
+    if (n_top_px > 0) {
+      for (int k = 0; k < n_top_px; k++) above_row[k] = above_ref[k];
+      int i = n_top_px;
+      if (n_topright_px > 0) {
+        for (int k = 0; k < n_topright_px; k++) above_row[txwpx + k] = above_ref[txwpx + k];
+        i += n_topright_px;
+      }
+      if (i < num_top)
+        for (int k = i; k < num_top; k++) above_row[k] = above_row[i - 1];
+    } else if (n_left_px > 0) {
+      for (int k = 0; k < num_top; k++) above_row[k] = left_ref[0];
+    }
+  }
+  if (need_above_left) {
+    if (n_top_px > 0 && n_left_px > 0) above_row[-1] = above_ref[-1];
+    else if (n_top_px > 0) above_row[-1] = above_ref[0];
+    else if (n_left_px > 0) above_row[-1] = left_ref[0];
+    else above_row[-1] = (uint16_t)base;
+    left_col[-1] = above_row[-1];
+  }
+
+  int upsample_above = 0, upsample_left = 0;
+  if (!disable_edge_filter) {
+    const int need_right = p_angle < 90;
+    const int need_bottom = p_angle > 180;
+    if (p_angle != 90 && p_angle != 180) {
+      if (need_above && need_left && (txwpx + txhpx >= 24)) {
+        int s = left_col[0] * 5 + above_row[-1] * 6 + above_row[0] * 5;
+        s = (s + 8) >> 4;
+        above_row[-1] = (uint16_t)s;
+        left_col[-1] = (uint16_t)s;
+      }
+      if (need_above && n_top_px > 0) {
+        int strength = shim_intra_edge_strength(txwpx, txhpx, p_angle - 90, filt_type);
+        int n_px = n_top_px + 1 + (need_right ? txhpx : 0);
+        av1_highbd_filter_intra_edge_c(above_row - 1, n_px, strength);
+      }
+      if (need_left && n_left_px > 0) {
+        int strength = shim_intra_edge_strength(txhpx, txwpx, p_angle - 180, filt_type);
+        int n_px = n_left_px + 1 + (need_bottom ? txwpx : 0);
+        av1_highbd_filter_intra_edge_c(left_col - 1, n_px, strength);
+      }
+    }
+    upsample_above = shim_use_intra_edge_upsample(txwpx, txhpx, p_angle - 90, filt_type);
+    if (need_above && upsample_above) {
+      int n_px = txwpx + (need_right ? txhpx : 0);
+      av1_highbd_upsample_intra_edge_c(above_row, n_px, bd);
+    }
+    upsample_left = shim_use_intra_edge_upsample(txhpx, txwpx, p_angle - 180, filt_type);
+    if (need_left && upsample_left) {
+      int n_px = txhpx + (need_bottom ? txwpx : 0);
+      av1_highbd_upsample_intra_edge_c(left_col, n_px, bd);
+    }
+  }
+
+  shim_hbd_dr_predict(dst, dst_stride, tx_size, above_row, left_col, upsample_above,
+                      upsample_left, p_angle, bd);
+}

@@ -495,3 +495,233 @@ pub fn dr_predict_high(
         predict_highbd(H, dst, dst_stride, bw, bh, &above, &left_data[pad..pad + bh], bd);
     }
 }
+
+/// `NUM_INTRA_NEIGHBOUR_PIXELS` (`MAX_TX_SIZE*2 + 32`): the reference-edge buffer
+/// size, with the edge origin at [`DIR_PAD`].
+const NUM_INTRA_NEIGHBOUR_PIXELS: usize = 160;
+/// Samples before the edge origin in the directional reference buffers (the C
+/// `above_data + 16` / `left_data + 16` offset): room for the corner and the
+/// upsample scratch (`p[-2]`).
+const DIR_PAD: usize = 16;
+
+/// Geometry + neighbour availability for [`assemble_dir_edges`]. `n_topright_px`
+/// / `n_bottomleft_px` are `-1` when the above-right / below-left region is
+/// unavailable (`>= 0` extends the edge by `txwpx`/`txhpx`).
+struct DirEdge {
+    ref_off: usize,
+    ref_stride: usize,
+    txwpx: usize,
+    txhpx: usize,
+    n_top_px: usize,
+    n_topright_px: i32,
+    n_left_px: usize,
+    n_bottomleft_px: i32,
+    need_above: bool,
+    need_left: bool,
+    need_above_left: bool,
+    base: i32,
+}
+
+/// Assemble the directional intra reference edges — libaom's
+/// `highbd_build_directional_and_filter_intra_predictors` edge assembly
+/// (reconintra.c): whole-buffer `base±1` defaults, then the real above / left
+/// samples extended by the above-right / below-left neighbours and replicated to
+/// the needed length, plus the top-left corner. `#[autoversion]` vectorizes the
+/// constant fills and the contiguous above copy (byte-identical to scalar); the
+/// strided left-column gather stays scalar. `above_data`/`left_data` are the full
+/// [`NUM_INTRA_NEIGHBOUR_PIXELS`] buffers with the edge origin at [`DIR_PAD`].
+#[autoversion]
+fn assemble_dir_edges(recon: &[u16], g: &DirEdge, above_data: &mut [u16], left_data: &mut [u16]) {
+    let DirEdge {
+        ref_off, ref_stride, txwpx, txhpx, n_top_px, n_topright_px, n_left_px, n_bottomleft_px,
+        need_above, need_left, need_above_left, base,
+    } = *g;
+    const P: usize = DIR_PAD;
+
+    // Whole-buffer defaults (valgrind-safety + the z2 predictor's negative reads).
+    let ao = (base - 1) as u16;
+    let lo = (base + 1) as u16;
+    for e in above_data.iter_mut() {
+        *e = ao;
+    }
+    for e in left_data.iter_mut() {
+        *e = lo;
+    }
+
+    if need_left {
+        let num_left = txhpx + if n_bottomleft_px >= 0 { txwpx } else { 0 };
+        if n_left_px > 0 {
+            let loff = ref_off - 1;
+            for i in 0..n_left_px {
+                left_data[P + i] = recon[loff + i * ref_stride]; // strided gather (scalar)
+            }
+            let mut i = n_left_px;
+            if n_bottomleft_px > 0 {
+                // n_left_px == txhpx here (C assert): the real column is full.
+                for k in txhpx..txhpx + n_bottomleft_px as usize {
+                    left_data[P + k] = recon[loff + k * ref_stride];
+                }
+                i = txhpx + n_bottomleft_px as usize;
+            }
+            if i < num_left {
+                let last = left_data[P + i - 1];
+                for e in left_data[P + i..P + num_left].iter_mut() {
+                    *e = last;
+                }
+            }
+        } else if n_top_px > 0 {
+            let a0 = recon[ref_off - ref_stride];
+            for e in left_data[P..P + num_left].iter_mut() {
+                *e = a0;
+            }
+        }
+    }
+
+    if need_above {
+        let num_top = txwpx + if n_topright_px >= 0 { txhpx } else { 0 };
+        if n_top_px > 0 {
+            let aoff = ref_off - ref_stride;
+            above_data[P..P + n_top_px].copy_from_slice(&recon[aoff..aoff + n_top_px]);
+            let mut i = n_top_px;
+            if n_topright_px > 0 {
+                // n_top_px == txwpx here (C assert): the real row is full.
+                let s = aoff + txwpx;
+                above_data[P + txwpx..P + txwpx + n_topright_px as usize]
+                    .copy_from_slice(&recon[s..s + n_topright_px as usize]);
+                i += n_topright_px as usize;
+            }
+            if i < num_top {
+                let last = above_data[P + i - 1];
+                for e in above_data[P + i..P + num_top].iter_mut() {
+                    *e = last;
+                }
+            }
+        } else if n_left_px > 0 {
+            let l0 = recon[ref_off - 1];
+            for e in above_data[P..P + num_top].iter_mut() {
+                *e = l0;
+            }
+        }
+    }
+
+    if need_above_left {
+        let corner = if n_top_px > 0 && n_left_px > 0 {
+            recon[ref_off - ref_stride - 1]
+        } else if n_top_px > 0 {
+            recon[ref_off - ref_stride]
+        } else if n_left_px > 0 {
+            recon[ref_off - 1]
+        } else {
+            base as u16
+        };
+        above_data[P - 1] = corner;
+        left_data[P - 1] = corner;
+    }
+}
+
+/// Build the intra prediction for a directional mode into `dst` — the highbd
+/// directional path of libaom's `av1_predict_intra_block`
+/// (`highbd_build_directional_and_filter_intra_predictors`, reconintra.c, minus
+/// the recursive filter-intra branch). Assemble the reference edges (via the
+/// archmage-vectorized [`assemble_dir_edges`]), corner-filter + edge-filter +
+/// upsample the reference (unless `disable_edge_filter`), then dispatch by angle
+/// through [`dr_predict_high`].
+///
+/// `recon[ref_off]` is the block top-left in the reconstruction plane (row stride
+/// `ref_stride`). `p_angle` is the prediction angle (`0 < p_angle < 270`).
+/// `n_topright_px` / `n_bottomleft_px` are `-1` when unavailable. `filter_type`
+/// is `av1_get_filt_type`. Availability counts are the decode driver's job.
+#[allow(clippy::too_many_arguments)]
+pub fn build_directional_intra_high(
+    recon: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    dst: &mut [u16],
+    dst_stride: usize,
+    p_angle: i32,
+    disable_edge_filter: bool,
+    filter_type: i32,
+    tx_size: usize,
+    n_top_px: usize,
+    n_topright_px: i32,
+    n_left_px: usize,
+    n_bottomleft_px: i32,
+    bd: i32,
+) {
+    let txwpx = TX_W[tx_size];
+    let txhpx = TX_H[tx_size];
+    let base = 128i32 << (bd - 8);
+
+    // Directional need-flags from the angle (reconintra.c).
+    let (need_above, need_left, need_above_left) = if p_angle <= 90 {
+        (true, false, true)
+    } else if p_angle < 180 {
+        (true, true, true)
+    } else {
+        (false, true, true)
+    };
+
+    // Degenerate early-out (one side needed, none available).
+    if (!need_above && n_left_px == 0) || (!need_left && n_top_px == 0) {
+        let val = if need_left {
+            if n_top_px > 0 { recon[ref_off - ref_stride] } else { (base + 1) as u16 }
+        } else if n_left_px > 0 {
+            recon[ref_off - 1]
+        } else {
+            (base - 1) as u16
+        };
+        for r in 0..txhpx {
+            for e in dst[r * dst_stride..r * dst_stride + txwpx].iter_mut() {
+                *e = val;
+            }
+        }
+        return;
+    }
+
+    let mut above_data = [0u16; NUM_INTRA_NEIGHBOUR_PIXELS];
+    let mut left_data = [0u16; NUM_INTRA_NEIGHBOUR_PIXELS];
+    let g = DirEdge {
+        ref_off, ref_stride, txwpx, txhpx, n_top_px, n_topright_px, n_left_px, n_bottomleft_px,
+        need_above, need_left, need_above_left, base,
+    };
+    assemble_dir_edges(recon, &g, &mut above_data, &mut left_data);
+
+    let mut upsample_above = 0;
+    let mut upsample_left = 0;
+    if !disable_edge_filter {
+        let need_right = p_angle < 90;
+        let need_bottom = p_angle > 180;
+        if p_angle != 90 && p_angle != 180 {
+            if need_above && need_left && txwpx + txhpx >= 24 {
+                edge::filter_corner_high(&mut above_data[DIR_PAD - 1..], &mut left_data[DIR_PAD - 1..]);
+            }
+            if need_above && n_top_px > 0 {
+                let strength =
+                    edge::edge_filter_strength(txwpx as i32, txhpx as i32, p_angle - 90, filter_type);
+                let n_px = n_top_px + 1 + if need_right { txhpx } else { 0 };
+                edge::highbd_filter_intra_edge(&mut above_data[DIR_PAD - 1..DIR_PAD - 1 + n_px], n_px, strength);
+            }
+            if need_left && n_left_px > 0 {
+                let strength =
+                    edge::edge_filter_strength(txhpx as i32, txwpx as i32, p_angle - 180, filter_type);
+                let n_px = n_left_px + 1 + if need_bottom { txwpx } else { 0 };
+                edge::highbd_filter_intra_edge(&mut left_data[DIR_PAD - 1..DIR_PAD - 1 + n_px], n_px, strength);
+            }
+        }
+        upsample_above = edge::use_upsample(txwpx as i32, txhpx as i32, p_angle - 90, filter_type);
+        if need_above && upsample_above != 0 {
+            let n_px = txwpx + if need_right { txhpx } else { 0 };
+            edge::highbd_upsample_intra_edge(&mut above_data, DIR_PAD, n_px, bd as u8);
+        }
+        upsample_left = edge::use_upsample(txhpx as i32, txwpx as i32, p_angle - 180, filter_type);
+        if need_left && upsample_left != 0 {
+            let n_px = txhpx + if need_bottom { txwpx } else { 0 };
+            edge::highbd_upsample_intra_edge(&mut left_data, DIR_PAD, n_px, bd as u8);
+        }
+    }
+
+    dr_predict_high(
+        dst, dst_stride, tx_size, &above_data, &left_data, DIR_PAD, upsample_above, upsample_left,
+        p_angle, bd,
+    );
+}

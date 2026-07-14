@@ -2164,6 +2164,25 @@ extern "C" {
     );
 }
 
+/// Reference highbd directional intra builder (`highbd_build_directional_and_
+/// filter_intra_predictors`, directional path): edge assembly (with above-right /
+/// below-left) + corner-filter + edge filter/upsample + angle dispatch.
+/// `recon[ref_off]` is the block top-left (row stride `ref_stride`). `n_topright_px`
+/// / `n_bottomleft_px` are `-1` when unavailable. Returns the `txw*txh` block.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_hbd_build_dir_intra(
+    recon: &[u16], ref_off: usize, ref_stride: usize, p_angle: i32, disable_edge_filter: bool, filt_type: i32, tx_size: usize, txw: usize, txh: usize, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; txw * txh];
+    unsafe {
+        shim_hbd_build_dir_intra(
+            recon.as_ptr().add(ref_off), ref_stride as i32, p_angle, disable_edge_filter as i32, filt_type, tx_size as i32,
+            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, bd, dst.as_mut_ptr(), txw as i32,
+        )
+    }
+    dst
+}
+
 /// Reference highbd directional predictor dispatch (`highbd_dr_predictor`):
 /// route by `angle` to z1/z2/z3 or V/H. `above_data`/`left_data` are padded `u16`
 /// buffers; the C edge pointer is taken at offset `pad` (`data[pad]` is the edge
@@ -2241,6 +2260,9 @@ extern "C" {
     );
     fn shim_hbd_dr_predict(
         dst: *mut u16, stride: isize, tx_size: i32, above: *const u16, left: *const u16, up_above: i32, up_left: i32, angle: i32, bd: i32,
+    );
+    fn shim_hbd_build_dir_intra(
+        r: *const u16, ref_stride: i32, p_angle: i32, disable_edge_filter: i32, filt_type: i32, tx_size: i32, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32, dst: *mut u16, dst_stride: i32,
     );
 }
 

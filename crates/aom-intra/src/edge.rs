@@ -126,6 +126,18 @@ pub fn upsample_intra_edge(buf: &mut [u8], off: usize, sz: usize) {
     }
 }
 
+/// `highbd_filter_intra_edge_corner` (reconintra.c): 3-tap blend of the top-left
+/// corner with the first above and left samples, written to both corners.
+/// `above`/`left` are `[-1..]` views — index 0 is the corner (`above_row[-1]` /
+/// `left_col[-1]`), index 1 the first edge sample (`above_row[0]` / `left_col[0]`).
+pub fn filter_corner_high(above: &mut [u16], left: &mut [u16]) {
+    // s = left_col[0]*5 + above_row[-1]*6 + above_row[0]*5, rounded >> 4.
+    let s = left[1] as i32 * 5 + above[0] as i32 * 6 + above[1] as i32 * 5;
+    let s = ((s + 8) >> 4) as u16;
+    above[0] = s;
+    left[0] = s;
+}
+
 /// `av1_highbd_filter_intra_edge_c`: highbd (u16) 5-tap edge low-pass. Same as
 /// the lowbd filter but 16-bit (no clip needed — outputs stay in range).
 pub fn highbd_filter_intra_edge(p: &mut [u16], sz: usize, strength: i32) {
