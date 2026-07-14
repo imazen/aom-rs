@@ -11,8 +11,8 @@
 
 use crate::scan::scan;
 use crate::{
-    get_br_ctx, get_eob_pos_token, get_nz_map_contexts, txb_bhl, txb_high, txb_wide,
-    txb_init_levels, TxClass, TX_PAD_2D, TX_TYPE_TO_CLASS, EOB_OFFSET_BITS,
+    get_br_ctx, get_eob_pos_token, get_nz_map_contexts, txb_bhl, txb_high, txb_init_levels,
+    txb_wide, TxClass, EOB_OFFSET_BITS, TX_PAD_2D, TX_TYPE_TO_CLASS,
 };
 
 const NUM_BASE_LEVELS: u32 = 2;
@@ -80,7 +80,9 @@ fn br_cost(level: i32, lps: &[i32]) -> i32 {
 const LPS_STRIDE: usize = (COEFF_BASE_RANGE as usize + 1) * 2; // 26
 
 /// `get_eob_cost` (crate-visible wrapper for the trellis).
-pub(crate) fn eob_cost_pub(eob: usize, t: &CoeffCostTables, tx_class: TxClass) -> i32 { eob_cost(eob, t, tx_class) }
+pub(crate) fn eob_cost_pub(eob: usize, t: &CoeffCostTables, tx_class: TxClass) -> i32 {
+    eob_cost(eob, t, tx_class)
+}
 
 /// `get_eob_cost`.
 fn eob_cost(eob: usize, t: &CoeffCostTables, tx_class: TxClass) -> i32 {
@@ -142,7 +144,10 @@ pub fn cost_coeffs_txb(
             cost += t.base_eob[coeff_ctx * 3 + (level.min(3) - 1) as usize];
             if level > NUM_BASE_LEVELS as i32 {
                 let ctx = get_br_ctx_eob(pos, bhl, tx_class);
-                cost += br_cost(level, &t.lps[ctx * LPS_STRIDE..ctx * LPS_STRIDE + LPS_STRIDE]);
+                cost += br_cost(
+                    level,
+                    &t.lps[ctx * LPS_STRIDE..ctx * LPS_STRIDE + LPS_STRIDE],
+                );
             }
             if c != 0 {
                 cost += COST_LIT1;
@@ -168,7 +173,10 @@ pub fn cost_coeffs_txb(
             cost += COST_LIT1;
             if level > NUM_BASE_LEVELS as i32 {
                 let ctx = get_br_ctx(&levels_buf, pos, bhl, tx_class) as usize;
-                cost += br_cost(level, &t.lps[ctx * LPS_STRIDE..ctx * LPS_STRIDE + LPS_STRIDE]);
+                cost += br_cost(
+                    level,
+                    &t.lps[ctx * LPS_STRIDE..ctx * LPS_STRIDE + LPS_STRIDE],
+                );
             }
         }
         c -= 1;
@@ -188,7 +196,10 @@ pub fn cost_coeffs_txb(
             cost += t.dc_sign[dc_sign_ctx * 2 + sign01];
             if level > NUM_BASE_LEVELS as i32 {
                 let ctx = get_br_ctx(&levels_buf, pos, bhl, tx_class) as usize;
-                cost += br_cost(level, &t.lps[ctx * LPS_STRIDE..ctx * LPS_STRIDE + LPS_STRIDE]);
+                cost += br_cost(
+                    level,
+                    &t.lps[ctx * LPS_STRIDE..ctx * LPS_STRIDE + LPS_STRIDE],
+                );
             }
         }
     }

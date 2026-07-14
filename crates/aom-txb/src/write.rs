@@ -11,12 +11,16 @@
 //! layout), `eob`, and the two entropy contexts (`txb_skip_ctx`, `dc_sign_ctx`).
 
 use crate::scan::scan;
-use crate::{get_br_ctx, get_eob_pos_token, get_nz_map_contexts, txb_high, txb_wide, txb_init_levels, TxClass, TX_PAD_2D, TX_TYPE_TO_CLASS, EOB_OFFSET_BITS};
+use crate::{
+    get_br_ctx, get_eob_pos_token, get_nz_map_contexts, txb_high, txb_init_levels, txb_wide,
+    TxClass, EOB_OFFSET_BITS, TX_PAD_2D, TX_TYPE_TO_CLASS,
+};
 use aom_entropy::cdf::write_symbol;
 use aom_entropy::enc::OdEcEnc;
 
 // Header-static index tables (common_data.h / entropy.h).
-pub(crate) const TXSIZE_LOG2_MINUS4: [i32; 19] = [0, 2, 4, 6, 6, 1, 1, 3, 3, 5, 5, 6, 6, 2, 2, 4, 4, 5, 5];
+pub(crate) const TXSIZE_LOG2_MINUS4: [i32; 19] =
+    [0, 2, 4, 6, 6, 1, 1, 3, 3, 5, 5, 6, 6, 2, 2, 4, 4, 5, 5];
 const TXS_SQR: [usize; 19] = [0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2];
 const TXS_SQR_UP: [usize; 19] = [0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4];
 
@@ -43,7 +47,9 @@ pub(crate) const A_DC_SIGN: usize = 4027; // [2][3] n2 s3
 /// Total u16 length of the coefficient-coding CDF arena.
 pub const CDF_ARENA_LEN: usize = 4045;
 
-pub(crate) const EOB_OFF: [usize; 7] = [A_EOB16, A_EOB32, A_EOB64, A_EOB128, A_EOB256, A_EOB512, A_EOB1024];
+pub(crate) const EOB_OFF: [usize; 7] = [
+    A_EOB16, A_EOB32, A_EOB64, A_EOB128, A_EOB256, A_EOB512, A_EOB1024,
+];
 
 /// Pack one transform block. Appends symbols to `enc`; mutates the adaptive
 /// CDFs in `cdfs` in place when `allow_update_cdf`.
@@ -66,12 +72,29 @@ pub fn write_coeffs_txb(
     let txs_ctx = txsize_entropy_ctx(tx_size);
     let upd = allow_update_cdf;
 
-    sym(enc, cdfs, A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3, (eob == 0) as i32, 2, upd);
+    sym(
+        enc,
+        cdfs,
+        A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3,
+        (eob == 0) as i32,
+        2,
+        upd,
+    );
     if eob == 0 {
         return;
     }
     // tx_type (plane-0) is written by write_coeffs_txb_full; here just the payload.
-    write_txb_body(enc, cdfs, tcoeff, eob, tx_size, tx_type, plane_type, dc_sign_ctx, upd);
+    write_txb_body(
+        enc,
+        cdfs,
+        tcoeff,
+        eob,
+        tx_size,
+        tx_type,
+        plane_type,
+        dc_sign_ctx,
+        upd,
+    );
 }
 
 /// The txb payload written after the `txb_skip` flag (and, for luma, the
@@ -110,7 +133,14 @@ pub(crate) fn write_txb_body(
         let eob_ctx = (eob_pt - 3) as usize;
         let mut eob_shift = eob_offset_bits - 1;
         let bit = i32::from(eob_extra & (1 << eob_shift) != 0);
-        sym(enc, cdfs, A_EOB_EXTRA + ((txs_ctx * 2 + plane_type) * 9 + eob_ctx) * 3, bit, 2, upd);
+        sym(
+            enc,
+            cdfs,
+            A_EOB_EXTRA + ((txs_ctx * 2 + plane_type) * 9 + eob_ctx) * 3,
+            bit,
+            2,
+            upd,
+        );
         for i in 1..eob_offset_bits {
             eob_shift = eob_offset_bits - 1 - i;
             let bit = i32::from(eob_extra & (1 << eob_shift) != 0);
@@ -135,10 +165,24 @@ pub(crate) fn write_txb_body(
 
         if c == eob - 1 {
             let s = level.min(3) as i32 - 1;
-            sym(enc, cdfs, A_BASE_EOB + ((txs_ctx * 2 + plane_type) * 4 + coeff_ctx) * 4, s, 3, upd);
+            sym(
+                enc,
+                cdfs,
+                A_BASE_EOB + ((txs_ctx * 2 + plane_type) * 4 + coeff_ctx) * 4,
+                s,
+                3,
+                upd,
+            );
         } else {
             let s = level.min(3) as i32;
-            sym(enc, cdfs, A_BASE + ((txs_ctx * 2 + plane_type) * 42 + coeff_ctx) * 5, s, 4, upd);
+            sym(
+                enc,
+                cdfs,
+                A_BASE + ((txs_ctx * 2 + plane_type) * 42 + coeff_ctx) * 5,
+                s,
+                4,
+                upd,
+            );
         }
         if level > 2 {
             // NUM_BASE_LEVELS
@@ -165,7 +209,14 @@ pub(crate) fn write_txb_body(
         let sign = i32::from(v < 0);
         if level != 0 {
             if c == 0 {
-                sym(enc, cdfs, A_DC_SIGN + (plane_type * 3 + dc_sign_ctx) * 3, sign, 2, upd);
+                sym(
+                    enc,
+                    cdfs,
+                    A_DC_SIGN + (plane_type * 3 + dc_sign_ctx) * 3,
+                    sign,
+                    2,
+                    upd,
+                );
             } else {
                 write_bit(enc, sign);
             }
@@ -206,18 +257,43 @@ pub fn write_coeffs_txb_full(
 ) {
     let txs_ctx = txsize_entropy_ctx(tx_size);
     let upd = allow_update_cdf;
-    sym(enc, cdfs, A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3, (eob == 0) as i32, 2, upd);
+    sym(
+        enc,
+        cdfs,
+        A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3,
+        (eob == 0) as i32,
+        2,
+        upd,
+    );
     if eob == 0 {
         return;
     }
     if plane_type == 0 {
         // Only luma transmits tx_type.
         crate::write_tx_type(
-            enc, ext_tx_cdf, tx_size, is_inter, reduced, tx_type, use_filter_intra, fi_mode, mode,
+            enc,
+            ext_tx_cdf,
+            tx_size,
+            is_inter,
+            reduced,
+            tx_type,
+            use_filter_intra,
+            fi_mode,
+            mode,
             signal_gate,
         );
     }
-    write_txb_body(enc, cdfs, tcoeff, eob, tx_size, tx_type, plane_type, dc_sign_ctx, upd);
+    write_txb_body(
+        enc,
+        cdfs,
+        tcoeff,
+        eob,
+        tx_size,
+        tx_type,
+        plane_type,
+        dc_sign_ctx,
+        upd,
+    );
 }
 
 #[inline]

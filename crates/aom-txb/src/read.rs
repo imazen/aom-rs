@@ -69,14 +69,29 @@ pub fn read_coeffs_txb(
     let txs_ctx = txsize_entropy_ctx(tx_size);
     let upd = allow_update_cdf;
 
-    let all_zero = rsym(dec, cdfs, A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3, 2, upd);
+    let all_zero = rsym(
+        dec,
+        cdfs,
+        A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3,
+        2,
+        upd,
+    );
     let width = txb_wide(tx_size);
     let height = txb_high(tx_size);
     tcoeff[..width * height].fill(0);
     if all_zero != 0 {
         return 0;
     }
-    read_txb_body(dec, cdfs, tcoeff, tx_size, tx_type, plane_type, dc_sign_ctx, upd)
+    read_txb_body(
+        dec,
+        cdfs,
+        tcoeff,
+        tx_size,
+        tx_type,
+        plane_type,
+        dc_sign_ctx,
+        upd,
+    )
 }
 
 /// The txb payload after the `txb_skip` flag: the eob token + extra bits, the
@@ -111,7 +126,13 @@ fn read_txb_body(
     if eob_offset_bits > 0 {
         let eob_ctx = (eob_pt - 3) as usize;
         let mut eob_shift = eob_offset_bits - 1;
-        let bit = rsym(dec, cdfs, A_EOB_EXTRA + ((txs_ctx * 2 + plane_type) * 9 + eob_ctx) * 3, 2, upd);
+        let bit = rsym(
+            dec,
+            cdfs,
+            A_EOB_EXTRA + ((txs_ctx * 2 + plane_type) * 9 + eob_ctx) * 3,
+            2,
+            upd,
+        );
         if bit != 0 {
             eob += 1 << eob_shift;
         }
@@ -135,10 +156,22 @@ fn read_txb_body(
         let pos = sc[c] as usize;
         let mut level = if c == eob - 1 {
             let ctx = get_lower_levels_ctx_eob(bhl, width, c) as usize;
-            rsym(dec, cdfs, A_BASE_EOB + ((txs_ctx * 2 + plane_type) * 4 + ctx) * 4, 3, upd) + 1
+            rsym(
+                dec,
+                cdfs,
+                A_BASE_EOB + ((txs_ctx * 2 + plane_type) * 4 + ctx) * 4,
+                3,
+                upd,
+            ) + 1
         } else {
             let ctx = get_lower_levels_ctx(&levels_buf, pos, bhl, tx_size, tx_class) as usize;
-            rsym(dec, cdfs, A_BASE + ((txs_ctx * 2 + plane_type) * 42 + ctx) * 5, 4, upd)
+            rsym(
+                dec,
+                cdfs,
+                A_BASE + ((txs_ctx * 2 + plane_type) * 42 + ctx) * 5,
+                4,
+                upd,
+            )
         };
         if level > 2 {
             // NUM_BASE_LEVELS
@@ -167,7 +200,13 @@ fn read_txb_body(
         let mut level = tcoeff[pos];
         if level != 0 {
             let sign = if c == 0 {
-                rsym(dec, cdfs, A_DC_SIGN + (plane_type * 3 + dc_sign_ctx) * 3, 2, upd)
+                rsym(
+                    dec,
+                    cdfs,
+                    A_DC_SIGN + (plane_type * 3 + dc_sign_ctx) * 3,
+                    2,
+                    upd,
+                )
             } else {
                 read_bit(dec)
             };
@@ -263,7 +302,13 @@ pub fn read_coeffs_txb_full(
 ) -> (usize, usize) {
     let txs_ctx = txsize_entropy_ctx(tx_size);
     let upd = allow_update_cdf;
-    let all_zero = rsym(dec, cdfs, A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3, 2, upd);
+    let all_zero = rsym(
+        dec,
+        cdfs,
+        A_TXB_SKIP + (txs_ctx * 13 + txb_skip_ctx) * 3,
+        2,
+        upd,
+    );
     let (width, height) = (txb_wide(tx_size), txb_high(tx_size));
     tcoeff[..width * height].fill(0);
     if all_zero != 0 {
@@ -274,6 +319,15 @@ pub fn read_coeffs_txb_full(
     } else {
         tx_type_in
     };
-    let eob = read_txb_body(dec, cdfs, tcoeff, tx_size, tx_type, plane_type, dc_sign_ctx, upd);
+    let eob = read_txb_body(
+        dec,
+        cdfs,
+        tcoeff,
+        tx_size,
+        tx_type,
+        plane_type,
+        dc_sign_ctx,
+        upd,
+    );
     (eob, tx_type)
 }

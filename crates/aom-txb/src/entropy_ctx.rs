@@ -14,11 +14,14 @@ const TX_WIDE_UNIT: [usize; 19] = [1, 2, 4, 8, 16, 1, 2, 2, 4, 4, 8, 8, 16, 1, 4
 const TX_HIGH_UNIT: [usize; 19] = [1, 2, 4, 8, 16, 2, 1, 4, 2, 8, 4, 16, 8, 4, 1, 8, 2, 16, 4];
 
 // txsize_to_bsize[TX_SIZES_ALL] -> BLOCK_SIZE (matches our BlockSize discriminants).
-const TXSIZE_TO_BSIZE: [usize; 19] = [0, 3, 6, 9, 12, 1, 2, 4, 5, 7, 8, 10, 11, 16, 17, 18, 19, 20, 21];
+const TXSIZE_TO_BSIZE: [usize; 19] = [
+    0, 3, 6, 9, 12, 1, 2, 4, 5, 7, 8, 10, 11, 16, 17, 18, 19, 20, 21,
+];
 
 // num_pels_log2_lookup[BLOCK_SIZES_ALL].
-const NUM_PELS_LOG2: [i32; 22] =
-    [4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12, 13, 13, 14, 6, 6, 8, 8, 10, 10];
+const NUM_PELS_LOG2: [i32; 22] = [
+    4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12, 13, 13, 14, 6, 6, 8, 8, 10, 10,
+];
 
 // dc_sign_contexts[4*16+1] = 65 entries: 32x 1, then 0, then 32x 2.
 #[inline]
@@ -52,7 +55,13 @@ fn get_entropy_context(tx_size: usize, a: &[i8], l: &[i8]) -> i32 {
 /// `get_txb_ctx`: neighbour entropy contexts (`a` above, `l` left; packed bytes
 /// `cul_level | dc_sign<<3`) -> `(txb_skip_ctx, dc_sign_ctx)` for `plane`
 /// (0 = luma). `plane_bsize` is the plane block size (BlockSize discriminant).
-pub fn get_txb_ctx(plane_bsize: usize, tx_size: usize, plane: usize, a: &[i8], l: &[i8]) -> (i32, i32) {
+pub fn get_txb_ctx(
+    plane_bsize: usize,
+    tx_size: usize,
+    plane: usize,
+    a: &[i8],
+    l: &[i8],
+) -> (i32, i32) {
     let w_unit = TX_WIDE_UNIT[tx_size];
     let h_unit = TX_HIGH_UNIT[tx_size];
     const SIGNS: [i32; 3] = [0, -1, 1];
@@ -83,8 +92,11 @@ pub fn get_txb_ctx(plane_bsize: usize, tx_size: usize, plane: usize, a: &[i8], l
         }
     } else {
         let ctx_base = get_entropy_context(tx_size, a, l);
-        let ctx_offset =
-            if NUM_PELS_LOG2[plane_bsize] > NUM_PELS_LOG2[TXSIZE_TO_BSIZE[tx_size]] { 10 } else { 7 };
+        let ctx_offset = if NUM_PELS_LOG2[plane_bsize] > NUM_PELS_LOG2[TXSIZE_TO_BSIZE[tx_size]] {
+            10
+        } else {
+            7
+        };
         ctx_base + ctx_offset
     };
     (txb_skip_ctx, dc_sign_ctx)

@@ -26,7 +26,8 @@ const INT8_MAX: i32 = 127;
 /// `RDCOST(rdmult, rate, dist)`.
 #[inline]
 fn rdcost(rdmult: i64, rate: i64, dist: i64) -> i64 {
-    ((rate * rdmult + (1 << (AV1_PROB_COST_SHIFT - 1))) >> AV1_PROB_COST_SHIFT) + (dist << RDDIV_BITS)
+    ((rate * rdmult + (1 << (AV1_PROB_COST_SHIFT - 1))) >> AV1_PROB_COST_SHIFT)
+        + (dist << RDDIV_BITS)
 }
 
 const AOM_QM_BITS: i32 = 5;
@@ -45,7 +46,13 @@ pub(crate) fn get_dqv(dequant: [i16; 2], coeff_idx: usize, iqmatrix: Option<&[u8
 /// `get_coeff_dist`: squared-error distortion `((t - dq) << shift)^2`. With
 /// `qmatrix`, weights the diff by `qm[ci]` then rounds `>> (2*AOM_QM_BITS)`.
 #[inline]
-pub(crate) fn get_coeff_dist(tcoeff: i32, dqcoeff: i32, shift: i32, qmatrix: Option<&[u8]>, coeff_idx: usize) -> i64 {
+pub(crate) fn get_coeff_dist(
+    tcoeff: i32,
+    dqcoeff: i32,
+    shift: i32,
+    qmatrix: Option<&[u8]>,
+    coeff_idx: usize,
+) -> i64 {
     let diff = (tcoeff as i64 - dqcoeff as i64) * (1i64 << shift);
     match qmatrix {
         None => diff * diff,
@@ -91,8 +98,21 @@ pub fn optimize_txb(
     t: &CoeffCostTables,
 ) -> OptimizeResult {
     optimize_txb_core(
-        tx_size, tx_type, qcoeff, dqcoeff, tcoeff, eob_in, dequant, rdmult, dc_sign_ctx,
-        txb_skip_ctx, sharpness, scan, t, None, None,
+        tx_size,
+        tx_type,
+        qcoeff,
+        dqcoeff,
+        tcoeff,
+        eob_in,
+        dequant,
+        rdmult,
+        dc_sign_ctx,
+        txb_skip_ctx,
+        sharpness,
+        scan,
+        t,
+        None,
+        None,
     )
 }
 
@@ -118,8 +138,21 @@ pub fn optimize_txb_qm(
     qmatrix: &[u8],
 ) -> OptimizeResult {
     optimize_txb_core(
-        tx_size, tx_type, qcoeff, dqcoeff, tcoeff, eob_in, dequant, rdmult, dc_sign_ctx,
-        txb_skip_ctx, sharpness, scan, t, Some(iqmatrix), Some(qmatrix),
+        tx_size,
+        tx_type,
+        qcoeff,
+        dqcoeff,
+        tcoeff,
+        eob_in,
+        dequant,
+        rdmult,
+        dc_sign_ctx,
+        txb_skip_ctx,
+        sharpness,
+        scan,
+        t,
+        Some(iqmatrix),
+        Some(qmatrix),
     )
 }
 
@@ -154,7 +187,8 @@ fn optimize_txb_core(
         txb_init_levels(qcoeff, width, height, &mut levels);
     }
     let dqv = |ci: usize| -> i32 { get_dqv(dequant, ci, iqmatrix) };
-    let cdist = |tqc: i32, dqc: i32, ci: usize| -> i64 { get_coeff_dist(tqc, dqc, shift, qmatrix, ci) };
+    let cdist =
+        |tqc: i32, dqc: i32, ci: usize| -> i64 { get_coeff_dist(tqc, dqc, shift, qmatrix, ci) };
     let base0 = |ctx: usize| -> i32 { t.base[ctx * 8] };
 
     let non_skip_cost = t.txb_skip[txb_skip_ctx * 2];
@@ -173,13 +207,39 @@ fn optimize_txb_core(
 
     if abs_qc0 >= 2 {
         update_coeff_general(
-            &mut accu_rate, &mut accu_dist, si as usize, true, tx_size, tx_class, bhl, width, shift,
-            rdmult, dc_sign_ctx, &dqv, scan, t, tcoeff, qcoeff, dqcoeff, &mut levels, qmatrix,
+            &mut accu_rate,
+            &mut accu_dist,
+            si as usize,
+            true,
+            tx_size,
+            tx_class,
+            bhl,
+            width,
+            shift,
+            rdmult,
+            dc_sign_ctx,
+            &dqv,
+            scan,
+            t,
+            tcoeff,
+            qcoeff,
+            dqcoeff,
+            &mut levels,
+            qmatrix,
         );
         si -= 1;
     } else {
         let coeff_ctx = get_lower_levels_ctx_eob(bhl, width, si as usize) as usize;
-        accu_rate += coeff_cost_eob(ci0, abs_qc0, sign0 as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class);
+        accu_rate += coeff_cost_eob(
+            ci0,
+            abs_qc0,
+            sign0 as usize,
+            coeff_ctx,
+            dc_sign_ctx,
+            t,
+            bhl,
+            tx_class,
+        );
         let (tqc, dqc) = (tcoeff[ci0], dqcoeff[ci0]);
         accu_dist += cdist(tqc, dqc, ci0) - cdist(tqc, 0, ci0);
         si -= 1;
@@ -203,7 +263,18 @@ fn optimize_txb_core(
         let sign = (qc < 0) as i32;
         let dist0 = cdist(tqc, 0, ci);
         let mut dist = cdist(tqc, dqc, ci) - dist0;
-        let mut rate = coeff_cost_general(false, ci, abs_qc, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, &levels);
+        let mut rate = coeff_cost_general(
+            false,
+            ci,
+            abs_qc,
+            sign as usize,
+            coeff_ctx,
+            dc_sign_ctx,
+            t,
+            bhl,
+            tx_class,
+            &levels,
+        );
         let mut rd = rdcost(rdmult, (accu_rate + rate) as i64, accu_dist + dist);
 
         let (qc_low, dqc_low, abs_qc_low, dist_low, rate_low, rd_low);
@@ -220,7 +291,18 @@ fn optimize_txb_core(
             dqc_low = dql;
             abs_qc_low = abs_qc - 1;
             dist_low = cdist(tqc, dqc_low, ci) - dist0;
-            rate_low = coeff_cost_general(false, ci, abs_qc_low, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, &levels);
+            rate_low = coeff_cost_general(
+                false,
+                ci,
+                abs_qc_low,
+                sign as usize,
+                coeff_ctx,
+                dc_sign_ctx,
+                t,
+                bhl,
+                tx_class,
+                &levels,
+            );
             rd_low = rdcost(rdmult, (accu_rate + rate_low) as i64, accu_dist + dist_low);
         }
 
@@ -228,13 +310,31 @@ fn optimize_txb_core(
         let new_eob = s + 1;
         let coeff_ctx_new_eob = get_lower_levels_ctx_eob(bhl, width, s) as usize;
         let new_eob_cost = crate::cost::eob_cost_pub(new_eob, t, tx_class);
-        let mut rate_coeff_eob =
-            new_eob_cost + coeff_cost_eob(ci, abs_qc, sign as usize, coeff_ctx_new_eob, dc_sign_ctx, t, bhl, tx_class);
+        let mut rate_coeff_eob = new_eob_cost
+            + coeff_cost_eob(
+                ci,
+                abs_qc,
+                sign as usize,
+                coeff_ctx_new_eob,
+                dc_sign_ctx,
+                t,
+                bhl,
+                tx_class,
+            );
         let mut dist_new_eob = dist;
         let mut rd_new_eob = rdcost(rdmult, rate_coeff_eob as i64, dist_new_eob);
         if abs_qc_low > 0 {
             let rate_coeff_eob_low = new_eob_cost
-                + coeff_cost_eob(ci, abs_qc_low, sign as usize, coeff_ctx_new_eob, dc_sign_ctx, t, bhl, tx_class);
+                + coeff_cost_eob(
+                    ci,
+                    abs_qc_low,
+                    sign as usize,
+                    coeff_ctx_new_eob,
+                    dc_sign_ctx,
+                    t,
+                    bhl,
+                    tx_class,
+                );
             let rd_new_eob_low = rdcost(rdmult, rate_coeff_eob_low as i64, dist_low);
             if rd_new_eob_low < rd_new_eob {
                 lower_level_new_eob = true;
@@ -244,7 +344,11 @@ fn optimize_txb_core(
             }
         }
         let qc_threshold = if s <= 5 { 2 } else { 1 };
-        let allow_lower_qc = if sharpness != 0 { abs_qc > qc_threshold } else { true };
+        let allow_lower_qc = if sharpness != 0 {
+            abs_qc > qc_threshold
+        } else {
+            true
+        };
         if allow_lower_qc && rd_low < rd {
             lower_level = true;
             rd = rd_low;
@@ -306,7 +410,8 @@ fn optimize_txb_core(
         let abs_qc = qc.abs();
         let abs_tqc = tcoeff[ci].abs();
         let abs_dqc = dqcoeff[ci].abs();
-        let (rate, rate_low) = two_coeff_cost_simple(ci, abs_qc, coeff_ctx, t, bhl, tx_class, &levels);
+        let (rate, rate_low) =
+            two_coeff_cost_simple(ci, abs_qc, coeff_ctx, t, bhl, tx_class, &levels);
         if abs_dqc < abs_tqc {
             accu_rate += rate;
             si -= 1;
@@ -336,8 +441,25 @@ fn optimize_txb_core(
     if si == 0 {
         let mut dummy = 0i64;
         update_coeff_general(
-            &mut accu_rate, &mut dummy, 0, false, tx_size, tx_class, bhl, width, shift, rdmult,
-            dc_sign_ctx, &dqv, scan, t, tcoeff, qcoeff, dqcoeff, &mut levels, qmatrix,
+            &mut accu_rate,
+            &mut dummy,
+            0,
+            false,
+            tx_size,
+            tx_class,
+            bhl,
+            width,
+            shift,
+            rdmult,
+            dc_sign_ctx,
+            &dqv,
+            scan,
+            t,
+            tcoeff,
+            qcoeff,
+            dqcoeff,
+            &mut levels,
+            qmatrix,
         );
     }
 
@@ -346,7 +468,10 @@ fn optimize_txb_core(
     } else {
         accu_rate += non_skip_cost; // + tx_type_cost (out of scope)
     }
-    OptimizeResult { eob, rate: accu_rate }
+    OptimizeResult {
+        eob,
+        rate: accu_rate,
+    }
 }
 
 /// `update_coeff_general` (used at the eob coefficient and the DC position).
@@ -375,7 +500,8 @@ fn update_coeff_general(
     let ci = scan[si] as usize;
     let qc = qcoeff[ci];
     let coeff_ctx =
-        get_lower_levels_ctx_general(is_last, si, bhl, width, levels, ci, tx_size, tx_class) as usize;
+        get_lower_levels_ctx_general(is_last, si, bhl, width, levels, ci, tx_size, tx_class)
+            as usize;
     if qc == 0 {
         *accu_rate += t.base[coeff_ctx * 8];
         return;
@@ -386,7 +512,18 @@ fn update_coeff_general(
     let (tqc, dqc) = (tcoeff[ci], dqcoeff[ci]);
     let dist = get_coeff_dist(tqc, dqc, shift, qmatrix, ci);
     let dist0 = get_coeff_dist(tqc, 0, shift, qmatrix, ci);
-    let rate = coeff_cost_general(is_last, ci, abs_qc, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, levels);
+    let rate = coeff_cost_general(
+        is_last,
+        ci,
+        abs_qc,
+        sign as usize,
+        coeff_ctx,
+        dc_sign_ctx,
+        t,
+        bhl,
+        tx_class,
+        levels,
+    );
     let rd = rdcost(rdmult, rate as i64, dist);
 
     let (qc_low, dqc_low, abs_qc_low, dist_low, rate_low);
@@ -402,7 +539,18 @@ fn update_coeff_general(
         dqc_low = dql;
         abs_qc_low = abs_qc - 1;
         dist_low = get_coeff_dist(tqc, dqc_low, shift, qmatrix, ci);
-        rate_low = coeff_cost_general(is_last, ci, abs_qc_low, sign as usize, coeff_ctx, dc_sign_ctx, t, bhl, tx_class, levels);
+        rate_low = coeff_cost_general(
+            is_last,
+            ci,
+            abs_qc_low,
+            sign as usize,
+            coeff_ctx,
+            dc_sign_ctx,
+            t,
+            bhl,
+            tx_class,
+            levels,
+        );
     }
     let rd_low = rdcost(rdmult, rate_low as i64, dist_low);
     if rd_low < rd {
@@ -449,7 +597,10 @@ mod qm_primitive_tests {
             let ci = rng.range(0, 1024) as usize;
             let iqm: Vec<u8> = (0..1024).map(|_| rng.range(1, 243) as u8).collect();
             // None (flat) and Some (weighted).
-            assert_eq!(get_dqv(dequant, ci, None), c::ref_get_dqv(&dequant, ci, None));
+            assert_eq!(
+                get_dqv(dequant, ci, None),
+                c::ref_get_dqv(&dequant, ci, None)
+            );
             assert_eq!(
                 get_dqv(dequant, ci, Some(&iqm)),
                 c::ref_get_dqv(&dequant, ci, Some(&iqm)),

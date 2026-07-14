@@ -134,7 +134,15 @@ pub fn write_tx_type(
     mode: usize,
     signal_gate: bool,
 ) {
-    let d = ext_tx_derive(tx_size, is_inter, reduced, tx_type, use_filter_intra, fi_mode, mode);
+    let d = ext_tx_derive(
+        tx_size,
+        is_inter,
+        reduced,
+        tx_type,
+        use_filter_intra,
+        fi_mode,
+        mode,
+    );
     if d.num > 1 && signal_gate {
         write_symbol(enc, d.symb, &mut cdf[..d.num as usize + 1], d.num as usize);
     }
@@ -252,7 +260,10 @@ pub fn fill_tx_type_costs(costs: &mut TxTypeCosts, intra_cdf: &[u16], inter_cdf:
         intra_cdf.len(),
         EXT_TX_SETS_INTRA * EXT_TX_SIZES * INTRA_MODES * (TX_TYPES + 1)
     );
-    assert_eq!(inter_cdf.len(), EXT_TX_SETS_INTER * EXT_TX_SIZES * (TX_TYPES + 1));
+    assert_eq!(
+        inter_cdf.len(),
+        EXT_TX_SETS_INTER * EXT_TX_SIZES * (TX_TYPES + 1)
+    );
     for i in 0..EXT_TX_SIZES {
         // TX_4X4 == 0
         for s in 1..EXT_TX_SETS_INTER {
