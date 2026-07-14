@@ -455,6 +455,12 @@ fn decode_tile_payload(
         delta_lf_present: p.delta_q.delta_lf_present,
         delta_lf_multi: p.delta_q.delta_lf_multi,
         delta_lf_res: p.delta_q.delta_lf_res,
+        lr: aom_entropy::lr::LrFrameConfig {
+            frame_restoration_type: p.restoration.frame_restoration_type,
+            unit_size: p.restoration.restoration_unit_size,
+            crop_width: p.frame_size.superres_upscaled_width,
+            crop_height: p.frame_size.superres_upscaled_height,
+        },
     };
     let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
     let mut dec = OdEcDec::new(tile_data);

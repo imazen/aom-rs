@@ -339,3 +339,98 @@ pub fn read_lr_unit(
     }
     u
 }
+
+/// `RESTORATION_UNITSIZE_MAX` / `RESTORATION_PROC_UNIT_SIZE` /
+/// `RESTORATION_UNIT_OFFSET` (restoration.h).
+pub const RESTORATION_UNITSIZE_MAX: i32 = 256;
+pub const RESTORATION_PROC_UNIT_SIZE: i32 = 64;
+pub const RESTORATION_UNIT_OFFSET: i32 = 8;
+
+/// `av1_lr_count_units` (restoration.c): units along one axis — round the
+/// plane size to nearest (a right/bottom unit may extend to 150%), min 1.
+pub fn lr_count_units(unit_size: i32, plane_size: i32) -> i32 {
+    ((plane_size + (unit_size >> 1)) / unit_size).max(1)
+}
+
+/// The loop-restoration frame geometry the tile parse and the frame walk
+/// share: per-plane `frame_restoration_type` + unit size (from
+/// `read_restoration_mode`) and the frame crop dims that size the unit grid.
+/// `Default` (all `RESTORE_NONE`) codes and applies nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LrFrameConfig {
+    /// Per-plane `RESTORE_*` frame restoration type.
+    pub frame_restoration_type: [u8; 3],
+    /// Per-plane restoration unit size (64/128/256; luma-scale values —
+    /// chroma planes use the coded chroma size directly).
+    pub unit_size: [i32; 3],
+    /// Frame crop dims (superres-upscaled width; the envelope rejects scaled
+    /// superres so this is the coded frame width/height).
+    pub crop_width: i32,
+    pub crop_height: i32,
+}
+
+impl LrFrameConfig {
+    /// Any plane restored (`do_loop_restoration`, decodeframe.c:5424).
+    pub fn any_enabled(&self) -> bool {
+        self.frame_restoration_type
+            .iter()
+            .any(|&t| t != RESTORE_NONE)
+    }
+
+    /// This plane's subsampled dims (`av1_get_upsampled_plane_size`).
+    pub fn plane_size(&self, plane: usize, ss_x: usize, ss_y: usize) -> (i32, i32) {
+        let (sx, sy) = if plane > 0 { (ss_x, ss_y) } else { (0, 0) };
+        (
+            (self.crop_width + (1 << sx) - 1) >> sx,
+            (self.crop_height + (1 << sy) - 1) >> sy,
+        )
+    }
+
+    /// This plane's `(horz_units, vert_units)` (`av1_alloc_restoration_struct`).
+    pub fn plane_units(&self, plane: usize, ss_x: usize, ss_y: usize) -> (i32, i32) {
+        let (pw, ph) = self.plane_size(plane, ss_x, ss_y);
+        (
+            lr_count_units(self.unit_size[plane], pw),
+            lr_count_units(self.unit_size[plane], ph),
+        )
+    }
+}
+
+/// `av1_loop_restoration_corners_in_sb` (restoration.c) for the unscaled-
+/// superres envelope: the half-open RU rectangle `[rcol0, rcol1) x
+/// [rrow0, rrow1)` whose top-left corners fall inside the superblock at
+/// `(mi_row, mi_col)` of `mi_size` mi units — the units whose parameters this
+/// superblock codes. `None` when empty. The caller applies the
+/// `bsize == sb_size` gate (the C returns 0 for any smaller bsize).
+#[allow(clippy::too_many_arguments)]
+pub fn lr_corners_in_sb(
+    lr: &LrFrameConfig,
+    plane: usize,
+    ss_x: usize,
+    ss_y: usize,
+    mi_row: i32,
+    mi_col: i32,
+    mi_size_high: i32,
+    mi_size_wide: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let (sx, sy) = if plane > 0 {
+        (ss_x as i32, ss_y as i32)
+    } else {
+        (0, 0)
+    };
+    let size = lr.unit_size[plane];
+    let (horz_units, vert_units) = lr.plane_units(plane, ss_x, ss_y);
+
+    // MI_SIZE = 4; superres unscaled: mi_to_num = mi_size, denom = size.
+    let mi_size_x = 4 >> sx;
+    let mi_size_y = 4 >> sy;
+    let (mi_to_num_x, denom_x) = (mi_size_x, size);
+    let (mi_to_num_y, denom_y) = (mi_size_y, size);
+    let (rnd_x, rnd_y) = (denom_x - 1, denom_y - 1);
+
+    let rcol0 = (mi_col * mi_to_num_x + rnd_x) / denom_x;
+    let rrow0 = (mi_row * mi_to_num_y + rnd_y) / denom_y;
+    let rcol1 = (((mi_col + mi_size_wide) * mi_to_num_x + rnd_x) / denom_x).min(horz_units);
+    let rrow1 = (((mi_row + mi_size_high) * mi_to_num_y + rnd_y) / denom_y).min(vert_units);
+    (rcol0 < rcol1 && rrow0 < rrow1).then_some((rcol0, rcol1, rrow0, rrow1))
+}

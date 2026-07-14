@@ -1192,3 +1192,49 @@ long shim_lr_units_roundtrip(const int32_t *units, int n, uint8_t *out,
   free(cm);
   return len;
 }
+
+/* REAL av1_alloc_restoration_struct unit-grid geometry + REAL
+ * av1_loop_restoration_corners_in_sb for one (plane, SB). out[6] =
+ * { horz_units, vert_units, rcol0, rcol1, rrow0, rrow1 }; returns the C
+ * corners_in_sb return (0 = no unit corners in this SB / not sb_size). */
+int shim_lr_corners_in_sb(int w, int h, int ss_x, int ss_y,
+                          const int32_t *unit_size /*[3]*/, int plane,
+                          int mi_row, int mi_col, int bsize, int32_t *out) {
+  AV1_COMMON *cm = (AV1_COMMON *)calloc(1, sizeof(*cm));
+  SequenceHeader *seq = (SequenceHeader *)calloc(1, sizeof(*seq));
+  struct aom_internal_error_info *err =
+      (struct aom_internal_error_info *)calloc(1, sizeof(*err));
+  if (!cm || !seq || !err) return -1;
+  seq->subsampling_x = ss_x;
+  seq->subsampling_y = ss_y;
+  seq->sb_size = BLOCK_64X64;
+  cm->seq_params = seq;
+  cm->error = err;
+  cm->width = w;
+  cm->height = h;
+  cm->superres_upscaled_width = w;
+  cm->superres_upscaled_height = h;
+  cm->superres_scale_denominator = SCALE_NUMERATOR;
+  cm->mi_params.mi_rows = ((h + 7) & ~7) >> 2;
+  cm->mi_params.mi_cols = ((w + 7) & ~7) >> 2;
+  for (int p = 0; p < 3; p++) {
+    cm->rst_info[p].restoration_unit_size = unit_size[p];
+    cm->rst_info[p].frame_restoration_type = RESTORE_WIENER;
+    av1_alloc_restoration_struct(cm, &cm->rst_info[p], p > 0);
+  }
+  out[0] = cm->rst_info[plane].horz_units;
+  out[1] = cm->rst_info[plane].vert_units;
+  int rcol0 = 0, rcol1 = 0, rrow0 = 0, rrow1 = 0;
+  const int hit = av1_loop_restoration_corners_in_sb(
+      cm, plane, mi_row, mi_col, (BLOCK_SIZE)bsize, &rcol0, &rcol1, &rrow0,
+      &rrow1);
+  out[2] = rcol0;
+  out[3] = rcol1;
+  out[4] = rrow0;
+  out[5] = rrow1;
+  for (int p = 0; p < 3; p++) av1_free_restoration_struct(&cm->rst_info[p]);
+  free(err);
+  free(seq);
+  free(cm);
+  return hit;
+}

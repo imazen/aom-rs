@@ -7770,6 +7770,58 @@ extern "C" {
         readback: *mut i32,
         cdf_out: *mut u16,
     ) -> i64;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_lr_corners_in_sb(
+        w: i32,
+        h: i32,
+        ss_x: i32,
+        ss_y: i32,
+        unit_size: *const i32,
+        plane: i32,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: i32,
+        out: *mut i32,
+    ) -> i32;
+}
+
+/// REAL `av1_alloc_restoration_struct` geometry + REAL
+/// `av1_loop_restoration_corners_in_sb` for one (plane, superblock). Returns
+/// `(hit, horz_units, vert_units, [rcol0, rcol1, rrow0, rrow1])`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_lr_corners_in_sb(
+    w: i32,
+    h: i32,
+    ss_x: i32,
+    ss_y: i32,
+    unit_size: [i32; 3],
+    plane: usize,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+) -> (bool, i32, i32, [i32; 4]) {
+    let mut out = [0i32; 6];
+    let hit = unsafe {
+        shim_lr_corners_in_sb(
+            w,
+            h,
+            ss_x,
+            ss_y,
+            unit_size.as_ptr(),
+            plane as i32,
+            mi_row,
+            mi_col,
+            bsize as i32,
+            out.as_mut_ptr(),
+        )
+    };
+    assert!(hit >= 0, "shim_lr_corners_in_sb failed");
+    (
+        hit != 0,
+        out[0],
+        out[1],
+        [out[2], out[3], out[4], out[5]],
+    )
 }
 
 /// Words per unit in [`ref_lr_units_roundtrip`] packing:

@@ -191,3 +191,101 @@ fn lr_default_refs_match_c_formulas() {
         assert_eq!(r.sgrproj[p].xqd, [(-96 + 31) / 2, (-32 + 95) / 2]);
     }
 }
+
+/// `lr_corners_in_sb` + unit-grid geometry vs the REAL C
+/// (`av1_alloc_restoration_struct` counts + `av1_loop_restoration_corners_in_sb`),
+/// over frame dims incl. non-multiples of 64, all subsamplings, all unit
+/// sizes, every 64x64 SB of each frame. Also asserts full coverage: over all
+/// SBs the hit rectangles partition the unit grid exactly (every RU's params
+/// are coded exactly once).
+#[test]
+fn lr_corners_and_unit_grid_match_c() {
+    const BLOCK_64X64: usize = 12;
+    for &(w, h) in &[
+        (64, 64),
+        (65, 65),
+        (128, 96),
+        (176, 144),
+        (320, 240),
+        (127, 250),
+        (4, 4),
+        (36, 20),
+        (256, 256),
+        (448, 232),
+    ] {
+        for &(ss_x, ss_y) in &[(0usize, 0usize), (1, 0), (1, 1)] {
+            for &ys in &[64i32, 128, 256] {
+                // Chroma size: same, or halved when both axes subsampled
+                // (the only coded choices; 64 luma can't halve — the C
+                // reader derives chroma from the coded luma size).
+                let chroma_choices: &[i32] = if ss_x.min(ss_y) == 1 && ys > 64 {
+                    &[0, 1]
+                } else {
+                    &[0]
+                };
+                for &half in chroma_choices {
+                    let cs = ys >> half;
+                    let unit_size = [ys, cs, cs];
+                    let lr = aom_entropy::lr::LrFrameConfig {
+                        frame_restoration_type: [RESTORE_WIENER; 3],
+                        unit_size,
+                        crop_width: w,
+                        crop_height: h,
+                    };
+                    let mi_rows = ((h + 7) & !7) >> 2;
+                    let mi_cols = ((w + 7) & !7) >> 2;
+                    for plane in 0..3 {
+                        let (hu, vu) = lr.plane_units(plane, ss_x, ss_y);
+                        let mut covered = vec![0u32; (hu * vu) as usize];
+                        let mut mi_row = 0;
+                        while mi_row < mi_rows {
+                            let mut mi_col = 0;
+                            while mi_col < mi_cols {
+                                let (c_hit, c_hu, c_vu, c_r) = c::ref_lr_corners_in_sb(
+                                    w,
+                                    h,
+                                    ss_x as i32,
+                                    ss_y as i32,
+                                    unit_size,
+                                    plane,
+                                    mi_row,
+                                    mi_col,
+                                    BLOCK_64X64,
+                                );
+                                assert_eq!(
+                                    (hu, vu),
+                                    (c_hu, c_vu),
+                                    "unit grid {w}x{h} ss({ss_x},{ss_y}) us{unit_size:?} p{plane}"
+                                );
+                                let r = aom_entropy::lr::lr_corners_in_sb(
+                                    &lr, plane, ss_x, ss_y, mi_row, mi_col, 16, 16,
+                                );
+                                match r {
+                                    Some((rc0, rc1, rr0, rr1)) => {
+                                        assert!(c_hit, "rust hit, C miss @({mi_row},{mi_col}) p{plane} {w}x{h}");
+                                        assert_eq!([rc0, rc1, rr0, rr1], c_r, "corners @({mi_row},{mi_col}) p{plane} {w}x{h} ss({ss_x},{ss_y}) us{unit_size:?}");
+                                        for rr in rr0..rr1 {
+                                            for rc in rc0..rc1 {
+                                                covered[(rr * hu + rc) as usize] += 1;
+                                            }
+                                        }
+                                    }
+                                    None => assert!(
+                                        !c_hit,
+                                        "C hit, rust miss @({mi_row},{mi_col}) p{plane} {w}x{h}"
+                                    ),
+                                }
+                                mi_col += 16;
+                            }
+                            mi_row += 16;
+                        }
+                        assert!(
+                            covered.iter().all(|&c| c == 1),
+                            "unit coverage not exactly-once: {w}x{h} ss({ss_x},{ss_y}) us{unit_size:?} p{plane} {covered:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

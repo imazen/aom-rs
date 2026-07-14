@@ -364,6 +364,11 @@ pub struct KfTileConfig {
     pub delta_lf_present: bool,
     pub delta_lf_multi: bool,
     pub delta_lf_res: i32,
+    /// Loop-restoration frame geometry (`cm->rst_info` slice): per-plane
+    /// frame restoration type + unit size + the frame crop dims that size
+    /// the unit grid. Default (all `RESTORE_NONE`) codes no RU params —
+    /// the pre-restoration tile syntax is unchanged.
+    pub lr: aom_entropy::lr::LrFrameConfig,
 }
 
 /// The per-plane `[dc, ac]` dequant steps for an effective qindex — the shared
@@ -434,6 +439,11 @@ pub struct KfTileDecode {
     pub height_uv: usize,
     pub tree: Vec<i8>,
     pub blocks: Vec<DecodedBlockKf>,
+    /// Per-plane restoration-unit parameters in unit-grid raster order
+    /// (`rst_info[plane].unit_info`), decoded interleaved with the SB walk
+    /// (`loop_restoration_read_sb_coeffs`); empty when the plane's frame
+    /// restoration type is `RESTORE_NONE`.
+    pub lr_units: [Vec<aom_entropy::lr::LrUnitInfo>; 3],
 }
 
 // ---- shared driver helpers (also used by the roundtrip mirror encoder) ----------
@@ -536,6 +546,12 @@ struct TileKf<'c> {
     st: KfBlockState,
     tree: Vec<i8>,
     blocks: Vec<DecodedBlockKf>,
+    /// Per-plane restoration-unit params (unit-grid raster order); sized
+    /// `horz_units * vert_units` for restored planes, empty otherwise.
+    lr_units: [Vec<aom_entropy::lr::LrUnitInfo>; 3],
+    /// `xd->wiener_info` / `xd->sgrproj_info` — the per-plane RU-params
+    /// prediction references (`av1_reset_loop_restoration` at tile start).
+    lr_refs: aom_entropy::lr::LrRefState,
 }
 
 impl<'c> TileKf<'c> {
@@ -645,6 +661,15 @@ impl<'c> TileKf<'c> {
             st,
             tree: Vec::new(),
             blocks: Vec::new(),
+            lr_units: std::array::from_fn(|p| {
+                if cfg.lr.frame_restoration_type[p] == aom_entropy::lr::RESTORE_NONE {
+                    Vec::new()
+                } else {
+                    let (hu, vu) = cfg.lr.plane_units(p, ss_x, ss_y);
+                    vec![aom_entropy::lr::LrUnitInfo::default(); (hu * vu) as usize]
+                }
+            }),
+            lr_refs: aom_entropy::lr::LrRefState::default(),
         }
     }
 
@@ -1268,6 +1293,48 @@ impl<'c> TileKf<'c> {
         });
     }
 
+    /// The per-SB restoration-unit parameter reads
+    /// (`loop_restoration_read_sb_coeffs` over the
+    /// `av1_loop_restoration_corners_in_sb` rectangle, decodeframe.c:1325):
+    /// plane-major, then unit-grid raster order within the SB's rectangle.
+    fn read_lr_units(
+        &mut self,
+        dec: &mut OdEcDec,
+        cdfs: &mut KfFrameContext,
+        mi_row: i32,
+        mi_col: i32,
+    ) {
+        use aom_entropy::lr;
+        let num_planes = if self.cfg.monochrome { 1 } else { 3 };
+        let (ss_x, ss_y) = (self.cfg.subsampling_x, self.cfg.subsampling_y);
+        for plane in 0..num_planes {
+            let frt = self.cfg.lr.frame_restoration_type[plane];
+            if frt == lr::RESTORE_NONE {
+                continue;
+            }
+            let Some((rcol0, rcol1, rrow0, rrow1)) =
+                lr::lr_corners_in_sb(&self.cfg.lr, plane, ss_x, ss_y, mi_row, mi_col, 16, 16)
+            else {
+                continue;
+            };
+            let (hu, _) = self.cfg.lr.plane_units(plane, ss_x, ss_y);
+            for rrow in rrow0..rrow1 {
+                for rcol in rcol0..rcol1 {
+                    let unit_idx = (rrow * hu + rcol) as usize;
+                    self.lr_units[plane][unit_idx] = lr::read_lr_unit(
+                        dec,
+                        frt,
+                        plane,
+                        &mut self.lr_refs,
+                        &mut cdfs.switchable_restore,
+                        &mut cdfs.wiener_restore,
+                        &mut cdfs.sgrproj_restore,
+                    );
+                }
+            }
+        }
+    }
+
     /// `decode_partition` (decodeframe.c): the recursive partition walk. Reads
     /// the partition symbol per in-frame node (forced NONE below 8x8; the 2-way
     /// edge gathers and forced SPLIT are inside `read_partition`), dispatches the
@@ -1283,6 +1350,14 @@ impl<'c> TileKf<'c> {
     ) {
         if mi_row >= self.cfg.mi_rows || mi_col >= self.cfg.mi_cols {
             return;
+        }
+        // decode_partition's parse arm (decodeframe.c:1325-1343): at the
+        // superblock root, the parameters of every restoration unit whose
+        // top-left corner falls in this SB are coded here, per plane, before
+        // the SB's first partition symbol (av1_loop_restoration_corners_in_sb
+        // returns 0 for any bsize below sb_size, so only the root fires).
+        if bsize == BLOCK_64X64 {
+            self.read_lr_units(dec, cdfs, mi_row, mi_col);
         }
         let hbs = MI_SIZE_WIDE[bsize] / 2;
         let quarter_step = MI_SIZE_WIDE[bsize] / 4;
@@ -1432,5 +1507,6 @@ pub fn decode_tile_kf(
         },
         tree: t.tree,
         blocks: t.blocks,
+        lr_units: t.lr_units,
     }
 }
