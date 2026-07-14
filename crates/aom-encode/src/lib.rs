@@ -492,6 +492,46 @@ pub fn dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, bd: 
     )
 }
 
+/// Coefficient-level per-transform-block RD cost — the core of the speed-0 intra
+/// tx-type RD evaluation (av1/encoder/tx_search.c): given the outputs of
+/// [`xform_quant_optimize`] (`coeff` = forward-transform coefficients,
+/// `qcoeff` = quantized, `dqcoeff` = dequantized, plus `eob` and the entropy
+/// contexts), compute
+/// `RDCOST(rdmult, cost_coeffs_txb(qcoeff, …), dist_block_tx_domain(coeff, dqcoeff, …))`.
+///
+/// The rate here is the coefficient-coding bits only ([`aom_txb::cost_coeffs_txb`]);
+/// the block-level mode / tx-type signaling bits are added by the caller and are
+/// out of scope for this txb-level primitive. Distortion is transform-domain
+/// ([`dist_block_tx_domain`]). `cost_tables` are the derived
+/// `LV_MAP_COEFF_COST` / `LV_MAP_EOB_COST` cost tables; `rdmult` is the RD
+/// multiplier from [`rd::av1_compute_rd_mult_based_on_qindex`].
+#[allow(clippy::too_many_arguments)]
+pub fn txb_rd_cost(
+    coeff: &[i32],
+    qcoeff: &[i32],
+    dqcoeff: &[i32],
+    eob: usize,
+    tx_size: usize,
+    tx_type: usize,
+    txb_skip_ctx: usize,
+    dc_sign_ctx: usize,
+    cost_tables: &CoeffCostTables,
+    rdmult: i32,
+    bd: u8,
+) -> i64 {
+    let rate = aom_txb::cost_coeffs_txb(
+        qcoeff,
+        eob,
+        tx_size,
+        tx_type,
+        txb_skip_ctx,
+        dc_sign_ctx,
+        cost_tables,
+    );
+    let (dist, _sse) = dist_block_tx_domain(coeff, dqcoeff, tx_size, bd);
+    rd::rdcost(rdmult, rate, dist)
+}
+
 /// `read_coding_block_plane` — decode inverse of [`encode_coding_block_plane`]: iterate a
 /// plane's transform blocks in raster order, reading each txb's coefficients via
 /// `read_coeffs_txb_full` with the `get_txb_ctx`-derived contexts, threading the above/left
