@@ -716,3 +716,59 @@ int shim_tx_size_cost(const int *costs /*[4][3][3]*/, int tx_mode_is_select,
   const int depth = tx_size_to_depth((TX_SIZE)tx_size, (BLOCK_SIZE)bsize);
   return costs[(tx_size_cat * TX_SIZE_CONTEXTS + tx_size_ctx) * 3 + depth];
 }
+
+/* ---- model-rd prune (intra_mode_search.c statics) ---------------------------
+ * get_model_rd_index_for_pruning + prune_intra_y_mode are static; both bodies
+ * are transcribed VERBATIM (intra_mode_search.c:423-492) so the double
+ * threshold math (1.50 / 1.00 * int64 model rd) is compiled as C. Neighbour
+ * state is passed as plain ints (avail flag + mode); left/above mode
+ * comparisons default 0 when unavailable, as the C's guarded reads do. */
+int shim_get_model_rd_index_for_pruning(int cur_mode, int qindex,
+                                        int top_intra_model_count_allowed,
+                                        int adapt_top_model_rd_count_using_neighbors,
+                                        int left_available, int left_mode,
+                                        int up_available, int above_mode) {
+  if (!adapt_top_model_rd_count_using_neighbors)
+    return top_intra_model_count_allowed - 1;
+
+  const int mode = cur_mode;
+  int model_rd_index_for_pruning = top_intra_model_count_allowed - 1;
+  int is_left_mode_neq_cur_mode = 0, is_above_mode_neq_cur_mode = 0;
+  if (left_available) is_left_mode_neq_cur_mode = left_mode != mode;
+  if (up_available) is_above_mode_neq_cur_mode = above_mode != mode;
+  if (qindex <= 127) {
+    if (is_left_mode_neq_cur_mode || is_above_mode_neq_cur_mode)
+      model_rd_index_for_pruning = AOMMAX(model_rd_index_for_pruning - 1, 0);
+  } else {
+    if (is_left_mode_neq_cur_mode && is_above_mode_neq_cur_mode)
+      model_rd_index_for_pruning = AOMMAX(model_rd_index_for_pruning - 1, 0);
+  }
+  return model_rd_index_for_pruning;
+}
+
+int shim_prune_intra_y_mode(int64_t this_model_rd, int64_t *best_model_rd,
+                            int64_t top_intra_model_rd[],
+                            int max_model_cnt_allowed,
+                            int model_rd_index_for_pruning) {
+  const double thresh_best = 1.50;
+  const double thresh_top = 1.00;
+  for (int i = 0; i < max_model_cnt_allowed; i++) {
+    if (this_model_rd < top_intra_model_rd[i]) {
+      for (int j = max_model_cnt_allowed - 1; j > i; j--) {
+        top_intra_model_rd[j] = top_intra_model_rd[j - 1];
+      }
+      top_intra_model_rd[i] = this_model_rd;
+      break;
+    }
+  }
+  if (top_intra_model_rd[model_rd_index_for_pruning] != INT64_MAX &&
+      this_model_rd >
+          thresh_top * top_intra_model_rd[model_rd_index_for_pruning])
+    return 1;
+
+  if (this_model_rd != INT64_MAX &&
+      this_model_rd > thresh_best * (*best_model_rd))
+    return 1;
+  if (this_model_rd < *best_model_rd) *best_model_rd = this_model_rd;
+  return 0;
+}

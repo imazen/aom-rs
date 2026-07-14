@@ -447,3 +447,90 @@ pub fn prune_luma_odd_delta_angles_using_rd_cost(
     intra_modes_rd_cost[(luma_delta_angle + MAX_ANGLE_DELTA) as usize] > rd_thresh
         && intra_modes_rd_cost[(luma_delta_angle + MAX_ANGLE_DELTA + 2) as usize] > rd_thresh
 }
+
+// ---------------------------------------------------------------------------
+// Model-RD pruning (intra_mode_search.c) — the Hadamard-SATD gate that runs
+// before each candidate's full tx search in the av1_rd_pick_intra_sby_mode
+// loop. The model cost itself is [`crate::tx_search::intra_model_rd_y`].
+// ---------------------------------------------------------------------------
+
+/// `TOP_INTRA_MODEL_COUNT` (speed_features.h): the `top_intra_model_rd[]`
+/// array length in the mode loop.
+pub const TOP_INTRA_MODEL_COUNT: usize = 4;
+
+/// `get_model_rd_index_for_pruning` (intra_mode_search.c): which
+/// `top_intra_model_rd` slot `prune_intra_y_mode` compares against.
+/// Neighbour modes: `None` = unavailable (the C's guarded
+/// `xd->left_mbmi->mode` reads).
+///
+/// Speed-0 all-intra values (speed_features.c): `top_intra_model_count_allowed
+/// = TOP_INTRA_MODEL_COUNT` (=4) and `adapt_top_model_rd_count_using_neighbors
+/// = 0 (both `init_intra_mode_sf` defaults; the allintra path lowers them only
+/// at speed >= 1 / speed >= 6) — so at speed 0 this is always `4 - 1 = 3`.
+pub fn get_model_rd_index_for_pruning(
+    cur_mode: usize,
+    qindex: i32,
+    top_intra_model_count_allowed: i32,
+    adapt_top_model_rd_count_using_neighbors: bool,
+    left_mode: Option<usize>,
+    above_mode: Option<usize>,
+) -> i32 {
+    if !adapt_top_model_rd_count_using_neighbors {
+        return top_intra_model_count_allowed - 1;
+    }
+    let mut model_rd_index_for_pruning = top_intra_model_count_allowed - 1;
+    let is_left_mode_neq_cur_mode = left_mode.is_some_and(|m| m != cur_mode);
+    let is_above_mode_neq_cur_mode = above_mode.is_some_and(|m| m != cur_mode);
+    // qidx 0..=127: reduce when EITHER available neighbour mode differs;
+    // qidx 128..=255: reduce only when BOTH differ.
+    let reduce = if qindex <= 127 {
+        is_left_mode_neq_cur_mode || is_above_mode_neq_cur_mode
+    } else {
+        is_left_mode_neq_cur_mode && is_above_mode_neq_cur_mode
+    };
+    if reduce {
+        model_rd_index_for_pruning = (model_rd_index_for_pruning - 1).max(0);
+    }
+    model_rd_index_for_pruning
+}
+
+/// `prune_intra_y_mode` (intra_mode_search.c): sorted-insert `this_model_rd`
+/// into the top-N model RDs, then prune when it exceeds
+/// `1.00 * top[model_rd_index_for_pruning]` or `1.50 * best_model_rd` (both
+/// DOUBLE comparisons — the i64 operands convert to f64 exactly for every
+/// reachable SATD magnitude, and the reference build carries no FMA, so plain
+/// Rust f64 mul + compare replicates the C bit-for-bit); otherwise lower
+/// `best_model_rd`. Mutates both accumulators exactly as the C does.
+pub fn prune_intra_y_mode(
+    this_model_rd: i64,
+    best_model_rd: &mut i64,
+    top_intra_model_rd: &mut [i64],
+    max_model_cnt_allowed: usize,
+    model_rd_index_for_pruning: usize,
+) -> bool {
+    const THRESH_BEST: f64 = 1.50;
+    const THRESH_TOP: f64 = 1.00;
+    for i in 0..max_model_cnt_allowed {
+        if this_model_rd < top_intra_model_rd[i] {
+            for j in (i + 1..max_model_cnt_allowed).rev() {
+                top_intra_model_rd[j] = top_intra_model_rd[j - 1];
+            }
+            top_intra_model_rd[i] = this_model_rd;
+            break;
+        }
+    }
+    if top_intra_model_rd[model_rd_index_for_pruning] != i64::MAX
+        && (this_model_rd as f64)
+            > THRESH_TOP * (top_intra_model_rd[model_rd_index_for_pruning] as f64)
+    {
+        return true;
+    }
+    if this_model_rd != i64::MAX && (this_model_rd as f64) > THRESH_BEST * (*best_model_rd as f64)
+    {
+        return true;
+    }
+    if this_model_rd < *best_model_rd {
+        *best_model_rd = this_model_rd;
+    }
+    false
+}

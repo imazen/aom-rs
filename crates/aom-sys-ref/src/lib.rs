@@ -3893,3 +3893,73 @@ pub fn ref_tx_size_cost(
         shim_tx_size_cost(costs.as_ptr(), tx_mode_is_select as i32, bsize, tx_size, tx_size_ctx)
     }
 }
+
+// intra_mode_search.c model-rd prune statics — verbatim transcriptions in
+// rd_shim.c (the double-threshold math compiled as C).
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_get_model_rd_index_for_pruning(
+        cur_mode: i32,
+        qindex: i32,
+        top_intra_model_count_allowed: i32,
+        adapt_top_model_rd_count_using_neighbors: i32,
+        left_available: i32,
+        left_mode: i32,
+        up_available: i32,
+        above_mode: i32,
+    ) -> i32;
+    fn shim_prune_intra_y_mode(
+        this_model_rd: i64,
+        best_model_rd: *mut i64,
+        top_intra_model_rd: *mut i64,
+        max_model_cnt_allowed: i32,
+        model_rd_index_for_pruning: i32,
+    ) -> i32;
+}
+
+/// Reference `get_model_rd_index_for_pruning` (intra_mode_search.c,
+/// transcription). Neighbour modes: `None` = unavailable.
+pub fn ref_get_model_rd_index_for_pruning(
+    cur_mode: usize,
+    qindex: i32,
+    top_intra_model_count_allowed: i32,
+    adapt_top_model_rd_count_using_neighbors: bool,
+    left_mode: Option<usize>,
+    above_mode: Option<usize>,
+) -> i32 {
+    unsafe {
+        shim_get_model_rd_index_for_pruning(
+            cur_mode as i32,
+            qindex,
+            top_intra_model_count_allowed,
+            adapt_top_model_rd_count_using_neighbors as i32,
+            left_mode.is_some() as i32,
+            left_mode.unwrap_or(0) as i32,
+            above_mode.is_some() as i32,
+            above_mode.unwrap_or(0) as i32,
+        )
+    }
+}
+
+/// Reference `prune_intra_y_mode` (intra_mode_search.c, transcription).
+/// Mutates `best_model_rd` + `top_intra_model_rd` exactly as the C does;
+/// returns the prune decision.
+pub fn ref_prune_intra_y_mode(
+    this_model_rd: i64,
+    best_model_rd: &mut i64,
+    top_intra_model_rd: &mut [i64],
+    max_model_cnt_allowed: usize,
+    model_rd_index_for_pruning: usize,
+) -> bool {
+    assert!(max_model_cnt_allowed <= top_intra_model_rd.len());
+    assert!(model_rd_index_for_pruning < top_intra_model_rd.len());
+    unsafe {
+        shim_prune_intra_y_mode(
+            this_model_rd,
+            best_model_rd,
+            top_intra_model_rd.as_mut_ptr(),
+            max_model_cnt_allowed as i32,
+            model_rd_index_for_pruning as i32,
+        ) != 0
+    }
+}
