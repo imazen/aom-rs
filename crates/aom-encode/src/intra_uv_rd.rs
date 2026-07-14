@@ -239,8 +239,10 @@ impl UvRdEnv<'_> {
 /// plane): the CfL arm (DC prediction — cached or fresh — plus the
 /// alpha-scaled AC) or the plain intra prediction, written INTO the recon
 /// plane (the facade's in-place dst write; load-bearing for the next txb).
+/// (Shared with the winner re-encode walk,
+/// [`crate::encode_intra::encode_intra_block_plane_uv`].)
 #[allow(clippy::too_many_arguments)]
-fn predict_uv_txb(
+pub(crate) fn predict_uv_txb(
     env: &UvRdEnv,
     recon: &mut [u16],
     plane: usize,

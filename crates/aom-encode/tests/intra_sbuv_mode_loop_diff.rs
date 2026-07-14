@@ -73,7 +73,6 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
         (32, 16) => 10,
         _ => unreachable!(),
     };
-    let pol = TxTypeSearchPolicy::speed0_allintra();
     let mut win_counts = [0usize; 14];
     let mut angle_winners = 0usize;
     let mut cfl_winners = 0usize;
@@ -82,6 +81,13 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
     for (ci, &(bsize, ss_x, ss_y, mi_row, mi_col)) in cases.iter().enumerate() {
         assert!(is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y));
         for iter in 0..8 {
+            // Sweep BOTH usage arms (ALLINTRA chroma trellis mult 13 /
+            // GOOD 20).
+            let pol = if iter % 2 == 0 {
+                TxTypeSearchPolicy::speed0_allintra()
+            } else {
+                TxTypeSearchPolicy::speed0_good()
+            };
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
             let qindex = [16, 64, 128, 200, 255][(ci + iter) % 5] as usize;
@@ -352,6 +358,7 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
                     &t_eob,
                 ),
                 ttc_tables: (&ttc_intra, &ttc_inter),
+                use_chroma_trellis_rd_mult: pol.use_chroma_trellis_rd_mult,
             };
             let mut recon_u_c = recon_u0.clone();
             let mut recon_v_c = recon_v0.clone();

@@ -49,10 +49,21 @@
 //!
 //! ## Scope
 //!
-//! Luma (plane 0) only — 1 of 3 planes. MISSING: the chroma arms (UV
-//! prediction incl. the signalled-CfL-alpha path; needed by the final
-//! `encode_superblock`, not by `av1_rd_pick_intra_sbuv_mode`'s preamble which
-//! only re-encodes luma); frame-edge clipped walks (`max_block_wide/high` —
+//! All 3 plane arms: [`encode_intra_block_plane_y`] (luma) and
+//! [`encode_intra_block_plane_uv`] (each chroma plane; the `plane &&
+//! !xd->is_chroma_ref` early return is the CALLER's gate — encodemb.c:806).
+//! The chroma arm differs from luma per the C body exactly by: prediction
+//! from `get_uv_mode(mbmi->uv_mode)` incl. the signalled-CfL path
+//! (`av1_predict_intra_block_facade`'s `uv_mode == UV_CFL_PRED` arm predicts
+//! DC then applies the WINNER's `cfl_alpha_idx`/`cfl_alpha_signs` AC; the
+//! DC-prediction cache is INACTIVE outside `cfl_rd_pick_alpha`, so the
+//! fresh-DC path runs every txb); `av1_get_tx_type`'s PLANE_TYPE_UV arm
+//! ([`crate::tx_search::uv_intra_tx_type`]); the chroma trellis rd
+//! multiplier (`plane_rd_mult[0][PLANE_TYPE_UV] = 13`); NO
+//! `update_txk_array` reset (`plane == 0` gate, encodemb.c:770) and NO
+//! `cfl_store_tx` (`plane == AOM_PLANE_Y` gate, encodemb.c:782).
+//!
+//! MISSING: frame-edge clipped walks (`max_block_wide/high` —
 //! interior blocks only, same scope as the luma/chroma RD walks); block sizes
 //! above 64x64 (the `mu_blocks` outer walk of
 //! `av1_foreach_transformed_block_in_plane` degenerates to a plain raster for
@@ -64,15 +75,16 @@
 //! are ever read on the KEY-frame path (`av1_get_tx_type` Y reads the origin;
 //! intra UV never reads the luma map); non-origin cells are dead state.
 
+use crate::intra_uv_rd::{predict_uv_txb, CflDcCache, CflPredict, UvRdEnv, UV_CFL_PRED};
 use crate::tx_search::{
-    BLK_H_B, BLK_W_B, MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W, TXSIZE_SQR_UP_MAP,
-    trellis_rdmult_intra_y,
+    trellis_rdmult_intra, trellis_rdmult_intra_y, uv_intra_tx_type, BLK_H_B, BLK_W_B,
+    MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXSIZE_SQR_UP_MAP, TXS_H, TXS_W,
 };
 use crate::{
     BlockContext, OptimizeInputs, QuantKind, QuantParams, xform_quant, xform_quant_optimize,
 };
 use aom_dist::highbd_subtract_block;
-use aom_entropy::partition::intra_avail;
+use aom_entropy::partition::{get_plane_block_size, intra_avail};
 use aom_intra::cfl::{CflCtx, cfl_store_tx};
 use aom_intra::predict_intra_high;
 use aom_transform::inv_txfm2d::av1_inv_txfm2d_add;
@@ -438,6 +450,244 @@ pub fn encode_intra_block_plane_y(
                     env.mi_col,
                 );
             }
+
+            // --- av1_set_txb_context (full-footprint memset) ---
+            for a in ta[blk_col..blk_col + txw_unit].iter_mut() {
+                *a = ent_ctx as i8;
+            }
+            for l in tl[blk_row..blk_row + txh_unit].iter_mut() {
+                *l = ent_ctx as i8;
+            }
+
+            txbs.push(TxbEncode {
+                tx_type,
+                eob,
+                txb_entropy_ctx: ent_ctx,
+                qcoeff,
+                dqcoeff,
+            });
+            blk_col += txw_unit;
+        }
+        blk_row += txh_unit;
+    }
+
+    EncodeIntraPlaneOutcome { txbs, ta, tl }
+}
+
+/// The winner CHROMA mode-info fields the UV re-encode reads from `mbmi`
+/// (the RD pick's outputs).
+#[derive(Clone, Copy, Debug)]
+pub struct UvWinner {
+    /// `mbmi->uv_mode` (UV_PREDICTION_MODE; `UV_CFL_PRED == 13`).
+    pub uv_mode: usize,
+    /// `mbmi->angle_delta[PLANE_TYPE_UV]`, unscaled.
+    pub angle_delta_uv: i32,
+    /// `mbmi->cfl_alpha_idx` (read only when `uv_mode == UV_CFL_PRED`).
+    pub cfl_alpha_idx: i32,
+    /// `mbmi->cfl_alpha_signs` (the joint sign).
+    pub cfl_alpha_signs: i32,
+}
+
+/// The per-call knobs of the UV re-encode arm (the `encode_b_args` slice the
+/// chroma walk reads; the luma arm carries these inside [`EncodeIntraYEnv`]).
+#[derive(Clone, Copy, Debug)]
+pub struct UvEncodeParams {
+    /// `av1_get_tx_size(plane, xd)` for the chroma plane
+    /// ([`crate::intra_uv_rd::av1_get_tx_size_uv`] — both planes share it).
+    pub tx_size: usize,
+    /// `xd->mi[0]->skip_txfm` (0 throughout the KEY-frame intra path).
+    pub skip_txfm: bool,
+    /// `cpi->oxcf.algo_cfg.sharpness` (0 default).
+    pub sharpness: i32,
+    /// `cpi->optimize_seg_arr[mbmi->segment_id]`.
+    pub enable_optimize_b: TrellisOptType,
+    /// `dry_run == OUTPUT_ENABLED`.
+    pub dry_run_output_enabled: bool,
+    /// sf `tx_sf.use_chroma_trellis_rd_mult` — ALLINTRA/RT 1 (chroma
+    /// trellis multiplier 13), usage GOOD 0 (multiplier 20). See
+    /// [`trellis_rdmult_intra`].
+    pub use_chroma_trellis_rd_mult: bool,
+}
+
+/// `av1_encode_intra_block_plane(cpi, x, bsize, plane /* 1|2 */, dry_run,
+/// enable_optimize_b)` (encodemb.c:801-823) — the CHROMA arm. See the module
+/// docs for the delta vs the luma arm. The `plane && !xd->is_chroma_ref`
+/// early return (encodemb.c:806) is the caller's gate; `env` carries the
+/// block geometry/pixels exactly as for the UV RD walk ([`UvRdEnv`] — the
+/// sub-8x8 mi rounding is baked into `ref_off`/`src_off`). `recon` is the
+/// `plane` recon; `cfl` is the loaded CfL context (read only on the CfL
+/// path — the luma re-encode/store must already have run, which the C
+/// guarantees by plane order inside `encode_superblock`).
+pub fn encode_intra_block_plane_uv(
+    env: &UvRdEnv,
+    winner: &UvWinner,
+    prm: &UvEncodeParams,
+    plane: usize,
+    recon: &mut [u16],
+    cfl: &mut CflCtx,
+) -> EncodeIntraPlaneOutcome {
+    debug_assert!(plane == 1 || plane == 2);
+    let plane_bsize = get_plane_block_size(env.bsize, env.ss_x, env.ss_y);
+    debug_assert!(plane_bsize < 22, "invalid chroma plane block");
+    let tx_size = prm.tx_size;
+    let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
+    let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
+    // Plane 4x4 unit dims (mi_size_wide/high of the SUBSAMPLED plane bsize).
+    let max_blocks_wide = MI_SIZE_WIDE_B[plane_bsize];
+    let max_blocks_high = MI_SIZE_HIGH_B[plane_bsize];
+    let pi = plane - 1;
+
+    // ENTROPY_CONTEXT ta/tl = {0}; av1_get_entropy_contexts only when
+    // enable_optimize_b (encodemb.c:817-819).
+    let mut ta = vec![0i8; max_blocks_wide];
+    let mut tl = vec![0i8; max_blocks_high];
+    if prm.enable_optimize_b != TrellisOptType::NoTrellisOpt {
+        ta.copy_from_slice(&env.above_ctx[pi][..max_blocks_wide]);
+        tl.copy_from_slice(&env.left_ctx[pi][..max_blocks_high]);
+    }
+    let use_trellis = is_trellis_used(prm.enable_optimize_b, prm.dry_run_output_enabled);
+
+    // The facade's CfL state: outside cfl_rd_pick_alpha the DC-prediction
+    // cache is off (`use_dc_pred_cache == 0`, nothing cached), so every txb
+    // runs the fresh-DC + alpha-AC path.
+    let mut dc_cache = CflDcCache::cleared();
+
+    let mut txbs: Vec<TxbEncode> = Vec::new();
+    let mut blk_row = 0usize;
+    while blk_row < max_blocks_high {
+        let mut blk_col = 0usize;
+        while blk_col < max_blocks_wide {
+            // --- encode_block_intra ---
+            // av1_predict_intra_block_facade: predict INTO the recon plane
+            // (CfL arm applies the WINNER's signalled alphas).
+            let txb_off = env.ref_off[pi] + (blk_row * env.ref_stride + blk_col) * 4;
+            let mut cfl_predict;
+            let cfl_arg = if winner.uv_mode == UV_CFL_PRED {
+                cfl_predict = CflPredict {
+                    ctx: cfl,
+                    cache: &mut dc_cache,
+                    alpha_idx: winner.cfl_alpha_idx,
+                    joint_sign: winner.cfl_alpha_signs,
+                };
+                Some(&mut cfl_predict)
+            } else {
+                None
+            };
+            predict_uv_txb(
+                env,
+                recon,
+                plane,
+                winner.uv_mode,
+                winner.angle_delta_uv,
+                cfl_arg,
+                tx_size,
+                blk_row,
+                blk_col,
+                txb_off,
+            );
+
+            let mut tx_type = 0usize; // DCT_DCT
+            let (qcoeff, dqcoeff, eob, ent_ctx);
+            if prm.skip_txfm {
+                // *eob = 0; p->txb_entropy_ctx[block] = 0 (encodemb.c:722-724).
+                qcoeff = Vec::new();
+                dqcoeff = Vec::new();
+                eob = 0u16;
+                ent_ctx = 0u8;
+            } else {
+                // av1_subtract_txb: prediction snapshot (tight) as base.
+                let mut pred = vec![0u16; txw * txh];
+                for r in 0..txh {
+                    pred[r * txw..r * txw + txw].copy_from_slice(
+                        &recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw],
+                    );
+                }
+                let src = if plane == 1 { env.src_u } else { env.src_v };
+                let src_txb_off = env.src_off[pi] + (blk_row * env.src_stride + blk_col) * 4;
+                let mut residual = vec![0i16; txw * txh];
+                highbd_subtract_block(
+                    txh,
+                    txw,
+                    &mut residual,
+                    txw,
+                    &src[src_txb_off..],
+                    env.src_stride,
+                    &pred,
+                    txw,
+                );
+
+                // av1_get_tx_type PLANE_TYPE_UV intra arm.
+                tx_type = uv_intra_tx_type(
+                    winner.uv_mode,
+                    env.lossless,
+                    tx_size,
+                    env.reduced_tx_set_used,
+                );
+
+                // quant_idx: use_trellis ? FP : (USE_B_QUANT_NO_TRELLIS ? B : FP).
+                let kind = if use_trellis {
+                    QuantKind::Fp
+                } else {
+                    QuantKind::B
+                };
+                let rows = if plane == 1 { env.rows_u } else { env.rows_v };
+                let qp = QuantParams::from_plane_rows(rows, kind, env.bd);
+                if use_trellis {
+                    let bctx = BlockContext {
+                        above: &ta[blk_col..],
+                        left: &tl[blk_row..],
+                        plane,
+                        plane_bsize,
+                    };
+                    let opt = OptimizeInputs {
+                        cost: env.coeff_costs,
+                        rdmult: trellis_rdmult_intra(
+                            env.rdmult,
+                            prm.sharpness,
+                            env.bd,
+                            plane,
+                            prm.use_chroma_trellis_rd_mult,
+                        ),
+                        sharpness: prm.sharpness,
+                    };
+                    let r =
+                        xform_quant_optimize(&residual, tx_size, tx_type, kind, &qp, &bctx, &opt);
+                    qcoeff = r.qcoeff;
+                    dqcoeff = r.dqcoeff;
+                    eob = r.eob;
+                    ent_ctx = r.txb_entropy_ctx;
+                } else {
+                    let r = xform_quant(&residual, tx_size, tx_type, kind, &qp, false);
+                    qcoeff = r.qcoeff;
+                    dqcoeff = r.dqcoeff;
+                    eob = r.eob;
+                    ent_ctx = r.txb_entropy_ctx;
+                }
+            }
+
+            // if (*eob) av1_inverse_transform_block into the recon plane.
+            if eob > 0 {
+                let mut tight = vec![0u16; txw * txh];
+                for r in 0..txh {
+                    tight[r * txw..r * txw + txw].copy_from_slice(
+                        &recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw],
+                    );
+                }
+                av1_inv_txfm2d_add(
+                    &dqcoeff,
+                    &mut tight,
+                    txw,
+                    tx_type,
+                    tx_size,
+                    i32::from(env.bd),
+                );
+                for r in 0..txh {
+                    recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]
+                        .copy_from_slice(&tight[r * txw..r * txw + txw]);
+                }
+            }
+
+            // plane != 0: NO update_txk_array reset, NO cfl_store_tx.
 
             // --- av1_set_txb_context (full-footprint memset) ---
             for a in ta[blk_col..blk_col + txw_unit].iter_mut() {

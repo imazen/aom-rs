@@ -187,7 +187,6 @@ fn txfm_uvrd_matches_c_walk() {
     let mut invalid_hits = 0usize;
     let mut multi_txb_hits = 0usize;
     let mut angle_hits = 0usize;
-    let pol = TxTypeSearchPolicy::speed0_allintra();
 
     for (ci, &(bsize, ss_x, ss_y, mi_row, mi_col)) in cases.iter().enumerate() {
         assert!(
@@ -195,6 +194,13 @@ fn txfm_uvrd_matches_c_walk() {
             "case {ci} must be a chroma-ref block",
         );
         for iter in 0..8 {
+            // Sweep BOTH usage arms (ALLINTRA chroma trellis mult 13 /
+            // GOOD 20).
+            let pol = if iter % 2 == 0 {
+                TxTypeSearchPolicy::speed0_allintra()
+            } else {
+                TxTypeSearchPolicy::speed0_good()
+            };
             let sc = build_scenario(&mut rng, bsize, ss_x, ss_y, mi_row, mi_col, ci + iter);
             let t = gen_tables(&mut rng);
             let coeff_costs = CoeffCostTables {
@@ -309,6 +315,7 @@ fn txfm_uvrd_matches_c_walk() {
                     &t.eob_tbl,
                 ),
                 ttc_tables: (&t.ttc_intra, &t.ttc_inter),
+                use_chroma_trellis_rd_mult: pol.use_chroma_trellis_rd_mult,
             };
             let mut recon_u_c = sc.recon_u0.clone();
             let mut recon_v_c = sc.recon_v0.clone();
@@ -369,10 +376,16 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
         (6, 0, 0, 8, 8),
         (9, 0, 0, 8, 8),
     ];
-    let pol = TxTypeSearchPolicy::speed0_allintra();
     let mut cached_evals = 0usize;
     for (ci, &(bsize, ss_x, ss_y, mi_row, mi_col)) in cases.iter().enumerate() {
         for iter in 0..8 {
+            // Sweep BOTH usage arms (ALLINTRA chroma trellis mult 13 /
+            // GOOD 20).
+            let pol = if iter % 2 == 0 {
+                TxTypeSearchPolicy::speed0_allintra()
+            } else {
+                TxTypeSearchPolicy::speed0_good()
+            };
             let sc = build_scenario(&mut rng, bsize, ss_x, ss_y, mi_row, mi_col, ci + iter);
             let t = gen_tables(&mut rng);
             let coeff_costs = CoeffCostTables {
@@ -494,6 +507,7 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
                     &t.eob_tbl,
                 ),
                 ttc_tables: (&t.ttc_intra, &t.ttc_inter),
+                use_chroma_trellis_rd_mult: pol.use_chroma_trellis_rd_mult,
             };
 
             let uv_tx = av1_get_tx_size_uv(bsize, false, ss_x, ss_y);

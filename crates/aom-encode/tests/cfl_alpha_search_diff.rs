@@ -65,7 +65,6 @@ fn cfl_rd_pick_alpha_matches_c() {
         (32, 16) => 10,
         _ => unreachable!(),
     };
-    let pol = TxTypeSearchPolicy::speed0_allintra();
     let mut valid_hits = 0usize;
     let mut invalid_hits = 0usize;
     let mut nonzero_alpha_winners = 0usize;
@@ -73,6 +72,13 @@ fn cfl_rd_pick_alpha_matches_c() {
 
     for (ci, &(bsize, ss_x, ss_y, mi_row, mi_col)) in cases.iter().enumerate() {
         for iter in 0..10 {
+            // Sweep BOTH usage arms (ALLINTRA chroma trellis mult 13 /
+            // GOOD 20).
+            let pol = if iter % 2 == 0 {
+                TxTypeSearchPolicy::speed0_allintra()
+            } else {
+                TxTypeSearchPolicy::speed0_good()
+            };
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
             let qindex = [16, 64, 128, 200, 255][iter % 5] as usize;
@@ -271,6 +277,7 @@ fn cfl_rd_pick_alpha_matches_c() {
                     &t_eob,
                 ),
                 ttc_tables: (&ttc_intra, &ttc_inter),
+                use_chroma_trellis_rd_mult: pol.use_chroma_trellis_rd_mult,
             };
             let mut recon_u_c = recon_u0.clone();
             let mut recon_v_c = recon_v0.clone();

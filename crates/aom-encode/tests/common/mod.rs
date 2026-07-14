@@ -90,10 +90,12 @@ pub fn c_search_tx_type(
     coeff_tbls: (&[i32], &[i32], &[i32], &[i32], &[i32], &[i32], &[i32]),
     ttc_tables: (&[i32], &[i32]),
 ) -> (usize, u16, i32, i64, i64, u8, Vec<i32>, i64) {
+    // plane 0: the chroma trellis-table select is irrelevant (luma is 17 in
+    // both tables).
     c_search_tx_type_p(
         0, 0, residual, pred, src, src_off, src_stride, tx_size, mode, use_fi, fi_mode,
         lossless, reduced, bd, plane_rows_c, dequant, t_above, t_left, bsize, rdmult,
-        ref_best_rd, coeff_tbls, ttc_tables,
+        ref_best_rd, coeff_tbls, ttc_tables, true,
     )
 }
 
@@ -453,6 +455,7 @@ pub fn c_search_tx_type_p(
     ref_best_rd: i64,
     coeff_tbls: (&[i32], &[i32], &[i32], &[i32], &[i32], &[i32], &[i32]),
     ttc_tables: (&[i32], &[i32]),
+    use_chroma_trellis_rd_mult: bool,
 ) -> (usize, u16, i32, i64, i64, u8, Vec<i32>, i64) {
     let (w, _h) = (TX_W[tx_size], TX_H[tx_size]);
     let n_coeffs = txb_wide(tx_size) * txb_high(tx_size);
@@ -491,7 +494,7 @@ pub fn c_search_tx_type_p(
     let qstep_c = (i32::from(dequant[1]) >> dequant_shift) as u64;
     let skip_trellis_c = !((mse_c as u64) <= 3200u64 * qstep_c * qstep_c);
     let kind_c = if skip_trellis_c { 1 } else { 0 };
-    let trellis_rdmult = trellis_rdmult_intra(rdmult, 0, bd, plane);
+    let trellis_rdmult = trellis_rdmult_intra(rdmult, 0, bd, plane, use_chroma_trellis_rd_mult);
     let (txb_skip_ctx_c, dc_sign_ctx_c) =
         c::ref_get_txb_ctx(plane_bsize, tx_size, plane, t_above, t_left);
 
@@ -662,6 +665,9 @@ pub struct CUvEnv<'a> {
     pub rdmult: i32,
     pub coeff_tbls: (&'a [i32], &'a [i32], &'a [i32], &'a [i32], &'a [i32], &'a [i32], &'a [i32]),
     pub ttc_tables: (&'a [i32], &'a [i32]),
+    /// sf `tx_sf.use_chroma_trellis_rd_mult` — ALLINTRA/RT 1 (chroma trellis
+    /// mult 13), usage GOOD 0 (mult 20). Both arms swept by the diffs.
+    pub use_chroma_trellis_rd_mult: bool,
 }
 
 /// C-side `av1_txfm_rd_in_plane` for one CHROMA plane (intra): the walk over
@@ -774,6 +780,7 @@ pub fn c_txfm_rd_in_plane_uv(
                 env.luma_mode, env.luma_use_fi, env.luma_fi_mode, env.lossless, env.reduced,
                 env.bd, rows_c, dequant, &t_above[blk_col..], &t_left[blk_row..], plane_bsize,
                 env.rdmult, ref_best_rd - current_rd, env.coeff_tbls, env.ttc_tables,
+                env.use_chroma_trellis_rd_mult,
             );
             if weob > 0 {
                 let mut tight = pred.clone();
@@ -1911,7 +1918,8 @@ pub fn c_encode_intra_block_plane_y(
                             &tcoeff,
                             eob0,
                             &a.dequant,
-                            trellis_rdmult_intra(a.rdmult, a.sharpness, a.bd, 0),
+                            // plane 0: table select irrelevant (17 both).
+                            trellis_rdmult_intra(a.rdmult, a.sharpness, a.bd, 0, true),
                             dc_sign_ctx_c as usize,
                             txb_skip_ctx_c as usize,
                             a.sharpness,
@@ -1958,6 +1966,206 @@ pub fn c_encode_intra_block_plane_y(
             }
             txbs.push((tx_type_c, eob_c as u16, ctx_c, qc, dqc));
         }
+    }
+    (txbs, ta_c, tl_c)
+}
+
+/// The C-side CHROMA walk of `av1_encode_intra_block_plane` (plane 1/2) over
+/// REAL pieces: per txb prediction (plain via ref_hbd_predict_intra with the
+/// UV mode/angle, or the CfL arm — fresh DC prediction + the REAL
+/// `av1_cfl_predict_block` with the WINNER's alpha_idx/joint_sign; the
+/// dc-pred cache is inactive outside cfl_rd_pick_alpha) ->
+/// ref_highbd_subtract_block -> the REAL `av1_get_tx_type` UV arm
+/// (ref_get_tx_type_uv_intra) -> ref_fwd_txfm2d + ref_quant_plane_rows
+/// (FP/B) -> [trellis: ref_get_txb_ctx(plane_bsize, plane) +
+/// ref_optimize_txb at the plane trellis rdmult + ref_txb_entropy_context]
+/// -> ref_inv_txfm2d_add. NO txk reset, NO cfl store (plane != 0 gates).
+#[allow(clippy::too_many_arguments)]
+pub fn c_encode_intra_block_plane_uv(
+    env: &CUvEnv,
+    plane: usize,
+    uv_mode: usize,
+    angle_delta_uv: i32,
+    mut cfl: Option<(&mut c::RefCflState, i32, i32)>,
+    tx_size: usize,
+    skip_txfm: bool,
+    use_trellis: bool,
+    load_ctx: bool,
+    sharpness: i32,
+    recon: &mut [u16],
+) -> (Vec<CTxb>, Vec<i8>, Vec<i8>) {
+    use aom_encode::tx_search::trellis_rdmult_intra;
+    let plane_bsize = aom_entropy::partition::get_plane_block_size(env.bsize, env.ss_x, env.ss_y);
+    let (txw, txh) = (TX_W[tx_size], TX_H[tx_size]);
+    let (txwu, txhu) = (txw >> 2, txh >> 2);
+    let max_w = MI_W[plane_bsize];
+    let max_h = MI_H[plane_bsize];
+    let pi = plane - 1;
+    let mode = aom_entropy::partition::get_uv_mode(uv_mode) as usize;
+    let wpx = ((MI_W[env.bsize] * 4) >> env.ss_x).max(4) as i32;
+    let hpx = ((MI_H[env.bsize] * 4) >> env.ss_y).max(4) as i32;
+    let src: &[u16] = if plane == 1 { env.src_u } else { env.src_v };
+    let (rows_c, dequant) =
+        if plane == 1 { (env.rows_u_c, env.dequant_u) } else { (env.rows_v_c, env.dequant_v) };
+    let (txb_skip, base_eob, base, eob_extra, dc_sign, lps, eob_tbl) = env.coeff_tbls;
+
+    let mut ta_c = vec![0i8; max_w];
+    let mut tl_c = vec![0i8; max_h];
+    if load_ctx {
+        ta_c.copy_from_slice(&env.above_ctx[pi][..max_w]);
+        tl_c.copy_from_slice(&env.left_ctx[pi][..max_h]);
+    }
+
+    let mut txbs: Vec<CTxb> = Vec::new();
+    let mut blk_row = 0usize;
+    while blk_row < max_h {
+        let mut blk_col = 0usize;
+        while blk_col < max_w {
+            let txb_off = env.ref_off[pi] + (blk_row * env.stride + blk_col) * 4;
+            // --- av1_predict_intra_block_facade ---
+            if let Some((st, alpha_idx, joint_sign)) = cfl.as_mut() {
+                assert_eq!((blk_row, blk_col), (0, 0), "CfL block == tx block");
+                // Fresh DC prediction (no dc-pred cache in the encode pass).
+                let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
+                    12, env.bsize, env.mi_row, env.mi_col, true, true, 1 << 16, 1 << 16, 0,
+                    tx_size, env.ss_x as i32, env.ss_y as i32, blk_row as i32, blk_col as i32,
+                    wpx, hpx, 512, 512, mode, 0, false,
+                );
+                let pred = c::ref_hbd_predict_intra(
+                    recon, txb_off, env.stride, mode, 0, false, 0, false, 0, tx_size, txw, txh,
+                    n_top, n_tr, n_left, n_bl, env.bd as i32,
+                );
+                for r in 0..txh {
+                    recon[txb_off + r * env.stride..txb_off + r * env.stride + txw]
+                        .copy_from_slice(&pred[r * txw..r * txw + txw]);
+                }
+                c::ref_cfl_predict_block(
+                    st, recon, txb_off, env.stride, tx_size, plane, *alpha_idx, *joint_sign,
+                    env.bsize, env.lossless, env.ss_x as i32, env.ss_y as i32, env.bd,
+                );
+            } else {
+                let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
+                    12, env.bsize, env.mi_row, env.mi_col, true, true, 1 << 16, 1 << 16, 0,
+                    tx_size, env.ss_x as i32, env.ss_y as i32, blk_row as i32, blk_col as i32,
+                    wpx, hpx, 512, 512, mode, angle_delta_uv * 3, false,
+                );
+                let pred = c::ref_hbd_predict_intra(
+                    recon, txb_off, env.stride, mode, angle_delta_uv * 3, false, 0, false, 0,
+                    tx_size, txw, txh, n_top, n_tr, n_left, n_bl, env.bd as i32,
+                );
+                for r in 0..txh {
+                    recon[txb_off + r * env.stride..txb_off + r * env.stride + txw]
+                        .copy_from_slice(&pred[r * txw..r * txw + txw]);
+                }
+            }
+
+            let mut tx_type_c = 0usize;
+            let (mut qc, mut dqc): (Vec<i32>, Vec<i32>) = (Vec::new(), Vec::new());
+            let (eob_c, ctx_c);
+            if skip_txfm {
+                eob_c = 0usize;
+                ctx_c = 0u8;
+            } else {
+                // Prediction snapshot (recon holds it) for subtract + recon base.
+                let mut pred = vec![0u16; txw * txh];
+                for r in 0..txh {
+                    pred[r * txw..r * txw + txw].copy_from_slice(
+                        &recon[txb_off + r * env.stride..txb_off + r * env.stride + txw],
+                    );
+                }
+                let src_txb_off = env.src_off[pi] + (blk_row * env.stride + blk_col) * 4;
+                let mut residual = vec![0i16; txw * txh];
+                c::ref_highbd_subtract_block(
+                    txh, txw, &mut residual, txw, &src[src_txb_off..], env.stride, &pred, txw,
+                );
+                tx_type_c =
+                    c::ref_get_tx_type_uv_intra(uv_mode, env.lossless, tx_size, env.reduced);
+                let n_coeffs = txb_wide(tx_size) * txb_high(tx_size);
+                let coeff = c::ref_fwd_txfm2d(tx_size, &residual, txw, tx_type_c);
+                let tcoeff = coeff[..n_coeffs].to_vec();
+                qc = vec![0i32; n_coeffs];
+                dqc = vec![0i32; n_coeffs];
+                let kind_c = if use_trellis { 0 } else { 1 }; // FP : B
+                let eob0 = c::ref_quant_plane_rows(
+                    kind_c,
+                    env.bd > 8,
+                    &tcoeff,
+                    rows_c,
+                    scan(tx_size, tx_type_c),
+                    aom_txb::iscan(tx_size, tx_type_c),
+                    aom_encode::tx_scale(tx_size),
+                    &mut qc,
+                    &mut dqc,
+                ) as usize;
+                if use_trellis {
+                    let (txb_skip_ctx_c, dc_sign_ctx_c) = c::ref_get_txb_ctx(
+                        plane_bsize, tx_size, plane, &ta_c[blk_col..], &tl_c[blk_row..],
+                    );
+                    if eob0 == 0 {
+                        eob_c = 0;
+                        ctx_c = 0;
+                    } else {
+                        let (ne, _rate) = c::ref_optimize_txb(
+                            tx_size,
+                            tx_type_c,
+                            &mut qc,
+                            &mut dqc,
+                            &tcoeff,
+                            eob0,
+                            &dequant,
+                            trellis_rdmult_intra(
+                                env.rdmult,
+                                sharpness,
+                                env.bd,
+                                plane,
+                                env.use_chroma_trellis_rd_mult,
+                            ),
+                            dc_sign_ctx_c as usize,
+                            txb_skip_ctx_c as usize,
+                            sharpness,
+                            scan(tx_size, tx_type_c),
+                            txb_skip,
+                            base_eob,
+                            base,
+                            eob_extra,
+                            dc_sign,
+                            lps,
+                            eob_tbl,
+                        );
+                        eob_c = ne;
+                        ctx_c = c::ref_txb_entropy_context(&qc, tx_size, tx_type_c, ne);
+                    }
+                } else {
+                    eob_c = eob0;
+                    ctx_c = c::ref_txb_entropy_context(&qc, tx_size, tx_type_c, eob0);
+                }
+            }
+
+            if eob_c > 0 {
+                let mut tight = vec![0u16; txw * txh];
+                for r in 0..txh {
+                    tight[r * txw..r * txw + txw].copy_from_slice(
+                        &recon[txb_off + r * env.stride..txb_off + r * env.stride + txw],
+                    );
+                }
+                c::ref_inv_txfm2d_add(tx_size, &dqc, &mut tight, txw, tx_type_c, env.bd as i32);
+                for r in 0..txh {
+                    recon[txb_off + r * env.stride..txb_off + r * env.stride + txw]
+                        .copy_from_slice(&tight[r * txw..r * txw + txw]);
+                }
+            }
+            // plane != 0: no update_txk_array, no cfl_store_tx.
+
+            for x in ta_c[blk_col..blk_col + txwu].iter_mut() {
+                *x = ctx_c as i8;
+            }
+            for x in tl_c[blk_row..blk_row + txhu].iter_mut() {
+                *x = ctx_c as i8;
+            }
+            txbs.push((tx_type_c, eob_c as u16, ctx_c, qc, dqc));
+            blk_col += txwu;
+        }
+        blk_row += txhu;
     }
     (txbs, ta_c, tl_c)
 }

@@ -356,14 +356,33 @@ pub fn trellis_rdmult_intra_y(rdmult: i32, sharpness: i32, bd: u8) -> i64 {
     )
 }
 
-/// The intra trellis RD multiplier for any plane: the speed-0 allintra sf
-/// `use_chroma_trellis_rd_mult = 1` (speed_features.c:370) selects
-/// `plane_rd_mult_chroma[is_inter=0] = {17, 13}` (encodetxb.h:266;
-/// txb_rdopt.c:387-395) — 17 for luma (== the default table, no-op), **13**
-/// for chroma.
+/// The intra trellis RD multiplier for any plane. `av1_optimize_txb`
+/// (txb_rdopt.c:387-395) selects the table by the sf
+/// `tx_sf.use_chroma_trellis_rd_mult`:
+/// - sf == 1: `plane_rd_mult_chroma[is_inter=0] = {17, 13}` (encodetxb.h:266)
+///   — set by the ALLINTRA (speed_features.c:370) and RT (:2035)
+///   framesize-independent setters;
+/// - sf == 0: the default `plane_rd_mult[is_inter=0] = {17, 20}`
+///   (encodetxb.h:270) — **usage GOOD never sets the sf** (default 0,
+///   speed_features.c:2474; absent from `set_good_speed_features_framesize_
+///   independent`), so the GOOD KEY-frame envelope uses **20** for chroma.
+///
+/// Luma is 17 in both tables — the flag only matters for chroma.
 #[inline]
-pub fn trellis_rdmult_intra(rdmult: i32, sharpness: i32, bd: u8, plane: usize) -> i64 {
-    let mult: i64 = if plane == 0 { 17 } else { 13 };
+pub fn trellis_rdmult_intra(
+    rdmult: i32,
+    sharpness: i32,
+    bd: u8,
+    plane: usize,
+    use_chroma_trellis_rd_mult: bool,
+) -> i64 {
+    let mult: i64 = if plane == 0 {
+        17
+    } else if use_chroma_trellis_rd_mult {
+        13
+    } else {
+        20
+    };
     round_power_of_two_i64(
         (rdmult as i64) * ((8 - sharpness) as i64) * (mult << (2 * (bd as i32 - 8))),
         5,
@@ -399,6 +418,11 @@ pub struct TxTypeSearchPolicy {
     pub skip_tx_search: bool,
     /// `oxcf.algo_cfg.sharpness` (CLI default 0).
     pub sharpness: i32,
+    /// sf `tx_sf.use_chroma_trellis_rd_mult` — the chroma trellis-table
+    /// select (see [`trellis_rdmult_intra`]): ALLINTRA/RT set 1, **usage
+    /// GOOD leaves the default 0** (chroma multiplier 20, not 13). Luma
+    /// unaffected.
+    pub use_chroma_trellis_rd_mult: bool,
 }
 
 impl TxTypeSearchPolicy {
@@ -413,7 +437,18 @@ impl TxTypeSearchPolicy {
             adaptive_txb_search_level: 1,
             skip_tx_search: false,
             sharpness: 0,
+            use_chroma_trellis_rd_mult: true,
         }
+    }
+
+    /// Speed-0 usage-GOOD defaults — the KEY-frame encoder-gate envelope
+    /// (`aomenc --cpu-used=0` with one forced KEY frame runs usage GOOD,
+    /// not ALLINTRA). Verified vs `set_good_speed_features_framesize_
+    /// independent` speed-0 base (speed_features.c:1091-1163): every field
+    /// equals the allintra value EXCEPT `use_chroma_trellis_rd_mult`
+    /// (never set on the GOOD path — default 0, speed_features.c:2474).
+    pub fn speed0_good() -> Self {
+        TxTypeSearchPolicy { use_chroma_trellis_rd_mult: false, ..Self::speed0_allintra() }
     }
 }
 
@@ -565,7 +600,13 @@ pub fn search_tx_type_intra(
     // av1_setup_quant: FP with trellis, B without (USE_B_QUANT_NO_TRELLIS=1).
     let kind = if skip_trellis { QuantKind::B } else { QuantKind::Fp };
     let qp = QuantParams::from_plane_rows(inp.rows, kind, inp.bd);
-    let trellis_rdmult = trellis_rdmult_intra(inp.rdmult, pol.sharpness, inp.bd, inp.plane);
+    let trellis_rdmult = trellis_rdmult_intra(
+        inp.rdmult,
+        pol.sharpness,
+        inp.bd,
+        inp.plane,
+        pol.use_chroma_trellis_rd_mult,
+    );
     let opt = OptimizeInputs {
         cost: inp.coeff_costs,
         rdmult: trellis_rdmult,

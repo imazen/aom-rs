@@ -304,7 +304,14 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 }
             }
 
-            let pol = TxTypeSearchPolicy::speed0_allintra();
+            // Sweep BOTH usage arms: ALLINTRA (primary; chroma trellis
+            // mult 13) and GOOD (secondary; 20) — the only speed-0 tx-layer
+            // sf delta between the two usages.
+            let pol = if iter % 2 == 0 {
+                TxTypeSearchPolicy::speed0_allintra()
+            } else {
+                TxTypeSearchPolicy::speed0_good()
+            };
             let gates = IntraSbyGates::speed0([false; 13]);
 
             // ---- Rust side ----
@@ -643,6 +650,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                         &u_eob,
                     ),
                     ttc_tables: (&uv_ttc_intra, &uv_ttc_inter),
+                    use_chroma_trellis_rd_mult: pol.use_chroma_trellis_rd_mult,
                 };
                 let (cw, cvisits) = c_rd_pick_intra_sbuv_mode(
                     &cuv,
