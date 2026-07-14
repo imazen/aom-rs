@@ -11,9 +11,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "av1/common/blockd.h" /* av1_get_ext_tx_set_type, ext_tx_set_index,
+                                  av1_num_ext_tx_set, fimode_to_intradir */
+#include "av1/common/common_data.h" /* txsize_sqr_map */
+#include "av1/common/entropymode.h" /* av1_ext_tx_inv */
 #include "av1/common/quant_common.h"
 #include "av1/common/idct.h" /* MAX_TX_SCALE, av1_get_tx_scale */
 #include "av1/encoder/av1_quantize.h" /* QUANTS, Dequants, av1_build_quantizer */
+#include "av1/encoder/cost.h" /* av1_cost_tokens_from_cdf */
 #include "av1/encoder/rd.h"
 #include "aom_ports/mem.h" /* RIGHT_SIGNED_SHIFT */
 
@@ -123,5 +128,115 @@ int shim_build_quantizer(int bit_depth, int y_dc_delta_q, int u_dc_delta_q,
   }
   free(quants);
   free(deq);
+  return 0;
+}
+
+/* ---- tx-type signaling cost ------------------------------------------------
+ * (1) shim_fill_tx_type_costs: transcribes the tx-type slice of
+ *     av1_fill_mode_rates (av1/encoder/rd.c) over the REAL exported
+ *     av1_cost_tokens_from_cdf and the REAL av1_ext_tx_inv (entropymode.h).
+ *     The three rd.c file-local gating tables below are transcribed verbatim
+ *     (they are static in rd.c and not reachable any other way).
+ * (2) shim_get_tx_type_cost: transcribes get_tx_type_cost
+ *     (av1/encoder/txb_rdopt.c, static) over the REAL av1_get_ext_tx_set_type
+ *     / av1_num_ext_tx_set / ext_tx_set_index / fimode_to_intradir /
+ *     txsize_sqr_map (all header statics = pristine C recompiled); the
+ *     MACROBLOCK(D) derefs are passed as scalars, the cost tables as the flat
+ *     outputs of shim_fill_tx_type_costs. */
+static const int sh_use_intra_ext_tx_for_txsize[EXT_TX_SETS_INTRA]
+                                               [EXT_TX_SIZES] = {
+                                                 { 1, 1, 1, 1 },  // unused
+                                                 { 1, 1, 0, 0 },
+                                                 { 0, 0, 1, 0 },
+                                               };
+
+static const int sh_use_inter_ext_tx_for_txsize[EXT_TX_SETS_INTER]
+                                               [EXT_TX_SIZES] = {
+                                                 { 1, 1, 1, 1 },  // unused
+                                                 { 1, 1, 0, 0 },
+                                                 { 0, 0, 1, 0 },
+                                                 { 0, 1, 1, 1 },
+                                               };
+
+static const int sh_ext_tx_set_idx_to_type[2][4] = {
+  {
+      // Intra
+      EXT_TX_SET_DCTONLY,
+      EXT_TX_SET_DTT4_IDTX_1DDCT,
+      EXT_TX_SET_DTT4_IDTX,
+  },
+  {
+      // Inter
+      EXT_TX_SET_DCTONLY,
+      EXT_TX_SET_ALL16,
+      EXT_TX_SET_DTT9_IDTX_1DDCT,
+      EXT_TX_SET_DCT_IDTX,
+  },
+};
+
+/* intra_cdf: flat [EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][TX_TYPES+1];
+ * inter_cdf: flat [EXT_TX_SETS_INTER][EXT_TX_SIZES][TX_TYPES+1].
+ * out_intra: flat [EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][TX_TYPES];
+ * out_inter: flat [EXT_TX_SETS_INTER][EXT_TX_SIZES][TX_TYPES].
+ * Both outputs must be caller-zeroed (ungated combos stay 0 on both sides). */
+void shim_fill_tx_type_costs(const uint16_t *intra_cdf,
+                             const uint16_t *inter_cdf, int *out_intra,
+                             int *out_inter) {
+  for (int i = TX_4X4; i < EXT_TX_SIZES; ++i) {
+    for (int s = 1; s < EXT_TX_SETS_INTER; ++s) {
+      if (sh_use_inter_ext_tx_for_txsize[s][i]) {
+        av1_cost_tokens_from_cdf(
+            out_inter + (s * EXT_TX_SIZES + i) * TX_TYPES,
+            inter_cdf + (s * EXT_TX_SIZES + i) * (TX_TYPES + 1),
+            av1_ext_tx_inv[sh_ext_tx_set_idx_to_type[1][s]]);
+      }
+    }
+    for (int s = 1; s < EXT_TX_SETS_INTRA; ++s) {
+      if (sh_use_intra_ext_tx_for_txsize[s][i]) {
+        for (int j = 0; j < INTRA_MODES; ++j) {
+          av1_cost_tokens_from_cdf(
+              out_intra + ((s * EXT_TX_SIZES + i) * INTRA_MODES + j) * TX_TYPES,
+              intra_cdf +
+                  ((s * EXT_TX_SIZES + i) * INTRA_MODES + j) * (TX_TYPES + 1),
+              av1_ext_tx_inv[sh_ext_tx_set_idx_to_type[0][s]]);
+        }
+      }
+    }
+  }
+}
+
+int shim_get_tx_type_cost(const int *intra_costs, const int *inter_costs,
+                          int plane, int tx_size, int tx_type, int is_inter,
+                          int reduced_tx_set_used, int lossless,
+                          int use_filter_intra, int filter_intra_mode,
+                          int mode) {
+  if (plane > 0) return 0;
+
+  const TX_SIZE square_tx_size = txsize_sqr_map[tx_size];
+
+  const TxSetType set_type = av1_get_ext_tx_set_type(
+      (TX_SIZE)tx_size, is_inter, reduced_tx_set_used);
+  if (av1_num_ext_tx_set[set_type] > 1 && !lossless) {
+    const int ext_tx_set = ext_tx_set_index[is_inter][set_type];
+    if (is_inter) {
+      if (ext_tx_set > 0)
+        return inter_costs[(ext_tx_set * EXT_TX_SIZES + square_tx_size) *
+                               TX_TYPES +
+                           tx_type];
+    } else {
+      if (ext_tx_set > 0) {
+        PREDICTION_MODE intra_dir;
+        if (use_filter_intra)
+          intra_dir = fimode_to_intradir[filter_intra_mode];
+        else
+          intra_dir = (PREDICTION_MODE)mode;
+        return intra_costs[((ext_tx_set * EXT_TX_SIZES + square_tx_size) *
+                                INTRA_MODES +
+                            intra_dir) *
+                               TX_TYPES +
+                           tx_type];
+      }
+    }
+  }
   return 0;
 }

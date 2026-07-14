@@ -29,7 +29,11 @@ pub use prob_cost::{cost_symbol, cost_tokens_from_cdf};
 mod fill;
 pub use fill::{fill_lv_map_coeff_cost, LvMapCoeffCost};
 mod ext_tx;
-pub use ext_tx::{ext_tx_derive, ext_tx_set, ext_tx_set_type, read_tx_type, write_tx_type, ExtTxDeriv};
+pub use ext_tx::{
+    ext_tx_derive, ext_tx_set, ext_tx_set_type, fill_tx_type_costs, get_tx_type_cost,
+    read_tx_type, write_tx_type, ExtTxDeriv, TxTypeCosts, EXT_TX_SETS_INTER, EXT_TX_SETS_INTRA,
+    EXT_TX_SIZES, INTRA_MODES, TX_TYPES,
+};
 mod trellis_cost;
 pub use trellis_cost::{br_cost_with_diff, coeff_cost_eob, coeff_cost_general, two_coeff_cost_simple};
 mod optimize;

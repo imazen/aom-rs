@@ -3267,3 +3267,89 @@ pub fn ref_build_quantizer(
     };
     assert_eq!(rc, 0, "shim_build_quantizer allocation failed");
 }
+
+// ---- tx-type signaling cost oracles (rd_shim.c) ------------------------------
+
+extern "C" {
+    fn shim_fill_tx_type_costs(
+        intra_cdf: *const u16,
+        inter_cdf: *const u16,
+        out_intra: *mut i32,
+        out_inter: *mut i32,
+    );
+    fn shim_get_tx_type_cost(
+        intra_costs: *const i32,
+        inter_costs: *const i32,
+        plane: i32,
+        tx_size: i32,
+        tx_type: i32,
+        is_inter: i32,
+        reduced_tx_set_used: i32,
+        lossless: i32,
+        use_filter_intra: i32,
+        filter_intra_mode: i32,
+        mode: i32,
+    ) -> i32;
+}
+
+/// Flat lengths for the tx-type cost tables / CDF inputs
+/// (`EXT_TX_SETS_INTRA`=3, `EXT_TX_SETS_INTER`=4, `EXT_TX_SIZES`=4,
+/// `INTRA_MODES`=13, `TX_TYPES`=16, CDF rows are `TX_TYPES+1` wide).
+pub const TX_TYPE_COSTS_INTRA_LEN: usize = 3 * 4 * 13 * 16;
+pub const TX_TYPE_COSTS_INTER_LEN: usize = 4 * 4 * 16;
+pub const TX_TYPE_CDF_INTRA_LEN: usize = 3 * 4 * 13 * 17;
+pub const TX_TYPE_CDF_INTER_LEN: usize = 4 * 4 * 17;
+
+/// Reference tx-type slice of `av1_fill_mode_rates` (rd.c): fill the
+/// intra/inter tx-type cost tables from flat CDF arrays (see rd_shim.c for the
+/// layouts). Outputs are zero-initialized here (ungated combos stay 0).
+pub fn ref_fill_tx_type_costs(intra_cdf: &[u16], inter_cdf: &[u16]) -> (Vec<i32>, Vec<i32>) {
+    assert_eq!(intra_cdf.len(), TX_TYPE_CDF_INTRA_LEN);
+    assert_eq!(inter_cdf.len(), TX_TYPE_CDF_INTER_LEN);
+    let mut out_intra = vec![0i32; TX_TYPE_COSTS_INTRA_LEN];
+    let mut out_inter = vec![0i32; TX_TYPE_COSTS_INTER_LEN];
+    unsafe {
+        shim_fill_tx_type_costs(
+            intra_cdf.as_ptr(),
+            inter_cdf.as_ptr(),
+            out_intra.as_mut_ptr(),
+            out_inter.as_mut_ptr(),
+        );
+    }
+    (out_intra, out_inter)
+}
+
+/// Reference `get_tx_type_cost` (txb_rdopt.c): the plane-0 tx_type signaling
+/// rate, looked up in the flat tables from [`ref_fill_tx_type_costs`].
+#[allow(clippy::too_many_arguments)]
+pub fn ref_get_tx_type_cost(
+    intra_costs: &[i32],
+    inter_costs: &[i32],
+    plane: i32,
+    tx_size: i32,
+    tx_type: i32,
+    is_inter: bool,
+    reduced_tx_set_used: bool,
+    lossless: bool,
+    use_filter_intra: bool,
+    filter_intra_mode: i32,
+    mode: i32,
+) -> i32 {
+    assert_eq!(intra_costs.len(), TX_TYPE_COSTS_INTRA_LEN);
+    assert_eq!(inter_costs.len(), TX_TYPE_COSTS_INTER_LEN);
+    unsafe {
+        shim_get_tx_type_cost(
+            intra_costs.as_ptr(),
+            inter_costs.as_ptr(),
+            plane,
+            tx_size,
+            tx_type,
+            is_inter as i32,
+            reduced_tx_set_used as i32,
+            lossless as i32,
+            use_filter_intra as i32,
+            filter_intra_mode,
+            mode,
+        )
+    }
+}

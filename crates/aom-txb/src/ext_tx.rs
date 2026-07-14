@@ -7,6 +7,7 @@
 //! libaom's tables and verified exhaustively vs C. The symbol emission reuses
 //! the bit-exact `aom_write_symbol` (aom-entropy).
 
+use crate::cost_tokens_from_cdf;
 use aom_entropy::cdf::{read_symbol, write_symbol};
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;
@@ -172,4 +173,152 @@ pub fn read_tx_type(
     } else {
         0 // DCT_DCT
     }
+}
+
+// ---- tx-type signaling cost (RD rate) ---------------------------------------
+
+/// `EXT_TX_SIZES` (enums.h): number of square tx sizes using extended transforms.
+pub const EXT_TX_SIZES: usize = 4;
+/// `EXT_TX_SETS_INTRA` (enums.h).
+pub const EXT_TX_SETS_INTRA: usize = 3;
+/// `EXT_TX_SETS_INTER` (enums.h).
+pub const EXT_TX_SETS_INTER: usize = 4;
+/// `TX_TYPES` (enums.h).
+pub const TX_TYPES: usize = 16;
+/// `INTRA_MODES` (enums.h).
+pub const INTRA_MODES: usize = 13;
+
+/// `use_intra_ext_tx_for_txsize[EXT_TX_SETS_INTRA][EXT_TX_SIZES]` (rd.c):
+/// which (cdf set, square tx size) intra combos get cost tables filled.
+const USE_INTRA_EXT_TX_FOR_TXSIZE: [[i32; EXT_TX_SIZES]; EXT_TX_SETS_INTRA] = [
+    [1, 1, 1, 1], // unused
+    [1, 1, 0, 0],
+    [0, 0, 1, 0],
+];
+
+/// `use_inter_ext_tx_for_txsize[EXT_TX_SETS_INTER][EXT_TX_SIZES]` (rd.c).
+const USE_INTER_EXT_TX_FOR_TXSIZE: [[i32; EXT_TX_SIZES]; EXT_TX_SETS_INTER] = [
+    [1, 1, 1, 1], // unused
+    [1, 1, 0, 0],
+    [0, 0, 1, 0],
+    [0, 1, 1, 1],
+];
+
+/// `av1_ext_tx_set_idx_to_type[2][max(EXT_TX_SETS_INTRA, EXT_TX_SETS_INTER)]`
+/// (rd.c): CDF set index -> TxSetType. Intra: DCTONLY, DTT4_IDTX_1DDCT,
+/// DTT4_IDTX; inter: DCTONLY, ALL16, DTT9_IDTX_1DDCT, DCT_IDTX.
+const EXT_TX_SET_IDX_TO_TYPE: [[usize; 4]; 2] = [[0, 3, 2, 0], [0, 5, 4, 1]];
+
+/// `av1_ext_tx_inv[EXT_TX_SET_TYPES][TX_TYPES]` (entropymode.h) — transmitted
+/// symbol -> TX_TYPE (the `inv_map` for cost-table fill).
+#[rustfmt::skip]
+const AV1_EXT_TX_INV: [[i32; 16]; 6] = [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 0, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 0, 10, 11, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 10, 11, 0, 1, 2, 4, 5, 3, 6, 7, 8, 0, 0, 0, 0],
+    [9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 4, 5, 3, 6, 7, 8],
+];
+
+/// The tx-type slice of `MODE_COSTS` (block.h): per-symbol signaling rates,
+/// indexed `[cdf set][square tx size][(intra dir)][tx_type]`. Entries for
+/// combos gated off by `use_*_ext_tx_for_txsize` stay zero.
+pub struct TxTypeCosts {
+    pub intra: [[[[i32; TX_TYPES]; INTRA_MODES]; EXT_TX_SIZES]; EXT_TX_SETS_INTRA],
+    pub inter: [[[i32; TX_TYPES]; EXT_TX_SIZES]; EXT_TX_SETS_INTER],
+}
+
+impl TxTypeCosts {
+    /// All-zero tables (filled by [`fill_tx_type_costs`]).
+    pub fn zeroed() -> Box<Self> {
+        Box::new(Self {
+            intra: [[[[0; TX_TYPES]; INTRA_MODES]; EXT_TX_SIZES]; EXT_TX_SETS_INTRA],
+            inter: [[[0; TX_TYPES]; EXT_TX_SIZES]; EXT_TX_SETS_INTER],
+        })
+    }
+}
+
+/// Bit-exact port of the tx-type slice of `av1_fill_mode_rates` (rd.c): fill
+/// [`TxTypeCosts`] from the frame's ext-tx CDFs via [`cost_tokens_from_cdf`]
+/// with the `av1_ext_tx_inv` symbol->tx_type map.
+///
+/// `intra_cdf` is flat `[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES]
+/// [TX_TYPES+1]` (matching `FRAME_CONTEXT::intra_ext_tx_cdf`; each row is an
+/// inverse-CDF terminated at its set's symbol count); `inter_cdf` is flat
+/// `[EXT_TX_SETS_INTER][EXT_TX_SIZES][TX_TYPES+1]`.
+pub fn fill_tx_type_costs(costs: &mut TxTypeCosts, intra_cdf: &[u16], inter_cdf: &[u16]) {
+    assert_eq!(
+        intra_cdf.len(),
+        EXT_TX_SETS_INTRA * EXT_TX_SIZES * INTRA_MODES * (TX_TYPES + 1)
+    );
+    assert_eq!(inter_cdf.len(), EXT_TX_SETS_INTER * EXT_TX_SIZES * (TX_TYPES + 1));
+    for i in 0..EXT_TX_SIZES {
+        // TX_4X4 == 0
+        for s in 1..EXT_TX_SETS_INTER {
+            if USE_INTER_EXT_TX_FOR_TXSIZE[s][i] != 0 {
+                let off = (s * EXT_TX_SIZES + i) * (TX_TYPES + 1);
+                cost_tokens_from_cdf(
+                    &mut costs.inter[s][i],
+                    &inter_cdf[off..off + TX_TYPES + 1],
+                    Some(&AV1_EXT_TX_INV[EXT_TX_SET_IDX_TO_TYPE[1][s]]),
+                );
+            }
+        }
+        for s in 1..EXT_TX_SETS_INTRA {
+            if USE_INTRA_EXT_TX_FOR_TXSIZE[s][i] != 0 {
+                for j in 0..INTRA_MODES {
+                    let off = ((s * EXT_TX_SIZES + i) * INTRA_MODES + j) * (TX_TYPES + 1);
+                    cost_tokens_from_cdf(
+                        &mut costs.intra[s][i][j],
+                        &intra_cdf[off..off + TX_TYPES + 1],
+                        Some(&AV1_EXT_TX_INV[EXT_TX_SET_IDX_TO_TYPE[0][s]]),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Bit-exact port of `get_tx_type_cost` (av1/encoder/txb_rdopt.c): the
+/// tx_type signaling rate for one txb. Zero for chroma planes, DCT-only sets,
+/// lossless segments, and set index 0. `lossless` is
+/// `xd->lossless[mbmi->segment_id]`; `mode`/`filter_intra_mode` select the
+/// intra CDF direction (`fimode_to_intradir` when filter-intra is used).
+#[allow(clippy::too_many_arguments)]
+pub fn get_tx_type_cost(
+    costs: &TxTypeCosts,
+    plane: usize,
+    tx_size: usize,
+    tx_type: usize,
+    is_inter: bool,
+    reduced_tx_set_used: bool,
+    lossless: bool,
+    use_filter_intra: bool,
+    filter_intra_mode: usize,
+    mode: usize,
+) -> i32 {
+    if plane > 0 {
+        return 0;
+    }
+
+    let square_tx_size = TXSIZE_SQR[tx_size];
+
+    let set_type = ext_tx_set_type(tx_size, is_inter, reduced_tx_set_used);
+    if NUM_EXT_TX_SET[set_type] > 1 && !lossless {
+        let ext_tx_set = EXT_TX_SET_INDEX[is_inter as usize][set_type];
+        if is_inter {
+            if ext_tx_set > 0 {
+                return costs.inter[ext_tx_set as usize][square_tx_size][tx_type];
+            }
+        } else if ext_tx_set > 0 {
+            let intra_dir = if use_filter_intra {
+                FIMODE_TO_INTRADIR[filter_intra_mode] as usize
+            } else {
+                mode
+            };
+            return costs.intra[ext_tx_set as usize][square_tx_size][intra_dir][tx_type];
+        }
+    }
+    0
 }
