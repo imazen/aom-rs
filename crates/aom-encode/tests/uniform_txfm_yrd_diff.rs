@@ -306,7 +306,16 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
                         ),
                         (&c_ttc_intra, &c_ttc_inter),
                     );
-                    if weob > 0 {
+                    // recon_intra (tx_search.c:930-932) reconstructs a txb into
+                    // the recon plane ONLY when it is NOT the last
+                    // (bottom-right-most) txb; nothing chains from the last txb
+                    // so C leaves it as the raw prediction (load-bearing for the
+                    // ALLINTRA variance factor -- see the matching guard in
+                    // tx_search.rs `txfm_rd_in_plane_intra` + common::
+                    // c_uniform_txfm_yrd). `bw>>2`/`bh>>2` = mi_size_
+                    // {wide,high}[plane_bsize]; blk_/tx units are mi units.
+                    let not_last_txb = blk_row + txhu < (bh >> 2) || blk_col + txwu < (bw >> 2);
+                    if weob > 0 && not_last_txb {
                         let mut tight = pred.clone();
                         c::ref_inv_txfm2d_add(tx_size, &wdqc, &mut tight, txw, wtype, bd as i32);
                         for r in 0..txh {

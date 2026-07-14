@@ -1142,8 +1142,28 @@ pub fn txfm_rd_in_plane_intra(
                 .expect("search_tx_type always yields a winner");
 
             // recon_intra: reconstruct the winner on top of the prediction so
-            // the next txb predicts from decoded pixels.
-            if win.best_eob > 0 {
+            // the next txb predicts from decoded pixels. C's `recon_intra`
+            // (tx_search.c:930-932) guards this on `best_eob &&
+            // (blk_row + tx_size_high_unit < mi_size_high[plane_bsize] ||
+            //  blk_col + tx_size_wide_unit < mi_size_wide[plane_bsize])` --
+            // i.e. it reconstructs a txb ONLY when it is NOT the last
+            // (bottom-right-most) txb of the block. Nothing chains from the
+            // last txb, so C deliberately leaves the raw PREDICTION there
+            // rather than the reconstruction. This is not cosmetic: the
+            // ALLINTRA `intra_rd_variance_factor` reads `xd->plane[0].dst.buf`
+            // right after this tx-size search, and for a DC-predicted (flat)
+            // block that leftover determines whether the block's recon
+            // variance reads as ~0 (flat prediction -> factor up to 3.0) or as
+            // the high-variance reconstruction (factor 1.0). Reconstructing the
+            // last txb here made the factor 1.0 where C's is 3.0, letting the
+            // search accept small screen-content blocks (e.g. an 8x4 DC leaf of
+            // a HORZ split) that C's inflated rd rejects -- the (2,12,BLOCK_8X8)
+            // real=NONE / ours=HORZ AB-probe divergence. Interior-only walk:
+            // `max_blocks_{high,wide}` are the unclipped `mi_size_{high,wide}
+            // [plane_bsize]` this function already uses for the loop bounds.
+            let not_last_txb =
+                blk_row + txh_unit < max_blocks_high || blk_col + txw_unit < max_blocks_wide;
+            if win.best_eob > 0 && not_last_txb {
                 let mut tight = pred.clone();
                 aom_transform::inv_txfm2d::av1_inv_txfm2d_add(
                     &win.dqcoeff,

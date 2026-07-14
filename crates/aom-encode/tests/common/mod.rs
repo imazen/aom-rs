@@ -312,7 +312,21 @@ pub fn c_uniform_txfm_yrd(
                 coeff_tbls,
                 ttc_tables,
             );
-            if weob > 0 {
+            // recon_intra (tx_search.c:930-932) reconstructs a txb into the
+            // recon plane ONLY when it is NOT the last (bottom-right-most) txb
+            // of the block; nothing chains from the last txb so C deliberately
+            // leaves it as the raw PREDICTION. This is load-bearing for the
+            // ALLINTRA `intra_rd_variance_factor`, which reads this plane right
+            // after the tx-size search: on a flat DC small block the leftover
+            // (prediction vs reconstruction) is exactly what makes the recon
+            // variance read as ~0 (factor up to 3.0) rather than ~source
+            // (factor 1.0). Without this guard the oracle over-reconstructs the
+            // last txb and diverges from the real encoder (and from the port's
+            // matching `recon_intra` guard in tx_search.rs). `bw>>2` / `bh>>2`
+            // are `mi_size_{wide,high}[plane_bsize]`; `blk_{col,row}` and
+            // `tx{w,h}u` are already in mi units.
+            let not_last_txb = blk_row + txhu < (bh >> 2) || blk_col + txwu < (bw >> 2);
+            if weob > 0 && not_last_txb {
                 let mut tight = pred.clone();
                 c::ref_inv_txfm2d_add(tx_size, &wdqc, &mut tight, txw, wtype, bd as i32);
                 for r in 0..txh {
