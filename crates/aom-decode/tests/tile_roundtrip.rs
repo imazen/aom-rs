@@ -16,10 +16,11 @@
 //! a conformant walk never reads an unwritten pixel, so any neighbour-
 //! availability bug becomes a hard plane mismatch instead of silently agreeing.
 //!
-//! Sweep: 3 frame sizes (one SB / 2x2 SBs / non-multiple-of-SB 80x96 px with
-//! partial superblocks) × 6 configs (monochrome + 4:4:4, bd 8/10/12, filter
-//! intra on/off, intra edge filter on/off, reduced tx set, tx-type gate off,
-//! cdef bits 0..3) × 3 seeds, with pseudo-random partition trees over all 10
+//! Sweep: 4 frame sizes (one SB / 2x2 SBs / non-multiple-of-SB 80x96 px with
+//! partial superblocks / 3x3 SBs with a fully-interior SB) × 6 configs
+//! (monochrome + 4:4:4, bd 8/10/12, filter intra on/off, intra edge filter
+//! on/off, reduced tx set, tx-type gate off,
+//! cdef bits 0..3) × 6 seeds, with pseudo-random partition trees over all 10
 //! partition types, all 13 intra modes, angle deltas, filter-intra, and skip
 //! blocks; coverage of each is asserted at the end.
 
@@ -1041,8 +1042,9 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
 #[test]
 fn kf_luma_tile_roundtrips() {
     // (mi_rows, mi_cols): one 64x64 SB; 2x2 SBs; non-multiple-of-SB 80x96 px
-    // (partial SBs on the right and bottom edges).
-    let sizes = [(16, 16), (32, 32), (20, 24)];
+    // (partial SBs on the right and bottom edges); 3x3 SBs (a fully-interior
+    // superblock, exercising cross-SB top-right availability).
+    let sizes = [(16, 16), (32, 32), (20, 24), (48, 48)];
     let configs = [
         // bd, mono, cdef, edge_off, fi, reduced, gate
         SweepCase {
@@ -1112,10 +1114,13 @@ fn kf_luma_tile_roundtrips() {
             base_qindex_gt0: true,
         },
     ];
-    let seeds: [u64; 3] = [
+    let seeds: [u64; 6] = [
         0x0dec_0dea_11ce_0001,
         0x0dec_0dea_11ce_0002,
         0x0dec_0dea_11ce_0003,
+        0x0dec_0dea_11ce_0004,
+        0x0dec_0dea_11ce_0005,
+        0x0dec_0dea_11ce_0006,
     ];
 
     let mut cov = Coverage::default();
