@@ -1474,10 +1474,10 @@ fn intrabc_monochrome_streams_decode_byte_identical_to_c() {
             usage: 2,
         },
         IbcCfg {
-            w: 128,
+            w: 256,
             h: 128,
             bd: 10,
-            cq: 20,
+            cq: 24,
             usage: 2,
         },
         IbcCfg {

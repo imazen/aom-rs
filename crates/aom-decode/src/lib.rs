@@ -739,11 +739,36 @@ fn max_block_high_luma(bsize: usize, mb_to_bottom_edge: i32) -> i32 {
 /// Record a var-tx leaf tx size for the uniformity guard: the first leaf sets
 /// the reference size; any later leaf of a different size flags the partition
 /// non-uniform (see [`read_tx_size_vartx`]).
-fn vartx_record_leaf(first_leaf: &mut i32, non_uniform: &mut bool, leaf: usize) {
+/// At a var-tx leaf: (a) track uniformity via `first_leaf`/`non_uniform`, and
+/// (b) stamp the leaf's tx size over its mi footprint in `leaf_grid` (per-4x4,
+/// block-relative, `grid_stride` = block width in mi units, `grid_h` = height).
+/// The reconstruction walk ([`collect_vartx_leaves`]) reads this grid at a
+/// node's top-left cell to decide split-vs-leaf, exactly as C's
+/// `decode_reconstruct_tx` reads `mbmi->inter_tx_size[]`. Footprint clamped to
+/// the grid extent (edge blocks).
+#[allow(clippy::too_many_arguments)]
+fn vartx_leaf(
+    first_leaf: &mut i32,
+    non_uniform: &mut bool,
+    leaf_grid: &mut [u8],
+    grid_stride: usize,
+    grid_h: usize,
+    blk_row: i32,
+    blk_col: i32,
+    leaf: usize,
+) {
     if *first_leaf < 0 {
         *first_leaf = leaf as i32;
     } else if *first_leaf != leaf as i32 {
         *non_uniform = true;
+    }
+    let (br, bc) = (blk_row as usize, blk_col as usize);
+    let lh = TX_SIZE_HIGH_UNIT[leaf].min(grid_h - br);
+    let lw = TX_SIZE_WIDE_UNIT[leaf].min(grid_stride - bc);
+    for r in 0..lh {
+        for c in 0..lw {
+            leaf_grid[(br + r) * grid_stride + bc + c] = leaf as u8;
+        }
     }
 }
 
@@ -757,12 +782,11 @@ fn vartx_record_leaf(first_leaf: &mut i32, non_uniform: &mut bool, leaf: usize) 
 /// exactly the leaves where C sets it (an out-of-bounds child leaves the running
 /// value untouched, matching C's early `return`).
 ///
-/// The residual coefficient loop consumes only this scalar `tx_size_out`, so a
-/// block whose var-tx partition is NON-uniform (distinct tx sizes per txb — only
-/// possible for blocks taller/wider than 2 tx units) would still need the full
-/// `inter_tx_size[]` walk in the coeff reader. The KEY-frame intrabc streams this
-/// path serves only produce uniform partitions (BLOCK_4X8 → one split flag →
-/// either TX_4X8 or TX_4X4, both uniform), for which the scalar is exact.
+/// This is the SIZE-READ phase (C's `read_block_tx_size`): it fills `leaf_grid`
+/// with the per-4x4 leaf tx sizes (C's `mbmi->inter_tx_size[]`) so the later
+/// reconstruction phase ([`collect_vartx_leaves`]) can walk the same quadtree.
+/// `non_uniform` records whether the leaves differ; the caller uses it to pick
+/// the uniform fast loop vs the general leaf-walk.
 #[allow(clippy::too_many_arguments)]
 fn read_tx_size_vartx(
     dec: &mut OdEcDec,
@@ -777,13 +801,11 @@ fn read_tx_size_vartx(
     blk_row: i32,
     blk_col: i32,
     tx_size_out: &mut usize,
-    // Uniformity guard: `first_leaf` is the first leaf tx size seen (-1 = none
-    // yet); `non_uniform` is set if any later leaf differs. The residual coeff
-    // loop consumes only the scalar `tx_size_out`, which is exact ONLY when the
-    // whole block tiles uniformly — so the caller rejects a non-uniform read
-    // (rather than silently mis-tiling the coefficients and desyncing).
     first_leaf: &mut i32,
     non_uniform: &mut bool,
+    leaf_grid: &mut [u8],
+    grid_stride: usize,
+    grid_h: usize,
 ) {
     let max_blocks_high = max_block_high_luma(bsize, mb_to_bottom_edge);
     let max_blocks_wide = max_block_wide_luma(bsize, mb_to_right_edge);
@@ -793,7 +815,16 @@ fn read_tx_size_vartx(
     let (bc, br) = (blk_col as usize, blk_row as usize);
     if depth == VARTX_MAX_DEPTH {
         *tx_size_out = tx_size;
-        vartx_record_leaf(first_leaf, non_uniform, tx_size);
+        vartx_leaf(
+            first_leaf,
+            non_uniform,
+            leaf_grid,
+            grid_stride,
+            grid_h,
+            blk_row,
+            blk_col,
+            tx_size,
+        );
         txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], tx_size, tx_size);
         return;
     }
@@ -804,7 +835,16 @@ fn read_tx_size_vartx(
         let sub_txs = SUB_TX_SIZE_MAP[tx_size];
         if sub_txs == TX_4X4_IDX {
             *tx_size_out = sub_txs;
-            vartx_record_leaf(first_leaf, non_uniform, sub_txs);
+            vartx_leaf(
+                first_leaf,
+                non_uniform,
+                leaf_grid,
+                grid_stride,
+                grid_h,
+                blk_row,
+                blk_col,
+                sub_txs,
+            );
             txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], sub_txs, tx_size);
             return;
         }
@@ -829,6 +869,9 @@ fn read_tx_size_vartx(
                     tx_size_out,
                     first_leaf,
                     non_uniform,
+                    leaf_grid,
+                    grid_stride,
+                    grid_h,
                 );
                 col += bsw;
             }
@@ -836,8 +879,67 @@ fn read_tx_size_vartx(
         }
     } else {
         *tx_size_out = tx_size;
-        vartx_record_leaf(first_leaf, non_uniform, tx_size);
+        vartx_leaf(
+            first_leaf,
+            non_uniform,
+            leaf_grid,
+            grid_stride,
+            grid_h,
+            blk_row,
+            blk_col,
+            tx_size,
+        );
         txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], tx_size, tx_size);
+    }
+}
+
+/// Reconstruction-phase walk (C's `decode_reconstruct_tx`, luma): re-derive the
+/// var-tx quadtree from the per-4x4 `leaf_grid` produced by the size-read phase
+/// and emit the leaf `(blk_row, blk_col, tx_size)` triples in DFS quadrant order
+/// (TL, TR, BL, BR) — the order the coefficient stream expects. A node is a leaf
+/// iff its size equals the stored leaf size at its top-left cell; no bitstream is
+/// read here. `max_blocks_*` clamp edge blocks.
+#[allow(clippy::too_many_arguments)]
+fn collect_vartx_leaves(
+    leaf_grid: &[u8],
+    grid_stride: usize,
+    blk_row: usize,
+    blk_col: usize,
+    tx_size: usize,
+    max_blocks_high: usize,
+    max_blocks_wide: usize,
+    out: &mut Vec<(usize, usize, usize)>,
+) {
+    if blk_row >= max_blocks_high || blk_col >= max_blocks_wide {
+        return;
+    }
+    let plane_tx = leaf_grid[blk_row * grid_stride + blk_col] as usize;
+    if tx_size == plane_tx {
+        out.push((blk_row, blk_col, tx_size));
+        return;
+    }
+    let sub_txs = SUB_TX_SIZE_MAP[tx_size];
+    let bsw = TX_SIZE_WIDE_UNIT[sub_txs];
+    let bsh = TX_SIZE_HIGH_UNIT[sub_txs];
+    let row_end = TX_SIZE_HIGH_UNIT[tx_size].min(max_blocks_high - blk_row);
+    let col_end = TX_SIZE_WIDE_UNIT[tx_size].min(max_blocks_wide - blk_col);
+    let mut row = 0;
+    while row < row_end {
+        let mut col = 0;
+        while col < col_end {
+            collect_vartx_leaves(
+                leaf_grid,
+                grid_stride,
+                blk_row + row,
+                blk_col + col,
+                sub_txs,
+                max_blocks_high,
+                max_blocks_wide,
+                out,
+            );
+            col += bsw;
+        }
+        row += bsh;
     }
 }
 
@@ -1633,6 +1735,14 @@ impl<'c> TileKf<'c> {
         // allow_select_inter` is true for intra) — else the tx_mode fallback.
         let a_off = mi_col as usize;
         let l_off = (mi_row & 31) as usize;
+        // Var-tx leaf grid (C's `mbmi->inter_tx_size[]`), block-relative per-4x4,
+        // filled by the size-read phase for an intrabc var-tx block. When the
+        // partition is non-uniform the reconstruction phase walks it
+        // (`collect_vartx_leaves`) instead of tiling with a single tx size.
+        let bw4 = MI_SIZE_WIDE[bsize] as usize;
+        let bh4 = MI_SIZE_HIGH[bsize] as usize;
+        let mut vartx_leaf_grid: Vec<u8> = Vec::new();
+        let mut vartx_non_uniform = false;
         let tx_size = if info.use_intrabc != 0 {
             // Intrabc is `is_inter_block`, so `inter_block_tx` is set and the tx
             // size follows the INTER path (decodeframe.c:1179-1198):
@@ -1657,6 +1767,7 @@ impl<'c> TileKf<'c> {
                 let mut vartx_tx = max_tx;
                 let mut first_leaf = -1i32;
                 let mut non_uniform = false;
+                vartx_leaf_grid = vec![0u8; bw4 * bh4];
                 let mut idy = 0;
                 while idy < height_u {
                     let mut idx = 0;
@@ -1676,23 +1787,19 @@ impl<'c> TileKf<'c> {
                             &mut vartx_tx,
                             &mut first_leaf,
                             &mut non_uniform,
+                            &mut vartx_leaf_grid,
+                            bw4,
+                            bh4,
                         );
                         idx += bw_u;
                     }
                     idy += bh_u;
                 }
-                // The coeff loop tiles the whole block with this one scalar
-                // tx_size, exact only for a UNIFORM var-tx partition. A
-                // non-uniform intrabc partition (possible only for blocks >2 tx
-                // units in a dim) would need the per-txb inter_tx_size[] walk;
-                // reject rather than silently mis-tile the coefficients. The
-                // KEY-frame intrabc screen-content streams verified here only
-                // produce uniform partitions, so this never fires on them.
-                assert!(
-                    !non_uniform,
-                    "non-uniform intrabc var-tx partition not supported \
-                     (mi=({mi_row},{mi_col}) bsize={bsize}); would desync the coeff walk"
-                );
+                // For a UNIFORM partition the coeff loop below tiles the whole
+                // block with this single scalar tx size. A NON-uniform partition
+                // (distinct leaf sizes) instead drives the reconstruction phase
+                // through `collect_vartx_leaves` over `vartx_leaf_grid`; flag it.
+                vartx_non_uniform = non_uniform;
                 vartx_tx
             } else {
                 let ts = if bsize > 0 {
@@ -1859,8 +1966,142 @@ impl<'c> TileKf<'c> {
         let mut scratch = vec![0u16; txwpx * txhpx];
         let mut txbs = Vec::new();
 
+        // Non-uniform intrabc var-tx: the reconstruction phase
+        // (`decode_reconstruct_tx`) walks the per-leaf partition rather than
+        // tiling the block with one scalar tx size. Each leaf reads its own
+        // coeffs + tx_type (inter ext-tx at the leaf size) in DFS order, then the
+        // integer block copy + inverse transform, all at the leaf's size. The
+        // uniform fast loop below is skipped in this case.
+        let do_uniform = !(info.use_intrabc != 0 && vartx_non_uniform);
+        if !do_uniform {
+            let max_tx = MAX_TXSIZE_RECT_LOOKUP[bsize];
+            let bw_mt = TX_SIZE_WIDE_UNIT[max_tx];
+            let bh_mt = TX_SIZE_HIGH_UNIT[max_tx];
+            let mut leaves: Vec<(usize, usize, usize)> = Vec::new();
+            let mut r = 0;
+            while r < max_blocks_high {
+                let mut c = 0;
+                while c < max_blocks_wide {
+                    collect_vartx_leaves(
+                        &vartx_leaf_grid,
+                        bw4,
+                        r,
+                        c,
+                        max_tx,
+                        max_blocks_high,
+                        max_blocks_wide,
+                        &mut leaves,
+                    );
+                    c += bw_mt;
+                }
+                r += bh_mt;
+            }
+            let mut nu_tcoeff = vec![0i32; txb_wide(max_tx) * txb_high(max_tx)];
+            let mut nu_scratch = vec![0u16; TX_SIZE_WIDE[max_tx] * TX_SIZE_HIGH[max_tx]];
+            for &(blk_row, blk_col, cur_tx) in &leaves {
+                let (ltxw, ltxh) = (TX_SIZE_WIDE_UNIT[cur_tx], TX_SIZE_HIGH_UNIT[cur_tx]);
+                let (ltxwpx, ltxhpx) = (TX_SIZE_WIDE[cur_tx], TX_SIZE_HIGH[cur_tx]);
+                let larea = txb_wide(cur_tx) * txb_high(cur_tx);
+                let (eob, tx_type) = if info.skip == 0 {
+                    let a0 = mi_col as usize + blk_col;
+                    let l0 = (mi_row & 31) as usize + blk_row;
+                    let (tsc, dsc) = get_txb_ctx(
+                        bsize,
+                        cur_tx,
+                        0,
+                        &self.above_e[0][a0..],
+                        &self.left_e[0][l0..],
+                    );
+                    let ext = inter_ext_tx_cdf(&mut cdfs.inter_ext_tx, cur_tx, cfg.reduced_tx_set);
+                    let (eob, tt) = read_coeffs_txb_full(
+                        dec,
+                        &mut cdfs.coeff,
+                        ext,
+                        &mut nu_tcoeff[..larea],
+                        cur_tx,
+                        0,
+                        tsc as usize,
+                        dsc as usize,
+                        true,
+                        true,
+                        cfg.reduced_tx_set,
+                        signal_gate,
+                        0,
+                    );
+                    let cul = txb_entropy_context(&nu_tcoeff[..larea], cur_tx, tt, eob) as i8;
+                    self.set_entropy_ctx(
+                        0,
+                        cul,
+                        mi_col as usize,
+                        (mi_row & 31) as usize,
+                        blk_row,
+                        blk_col,
+                        ltxw,
+                        ltxh,
+                        max_blocks_wide,
+                        max_blocks_high,
+                        mb_to_right_edge,
+                        mb_to_bottom_edge,
+                    );
+                    (eob, tt)
+                } else {
+                    (0, 0)
+                };
+                // Luma tx_type_map stamp (top-left + 64-level), per leaf, so the
+                // chroma co-location reads the right leaf's tx-type.
+                if !self.luma_tt.is_empty() {
+                    let cols = cfg.mi_cols as usize;
+                    let r0 = mi_row as usize + blk_row;
+                    let c0 = mi_col as usize + blk_col;
+                    self.luma_tt[r0 * cols + c0] = tx_type as u8;
+                    if ltxw == 16 || ltxh == 16 {
+                        let rmax = ltxh.min(max_blocks_high - blk_row);
+                        let cmax = ltxw.min(max_blocks_wide - blk_col);
+                        let mut idy = 0;
+                        while idy < rmax {
+                            let mut idx = 0;
+                            while idx < cmax {
+                                self.luma_tt[(r0 + idy) * cols + c0 + idx] = tx_type as u8;
+                                idx += 4;
+                            }
+                            idy += 4;
+                        }
+                    }
+                }
+                let off = ((mi_row * 4) as usize + blk_row * 4) * self.stride
+                    + (mi_col * 4) as usize
+                    + blk_col * 4;
+                let src = (off as i32
+                    + (info.dv_row >> 3) * self.stride as i32
+                    + (info.dv_col >> 3)) as usize;
+                for r in 0..ltxhpx {
+                    let s = src + r * self.stride;
+                    nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]
+                        .copy_from_slice(&self.recon[s..s + ltxwpx]);
+                }
+                for r in 0..ltxhpx {
+                    let d = off + r * self.stride;
+                    self.recon[d..d + ltxwpx]
+                        .copy_from_slice(&nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]);
+                }
+                if info.skip == 0 && eob > 0 {
+                    reconstruct_txb(
+                        &mut self.recon[off..],
+                        self.stride,
+                        cur_tx,
+                        tx_type,
+                        &nu_tcoeff[..larea],
+                        self.dequants[0],
+                        None,
+                        cfg.bd,
+                    );
+                }
+                txbs.push((eob, tx_type));
+            }
+        }
+
         let mut blk_row = 0usize;
-        while blk_row < max_blocks_high {
+        while do_uniform && blk_row < max_blocks_high {
             let mut blk_col = 0usize;
             while blk_col < max_blocks_wide {
                 // (1) coefficients — read_coeffs_tx_intra_block (skipped blocks
