@@ -29,39 +29,136 @@ extern "C" {
     fn shim_dec_free(d: *mut core::ffi::c_void);
     fn shim_update_cdf(cdf: *mut u16, val: i32, nsymbs: i32);
     fn shim_adapt_encode(
-        syms: *const i32, n: i32, cdf_init: *const u16, nsymbs: i32, out: *mut u8, out_cap: u32,
+        syms: *const i32,
+        n: i32,
+        cdf_init: *const u16,
+        nsymbs: i32,
+        out: *mut u8,
+        out_cap: u32,
     ) -> u32;
     fn shim_adapt_decode(
-        buf: *const u8, sz: u32, n: i32, cdf_init: *const u16, nsymbs: i32, out_syms: *mut i32,
+        buf: *const u8,
+        sz: u32,
+        n: i32,
+        cdf_init: *const u16,
+        nsymbs: i32,
+        out_syms: *mut i32,
     );
 }
 
 // convolve_shim.c — av1_convolve_{x,y}_sr (EIGHTTAP_REGULAR).
 extern "C" {
-    fn shim_convolve_x_sr(src: *const u8, ss: i32, dst: *mut u8, ds: i32, w: i32, h: i32, subpel: i32, ftype: i32);
-    fn shim_convolve_y_sr(src: *const u8, ss: i32, dst: *mut u8, ds: i32, w: i32, h: i32, subpel: i32, ftype: i32);
-    fn shim_convolve_2d_sr(src: *const u8, ss: i32, dst: *mut u8, ds: i32, w: i32, h: i32, spx: i32, spy: i32, ftype: i32);
+    fn shim_convolve_x_sr(
+        src: *const u8,
+        ss: i32,
+        dst: *mut u8,
+        ds: i32,
+        w: i32,
+        h: i32,
+        subpel: i32,
+        ftype: i32,
+    );
+    fn shim_convolve_y_sr(
+        src: *const u8,
+        ss: i32,
+        dst: *mut u8,
+        ds: i32,
+        w: i32,
+        h: i32,
+        subpel: i32,
+        ftype: i32,
+    );
+    fn shim_convolve_2d_sr(
+        src: *const u8,
+        ss: i32,
+        dst: *mut u8,
+        ds: i32,
+        w: i32,
+        h: i32,
+        spx: i32,
+        spy: i32,
+        ftype: i32,
+    );
 }
 
 /// Reference `av1_convolve_2d_sr_c`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_convolve_2d_sr(src: &[u8], src_off: usize, ss: usize, w: usize, h: usize, spx: usize, spy: usize, ftype: usize) -> Vec<u8> {
+pub fn ref_convolve_2d_sr(
+    src: &[u8],
+    src_off: usize,
+    ss: usize,
+    w: usize,
+    h: usize,
+    spx: usize,
+    spy: usize,
+    ftype: usize,
+) -> Vec<u8> {
     let mut dst = vec![0u8; w * h];
-    unsafe { shim_convolve_2d_sr(src.as_ptr().add(src_off), ss as i32, dst.as_mut_ptr(), w as i32, w as i32, h as i32, spx as i32, spy as i32, ftype as i32) }
+    unsafe {
+        shim_convolve_2d_sr(
+            src.as_ptr().add(src_off),
+            ss as i32,
+            dst.as_mut_ptr(),
+            w as i32,
+            w as i32,
+            h as i32,
+            spx as i32,
+            spy as i32,
+            ftype as i32,
+        )
+    }
     dst
 }
 
 /// Reference `av1_convolve_x_sr_c`. `src` points at the interior origin.
-pub fn ref_convolve_x_sr(src: &[u8], src_off: usize, ss: usize, w: usize, h: usize, subpel: usize, ftype: usize) -> Vec<u8> {
+pub fn ref_convolve_x_sr(
+    src: &[u8],
+    src_off: usize,
+    ss: usize,
+    w: usize,
+    h: usize,
+    subpel: usize,
+    ftype: usize,
+) -> Vec<u8> {
     let mut dst = vec![0u8; w * h];
-    unsafe { shim_convolve_x_sr(src.as_ptr().add(src_off), ss as i32, dst.as_mut_ptr(), w as i32, w as i32, h as i32, subpel as i32, ftype as i32) }
+    unsafe {
+        shim_convolve_x_sr(
+            src.as_ptr().add(src_off),
+            ss as i32,
+            dst.as_mut_ptr(),
+            w as i32,
+            w as i32,
+            h as i32,
+            subpel as i32,
+            ftype as i32,
+        )
+    }
     dst
 }
 
 /// Reference `av1_convolve_y_sr_c`.
-pub fn ref_convolve_y_sr(src: &[u8], src_off: usize, ss: usize, w: usize, h: usize, subpel: usize, ftype: usize) -> Vec<u8> {
+pub fn ref_convolve_y_sr(
+    src: &[u8],
+    src_off: usize,
+    ss: usize,
+    w: usize,
+    h: usize,
+    subpel: usize,
+    ftype: usize,
+) -> Vec<u8> {
     let mut dst = vec![0u8; w * h];
-    unsafe { shim_convolve_y_sr(src.as_ptr().add(src_off), ss as i32, dst.as_mut_ptr(), w as i32, w as i32, h as i32, subpel as i32, ftype as i32) }
+    unsafe {
+        shim_convolve_y_sr(
+            src.as_ptr().add(src_off),
+            ss as i32,
+            dst.as_mut_ptr(),
+            w as i32,
+            w as i32,
+            h as i32,
+            subpel as i32,
+            ftype as i32,
+        )
+    }
     dst
 }
 
@@ -116,8 +213,18 @@ extern "C" {
     pub fn cdef_find_dir_c(img: *const u16, stride: i32, var: *mut i32, coeff_shift: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_cdef_filter8(
-        variant: i32, dst: *mut u8, dstride: i32, in_: *const u16, pri: i32, sec: i32, dir: i32,
-        prid: i32, secd: i32, cshift: i32, bw: i32, bh: i32,
+        variant: i32,
+        dst: *mut u8,
+        dstride: i32,
+        in_: *const u16,
+        pri: i32,
+        sec: i32,
+        dir: i32,
+        prid: i32,
+        secd: i32,
+        cshift: i32,
+        bw: i32,
+        bh: i32,
     );
 }
 
@@ -125,14 +232,33 @@ extern "C" {
 /// CDEF_BSTRIDE; `in_off` is the block origin. Returns the `bw*bh` result.
 #[allow(clippy::too_many_arguments)]
 pub fn ref_cdef_filter8(
-    variant: i32, in_buf: &[u16], in_off: usize, pri: i32, sec: i32, dir: i32, prid: i32,
-    secd: i32, cshift: i32, bw: usize, bh: usize,
+    variant: i32,
+    in_buf: &[u16],
+    in_off: usize,
+    pri: i32,
+    sec: i32,
+    dir: i32,
+    prid: i32,
+    secd: i32,
+    cshift: i32,
+    bw: usize,
+    bh: usize,
 ) -> Vec<u8> {
     let mut dst = vec![0u8; bw * bh];
     unsafe {
         shim_cdef_filter8(
-            variant, dst.as_mut_ptr(), bw as i32, in_buf.as_ptr().add(in_off), pri, sec, dir,
-            prid, secd, cshift, bw as i32, bh as i32,
+            variant,
+            dst.as_mut_ptr(),
+            bw as i32,
+            in_buf.as_ptr().add(in_off),
+            pri,
+            sec,
+            dir,
+            prid,
+            secd,
+            cshift,
+            bw as i32,
+            bh as i32,
         )
     }
     dst
@@ -148,8 +274,18 @@ pub fn ref_cdef_find_dir(img: &[u16], stride: usize, coeff_shift: i32) -> (i32, 
 // sadvar_shim.c — SAD / variance / sub-pixel variance dispatch (22 sizes).
 extern "C" {
     fn shim_sad(idx: i32, s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
-    fn shim_variance(idx: i32, a: *const u8, as_: i32, b: *const u8, bs: i32, sse: *mut u32) -> u32;
-    fn shim_subpel_var(idx: i32, a: *const u8, as_: i32, xo: i32, yo: i32, b: *const u8, bs: i32, sse: *mut u32) -> u32;
+    fn shim_variance(idx: i32, a: *const u8, as_: i32, b: *const u8, bs: i32, sse: *mut u32)
+        -> u32;
+    fn shim_subpel_var(
+        idx: i32,
+        a: *const u8,
+        as_: i32,
+        xo: i32,
+        yo: i32,
+        b: *const u8,
+        bs: i32,
+        sse: *mut u32,
+    ) -> u32;
 }
 
 /// Reference `aom_sad<W>x<H>_c` for size index `idx`.
@@ -160,7 +296,17 @@ pub fn ref_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize) -> u32 {
 extern "C" {
     fn shim_sad_avg(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_masked_sad(i: i32, s: *const u8, ss: i32, r: *const u8, rs: i32, sp: *const u8, m: *const u8, ms: i32, inv: i32) -> u32;
+    fn shim_masked_sad(
+        i: i32,
+        s: *const u8,
+        ss: i32,
+        r: *const u8,
+        rs: i32,
+        sp: *const u8,
+        m: *const u8,
+        ms: i32,
+        inv: i32,
+    ) -> u32;
     fn shim_obmc_sad(i: i32, r: *const u8, rs: i32, ws: *const i32, m: *const i32) -> u32;
     fn shim_sse(a: *const u8, as_: i32, b: *const u8, bs: i32, w: i32, h: i32) -> i64;
     fn shim_hbd_sse(a: *const u16, as_: i32, b: *const u16, bs: i32, w: i32, h: i32) -> i64;
@@ -168,90 +314,468 @@ extern "C" {
 
 /// Reference `aom_sse_c` (sum of squared errors, generic w×h).
 pub fn ref_sse(a: &[u8], as_: usize, b: &[u8], bs: usize, w: usize, h: usize) -> i64 {
-    unsafe { shim_sse(a.as_ptr(), as_ as i32, b.as_ptr(), bs as i32, w as i32, h as i32) }
+    unsafe {
+        shim_sse(
+            a.as_ptr(),
+            as_ as i32,
+            b.as_ptr(),
+            bs as i32,
+            w as i32,
+            h as i32,
+        )
+    }
 }
 
 /// Reference `aom_highbd_sse_c`.
 pub fn ref_hbd_sse(a: &[u16], as_: usize, b: &[u16], bs: usize, w: usize, h: usize) -> i64 {
-    unsafe { shim_hbd_sse(a.as_ptr(), as_ as i32, b.as_ptr(), bs as i32, w as i32, h as i32) }
+    unsafe {
+        shim_hbd_sse(
+            a.as_ptr(),
+            as_ as i32,
+            b.as_ptr(),
+            bs as i32,
+            w as i32,
+            h as i32,
+        )
+    }
 }
 
 extern "C" {
-    fn av1_block_error_c(coeff: *const i32, dqcoeff: *const i32, block_size: isize, ssz: *mut i64) -> i64;
-    fn av1_highbd_block_error_c(coeff: *const i32, dqcoeff: *const i32, block_size: isize, ssz: *mut i64, bd: i32) -> i64;
-    fn aom_subtract_block_c(rows: i32, cols: i32, diff: *mut i16, diff_stride: isize, src: *const u8, src_stride: isize, pred: *const u8, pred_stride: isize);
-    fn shim_highbd_subtract_block(rows: i32, cols: i32, diff: *mut i16, diff_stride: i32, src: *const u16, src_stride: i32, pred: *const u16, pred_stride: i32);
-    fn shim_block_error_qm(coeff: *const i32, dqcoeff: *const i32, block_size: isize, qmatrix: *const u8, scan: *const i16, ssz: *mut i64, bd: i32) -> i64;
-    fn av1_model_rd_from_var_lapndz(var: i64, n_log2: u32, qstep: u32, rate: *mut i32, dist: *mut i64);
+    fn av1_block_error_c(
+        coeff: *const i32,
+        dqcoeff: *const i32,
+        block_size: isize,
+        ssz: *mut i64,
+    ) -> i64;
+    fn av1_highbd_block_error_c(
+        coeff: *const i32,
+        dqcoeff: *const i32,
+        block_size: isize,
+        ssz: *mut i64,
+        bd: i32,
+    ) -> i64;
+    fn aom_subtract_block_c(
+        rows: i32,
+        cols: i32,
+        diff: *mut i16,
+        diff_stride: isize,
+        src: *const u8,
+        src_stride: isize,
+        pred: *const u8,
+        pred_stride: isize,
+    );
+    fn shim_highbd_subtract_block(
+        rows: i32,
+        cols: i32,
+        diff: *mut i16,
+        diff_stride: i32,
+        src: *const u16,
+        src_stride: i32,
+        pred: *const u16,
+        pred_stride: i32,
+    );
+    fn shim_block_error_qm(
+        coeff: *const i32,
+        dqcoeff: *const i32,
+        block_size: isize,
+        qmatrix: *const u8,
+        scan: *const i16,
+        ssz: *mut i64,
+        bd: i32,
+    ) -> i64;
+    fn av1_model_rd_from_var_lapndz(
+        var: i64,
+        n_log2: u32,
+        qstep: u32,
+        rate: *mut i32,
+        dist: *mut i64,
+    );
     fn aom_sum_squares_i16_c(src: *const i16, n: u32) -> u64;
     fn aom_sum_squares_2d_i16_c(src: *const i16, src_stride: i32, width: i32, height: i32) -> u64;
     fn aom_vector_var_c(reff: *const i16, src: *const i16, bwl: i32) -> i32;
-    fn shim_wb_apply(data: *const u32, bits: *const i32, kind: *const i32, n: i32, out: *mut u8) -> u32;
+    fn shim_wb_apply(
+        data: *const u32,
+        bits: *const i32,
+        kind: *const i32,
+        n: i32,
+        out: *mut u8,
+    ) -> u32;
     fn aom_uleb_size_in_bytes(value: u64) -> usize;
-    fn aom_uleb_encode(value: u64, available: usize, coded_value: *mut u8, coded_size: *mut usize) -> i32;
-    fn aom_uleb_decode(buffer: *const u8, available: usize, value: *mut u64, length: *mut usize) -> i32;
-    fn shim_write_obu_header(obu_type: i32, has_nonzero_op: i32, is_layer_specific: i32, obu_extension: i32, dst: *mut u8) -> u32;
+    fn aom_uleb_encode(
+        value: u64,
+        available: usize,
+        coded_value: *mut u8,
+        coded_size: *mut usize,
+    ) -> i32;
+    fn aom_uleb_decode(
+        buffer: *const u8,
+        available: usize,
+        value: *mut u64,
+        length: *mut usize,
+    ) -> i32;
+    fn shim_write_obu_header(
+        obu_type: i32,
+        has_nonzero_op: i32,
+        is_layer_specific: i32,
+        obu_extension: i32,
+        dst: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_encode_quantization(base_qindex: i32, y_dc: i32, u_dc: i32, u_ac: i32, v_dc: i32, v_ac: i32, using_qm: i32, qm_y: i32, qm_u: i32, qm_v: i32, num_planes: i32, separate_uv: i32, out: *mut u8) -> u32;
+    fn shim_encode_quantization(
+        base_qindex: i32,
+        y_dc: i32,
+        u_dc: i32,
+        u_ac: i32,
+        v_dc: i32,
+        v_ac: i32,
+        using_qm: i32,
+        qm_y: i32,
+        qm_u: i32,
+        qm_v: i32,
+        num_planes: i32,
+        separate_uv: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_encode_loopfilter(allow_intrabc: i32, fl0: i32, fl1: i32, flu: i32, flv: i32, sharpness: i32, mode_ref_enabled: i32, mode_ref_update: i32, ref_deltas: *const i8, mode_deltas: *const i8, last_ref: *const i8, last_mode: *const i8, num_planes: i32, out: *mut u8) -> u32;
+    fn shim_encode_loopfilter(
+        allow_intrabc: i32,
+        fl0: i32,
+        fl1: i32,
+        flu: i32,
+        flv: i32,
+        sharpness: i32,
+        mode_ref_enabled: i32,
+        mode_ref_update: i32,
+        ref_deltas: *const i8,
+        mode_deltas: *const i8,
+        last_ref: *const i8,
+        last_mode: *const i8,
+        num_planes: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_encode_cdef(enable_cdef: i32, allow_intrabc: i32, damping: i32, cdef_bits: i32, nb: i32, y: *const i32, uv: *const i32, num_planes: i32, out: *mut u8) -> u32;
-    fn shim_encode_segmentation(enabled: i32, has_primary_ref: i32, update_map: i32, temporal_update: i32, update_data: i32, feature_mask: *const u32, feature_data: *const i32, out: *mut u8) -> u32;
+    fn shim_encode_cdef(
+        enable_cdef: i32,
+        allow_intrabc: i32,
+        damping: i32,
+        cdef_bits: i32,
+        nb: i32,
+        y: *const i32,
+        uv: *const i32,
+        num_planes: i32,
+        out: *mut u8,
+    ) -> u32;
+    fn shim_encode_segmentation(
+        enabled: i32,
+        has_primary_ref: i32,
+        update_map: i32,
+        temporal_update: i32,
+        update_data: i32,
+        feature_mask: *const u32,
+        feature_data: *const i32,
+        out: *mut u8,
+    ) -> u32;
     fn shim_write_frame_interp_filter(filter: i32, out: *mut u8) -> u32;
     fn shim_write_superres_scale(enable_superres: i32, denom: i32, out: *mut u8) -> u32;
     fn shim_write_render_size(scaling_active: i32, rw: i32, rh: i32, out: *mut u8) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_frame_size(frame_size_override: i32, num_bits_width: i32, num_bits_height: i32, up_w: i32, up_h: i32, enable_superres: i32, denom: i32, scaling_active: i32, rw: i32, rh: i32, out: *mut u8) -> u32;
+    fn shim_write_frame_size(
+        frame_size_override: i32,
+        num_bits_width: i32,
+        num_bits_height: i32,
+        up_w: i32,
+        up_h: i32,
+        enable_superres: i32,
+        denom: i32,
+        scaling_active: i32,
+        rw: i32,
+        rh: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_tile_group_header(start_tile: i32, end_tile: i32, tiles_log2: i32, present_flag: i32, out: *mut u8) -> u32;
-    fn shim_write_tile_info(mi_cols: i32, mi_rows: i32, mib_size_log2: i32, uniform_spacing: i32, log2_cols: i32, min_log2_cols: i32, max_log2_cols: i32, log2_rows: i32, min_log2_rows: i32, max_log2_rows: i32, cols: i32, rows: i32, col_start_sb: *const i32, row_start_sb: *const i32, max_width_sb: i32, max_height_sb: i32, out: *mut u8) -> u32;
+    fn shim_write_tile_group_header(
+        start_tile: i32,
+        end_tile: i32,
+        tiles_log2: i32,
+        present_flag: i32,
+        out: *mut u8,
+    ) -> u32;
+    fn shim_write_tile_info(
+        mi_cols: i32,
+        mi_rows: i32,
+        mib_size_log2: i32,
+        uniform_spacing: i32,
+        log2_cols: i32,
+        min_log2_cols: i32,
+        max_log2_cols: i32,
+        log2_rows: i32,
+        min_log2_rows: i32,
+        max_log2_rows: i32,
+        cols: i32,
+        rows: i32,
+        col_start_sb: *const i32,
+        row_start_sb: *const i32,
+        max_width_sb: i32,
+        max_height_sb: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_encode_restoration_mode(enable_restoration: i32, allow_intrabc: i32, frame_restoration_type: *const i32, sb_size_128: i32, restoration_unit_size: *const i32, ssx: i32, ssy: i32, num_planes: i32, out: *mut u8) -> u32;
+    fn shim_encode_restoration_mode(
+        enable_restoration: i32,
+        allow_intrabc: i32,
+        frame_restoration_type: *const i32,
+        sb_size_128: i32,
+        restoration_unit_size: *const i32,
+        ssx: i32,
+        ssy: i32,
+        num_planes: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_delta_q_params(base_qindex: i32, delta_q_present: i32, delta_q_res: i32, allow_intrabc: i32, delta_lf_present: i32, delta_lf_res: i32, delta_lf_multi: i32, out: *mut u8) -> u32;
+    fn shim_write_delta_q_params(
+        base_qindex: i32,
+        delta_q_present: i32,
+        delta_q_res: i32,
+        allow_intrabc: i32,
+        delta_lf_present: i32,
+        delta_lf_res: i32,
+        delta_lf_multi: i32,
+        out: *mut u8,
+    ) -> u32;
     fn shim_write_tx_mode(coded_lossless: i32, tx_mode_select: i32, out: *mut u8) -> u32;
-    fn shim_write_film_grain_params(s: *const i32, spy: *const i32, spcb: *const i32, spcr: *const i32, ary: *const i32, arcb: *const i32, arcr: *const i32, out: *mut u8) -> u32;
+    fn shim_write_film_grain_params(
+        s: *const i32,
+        spy: *const i32,
+        spcb: *const i32,
+        spcr: *const i32,
+        ary: *const i32,
+        arcb: *const i32,
+        arcr: *const i32,
+        out: *mut u8,
+    ) -> u32;
     fn shim_wb_signed_subexpfin(n: i32, k: i32, ref_: i32, v: i32, out: *mut u8) -> u32;
-    fn shim_write_global_motion(wmtype: *const i32, wmmat: *const i32, refmat: *const i32, allow_hp: i32, out: *mut u8) -> u32;
+    fn shim_write_global_motion(
+        wmtype: *const i32,
+        wmmat: *const i32,
+        refmat: *const i32,
+        allow_hp: i32,
+        out: *mut u8,
+    ) -> u32;
     fn shim_write_sequence_header(s: *const i32, out: *mut u8) -> u32;
     fn shim_write_ext_tile_info(pre_bits: i32, rows: i32, cols: i32, out: *mut u8) -> u32;
     fn shim_write_color_config(c: *const i32, out: *mut u8) -> u32;
     fn shim_wb_uvlc(v: u32, out: *mut u8) -> u32;
-    fn shim_write_timing_info(disp_tick: u32, time_scale: u32, equal_pic: i32, ticks_per_pic: u32, out: *mut u8) -> u32;
-    fn shim_write_decoder_model_info(ed_delay_len: i32, dec_tick: u32, rem_time_len: i32, pres_time_len: i32, out: *mut u8) -> u32;
-    fn shim_write_dec_model_op(dec_delay: u32, enc_delay: u32, low_delay: i32, delay_len: i32, out: *mut u8) -> u32;
+    fn shim_write_timing_info(
+        disp_tick: u32,
+        time_scale: u32,
+        equal_pic: i32,
+        ticks_per_pic: u32,
+        out: *mut u8,
+    ) -> u32;
+    fn shim_write_decoder_model_info(
+        ed_delay_len: i32,
+        dec_tick: u32,
+        rem_time_len: i32,
+        pres_time_len: i32,
+        out: *mut u8,
+    ) -> u32;
+    fn shim_write_dec_model_op(
+        dec_delay: u32,
+        enc_delay: u32,
+        low_delay: i32,
+        delay_len: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_sequence_header_obu(top: *const i64, sh: *const i64, cc: *const i64, idc: *const i64, level: *const i64, tier: *const i64, dmpp: *const i64, dispp: *const i64, decdelay: *const i64, encdelay: *const i64, lowdelay: *const i64, initdelay: *const i64, out: *mut u8) -> u32;
-    fn shim_write_frame_header_prefix(t: *const i64, op_dmpp: *const i64, op_idc: *const i64, brt: *const i64, ref_oh: *const i64, out: *mut u8) -> u32;
+    fn shim_write_sequence_header_obu(
+        top: *const i64,
+        sh: *const i64,
+        cc: *const i64,
+        idc: *const i64,
+        level: *const i64,
+        tier: *const i64,
+        dmpp: *const i64,
+        dispp: *const i64,
+        decdelay: *const i64,
+        encdelay: *const i64,
+        lowdelay: *const i64,
+        initdelay: *const i64,
+        out: *mut u8,
+    ) -> u32;
+    fn shim_write_frame_header_prefix(
+        t: *const i64,
+        op_dmpp: *const i64,
+        op_idc: *const i64,
+        brt: *const i64,
+        ref_oh: *const i64,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_frame_size_with_refs(up_w: i32, up_h: i32, rw: i32, rh: i32, valid: *const i32, ycw: *const i32, ych: *const i32, rrw: *const i32, rrh: *const i32, enable_superres: i32, denom: i32, fs_num_bits_w: i32, fs_num_bits_h: i32, fs_up_w: i32, fs_up_h: i32, fs_scaling_active: i32, fs_rw: i32, fs_rh: i32, out: *mut u8) -> u32;
+    fn shim_write_frame_size_with_refs(
+        up_w: i32,
+        up_h: i32,
+        rw: i32,
+        rh: i32,
+        valid: *const i32,
+        ycw: *const i32,
+        ych: *const i32,
+        rrw: *const i32,
+        rrh: *const i32,
+        enable_superres: i32,
+        denom: i32,
+        fs_num_bits_w: i32,
+        fs_num_bits_h: i32,
+        fs_up_w: i32,
+        fs_up_h: i32,
+        fs_scaling_active: i32,
+        fs_rw: i32,
+        fs_rh: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_ref_signaling(enable_order_hint: i32, short_sig: i32, ref_map_idx: *const i32, set_rfc: i32, rtc_reference: *const i32, rtc_ref_idx: *const i32, num_spatial_layers: i32, frame_id_present: i32, frame_id_len: i32, current_frame_id: i32, ref_frame_id: *const i32, diff_len: i32, out: *mut u8) -> u32;
-    fn shim_write_refresh_frame_context(reduced: i32, disable_cdf: i32, rfc_disabled: i32, out: *mut u8) -> u32;
+    fn shim_write_inter_ref_signaling(
+        enable_order_hint: i32,
+        short_sig: i32,
+        ref_map_idx: *const i32,
+        set_rfc: i32,
+        rtc_reference: *const i32,
+        rtc_ref_idx: *const i32,
+        num_spatial_layers: i32,
+        frame_id_present: i32,
+        frame_id_len: i32,
+        current_frame_id: i32,
+        ref_frame_id: *const i32,
+        diff_len: i32,
+        out: *mut u8,
+    ) -> u32;
+    fn shim_write_refresh_frame_context(
+        reduced: i32,
+        disable_cdf: i32,
+        rfc_disabled: i32,
+        out: *mut u8,
+    ) -> u32;
     fn shim_partition_cdf_length(bsize: i32) -> i32;
     fn shim_partition_gather_vert(out: *mut u16, cdf_in: *const u16, bsize: i32);
     fn shim_partition_gather_horz(out: *mut u16, cdf_in: *const u16, bsize: i32);
-    fn shim_partition_plane_context(above: *const i8, left: *const i8, mi_row: i32, mi_col: i32, bsize: i32) -> i32;
-    fn shim_write_partition(partition_cdf: *mut u16, cdf_len: i32, p: i32, has_rows: i32, has_cols: i32, bsize: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
-    fn shim_skip_txfm_context(above_present: i32, above_skip: i32, left_present: i32, left_skip: i32) -> i32;
-    fn shim_write_skip(skip_cdf: *mut u16, seg_skip_active: i32, skip_txfm: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
-    fn shim_write_delta_qindex(delta_q_cdf: *mut u16, delta_qindex: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
-    fn shim_write_delta_lflevel(delta_lf_cdf: *mut u16, delta_lflevel: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
-    fn shim_write_cfl_alphas(cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, idx: i32, joint_sign: i32, out: *mut u8, out_sign_cdf: *mut u16, out_alpha_cdf: *mut u16) -> u32;
-    fn shim_get_y_mode_ctx(above_present: i32, above_mode: i32, left_present: i32, left_mode: i32) -> i32;
-    fn shim_write_intra_y_mode_kf(kf_y_cdf: *mut u16, mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_partition_plane_context(
+        above: *const i8,
+        left: *const i8,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: i32,
+    ) -> i32;
+    fn shim_write_partition(
+        partition_cdf: *mut u16,
+        cdf_len: i32,
+        p: i32,
+        has_rows: i32,
+        has_cols: i32,
+        bsize: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
+    fn shim_skip_txfm_context(
+        above_present: i32,
+        above_skip: i32,
+        left_present: i32,
+        left_skip: i32,
+    ) -> i32;
+    fn shim_write_skip(
+        skip_cdf: *mut u16,
+        seg_skip_active: i32,
+        skip_txfm: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
+    fn shim_write_delta_qindex(
+        delta_q_cdf: *mut u16,
+        delta_qindex: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
+    fn shim_write_delta_lflevel(
+        delta_lf_cdf: *mut u16,
+        delta_lflevel: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
+    fn shim_write_cfl_alphas(
+        cfl_sign_cdf: *mut u16,
+        cfl_alpha_cdf: *mut u16,
+        idx: i32,
+        joint_sign: i32,
+        out: *mut u8,
+        out_sign_cdf: *mut u16,
+        out_alpha_cdf: *mut u16,
+    ) -> u32;
+    fn shim_get_y_mode_ctx(
+        above_present: i32,
+        above_mode: i32,
+        left_present: i32,
+        left_mode: i32,
+    ) -> i32;
+    fn shim_write_intra_y_mode_kf(
+        kf_y_cdf: *mut u16,
+        mode: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
     fn shim_size_group_lookup(bsize: i32) -> i32;
-    fn shim_write_intra_uv_mode(uv_mode_cdf: *mut u16, uv_mode: i32, cfl_allowed: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
-    fn shim_write_angle_delta(cdf: *mut u16, angle_delta: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_intra_uv_mode(
+        uv_mode_cdf: *mut u16,
+        uv_mode: i32,
+        cfl_allowed: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
+    fn shim_write_angle_delta(
+        cdf: *mut u16,
+        angle_delta: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_mb_interp_filter(cdf0: *mut u16, cdf1: *mut u16, interp_needed: i32, is_switchable: i32, enable_dual: i32, f0: i32, f1: i32, out: *mut u8, out0: *mut u16, out1: *mut u16) -> u32;
-    fn shim_get_intra_inter_context(has_above: i32, above_inter: i32, has_left: i32, left_inter: i32) -> i32;
+    fn shim_write_mb_interp_filter(
+        cdf0: *mut u16,
+        cdf1: *mut u16,
+        interp_needed: i32,
+        is_switchable: i32,
+        enable_dual: i32,
+        f0: i32,
+        f1: i32,
+        out: *mut u8,
+        out0: *mut u16,
+        out1: *mut u16,
+    ) -> u32;
+    fn shim_get_intra_inter_context(
+        has_above: i32,
+        above_inter: i32,
+        has_left: i32,
+        left_inter: i32,
+    ) -> i32;
     fn shim_get_skip_mode_context(ha: i32, a_sm: i32, hl: i32, l_sm: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_skip_mode(cdf: *mut u16, frame_flag: i32, seg_skip: i32, comp_allowed: i32, seg_ref_gmv: i32, skip_mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_skip_mode(
+        cdf: *mut u16,
+        frame_flag: i32,
+        seg_skip: i32,
+        comp_allowed: i32,
+        seg_ref_gmv: i32,
+        skip_mode: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_get_reference_mode_context(ha: i32, a_r0: i32, a_r1: i32, a_ibc: i32, hl: i32, l_r0: i32, l_r1: i32, l_ibc: i32) -> i32;
+    fn shim_get_reference_mode_context(
+        ha: i32,
+        a_r0: i32,
+        a_r1: i32,
+        a_ibc: i32,
+        hl: i32,
+        l_r0: i32,
+        l_r1: i32,
+        l_ibc: i32,
+    ) -> i32;
     fn shim_single_ref_p1_context(ref_counts: *const u8) -> i32;
     fn shim_single_ref_p2_context(rc: *const u8) -> i32;
     fn shim_single_ref_p3_context(rc: *const u8) -> i32;
@@ -263,33 +787,209 @@ extern "C" {
     fn shim_uni_comp_ref_p2_context(rc: *const u8) -> i32;
     fn shim_neg_interleave(x: i32, ref_: i32, max: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_intrabc_info(intrabc_cdf: *mut u16, joints: *mut u16, comp0: *mut u16, comp1: *mut u16, use_intrabc: i32, diff_row: i32, diff_col: i32, out: *mut u8, out_ibc: *mut u16, out_joints: *mut u16, out_c0: *mut u16, out_c1: *mut u16) -> u32;
+    fn shim_write_intrabc_info(
+        intrabc_cdf: *mut u16,
+        joints: *mut u16,
+        comp0: *mut u16,
+        comp1: *mut u16,
+        use_intrabc: i32,
+        diff_row: i32,
+        diff_col: i32,
+        out: *mut u8,
+        out_ibc: *mut u16,
+        out_joints: *mut u16,
+        out_c0: *mut u16,
+        out_c1: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_segment_id(cdf: *mut u16, seg_enabled: i32, update_map: i32, skip_txfm: i32, segment_id: i32, pred: i32, last_active_segid: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_segment_id(
+        cdf: *mut u16,
+        seg_enabled: i32,
+        update_map: i32,
+        skip_txfm: i32,
+        segment_id: i32,
+        pred: i32,
+        last_active_segid: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
     fn shim_txfm_partition_context(above: u8, left: u8, bsize: i32, tx_size: i32) -> i32;
-    fn shim_txfm_partition_update(above_ctx: *mut u8, left_ctx: *mut u8, tx_size: i32, txb_size: i32);
+    fn shim_txfm_partition_update(
+        above_ctx: *mut u8,
+        left_ctx: *mut u8,
+        tx_size: i32,
+        txb_size: i32,
+    );
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_tx_size_vartx(bsize: i32, top_tx_size: i32, inter_tx_size: *const u8, mb_to_right_edge: i32, mb_to_bottom_edge: i32, above_in: *const u8, left_in: *const u8, cdf: *mut u16, out: *mut u8, above_out: *mut u8, left_out: *mut u8, cdf_out: *mut u16) -> u32;
+    fn shim_write_tx_size_vartx(
+        bsize: i32,
+        top_tx_size: i32,
+        inter_tx_size: *const u8,
+        mb_to_right_edge: i32,
+        mb_to_bottom_edge: i32,
+        above_in: *const u8,
+        left_in: *const u8,
+        cdf: *mut u16,
+        out: *mut u8,
+        above_out: *mut u8,
+        left_out: *mut u8,
+        cdf_out: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_txfm_size(bsize: i32, max_tx: i32, inter_tx_size: *const u8, mb_to_right_edge: i32, mb_to_bottom_edge: i32, above_in: *const u8, left_in: *const u8, cdf: *mut u16, out: *mut u8, above_out: *mut u8, left_out: *mut u8, cdf_out: *mut u16) -> u32;
+    fn shim_write_inter_txfm_size(
+        bsize: i32,
+        max_tx: i32,
+        inter_tx_size: *const u8,
+        mb_to_right_edge: i32,
+        mb_to_bottom_edge: i32,
+        above_in: *const u8,
+        left_in: *const u8,
+        cdf: *mut u16,
+        out: *mut u8,
+        above_out: *mut u8,
+        left_out: *mut u8,
+        cdf_out: *mut u16,
+    ) -> u32;
     fn shim_get_palette_bsize_ctx(bsize: i32) -> i32;
     fn shim_get_palette_mode_ctx(ha: i32, a_psize: i32, hl: i32, l_psize: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_palette_flags_sizes(mode_dc: i32, n_y: i32, y_mode_cdf: *mut u16, y_size_cdf: *mut u16, uv_dc: i32, n_uv: i32, uv_mode_cdf: *mut u16, uv_size_cdf: *mut u16, out: *mut u8, o_ym: *mut u16, o_ys: *mut u16, o_um: *mut u16, o_us: *mut u16) -> u32;
-    fn shim_delta_encode_palette_colors(colors: *const i32, num: i32, bit_depth: i32, min_val: i32, out: *mut u8) -> u32;
-    fn shim_pack_map_tokens(n: i32, num: i32, tokens: *const u8, color_ctxs: *const u8, map_cdf: *mut u16, out: *mut u8, map_cdf_out: *mut u16) -> u32;
-    fn shim_write_palette_colors_v(colors_v: *const u16, n: i32, bit_depth: i32, out: *mut u8) -> u32;
+    fn shim_write_palette_flags_sizes(
+        mode_dc: i32,
+        n_y: i32,
+        y_mode_cdf: *mut u16,
+        y_size_cdf: *mut u16,
+        uv_dc: i32,
+        n_uv: i32,
+        uv_mode_cdf: *mut u16,
+        uv_size_cdf: *mut u16,
+        out: *mut u8,
+        o_ym: *mut u16,
+        o_ys: *mut u16,
+        o_um: *mut u16,
+        o_us: *mut u16,
+    ) -> u32;
+    fn shim_delta_encode_palette_colors(
+        colors: *const i32,
+        num: i32,
+        bit_depth: i32,
+        min_val: i32,
+        out: *mut u8,
+    ) -> u32;
+    fn shim_pack_map_tokens(
+        n: i32,
+        num: i32,
+        tokens: *const u8,
+        color_ctxs: *const u8,
+        map_cdf: *mut u16,
+        out: *mut u8,
+        map_cdf_out: *mut u16,
+    ) -> u32;
+    fn shim_write_palette_colors_v(
+        colors_v: *const u16,
+        n: i32,
+        bit_depth: i32,
+        out: *mut u8,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_get_palette_cache(plane: i32, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_size0: i32, a_size1: i32, hl: i32, l_colors: *const u16, l_size0: i32, l_size1: i32, out_cache: *mut u16) -> i32;
-    fn shim_index_color_cache(cache: *const u16, n_cache: i32, colors: *const u16, n_colors: i32, found: *mut u8, out_colors: *mut i32) -> i32;
+    fn shim_get_palette_cache(
+        plane: i32,
+        mb_to_top_edge: i32,
+        ha: i32,
+        a_colors: *const u16,
+        a_size0: i32,
+        a_size1: i32,
+        hl: i32,
+        l_colors: *const u16,
+        l_size0: i32,
+        l_size1: i32,
+        out_cache: *mut u16,
+    ) -> i32;
+    fn shim_index_color_cache(
+        cache: *const u16,
+        n_cache: i32,
+        colors: *const u16,
+        n_colors: i32,
+        found: *mut u8,
+        out_colors: *mut i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_palette_mode_info(mode_dc: i32, uv_dc: i32, bit_depth: i32, bsize_ctx: i32, y_mode_ctx: i32, uv_mode_ctx: i32, palette_size: *const u8, palette_colors: *const u16, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_s0: i32, a_s1: i32, hl: i32, l_colors: *const u16, l_s0: i32, l_s1: i32, y_mode_cdf: *mut u16, y_size_cdf: *mut u16, uv_mode_cdf: *mut u16, uv_size_cdf: *mut u16, out: *mut u8, o_ym: *mut u16, o_ys: *mut u16, o_um: *mut u16, o_us: *mut u16) -> u32;
+    fn shim_write_palette_mode_info(
+        mode_dc: i32,
+        uv_dc: i32,
+        bit_depth: i32,
+        bsize_ctx: i32,
+        y_mode_ctx: i32,
+        uv_mode_ctx: i32,
+        palette_size: *const u8,
+        palette_colors: *const u16,
+        mb_to_top_edge: i32,
+        ha: i32,
+        a_colors: *const u16,
+        a_s0: i32,
+        a_s1: i32,
+        hl: i32,
+        l_colors: *const u16,
+        l_s0: i32,
+        l_s1: i32,
+        y_mode_cdf: *mut u16,
+        y_size_cdf: *mut u16,
+        uv_mode_cdf: *mut u16,
+        uv_size_cdf: *mut u16,
+        out: *mut u8,
+        o_ym: *mut u16,
+        o_ys: *mut u16,
+        o_um: *mut u16,
+        o_us: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_interintra_info(interintra: i32, ii_cdf: *mut u16, ii_mode: i32, ii_mode_cdf: *mut u16, wedge_used: i32, use_wedge: i32, wedge_ii_cdf: *mut u16, wedge_index: i32, wedge_idx_cdf: *mut u16, out: *mut u8, o_ii: *mut u16, o_iim: *mut u16, o_wii: *mut u16, o_wix: *mut u16) -> u32;
+    fn shim_write_interintra_info(
+        interintra: i32,
+        ii_cdf: *mut u16,
+        ii_mode: i32,
+        ii_mode_cdf: *mut u16,
+        wedge_used: i32,
+        use_wedge: i32,
+        wedge_ii_cdf: *mut u16,
+        wedge_index: i32,
+        wedge_idx_cdf: *mut u16,
+        out: *mut u8,
+        o_ii: *mut u16,
+        o_iim: *mut u16,
+        o_wii: *mut u16,
+        o_wix: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_get_comp_group_idx_context(ha: i32, a_rf0: i32, a_rf1: i32, a_cgi: i32, hl: i32, l_rf0: i32, l_rf1: i32, l_cgi: i32) -> i32;
+    fn shim_get_comp_group_idx_context(
+        ha: i32,
+        a_rf0: i32,
+        a_rf1: i32,
+        a_cgi: i32,
+        hl: i32,
+        l_rf0: i32,
+        l_rf1: i32,
+        l_cgi: i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_compound_type_info(masked_used: i32, comp_group_idx: i32, cgi_cdf: *mut u16, dist_wtd: i32, compound_idx: i32, cidx_cdf: *mut u16, wedge_used: i32, comp_type: i32, ctype_cdf: *mut u16, wedge_index: i32, wedge_idx_cdf: *mut u16, wedge_sign: i32, mask_type: i32, out: *mut u8, o_cgi: *mut u16, o_cidx: *mut u16, o_ctype: *mut u16, o_wix: *mut u16) -> u32;
+    fn shim_write_compound_type_info(
+        masked_used: i32,
+        comp_group_idx: i32,
+        cgi_cdf: *mut u16,
+        dist_wtd: i32,
+        compound_idx: i32,
+        cidx_cdf: *mut u16,
+        wedge_used: i32,
+        comp_type: i32,
+        ctype_cdf: *mut u16,
+        wedge_index: i32,
+        wedge_idx_cdf: *mut u16,
+        wedge_sign: i32,
+        mask_type: i32,
+        out: *mut u8,
+        o_cgi: *mut u16,
+        o_cidx: *mut u16,
+        o_ctype: *mut u16,
+        o_wix: *mut u16,
+    ) -> u32;
     fn shim_get_relative_dist(enable: i32, bits_minus_1: i32, a: i32, b: i32) -> i32;
     fn shim_get_pred_context_seg_id(ha: i32, a_sip: i32, hl: i32, l_sip: i32) -> i32;
     fn shim_is_inter_compound_mode(mode: i32) -> i32;
@@ -297,67 +997,600 @@ extern "C" {
     fn shim_have_nearmv_in_inter_mode(mode: i32) -> i32;
     fn shim_mode_context_analyzer(rf0: i32, rf1: i32, mc_val: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_collect_neighbors_ref_counts(ha: i32, a_intrabc: i32, a_rf0: i32, a_rf1: i32, hl: i32, l_intrabc: i32, l_rf0: i32, l_rf1: i32, out_counts: *mut u8);
+    fn shim_collect_neighbors_ref_counts(
+        ha: i32,
+        a_intrabc: i32,
+        a_rf0: i32,
+        a_rf1: i32,
+        hl: i32,
+        l_intrabc: i32,
+        l_rf0: i32,
+        l_rf1: i32,
+        out_counts: *mut u8,
+    );
     fn shim_get_partition_subsize(bsize: i32, partition: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_update_ext_partition_context(mi_row: i32, mi_col: i32, subsize: i32, bsize: i32, partition: i32, above_in: *const i8, left_in: *const i8, above_out: *mut i8, left_out: *mut i8);
+    fn shim_update_ext_partition_context(
+        mi_row: i32,
+        mi_col: i32,
+        subsize: i32,
+        bsize: i32,
+        partition: i32,
+        above_in: *const i8,
+        left_in: *const i8,
+        above_out: *mut i8,
+        left_out: *mut i8,
+    );
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_partition_node(above_in: *const i8, left_in: *const i8, mi_row: i32, mi_col: i32, bsize: i32, partition: i32, mi_rows: i32, mi_cols: i32, arena: *mut u16, out: *mut u8, above_out: *mut i8, left_out: *mut i8, arena_out: *mut u16) -> u32;
+    fn shim_write_partition_node(
+        above_in: *const i8,
+        left_in: *const i8,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: i32,
+        partition: i32,
+        mi_rows: i32,
+        mi_cols: i32,
+        arena: *mut u16,
+        out: *mut u8,
+        above_out: *mut i8,
+        left_out: *mut i8,
+        arena_out: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_modes_sb(above_in: *const i8, left_in: *const i8, mi_row: i32, mi_col: i32, bsize: i32, tree: *const i8, tree_len: i32, arena: *mut u16, out: *mut u8, above_out: *mut i8, left_out: *mut i8, arena_out: *mut u16, tree_consumed: *mut i32) -> u32;
+    fn shim_write_modes_sb(
+        above_in: *const i8,
+        left_in: *const i8,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: i32,
+        tree: *const i8,
+        tree_len: i32,
+        arena: *mut u16,
+        out: *mut u8,
+        above_out: *mut i8,
+        left_out: *mut i8,
+        arena_out: *mut u16,
+        tree_consumed: *mut i32,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_modes_tile(n_sb_rows: i32, n_sb_cols: i32, sb_mi: i32, sb_size: i32, tree: *const i8, arena: *mut u16, out: *mut u8, above_out: *mut i8, arena_out: *mut u16, tree_consumed: *mut i32) -> u32;
+    fn shim_write_modes_tile(
+        n_sb_rows: i32,
+        n_sb_cols: i32,
+        sb_mi: i32,
+        sb_size: i32,
+        tree: *const i8,
+        arena: *mut u16,
+        out: *mut u8,
+        above_out: *mut i8,
+        arena_out: *mut u16,
+        tree_consumed: *mut i32,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_block_mvs(mode: i32, is_compound: i32, diff_row0: i32, diff_col0: i32, diff_row1: i32, diff_col1: i32, usehp: i32, joints: *mut u16, comp0: *mut u16, comp1: *mut u16, out: *mut u8, o_joints: *mut u16, o_c0: *mut u16, o_c1: *mut u16) -> u32;
+    fn shim_write_inter_block_mvs(
+        mode: i32,
+        is_compound: i32,
+        diff_row0: i32,
+        diff_col0: i32,
+        diff_row1: i32,
+        diff_col1: i32,
+        usehp: i32,
+        joints: *mut u16,
+        comp0: *mut u16,
+        comp1: *mut u16,
+        out: *mut u8,
+        o_joints: *mut u16,
+        o_c0: *mut u16,
+        o_c1: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_mode_drl(seg_skip: i32, mode: i32, mode_ctx: i32, inter_compound_mode_cdf: *mut u16, newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, drl_cdf: *mut u16, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, o_icm: *mut u16, o_newmv: *mut u16, o_zeromv: *mut u16, o_refmv: *mut u16, o_drl: *mut u16) -> u32;
+    fn shim_write_inter_mode_drl(
+        seg_skip: i32,
+        mode: i32,
+        mode_ctx: i32,
+        inter_compound_mode_cdf: *mut u16,
+        newmv_cdf: *mut u16,
+        zeromv_cdf: *mut u16,
+        refmv_cdf: *mut u16,
+        drl_cdf: *mut u16,
+        ref_mv_idx: i32,
+        ref_mv_count: i32,
+        weight: *const u16,
+        out: *mut u8,
+        o_icm: *mut u16,
+        o_newmv: *mut u16,
+        o_zeromv: *mut u16,
+        o_refmv: *mut u16,
+        o_drl: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_mode_tail(interintra_allowed: i32, interintra: i32, ii_cdf: *mut u16, ii_mode: i32, ii_mode_cdf: *mut u16, wedge_used_ii: i32, use_wedge_ii: i32, wedge_ii_cdf: *mut u16, ii_wedge_index: i32, wedge_idx_cdf: *mut u16, motion_mode_present: i32, obmc_cdf: *mut u16, mm_cdf: *mut u16, last_motion_mode_allowed: i32, motion_mode: i32, has_second_ref: i32, masked_used: i32, comp_group_idx: i32, cgi_cdf: *mut u16, dist_wtd: i32, compound_idx: i32, cidx_cdf: *mut u16, wedge_used_ct: i32, comp_type: i32, ctype_cdf: *mut u16, ct_wedge_index: i32, wedge_sign: i32, mask_type: i32, interp_needed: i32, is_switchable: i32, enable_dual: i32, f0: i32, f1: i32, interp_cdf0: *mut u16, interp_cdf1: *mut u16, out: *mut u8, o_all: *mut u16) -> u32;
+    fn shim_write_inter_mode_tail(
+        interintra_allowed: i32,
+        interintra: i32,
+        ii_cdf: *mut u16,
+        ii_mode: i32,
+        ii_mode_cdf: *mut u16,
+        wedge_used_ii: i32,
+        use_wedge_ii: i32,
+        wedge_ii_cdf: *mut u16,
+        ii_wedge_index: i32,
+        wedge_idx_cdf: *mut u16,
+        motion_mode_present: i32,
+        obmc_cdf: *mut u16,
+        mm_cdf: *mut u16,
+        last_motion_mode_allowed: i32,
+        motion_mode: i32,
+        has_second_ref: i32,
+        masked_used: i32,
+        comp_group_idx: i32,
+        cgi_cdf: *mut u16,
+        dist_wtd: i32,
+        compound_idx: i32,
+        cidx_cdf: *mut u16,
+        wedge_used_ct: i32,
+        comp_type: i32,
+        ctype_cdf: *mut u16,
+        ct_wedge_index: i32,
+        wedge_sign: i32,
+        mask_type: i32,
+        interp_needed: i32,
+        is_switchable: i32,
+        enable_dual: i32,
+        f0: i32,
+        f1: i32,
+        interp_cdf0: *mut u16,
+        interp_cdf1: *mut u16,
+        out: *mut u8,
+        o_all: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_segment_id(update_map: i32, preskip: i32, segid_preskip: i32, skip: i32, temporal_update: i32, seg_id_predicted: i32, pred_cdf: *mut u16, seg_cdf: *mut u16, seg_enabled: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, out: *mut u8, o_predcdf: *mut u16, o_segcdf: *mut u16) -> u32;
+    fn shim_write_inter_segment_id(
+        update_map: i32,
+        preskip: i32,
+        segid_preskip: i32,
+        skip: i32,
+        temporal_update: i32,
+        seg_id_predicted: i32,
+        pred_cdf: *mut u16,
+        seg_cdf: *mut u16,
+        seg_enabled: i32,
+        segment_id: i32,
+        seg_pred: i32,
+        last_active_segid: i32,
+        out: *mut u8,
+        o_predcdf: *mut u16,
+        o_segcdf: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_prefix(update_map: i32, segid_preskip: i32, temporal_update: i32, seg_id_predicted: i32, pred_cdf: *mut u16, seg_cdf: *mut u16, seg_enabled: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, skip_mode_cdf: *mut u16, frame_skip_mode_flag: i32, sm_seg_skip: i32, sm_comp_allowed: i32, sm_seg_ref_gmv: i32, skip_mode: i32, skip_cdf: *mut u16, skip_seg_active: i32, skip_txfm: i32, coded_lossless: i32, allow_intrabc: i32, mi_row: i32, mi_col: i32, mib_size: i32, sb_size: i32, cdef_trans_in: *const i32, cdef_bits: i32, cdef_strength: i32, dq_present: i32, dlf_present: i32, dlf_multi: i32, num_planes: i32, bsize: i32, cur_qindex: i32, cur_base_qindex: i32, dq_res: i32, mbmi_dlf: *const i32, xd_dlf_in: *const i32, mbmi_dlf_base: i32, xd_dlf_base_in: i32, dlf_res: i32, dq_cdf: *mut u16, dlf_multi_cdf: *mut u16, dlf_cdf: *mut u16, intra_inter_cdf: *mut u16, seg_ref_frame_active: i32, seg_globalmv_active: i32, is_inter: i32, out: *mut u8, out_skip: *mut i32, out_skip_mode: *mut i32, o_predcdf: *mut u16, o_segcdf: *mut u16, o_smcdf: *mut u16, o_skipcdf: *mut u16, o_cdef_trans: *mut i32, o_dqcdf: *mut u16, o_dlfmcdf: *mut u16, o_dlfcdf: *mut u16, o_base: *mut i32, o_xd_dlf: *mut i32, o_xd_dlf_base: *mut i32, o_iicdf: *mut u16) -> u32;
+    fn shim_write_inter_prefix(
+        update_map: i32,
+        segid_preskip: i32,
+        temporal_update: i32,
+        seg_id_predicted: i32,
+        pred_cdf: *mut u16,
+        seg_cdf: *mut u16,
+        seg_enabled: i32,
+        segment_id: i32,
+        seg_pred: i32,
+        last_active_segid: i32,
+        skip_mode_cdf: *mut u16,
+        frame_skip_mode_flag: i32,
+        sm_seg_skip: i32,
+        sm_comp_allowed: i32,
+        sm_seg_ref_gmv: i32,
+        skip_mode: i32,
+        skip_cdf: *mut u16,
+        skip_seg_active: i32,
+        skip_txfm: i32,
+        coded_lossless: i32,
+        allow_intrabc: i32,
+        mi_row: i32,
+        mi_col: i32,
+        mib_size: i32,
+        sb_size: i32,
+        cdef_trans_in: *const i32,
+        cdef_bits: i32,
+        cdef_strength: i32,
+        dq_present: i32,
+        dlf_present: i32,
+        dlf_multi: i32,
+        num_planes: i32,
+        bsize: i32,
+        cur_qindex: i32,
+        cur_base_qindex: i32,
+        dq_res: i32,
+        mbmi_dlf: *const i32,
+        xd_dlf_in: *const i32,
+        mbmi_dlf_base: i32,
+        xd_dlf_base_in: i32,
+        dlf_res: i32,
+        dq_cdf: *mut u16,
+        dlf_multi_cdf: *mut u16,
+        dlf_cdf: *mut u16,
+        intra_inter_cdf: *mut u16,
+        seg_ref_frame_active: i32,
+        seg_globalmv_active: i32,
+        is_inter: i32,
+        out: *mut u8,
+        out_skip: *mut i32,
+        out_skip_mode: *mut i32,
+        o_predcdf: *mut u16,
+        o_segcdf: *mut u16,
+        o_smcdf: *mut u16,
+        o_skipcdf: *mut u16,
+        o_cdef_trans: *mut i32,
+        o_dqcdf: *mut u16,
+        o_dlfmcdf: *mut u16,
+        o_dlfcdf: *mut u16,
+        o_base: *mut i32,
+        o_xd_dlf: *mut i32,
+        o_xd_dlf_base: *mut i32,
+        o_iicdf: *mut u16,
+    ) -> u32;
     fn shim_use_angle_delta(bsize: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_delta_q_params_sb(dq_present: i32, dlf_present: i32, dlf_multi: i32, num_planes: i32, bsize: i32, sb_size: i32, skip: i32, sbul: i32, cur_qindex: i32, cur_base_qindex: i32, dq_res: i32, mbmi_dlf: *const i32, xd_dlf_in: *const i32, mbmi_dlf_base: i32, xd_dlf_base_in: i32, dlf_res: i32, dq_cdf: *mut u16, dlf_multi_cdf: *mut u16, dlf_cdf: *mut u16, out: *mut u8, o_dqcdf: *mut u16, o_dlfmcdf: *mut u16, o_dlfcdf: *mut u16, o_base: *mut i32, o_xd_dlf: *mut i32, o_xd_dlf_base: *mut i32) -> u32;
+    fn shim_write_delta_q_params_sb(
+        dq_present: i32,
+        dlf_present: i32,
+        dlf_multi: i32,
+        num_planes: i32,
+        bsize: i32,
+        sb_size: i32,
+        skip: i32,
+        sbul: i32,
+        cur_qindex: i32,
+        cur_base_qindex: i32,
+        dq_res: i32,
+        mbmi_dlf: *const i32,
+        xd_dlf_in: *const i32,
+        mbmi_dlf_base: i32,
+        xd_dlf_base_in: i32,
+        dlf_res: i32,
+        dq_cdf: *mut u16,
+        dlf_multi_cdf: *mut u16,
+        dlf_cdf: *mut u16,
+        out: *mut u8,
+        o_dqcdf: *mut u16,
+        o_dlfmcdf: *mut u16,
+        o_dlfcdf: *mut u16,
+        o_base: *mut i32,
+        o_xd_dlf: *mut i32,
+        o_xd_dlf_base: *mut i32,
+    ) -> u32;
     fn shim_is_directional_mode(mode: i32) -> i32;
     fn shim_get_uv_mode(uv_mode: i32) -> i32;
     fn shim_allow_palette(allow_sct: i32, bsize: i32) -> i32;
     fn shim_is_cfl_allowed(bsize: i32, seg_id: i32, lossless: i32, ssx: i32, ssy: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_cdef(coded_lossless: i32, allow_intrabc: i32, mi_row: i32, mi_col: i32, mib_size: i32, sb_size: i32, skip: i32, transmitted_in: *const i32, cdef_bits: i32, cdef_strength: i32, out: *mut u8, transmitted_out: *mut i32) -> u32;
+    fn shim_write_cdef(
+        coded_lossless: i32,
+        allow_intrabc: i32,
+        mi_row: i32,
+        mi_col: i32,
+        mib_size: i32,
+        sb_size: i32,
+        skip: i32,
+        transmitted_in: *const i32,
+        cdef_bits: i32,
+        cdef_strength: i32,
+        out: *mut u8,
+        transmitted_out: *mut i32,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_mb_modes_kf_prefix(segid_preskip: i32, seg_enabled: i32, update_map: i32, segment_id: i32, seg_pred: i32, last_active_segid: i32, seg_cdf: *mut u16, seg_skip_active: i32, skip_txfm: i32, skip_cdf: *mut u16, coded_lossless: i32, allow_intrabc: i32, mi_row: i32, mi_col: i32, mib_size: i32, sb_size: i32, cdef_trans_in: *const i32, cdef_bits: i32, cdef_strength: i32, dq_present: i32, dlf_present: i32, dlf_multi: i32, num_planes: i32, bsize: i32, cur_qindex: i32, cur_base_qindex: i32, dq_res: i32, mbmi_dlf: *const i32, xd_dlf_in: *const i32, mbmi_dlf_base: i32, xd_dlf_base_in: i32, dlf_res: i32, dq_cdf: *mut u16, dlf_multi_cdf: *mut u16, dlf_cdf: *mut u16, out: *mut u8, out_skip: *mut i32, o_segcdf: *mut u16, o_skipcdf: *mut u16, o_cdef_trans: *mut i32, o_dqcdf: *mut u16, o_dlfmcdf: *mut u16, o_dlfcdf: *mut u16, o_base: *mut i32, o_xd_dlf: *mut i32, o_xd_dlf_base: *mut i32) -> u32;
+    fn shim_write_mb_modes_kf_prefix(
+        segid_preskip: i32,
+        seg_enabled: i32,
+        update_map: i32,
+        segment_id: i32,
+        seg_pred: i32,
+        last_active_segid: i32,
+        seg_cdf: *mut u16,
+        seg_skip_active: i32,
+        skip_txfm: i32,
+        skip_cdf: *mut u16,
+        coded_lossless: i32,
+        allow_intrabc: i32,
+        mi_row: i32,
+        mi_col: i32,
+        mib_size: i32,
+        sb_size: i32,
+        cdef_trans_in: *const i32,
+        cdef_bits: i32,
+        cdef_strength: i32,
+        dq_present: i32,
+        dlf_present: i32,
+        dlf_multi: i32,
+        num_planes: i32,
+        bsize: i32,
+        cur_qindex: i32,
+        cur_base_qindex: i32,
+        dq_res: i32,
+        mbmi_dlf: *const i32,
+        xd_dlf_in: *const i32,
+        mbmi_dlf_base: i32,
+        xd_dlf_base_in: i32,
+        dlf_res: i32,
+        dq_cdf: *mut u16,
+        dlf_multi_cdf: *mut u16,
+        dlf_cdf: *mut u16,
+        out: *mut u8,
+        out_skip: *mut i32,
+        o_segcdf: *mut u16,
+        o_skipcdf: *mut u16,
+        o_cdef_trans: *mut i32,
+        o_dqcdf: *mut u16,
+        o_dlfmcdf: *mut u16,
+        o_dlfcdf: *mut u16,
+        o_base: *mut i32,
+        o_xd_dlf: *mut i32,
+        o_xd_dlf_base: *mut i32,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_kf_tail(allow_intrabc: i32, intrabc_cdf: *mut u16, joints: *mut u16, comp0: *mut u16, comp1: *mut u16, use_intrabc: i32, diff_row: i32, diff_col: i32, mode: i32, bsize: i32, y_cdf: *mut u16, angle_delta_y: i32, y_angle_cdf: *mut u16, monochrome: i32, is_chroma_ref: i32, uv_mode: i32, cfl_allowed: i32, cfl_idx: i32, cfl_joint_sign: i32, angle_delta_uv: i32, uv_mode_cdf: *mut u16, cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, uv_angle_cdf: *mut u16, allow_palette: i32, bit_depth: i32, palette_size: *const u8, palette_colors: *const u16, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_s0: i32, a_s1: i32, hl: i32, l_colors: *const u16, l_s0: i32, l_s1: i32, pal_y_mode_cdf: *mut u16, pal_y_size_cdf: *mut u16, pal_uv_mode_cdf: *mut u16, pal_uv_size_cdf: *mut u16, filter_allowed: i32, use_filter_intra: i32, filter_intra_mode: i32, fi_use_cdf: *mut u16, fi_mode_cdf: *mut u16, out: *mut u8, o_intrabc: *mut u16, o_joints: *mut u16, o_c0: *mut u16, o_c1: *mut u16, o_all: *mut u16) -> u32;
-    fn shim_write_intra_y_and_angle(mode: i32, bsize: i32, y_cdf: *mut u16, angle_delta_y: i32, y_angle_cdf: *mut u16, out: *mut u8, o_ycdf: *mut u16, o_acdf: *mut u16) -> u32;
+    fn shim_kf_tail(
+        allow_intrabc: i32,
+        intrabc_cdf: *mut u16,
+        joints: *mut u16,
+        comp0: *mut u16,
+        comp1: *mut u16,
+        use_intrabc: i32,
+        diff_row: i32,
+        diff_col: i32,
+        mode: i32,
+        bsize: i32,
+        y_cdf: *mut u16,
+        angle_delta_y: i32,
+        y_angle_cdf: *mut u16,
+        monochrome: i32,
+        is_chroma_ref: i32,
+        uv_mode: i32,
+        cfl_allowed: i32,
+        cfl_idx: i32,
+        cfl_joint_sign: i32,
+        angle_delta_uv: i32,
+        uv_mode_cdf: *mut u16,
+        cfl_sign_cdf: *mut u16,
+        cfl_alpha_cdf: *mut u16,
+        uv_angle_cdf: *mut u16,
+        allow_palette: i32,
+        bit_depth: i32,
+        palette_size: *const u8,
+        palette_colors: *const u16,
+        mb_to_top_edge: i32,
+        ha: i32,
+        a_colors: *const u16,
+        a_s0: i32,
+        a_s1: i32,
+        hl: i32,
+        l_colors: *const u16,
+        l_s0: i32,
+        l_s1: i32,
+        pal_y_mode_cdf: *mut u16,
+        pal_y_size_cdf: *mut u16,
+        pal_uv_mode_cdf: *mut u16,
+        pal_uv_size_cdf: *mut u16,
+        filter_allowed: i32,
+        use_filter_intra: i32,
+        filter_intra_mode: i32,
+        fi_use_cdf: *mut u16,
+        fi_mode_cdf: *mut u16,
+        out: *mut u8,
+        o_intrabc: *mut u16,
+        o_joints: *mut u16,
+        o_c0: *mut u16,
+        o_c1: *mut u16,
+        o_all: *mut u16,
+    ) -> u32;
+    fn shim_write_intra_y_and_angle(
+        mode: i32,
+        bsize: i32,
+        y_cdf: *mut u16,
+        angle_delta_y: i32,
+        y_angle_cdf: *mut u16,
+        out: *mut u8,
+        o_ycdf: *mut u16,
+        o_acdf: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_intra_uv_and_angle(monochrome: i32, is_chroma_ref: i32, uv_mode: i32, cfl_allowed: i32, bsize: i32, cfl_idx: i32, cfl_joint_sign: i32, angle_delta_uv: i32, uv_mode_cdf: *mut u16, cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, uv_angle_cdf: *mut u16, out: *mut u8, o_uvcdf: *mut u16, o_signcdf: *mut u16, o_alphacdf: *mut u16, o_uvacdf: *mut u16) -> u32;
+    fn shim_write_intra_uv_and_angle(
+        monochrome: i32,
+        is_chroma_ref: i32,
+        uv_mode: i32,
+        cfl_allowed: i32,
+        bsize: i32,
+        cfl_idx: i32,
+        cfl_joint_sign: i32,
+        angle_delta_uv: i32,
+        uv_mode_cdf: *mut u16,
+        cfl_sign_cdf: *mut u16,
+        cfl_alpha_cdf: *mut u16,
+        uv_angle_cdf: *mut u16,
+        out: *mut u8,
+        o_uvcdf: *mut u16,
+        o_signcdf: *mut u16,
+        o_alphacdf: *mut u16,
+        o_uvacdf: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_intra_pred_modes(mode: i32, bsize: i32, y_cdf: *mut u16, angle_delta_y: i32, y_angle_cdf: *mut u16, monochrome: i32, is_chroma_ref: i32, uv_mode: i32, cfl_allowed: i32, cfl_idx: i32, cfl_joint_sign: i32, angle_delta_uv: i32, uv_mode_cdf: *mut u16, cfl_sign_cdf: *mut u16, cfl_alpha_cdf: *mut u16, uv_angle_cdf: *mut u16, allow_palette: i32, bit_depth: i32, palette_size: *const u8, palette_colors: *const u16, mb_to_top_edge: i32, ha: i32, a_colors: *const u16, a_s0: i32, a_s1: i32, hl: i32, l_colors: *const u16, l_s0: i32, l_s1: i32, pal_y_mode_cdf: *mut u16, pal_y_size_cdf: *mut u16, pal_uv_mode_cdf: *mut u16, pal_uv_size_cdf: *mut u16, filter_allowed: i32, use_filter_intra: i32, filter_intra_mode: i32, fi_use_cdf: *mut u16, fi_mode_cdf: *mut u16, out: *mut u8, o_all: *mut u16) -> u32;
+    fn shim_write_intra_pred_modes(
+        mode: i32,
+        bsize: i32,
+        y_cdf: *mut u16,
+        angle_delta_y: i32,
+        y_angle_cdf: *mut u16,
+        monochrome: i32,
+        is_chroma_ref: i32,
+        uv_mode: i32,
+        cfl_allowed: i32,
+        cfl_idx: i32,
+        cfl_joint_sign: i32,
+        angle_delta_uv: i32,
+        uv_mode_cdf: *mut u16,
+        cfl_sign_cdf: *mut u16,
+        cfl_alpha_cdf: *mut u16,
+        uv_angle_cdf: *mut u16,
+        allow_palette: i32,
+        bit_depth: i32,
+        palette_size: *const u8,
+        palette_colors: *const u16,
+        mb_to_top_edge: i32,
+        ha: i32,
+        a_colors: *const u16,
+        a_s0: i32,
+        a_s1: i32,
+        hl: i32,
+        l_colors: *const u16,
+        l_s0: i32,
+        l_s1: i32,
+        pal_y_mode_cdf: *mut u16,
+        pal_y_size_cdf: *mut u16,
+        pal_uv_mode_cdf: *mut u16,
+        pal_uv_size_cdf: *mut u16,
+        filter_allowed: i32,
+        use_filter_intra: i32,
+        filter_intra_mode: i32,
+        fi_use_cdf: *mut u16,
+        fi_mode_cdf: *mut u16,
+        out: *mut u8,
+        o_all: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_get_comp_index_context(enable: i32, bits_minus_1: i32, cur_order_hint: i32, fwd_order_hint: i32, bck_order_hint: i32, ha: i32, a_has2: i32, a_cidx: i32, a_rf0: i32, hl: i32, l_has2: i32, l_cidx: i32, l_rf0: i32) -> i32;
+    fn shim_get_comp_index_context(
+        enable: i32,
+        bits_minus_1: i32,
+        cur_order_hint: i32,
+        fwd_order_hint: i32,
+        bck_order_hint: i32,
+        ha: i32,
+        a_has2: i32,
+        a_cidx: i32,
+        a_rf0: i32,
+        hl: i32,
+        l_has2: i32,
+        l_cidx: i32,
+        l_rf0: i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_ref_frames(cdfs: *mut u16, seg_ref: i32, seg_skipgmv: i32, rmode_select: i32, comp_allowed: i32, is_compound: i32, comp_ref_type: i32, ref0: i32, ref1: i32, out: *mut u8, out_cdfs: *mut u16) -> u32;
+    fn shim_write_ref_frames(
+        cdfs: *mut u16,
+        seg_ref: i32,
+        seg_skipgmv: i32,
+        rmode_select: i32,
+        comp_allowed: i32,
+        is_compound: i32,
+        comp_ref_type: i32,
+        ref0: i32,
+        ref1: i32,
+        out: *mut u8,
+        out_cdfs: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_get_comp_reference_type_context(ha: i32, a_r0: i32, a_r1: i32, a_ibc: i32, hl: i32, l_r0: i32, l_r1: i32, l_ibc: i32) -> i32;
-    fn shim_write_motion_mode(obmc_cdf: *mut u16, mm_cdf: *mut u16, last_allowed: i32, mm: i32, out: *mut u8, out_obmc: *mut u16, out_mm: *mut u16) -> u32;
-    fn shim_write_inter_compound_mode(cdf: *mut u16, mode: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
-    fn shim_write_is_inter(cdf: *mut u16, seg_ref: i32, seg_gmv: i32, is_inter: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
-    fn shim_write_filter_intra(use_cdf: *mut u16, mode_cdf: *mut u16, allowed: i32, use_fi: i32, mode: i32, out: *mut u8, out_use: *mut u16, out_mode: *mut u16) -> u32;
+    fn shim_get_comp_reference_type_context(
+        ha: i32,
+        a_r0: i32,
+        a_r1: i32,
+        a_ibc: i32,
+        hl: i32,
+        l_r0: i32,
+        l_r1: i32,
+        l_ibc: i32,
+    ) -> i32;
+    fn shim_write_motion_mode(
+        obmc_cdf: *mut u16,
+        mm_cdf: *mut u16,
+        last_allowed: i32,
+        mm: i32,
+        out: *mut u8,
+        out_obmc: *mut u16,
+        out_mm: *mut u16,
+    ) -> u32;
+    fn shim_write_inter_compound_mode(
+        cdf: *mut u16,
+        mode: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
+    fn shim_write_is_inter(
+        cdf: *mut u16,
+        seg_ref: i32,
+        seg_gmv: i32,
+        is_inter: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
+    fn shim_write_filter_intra(
+        use_cdf: *mut u16,
+        mode_cdf: *mut u16,
+        allowed: i32,
+        use_fi: i32,
+        mode: i32,
+        out: *mut u8,
+        out_use: *mut u16,
+        out_mode: *mut u16,
+    ) -> u32;
     fn shim_bsize_to_max_depth(bsize: i32) -> i32;
     fn shim_bsize_to_tx_size_cat(bsize: i32) -> i32;
-    fn shim_write_selected_tx_size(cdf: *mut u16, bsize: i32, depth: i32, max_depths: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_write_selected_tx_size(
+        cdf: *mut u16,
+        bsize: i32,
+        depth: i32,
+        max_depths: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
     fn shim_get_mv_joint(row: i32, col: i32) -> i32;
     fn shim_get_mv_class(z: i32) -> i32;
-    fn shim_encode_mv_component(cdf: *mut u16, comp: i32, precision: i32, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_encode_mv_component(
+        cdf: *mut u16,
+        comp: i32,
+        precision: i32,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_encode_mv(joints_cdf: *mut u16, comp0: *mut u16, comp1: *mut u16, diff_row: i32, diff_col: i32, usehp: i32, out: *mut u8, out_joints: *mut u16, out_comp0: *mut u16, out_comp1: *mut u16) -> u32;
-    fn shim_write_drl_idx(drl_cdf: *mut u16, mode: i32, ref_mv_idx: i32, ref_mv_count: i32, weight: *const u16, out: *mut u8, out_cdf: *mut u16) -> u32;
+    fn shim_encode_mv(
+        joints_cdf: *mut u16,
+        comp0: *mut u16,
+        comp1: *mut u16,
+        diff_row: i32,
+        diff_col: i32,
+        usehp: i32,
+        out: *mut u8,
+        out_joints: *mut u16,
+        out_comp0: *mut u16,
+        out_comp1: *mut u16,
+    ) -> u32;
+    fn shim_write_drl_idx(
+        drl_cdf: *mut u16,
+        mode: i32,
+        ref_mv_idx: i32,
+        ref_mv_count: i32,
+        weight: *const u16,
+        out: *mut u8,
+        out_cdf: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_inter_mode(newmv_cdf: *mut u16, zeromv_cdf: *mut u16, refmv_cdf: *mut u16, mode: i32, mode_ctx: i32, out: *mut u8, out_newmv: *mut u16, out_zeromv: *mut u16, out_refmv: *mut u16) -> u32;
+    fn shim_write_inter_mode(
+        newmv_cdf: *mut u16,
+        zeromv_cdf: *mut u16,
+        refmv_cdf: *mut u16,
+        mode: i32,
+        mode_ctx: i32,
+        out: *mut u8,
+        out_newmv: *mut u16,
+        out_zeromv: *mut u16,
+        out_refmv: *mut u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_frame_header_trailing_flags(intra_only: i32, ref_mode_select: i32, skip_allowed: i32, skip_flag: i32, might_warp: i32, allow_warp: i32, reduced_tx_set: i32, out: *mut u8) -> u32;
+    fn shim_write_frame_header_trailing_flags(
+        intra_only: i32,
+        ref_mode_select: i32,
+        skip_allowed: i32,
+        skip_flag: i32,
+        might_warp: i32,
+        allow_warp: i32,
+        reduced_tx_set: i32,
+        out: *mut u8,
+    ) -> u32;
 }
 
 /// Reference `partition_cdf_length`.
@@ -367,11 +1600,35 @@ pub fn ref_partition_cdf_length(bsize: i32) -> i32 {
 
 /// Reference `av1_encode_mv` (joint + 2 components over the pristine C od_ec + real helpers).
 #[allow(clippy::type_complexity)]
-pub fn ref_encode_mv(joints_cdf: &[u16; 5], comp0: &[u16; 69], comp1: &[u16; 69], diff_row: i32, diff_col: i32, usehp: i32) -> (Vec<u8>, [u16; 5], [u16; 69], [u16; 69]) {
-    let mut jc = *joints_cdf; let mut c0 = *comp0; let mut c1 = *comp1;
+pub fn ref_encode_mv(
+    joints_cdf: &[u16; 5],
+    comp0: &[u16; 69],
+    comp1: &[u16; 69],
+    diff_row: i32,
+    diff_col: i32,
+    usehp: i32,
+) -> (Vec<u8>, [u16; 5], [u16; 69], [u16; 69]) {
+    let mut jc = *joints_cdf;
+    let mut c0 = *comp0;
+    let mut c1 = *comp1;
     let mut out = vec![0u8; 48];
-    let mut oj = [0u16; 5]; let mut o0 = [0u16; 69]; let mut o1 = [0u16; 69];
-    let n = unsafe { shim_encode_mv(jc.as_mut_ptr(), c0.as_mut_ptr(), c1.as_mut_ptr(), diff_row, diff_col, usehp, out.as_mut_ptr(), oj.as_mut_ptr(), o0.as_mut_ptr(), o1.as_mut_ptr()) };
+    let mut oj = [0u16; 5];
+    let mut o0 = [0u16; 69];
+    let mut o1 = [0u16; 69];
+    let n = unsafe {
+        shim_encode_mv(
+            jc.as_mut_ptr(),
+            c0.as_mut_ptr(),
+            c1.as_mut_ptr(),
+            diff_row,
+            diff_col,
+            usehp,
+            out.as_mut_ptr(),
+            oj.as_mut_ptr(),
+            o0.as_mut_ptr(),
+            o1.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, oj, o0, o1)
 }
@@ -381,66 +1638,199 @@ pub fn ref_encode_mv_component(cdf: &[u16; 69], comp: i32, precision: i32) -> (V
     let mut c = *cdf;
     let mut out = vec![0u8; 32];
     let mut out_cdf = [0u16; 69];
-    let n = unsafe { shim_encode_mv_component(c.as_mut_ptr(), comp, precision, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_encode_mv_component(
+            c.as_mut_ptr(),
+            comp,
+            precision,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
 
 /// Reference `write_mb_interp_filter`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_mb_interp_filter(cdf0: &[u16; 4], cdf1: &[u16; 4], interp_needed: bool, is_switchable: bool, enable_dual: bool, f0: i32, f1: i32) -> (Vec<u8>, [u16; 4], [u16; 4]) {
-    let mut c0 = *cdf0; let mut c1 = *cdf1; let mut out = vec![0u8; 16]; let mut o0 = [0u16; 4]; let mut o1 = [0u16; 4];
-    let n = unsafe { shim_write_mb_interp_filter(c0.as_mut_ptr(), c1.as_mut_ptr(), interp_needed as i32, is_switchable as i32, enable_dual as i32, f0, f1, out.as_mut_ptr(), o0.as_mut_ptr(), o1.as_mut_ptr()) };
-    out.truncate(n as usize); (out, o0, o1)
+pub fn ref_write_mb_interp_filter(
+    cdf0: &[u16; 4],
+    cdf1: &[u16; 4],
+    interp_needed: bool,
+    is_switchable: bool,
+    enable_dual: bool,
+    f0: i32,
+    f1: i32,
+) -> (Vec<u8>, [u16; 4], [u16; 4]) {
+    let mut c0 = *cdf0;
+    let mut c1 = *cdf1;
+    let mut out = vec![0u8; 16];
+    let mut o0 = [0u16; 4];
+    let mut o1 = [0u16; 4];
+    let n = unsafe {
+        shim_write_mb_interp_filter(
+            c0.as_mut_ptr(),
+            c1.as_mut_ptr(),
+            interp_needed as i32,
+            is_switchable as i32,
+            enable_dual as i32,
+            f0,
+            f1,
+            out.as_mut_ptr(),
+            o0.as_mut_ptr(),
+            o1.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, o0, o1)
 }
 
 /// Reference `av1_get_pred_context_single_ref_p2` (brfarf2_or_arf).
-pub fn ref_single_ref_p2_context(rc: &[u8; 8]) -> i32 { unsafe { shim_single_ref_p2_context(rc.as_ptr()) } }
+pub fn ref_single_ref_p2_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_single_ref_p2_context(rc.as_ptr()) }
+}
 
 /// Reference `av1_get_pred_context_single_ref_p3` (ll2_or_l3gld).
-pub fn ref_single_ref_p3_context(rc: &[u8; 8]) -> i32 { unsafe { shim_single_ref_p3_context(rc.as_ptr()) } }
+pub fn ref_single_ref_p3_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_single_ref_p3_context(rc.as_ptr()) }
+}
 
 /// Reference `av1_get_pred_context_single_ref_p4` (last_or_last2).
-pub fn ref_single_ref_p4_context(rc: &[u8; 8]) -> i32 { unsafe { shim_single_ref_p4_context(rc.as_ptr()) } }
+pub fn ref_single_ref_p4_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_single_ref_p4_context(rc.as_ptr()) }
+}
 
 /// Reference `av1_get_pred_context_single_ref_p5` (last3_or_gld).
-pub fn ref_single_ref_p5_context(rc: &[u8; 8]) -> i32 { unsafe { shim_single_ref_p5_context(rc.as_ptr()) } }
+pub fn ref_single_ref_p5_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_single_ref_p5_context(rc.as_ptr()) }
+}
 
 /// Reference `av1_get_pred_context_single_ref_p6` (brf_or_arf2).
-pub fn ref_single_ref_p6_context(rc: &[u8; 8]) -> i32 { unsafe { shim_single_ref_p6_context(rc.as_ptr()) } }
+pub fn ref_single_ref_p6_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_single_ref_p6_context(rc.as_ptr()) }
+}
 
 /// Reference `write_ref_frames` (cascade over the pristine C od_ec + update_cdf).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_ref_frames(cdfs: &[u16; 48], seg_ref: bool, seg_skipgmv: bool, rmode_select: bool, comp_allowed: bool, is_compound: bool, comp_ref_type: i32, ref0: i32, ref1: i32) -> (Vec<u8>, [u16; 48]) {
-    let mut c = *cdfs; let mut out = vec![0u8; 32]; let mut oc = [0u16; 48];
-    let n = unsafe { shim_write_ref_frames(c.as_mut_ptr(), seg_ref as i32, seg_skipgmv as i32, rmode_select as i32, comp_allowed as i32, is_compound as i32, comp_ref_type, ref0, ref1, out.as_mut_ptr(), oc.as_mut_ptr()) };
-    out.truncate(n as usize); (out, oc)
+pub fn ref_write_ref_frames(
+    cdfs: &[u16; 48],
+    seg_ref: bool,
+    seg_skipgmv: bool,
+    rmode_select: bool,
+    comp_allowed: bool,
+    is_compound: bool,
+    comp_ref_type: i32,
+    ref0: i32,
+    ref1: i32,
+) -> (Vec<u8>, [u16; 48]) {
+    let mut c = *cdfs;
+    let mut out = vec![0u8; 32];
+    let mut oc = [0u16; 48];
+    let n = unsafe {
+        shim_write_ref_frames(
+            c.as_mut_ptr(),
+            seg_ref as i32,
+            seg_skipgmv as i32,
+            rmode_select as i32,
+            comp_allowed as i32,
+            is_compound as i32,
+            comp_ref_type,
+            ref0,
+            ref1,
+            out.as_mut_ptr(),
+            oc.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oc)
 }
 
 /// Reference `write_intrabc_info` (flag + av1_encode_dv over the pristine C od_ec).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn ref_write_intrabc_info(intrabc_cdf: &[u16; 3], joints: &[u16; 5], comp0: &[u16; 69], comp1: &[u16; 69], use_intrabc: i32, diff_row: i32, diff_col: i32) -> (Vec<u8>, [u16; 3], [u16; 5], [u16; 69], [u16; 69]) {
-    let mut ib = *intrabc_cdf; let mut jc = *joints; let mut c0 = *comp0; let mut c1 = *comp1;
-    let mut out = vec![0u8; 48]; let mut oib = [0u16; 3]; let mut oj = [0u16; 5]; let mut o0 = [0u16; 69]; let mut o1 = [0u16; 69];
-    let n = unsafe { shim_write_intrabc_info(ib.as_mut_ptr(), jc.as_mut_ptr(), c0.as_mut_ptr(), c1.as_mut_ptr(), use_intrabc, diff_row, diff_col, out.as_mut_ptr(), oib.as_mut_ptr(), oj.as_mut_ptr(), o0.as_mut_ptr(), o1.as_mut_ptr()) };
-    out.truncate(n as usize); (out, oib, oj, o0, o1)
+pub fn ref_write_intrabc_info(
+    intrabc_cdf: &[u16; 3],
+    joints: &[u16; 5],
+    comp0: &[u16; 69],
+    comp1: &[u16; 69],
+    use_intrabc: i32,
+    diff_row: i32,
+    diff_col: i32,
+) -> (Vec<u8>, [u16; 3], [u16; 5], [u16; 69], [u16; 69]) {
+    let mut ib = *intrabc_cdf;
+    let mut jc = *joints;
+    let mut c0 = *comp0;
+    let mut c1 = *comp1;
+    let mut out = vec![0u8; 48];
+    let mut oib = [0u16; 3];
+    let mut oj = [0u16; 5];
+    let mut o0 = [0u16; 69];
+    let mut o1 = [0u16; 69];
+    let n = unsafe {
+        shim_write_intrabc_info(
+            ib.as_mut_ptr(),
+            jc.as_mut_ptr(),
+            c0.as_mut_ptr(),
+            c1.as_mut_ptr(),
+            use_intrabc,
+            diff_row,
+            diff_col,
+            out.as_mut_ptr(),
+            oib.as_mut_ptr(),
+            oj.as_mut_ptr(),
+            o0.as_mut_ptr(),
+            o1.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oib, oj, o0, o1)
 }
 
 /// Reference `av1_neg_interleave` (real exported fn).
-pub fn ref_neg_interleave(x: i32, ref_: i32, max: i32) -> i32 { unsafe { shim_neg_interleave(x, ref_, max) } }
+pub fn ref_neg_interleave(x: i32, ref_: i32, max: i32) -> i32 {
+    unsafe { shim_neg_interleave(x, ref_, max) }
+}
 
 /// Reference `write_segment_id` (over the pristine C od_ec + update_cdf).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_segment_id(cdf: &[u16; 9], seg_enabled: bool, update_map: bool, skip_txfm: bool, segment_id: i32, pred: i32, last_active_segid: i32) -> (Vec<u8>, [u16; 9]) {
-    let mut c = *cdf; let mut out = vec![0u8; 16]; let mut oc = [0u16; 9];
-    let n = unsafe { shim_write_segment_id(c.as_mut_ptr(), seg_enabled as i32, update_map as i32, skip_txfm as i32, segment_id, pred, last_active_segid, out.as_mut_ptr(), oc.as_mut_ptr()) };
-    out.truncate(n as usize); (out, oc)
+pub fn ref_write_segment_id(
+    cdf: &[u16; 9],
+    seg_enabled: bool,
+    update_map: bool,
+    skip_txfm: bool,
+    segment_id: i32,
+    pred: i32,
+    last_active_segid: i32,
+) -> (Vec<u8>, [u16; 9]) {
+    let mut c = *cdf;
+    let mut out = vec![0u8; 16];
+    let mut oc = [0u16; 9];
+    let n = unsafe {
+        shim_write_segment_id(
+            c.as_mut_ptr(),
+            seg_enabled as i32,
+            update_map as i32,
+            skip_txfm as i32,
+            segment_id,
+            pred,
+            last_active_segid,
+            out.as_mut_ptr(),
+            oc.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oc)
 }
 
 /// Reference the 3 uni-comp-ref contexts (facades over the real exported fns).
-pub fn ref_uni_comp_ref_p_context(rc: &[u8; 8]) -> i32 { unsafe { shim_uni_comp_ref_p_context(rc.as_ptr()) } }
-pub fn ref_uni_comp_ref_p1_context(rc: &[u8; 8]) -> i32 { unsafe { shim_uni_comp_ref_p1_context(rc.as_ptr()) } }
-pub fn ref_uni_comp_ref_p2_context(rc: &[u8; 8]) -> i32 { unsafe { shim_uni_comp_ref_p2_context(rc.as_ptr()) } }
+pub fn ref_uni_comp_ref_p_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_uni_comp_ref_p_context(rc.as_ptr()) }
+}
+pub fn ref_uni_comp_ref_p1_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_uni_comp_ref_p1_context(rc.as_ptr()) }
+}
+pub fn ref_uni_comp_ref_p2_context(rc: &[u8; 8]) -> i32 {
+    unsafe { shim_uni_comp_ref_p2_context(rc.as_ptr()) }
+}
 
 /// Reference `av1_get_pred_context_single_ref_p1` (facade over the real exported fn).
 pub fn ref_single_ref_p1_context(ref_counts: &[u8; 8]) -> i32 {
@@ -449,14 +1839,54 @@ pub fn ref_single_ref_p1_context(ref_counts: &[u8; 8]) -> i32 {
 
 /// Reference `av1_get_comp_reference_type_context` (facade over the real exported fn).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_get_comp_reference_type_context(ha: bool, a_r0: i32, a_r1: i32, a_ibc: bool, hl: bool, l_r0: i32, l_r1: i32, l_ibc: bool) -> i32 {
-    unsafe { shim_get_comp_reference_type_context(ha as i32, a_r0, a_r1, a_ibc as i32, hl as i32, l_r0, l_r1, l_ibc as i32) }
+pub fn ref_get_comp_reference_type_context(
+    ha: bool,
+    a_r0: i32,
+    a_r1: i32,
+    a_ibc: bool,
+    hl: bool,
+    l_r0: i32,
+    l_r1: i32,
+    l_ibc: bool,
+) -> i32 {
+    unsafe {
+        shim_get_comp_reference_type_context(
+            ha as i32,
+            a_r0,
+            a_r1,
+            a_ibc as i32,
+            hl as i32,
+            l_r0,
+            l_r1,
+            l_ibc as i32,
+        )
+    }
 }
 
 /// Reference `av1_get_reference_mode_context` (facade over the real exported fn).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_get_reference_mode_context(ha: bool, a_r0: i32, a_r1: i32, a_ibc: bool, hl: bool, l_r0: i32, l_r1: i32, l_ibc: bool) -> i32 {
-    unsafe { shim_get_reference_mode_context(ha as i32, a_r0, a_r1, a_ibc as i32, hl as i32, l_r0, l_r1, l_ibc as i32) }
+pub fn ref_get_reference_mode_context(
+    ha: bool,
+    a_r0: i32,
+    a_r1: i32,
+    a_ibc: bool,
+    hl: bool,
+    l_r0: i32,
+    l_r1: i32,
+    l_ibc: bool,
+) -> i32 {
+    unsafe {
+        shim_get_reference_mode_context(
+            ha as i32,
+            a_r0,
+            a_r1,
+            a_ibc as i32,
+            hl as i32,
+            l_r0,
+            l_r1,
+            l_ibc as i32,
+        )
+    }
 }
 
 /// Reference `av1_get_skip_mode_context` (facade over the real fn).
@@ -466,10 +1896,31 @@ pub fn ref_get_skip_mode_context(ha: bool, a_sm: i32, hl: bool, l_sm: i32) -> i3
 
 /// Reference `write_skip_mode` (over the pristine C od_ec + update_cdf).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_skip_mode(cdf: &[u16; 3], frame_flag: bool, seg_skip: bool, comp_allowed: bool, seg_ref_gmv: bool, skip_mode: i32) -> (Vec<u8>, [u16; 3]) {
-    let mut c = *cdf; let mut out = vec![0u8; 16]; let mut oc = [0u16; 3];
-    let n = unsafe { shim_write_skip_mode(c.as_mut_ptr(), frame_flag as i32, seg_skip as i32, comp_allowed as i32, seg_ref_gmv as i32, skip_mode, out.as_mut_ptr(), oc.as_mut_ptr()) };
-    out.truncate(n as usize); (out, oc)
+pub fn ref_write_skip_mode(
+    cdf: &[u16; 3],
+    frame_flag: bool,
+    seg_skip: bool,
+    comp_allowed: bool,
+    seg_ref_gmv: bool,
+    skip_mode: i32,
+) -> (Vec<u8>, [u16; 3]) {
+    let mut c = *cdf;
+    let mut out = vec![0u8; 16];
+    let mut oc = [0u16; 3];
+    let n = unsafe {
+        shim_write_skip_mode(
+            c.as_mut_ptr(),
+            frame_flag as i32,
+            seg_skip as i32,
+            comp_allowed as i32,
+            seg_ref_gmv as i32,
+            skip_mode,
+            out.as_mut_ptr(),
+            oc.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oc)
 }
 
 /// Reference `txfm_partition_context` (static inline, av1_common_int.h).
@@ -502,9 +1953,18 @@ pub fn ref_write_tx_size_vartx(
     let mut co = [0u16; 63];
     let n = unsafe {
         shim_write_tx_size_vartx(
-            bsize, top_tx_size, inter_tx_size.as_ptr(), mb_to_right_edge, mb_to_bottom_edge,
-            above_in.as_ptr(), left_in.as_ptr(), c.as_mut_ptr(), out.as_mut_ptr(),
-            ao.as_mut_ptr(), lo.as_mut_ptr(), co.as_mut_ptr(),
+            bsize,
+            top_tx_size,
+            inter_tx_size.as_ptr(),
+            mb_to_right_edge,
+            mb_to_bottom_edge,
+            above_in.as_ptr(),
+            left_in.as_ptr(),
+            c.as_mut_ptr(),
+            out.as_mut_ptr(),
+            ao.as_mut_ptr(),
+            lo.as_mut_ptr(),
+            co.as_mut_ptr(),
         )
     };
     out.truncate(n as usize);
@@ -515,8 +1975,14 @@ pub fn ref_write_tx_size_vartx(
 /// od_ec). Returns (bytes, above_ctx[32], left_ctx[32], adapted_cdf[21][3]).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_write_inter_txfm_size(
-    bsize: i32, max_tx: i32, inter_tx_size: &[u8; 16], mb_to_right_edge: i32, mb_to_bottom_edge: i32,
-    above_in: &[u8; 32], left_in: &[u8; 32], cdf: &[u16; 63],
+    bsize: i32,
+    max_tx: i32,
+    inter_tx_size: &[u8; 16],
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    above_in: &[u8; 32],
+    left_in: &[u8; 32],
+    cdf: &[u16; 63],
 ) -> (Vec<u8>, [u8; 32], [u8; 32], [u16; 63]) {
     let mut c = *cdf;
     let mut out = vec![0u8; 128];
@@ -524,9 +1990,20 @@ pub fn ref_write_inter_txfm_size(
     let mut lo = [0u8; 32];
     let mut co = [0u16; 63];
     let n = unsafe {
-        shim_write_inter_txfm_size(bsize, max_tx, inter_tx_size.as_ptr(), mb_to_right_edge,
-            mb_to_bottom_edge, above_in.as_ptr(), left_in.as_ptr(), c.as_mut_ptr(), out.as_mut_ptr(),
-            ao.as_mut_ptr(), lo.as_mut_ptr(), co.as_mut_ptr())
+        shim_write_inter_txfm_size(
+            bsize,
+            max_tx,
+            inter_tx_size.as_ptr(),
+            mb_to_right_edge,
+            mb_to_bottom_edge,
+            above_in.as_ptr(),
+            left_in.as_ptr(),
+            c.as_mut_ptr(),
+            out.as_mut_ptr(),
+            ao.as_mut_ptr(),
+            lo.as_mut_ptr(),
+            co.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, ao, lo, co)
@@ -561,9 +2038,19 @@ pub fn ref_write_palette_flags_sizes(
     let (mut oym, mut oys, mut oum, mut ous) = ([0u16; 3], [0u16; 8], [0u16; 3], [0u16; 8]);
     let n = unsafe {
         shim_write_palette_flags_sizes(
-            mode_dc as i32, n_y, ym.as_mut_ptr(), ys.as_mut_ptr(), uv_dc as i32, n_uv,
-            um.as_mut_ptr(), us.as_mut_ptr(), out.as_mut_ptr(), oym.as_mut_ptr(),
-            oys.as_mut_ptr(), oum.as_mut_ptr(), ous.as_mut_ptr(),
+            mode_dc as i32,
+            n_y,
+            ym.as_mut_ptr(),
+            ys.as_mut_ptr(),
+            uv_dc as i32,
+            n_uv,
+            um.as_mut_ptr(),
+            us.as_mut_ptr(),
+            out.as_mut_ptr(),
+            oym.as_mut_ptr(),
+            oys.as_mut_ptr(),
+            oum.as_mut_ptr(),
+            ous.as_mut_ptr(),
         )
     };
     out.truncate(n as usize);
@@ -573,14 +2060,26 @@ pub fn ref_write_palette_flags_sizes(
 /// Reference `pack_map_tokens` (palette colour-index map, over pristine C od_ec). map_cdf
 /// is the [PALETTE_COLOR_INDEX_CONTEXTS=5][9] slice for the palette size. Returns
 /// (bytes, adapted map_cdf[45]).
-pub fn ref_pack_map_tokens(n: i32, tokens: &[u8], color_ctxs: &[u8], map_cdf: &[u16; 45]) -> (Vec<u8>, [u16; 45]) {
+pub fn ref_pack_map_tokens(
+    n: i32,
+    tokens: &[u8],
+    color_ctxs: &[u8],
+    map_cdf: &[u16; 45],
+) -> (Vec<u8>, [u16; 45]) {
     let mut mc = *map_cdf;
     let mut out = vec![0u8; 256];
     let mut mco = [0u16; 45];
     let num = tokens.len() as i32;
     let n_out = unsafe {
-        shim_pack_map_tokens(n, num, tokens.as_ptr(), color_ctxs.as_ptr(), mc.as_mut_ptr(),
-            out.as_mut_ptr(), mco.as_mut_ptr())
+        shim_pack_map_tokens(
+            n,
+            num,
+            tokens.as_ptr(),
+            color_ctxs.as_ptr(),
+            mc.as_mut_ptr(),
+            out.as_mut_ptr(),
+            mco.as_mut_ptr(),
+        )
     };
     out.truncate(n_out as usize);
     (out, mco)
@@ -590,7 +2089,13 @@ pub fn ref_pack_map_tokens(n: i32, tokens: &[u8], color_ctxs: &[u8], map_cdf: &[
 pub fn ref_delta_encode_palette_colors(colors: &[i32], bit_depth: i32, min_val: i32) -> Vec<u8> {
     let mut out = vec![0u8; 64];
     let n = unsafe {
-        shim_delta_encode_palette_colors(colors.as_ptr(), colors.len() as i32, bit_depth, min_val, out.as_mut_ptr())
+        shim_delta_encode_palette_colors(
+            colors.as_ptr(),
+            colors.len() as i32,
+            bit_depth,
+            min_val,
+            out.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     out
@@ -601,7 +2106,12 @@ pub fn ref_delta_encode_palette_colors(colors: &[i32], bit_depth: i32, min_val: 
 pub fn ref_write_palette_colors_v(colors_v: &[u16], bit_depth: i32) -> Vec<u8> {
     let mut out = vec![0u8; 64];
     let n = unsafe {
-        shim_write_palette_colors_v(colors_v.as_ptr(), colors_v.len() as i32, bit_depth, out.as_mut_ptr())
+        shim_write_palette_colors_v(
+            colors_v.as_ptr(),
+            colors_v.len() as i32,
+            bit_depth,
+            out.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     out
@@ -612,18 +2122,36 @@ pub fn ref_write_palette_colors_v(colors_v: &[u16], bit_depth: i32) -> Vec<u8> {
 /// wedge_idx_cdf[17]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_interintra_info(
-    interintra: i32, ii_cdf: &[u16; 3], ii_mode: i32, ii_mode_cdf: &[u16; 5],
-    wedge_used: bool, use_wedge: i32, wedge_ii_cdf: &[u16; 3], wedge_index: i32,
+    interintra: i32,
+    ii_cdf: &[u16; 3],
+    ii_mode: i32,
+    ii_mode_cdf: &[u16; 5],
+    wedge_used: bool,
+    use_wedge: i32,
+    wedge_ii_cdf: &[u16; 3],
+    wedge_index: i32,
     wedge_idx_cdf: &[u16; 17],
 ) -> (Vec<u8>, [u16; 3], [u16; 5], [u16; 3], [u16; 17]) {
-    let (mut ii, mut iim, mut wii, mut wix) = (*ii_cdf, *ii_mode_cdf, *wedge_ii_cdf, *wedge_idx_cdf);
+    let (mut ii, mut iim, mut wii, mut wix) =
+        (*ii_cdf, *ii_mode_cdf, *wedge_ii_cdf, *wedge_idx_cdf);
     let mut out = vec![0u8; 32];
     let (mut oii, mut oiim, mut owii, mut owix) = ([0u16; 3], [0u16; 5], [0u16; 3], [0u16; 17]);
     let n = unsafe {
         shim_write_interintra_info(
-            interintra, ii.as_mut_ptr(), ii_mode, iim.as_mut_ptr(), wedge_used as i32, use_wedge,
-            wii.as_mut_ptr(), wedge_index, wix.as_mut_ptr(), out.as_mut_ptr(),
-            oii.as_mut_ptr(), oiim.as_mut_ptr(), owii.as_mut_ptr(), owix.as_mut_ptr(),
+            interintra,
+            ii.as_mut_ptr(),
+            ii_mode,
+            iim.as_mut_ptr(),
+            wedge_used as i32,
+            use_wedge,
+            wii.as_mut_ptr(),
+            wedge_index,
+            wix.as_mut_ptr(),
+            out.as_mut_ptr(),
+            oii.as_mut_ptr(),
+            oiim.as_mut_ptr(),
+            owii.as_mut_ptr(),
+            owix.as_mut_ptr(),
         )
     };
     out.truncate(n as usize);
@@ -633,10 +2161,20 @@ pub fn ref_write_interintra_info(
 /// Reference `get_comp_group_idx_context` (facade over the real static inline).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_get_comp_group_idx_context(
-    ha: bool, a_rf0: i32, a_rf1: i32, a_cgi: i32,
-    hl: bool, l_rf0: i32, l_rf1: i32, l_cgi: i32,
+    ha: bool,
+    a_rf0: i32,
+    a_rf1: i32,
+    a_cgi: i32,
+    hl: bool,
+    l_rf0: i32,
+    l_rf1: i32,
+    l_cgi: i32,
 ) -> i32 {
-    unsafe { shim_get_comp_group_idx_context(ha as i32, a_rf0, a_rf1, a_cgi, hl as i32, l_rf0, l_rf1, l_cgi) }
+    unsafe {
+        shim_get_comp_group_idx_context(
+            ha as i32, a_rf0, a_rf1, a_cgi, hl as i32, l_rf0, l_rf1, l_cgi,
+        )
+    }
 }
 
 /// Reference `get_relative_dist` (static inline, mvref_common.h).
@@ -651,9 +2189,15 @@ pub fn ref_get_pred_context_seg_id(ha: bool, a_sip: i32, hl: bool, l_sip: i32) -
 
 /// Reference `is_inter_compound_mode` / `is_inter_singleref_mode` /
 /// `have_nearmv_in_inter_mode` / `av1_mode_context_analyzer` (facade over the real fn).
-pub fn ref_is_inter_compound_mode(mode: i32) -> bool { unsafe { shim_is_inter_compound_mode(mode) != 0 } }
-pub fn ref_is_inter_singleref_mode(mode: i32) -> bool { unsafe { shim_is_inter_singleref_mode(mode) != 0 } }
-pub fn ref_have_nearmv_in_inter_mode(mode: i32) -> bool { unsafe { shim_have_nearmv_in_inter_mode(mode) != 0 } }
+pub fn ref_is_inter_compound_mode(mode: i32) -> bool {
+    unsafe { shim_is_inter_compound_mode(mode) != 0 }
+}
+pub fn ref_is_inter_singleref_mode(mode: i32) -> bool {
+    unsafe { shim_is_inter_singleref_mode(mode) != 0 }
+}
+pub fn ref_have_nearmv_in_inter_mode(mode: i32) -> bool {
+    unsafe { shim_have_nearmv_in_inter_mode(mode) != 0 }
+}
 pub fn ref_mode_context_analyzer(rf0: i32, rf1: i32, mc_val: i32) -> i32 {
     unsafe { shim_mode_context_analyzer(rf0, rf1, mc_val) }
 }
@@ -662,13 +2206,28 @@ pub fn ref_mode_context_analyzer(rf0: i32, rf1: i32, mc_val: i32) -> i32 {
 /// from the above/left inter neighbours.
 #[allow(clippy::too_many_arguments)]
 pub fn ref_collect_neighbors_ref_counts(
-    ha: bool, a_intrabc: bool, a_rf0: i32, a_rf1: i32,
-    hl: bool, l_intrabc: bool, l_rf0: i32, l_rf1: i32,
+    ha: bool,
+    a_intrabc: bool,
+    a_rf0: i32,
+    a_rf1: i32,
+    hl: bool,
+    l_intrabc: bool,
+    l_rf0: i32,
+    l_rf1: i32,
 ) -> [u8; 8] {
     let mut counts = [0u8; 8];
     unsafe {
-        shim_collect_neighbors_ref_counts(ha as i32, a_intrabc as i32, a_rf0, a_rf1, hl as i32,
-            l_intrabc as i32, l_rf0, l_rf1, counts.as_mut_ptr())
+        shim_collect_neighbors_ref_counts(
+            ha as i32,
+            a_intrabc as i32,
+            a_rf0,
+            a_rf1,
+            hl as i32,
+            l_intrabc as i32,
+            l_rf0,
+            l_rf1,
+            counts.as_mut_ptr(),
+        )
     };
     counts
 }
@@ -682,15 +2241,30 @@ pub fn ref_get_partition_subsize(bsize: i32, partition: i32) -> i32 {
 /// n_sb_rows x n_sb_cols grid of SBs. Returns (bytes, above[128], arena[220], consumed).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_modes_tile(
-    n_sb_rows: i32, n_sb_cols: i32, sb_mi: i32, sb_size: i32, tree: &[i8], arena: &[u16; 220],
+    n_sb_rows: i32,
+    n_sb_cols: i32,
+    sb_mi: i32,
+    sb_size: i32,
+    tree: &[i8],
+    arena: &[u16; 220],
 ) -> (Vec<u8>, [i8; 128], [u16; 220], i32) {
     let mut ar = *arena;
     let mut out = vec![0u8; 512];
     let (mut ao, mut aro) = ([0i8; 128], [0u16; 220]);
     let mut consumed = 0i32;
     let n = unsafe {
-        shim_write_modes_tile(n_sb_rows, n_sb_cols, sb_mi, sb_size, tree.as_ptr(), ar.as_mut_ptr(),
-            out.as_mut_ptr(), ao.as_mut_ptr(), aro.as_mut_ptr(), &mut consumed)
+        shim_write_modes_tile(
+            n_sb_rows,
+            n_sb_cols,
+            sb_mi,
+            sb_size,
+            tree.as_ptr(),
+            ar.as_mut_ptr(),
+            out.as_mut_ptr(),
+            ao.as_mut_ptr(),
+            aro.as_mut_ptr(),
+            &mut consumed,
+        )
     };
     out.truncate(n as usize);
     (out, ao, aro, consumed)
@@ -701,7 +2275,12 @@ pub fn ref_write_modes_tile(
 /// arena[220], tree_consumed).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_modes_sb(
-    above_in: &[i8; 64], left_in: &[i8; 32], mi_row: i32, mi_col: i32, bsize: i32, tree: &[i8],
+    above_in: &[i8; 64],
+    left_in: &[i8; 32],
+    mi_row: i32,
+    mi_col: i32,
+    bsize: i32,
+    tree: &[i8],
     arena: &[u16; 220],
 ) -> (Vec<u8>, [i8; 64], [i8; 32], [u16; 220], i32) {
     let mut ar = *arena;
@@ -709,9 +2288,21 @@ pub fn ref_write_modes_sb(
     let (mut ao, mut lo, mut aro) = ([0i8; 64], [0i8; 32], [0u16; 220]);
     let mut consumed = 0i32;
     let n = unsafe {
-        shim_write_modes_sb(above_in.as_ptr(), left_in.as_ptr(), mi_row, mi_col, bsize,
-            tree.as_ptr(), tree.len() as i32, ar.as_mut_ptr(), out.as_mut_ptr(), ao.as_mut_ptr(),
-            lo.as_mut_ptr(), aro.as_mut_ptr(), &mut consumed)
+        shim_write_modes_sb(
+            above_in.as_ptr(),
+            left_in.as_ptr(),
+            mi_row,
+            mi_col,
+            bsize,
+            tree.as_ptr(),
+            tree.len() as i32,
+            ar.as_mut_ptr(),
+            out.as_mut_ptr(),
+            ao.as_mut_ptr(),
+            lo.as_mut_ptr(),
+            aro.as_mut_ptr(),
+            &mut consumed,
+        )
     };
     out.truncate(n as usize);
     (out, ao, lo, aro, consumed)
@@ -722,16 +2313,35 @@ pub fn ref_write_modes_sb(
 /// Returns (bytes, above[64], left[32], arena[220]).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_write_partition_node(
-    above_in: &[i8; 64], left_in: &[i8; 32], mi_row: i32, mi_col: i32, bsize: i32, partition: i32,
-    mi_rows: i32, mi_cols: i32, arena: &[u16; 220],
+    above_in: &[i8; 64],
+    left_in: &[i8; 32],
+    mi_row: i32,
+    mi_col: i32,
+    bsize: i32,
+    partition: i32,
+    mi_rows: i32,
+    mi_cols: i32,
+    arena: &[u16; 220],
 ) -> (Vec<u8>, [i8; 64], [i8; 32], [u16; 220]) {
     let mut ar = *arena;
     let mut out = vec![0u8; 16];
     let (mut ao, mut lo, mut aro) = ([0i8; 64], [0i8; 32], [0u16; 220]);
     let n = unsafe {
-        shim_write_partition_node(above_in.as_ptr(), left_in.as_ptr(), mi_row, mi_col, bsize,
-            partition, mi_rows, mi_cols, ar.as_mut_ptr(), out.as_mut_ptr(), ao.as_mut_ptr(),
-            lo.as_mut_ptr(), aro.as_mut_ptr())
+        shim_write_partition_node(
+            above_in.as_ptr(),
+            left_in.as_ptr(),
+            mi_row,
+            mi_col,
+            bsize,
+            partition,
+            mi_rows,
+            mi_cols,
+            ar.as_mut_ptr(),
+            out.as_mut_ptr(),
+            ao.as_mut_ptr(),
+            lo.as_mut_ptr(),
+            aro.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, ao, lo, aro)
@@ -741,13 +2351,27 @@ pub fn ref_write_partition_node(
 /// 32-slot (MAX_MIB_SIZE) buffer. Returns the updated (above[64], left[32]).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_update_ext_partition_context(
-    mi_row: i32, mi_col: i32, subsize: i32, bsize: i32, partition: i32,
-    above_in: &[i8; 64], left_in: &[i8; 32],
+    mi_row: i32,
+    mi_col: i32,
+    subsize: i32,
+    bsize: i32,
+    partition: i32,
+    above_in: &[i8; 64],
+    left_in: &[i8; 32],
 ) -> ([i8; 64], [i8; 32]) {
     let (mut ao, mut lo) = ([0i8; 64], [0i8; 32]);
     unsafe {
-        shim_update_ext_partition_context(mi_row, mi_col, subsize, bsize, partition,
-            above_in.as_ptr(), left_in.as_ptr(), ao.as_mut_ptr(), lo.as_mut_ptr())
+        shim_update_ext_partition_context(
+            mi_row,
+            mi_col,
+            subsize,
+            bsize,
+            partition,
+            above_in.as_ptr(),
+            left_in.as_ptr(),
+            ao.as_mut_ptr(),
+            lo.as_mut_ptr(),
+        )
     };
     (ao, lo)
 }
@@ -756,16 +2380,37 @@ pub fn ref_update_ext_partition_context(
 /// C od_ec). Returns (bytes, joints[5], comp0[69], comp1[69]).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_write_inter_block_mvs(
-    mode: i32, is_compound: bool, diff_row0: i32, diff_col0: i32, diff_row1: i32, diff_col1: i32,
-    usehp: i32, joints: &[u16; 5], comp0: &[u16; 69], comp1: &[u16; 69],
+    mode: i32,
+    is_compound: bool,
+    diff_row0: i32,
+    diff_col0: i32,
+    diff_row1: i32,
+    diff_col1: i32,
+    usehp: i32,
+    joints: &[u16; 5],
+    comp0: &[u16; 69],
+    comp1: &[u16; 69],
 ) -> (Vec<u8>, [u16; 5], [u16; 69], [u16; 69]) {
     let (mut jo, mut c0, mut c1) = (*joints, *comp0, *comp1);
     let mut out = vec![0u8; 64];
     let (mut ojo, mut oc0, mut oc1) = ([0u16; 5], [0u16; 69], [0u16; 69]);
     let n = unsafe {
-        shim_write_inter_block_mvs(mode, is_compound as i32, diff_row0, diff_col0, diff_row1,
-            diff_col1, usehp, jo.as_mut_ptr(), c0.as_mut_ptr(), c1.as_mut_ptr(), out.as_mut_ptr(),
-            ojo.as_mut_ptr(), oc0.as_mut_ptr(), oc1.as_mut_ptr())
+        shim_write_inter_block_mvs(
+            mode,
+            is_compound as i32,
+            diff_row0,
+            diff_col0,
+            diff_row1,
+            diff_col1,
+            usehp,
+            jo.as_mut_ptr(),
+            c0.as_mut_ptr(),
+            c1.as_mut_ptr(),
+            out.as_mut_ptr(),
+            ojo.as_mut_ptr(),
+            oc0.as_mut_ptr(),
+            oc1.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, ojo, oc0, oc1)
@@ -776,18 +2421,43 @@ pub fn ref_write_inter_block_mvs(
 /// Returns (bytes, icm[9], newmv[18], zeromv[6], refmv[18], drl[9]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_inter_mode_drl(
-    seg_skip: bool, mode: i32, mode_ctx: i32, icm_cdf: &[u16; 9], newmv_cdf: &[u16; 18],
-    zeromv_cdf: &[u16; 6], refmv_cdf: &[u16; 18], drl_cdf: &[u16; 9], ref_mv_idx: i32,
-    ref_mv_count: i32, weight: &[u16],
+    seg_skip: bool,
+    mode: i32,
+    mode_ctx: i32,
+    icm_cdf: &[u16; 9],
+    newmv_cdf: &[u16; 18],
+    zeromv_cdf: &[u16; 6],
+    refmv_cdf: &[u16; 18],
+    drl_cdf: &[u16; 9],
+    ref_mv_idx: i32,
+    ref_mv_count: i32,
+    weight: &[u16],
 ) -> (Vec<u8>, [u16; 9], [u16; 18], [u16; 6], [u16; 18], [u16; 9]) {
-    let (mut icm, mut nm, mut zm, mut rm, mut drl) = (*icm_cdf, *newmv_cdf, *zeromv_cdf, *refmv_cdf, *drl_cdf);
+    let (mut icm, mut nm, mut zm, mut rm, mut drl) =
+        (*icm_cdf, *newmv_cdf, *zeromv_cdf, *refmv_cdf, *drl_cdf);
     let mut out = vec![0u8; 32];
-    let (mut oicm, mut onm, mut ozm, mut orm, mut odrl) = ([0u16; 9], [0u16; 18], [0u16; 6], [0u16; 18], [0u16; 9]);
+    let (mut oicm, mut onm, mut ozm, mut orm, mut odrl) =
+        ([0u16; 9], [0u16; 18], [0u16; 6], [0u16; 18], [0u16; 9]);
     let n = unsafe {
-        shim_write_inter_mode_drl(seg_skip as i32, mode, mode_ctx, icm.as_mut_ptr(), nm.as_mut_ptr(),
-            zm.as_mut_ptr(), rm.as_mut_ptr(), drl.as_mut_ptr(), ref_mv_idx, ref_mv_count,
-            weight.as_ptr(), out.as_mut_ptr(), oicm.as_mut_ptr(), onm.as_mut_ptr(), ozm.as_mut_ptr(),
-            orm.as_mut_ptr(), odrl.as_mut_ptr())
+        shim_write_inter_mode_drl(
+            seg_skip as i32,
+            mode,
+            mode_ctx,
+            icm.as_mut_ptr(),
+            nm.as_mut_ptr(),
+            zm.as_mut_ptr(),
+            rm.as_mut_ptr(),
+            drl.as_mut_ptr(),
+            ref_mv_idx,
+            ref_mv_count,
+            weight.as_ptr(),
+            out.as_mut_ptr(),
+            oicm.as_mut_ptr(),
+            onm.as_mut_ptr(),
+            ozm.as_mut_ptr(),
+            orm.as_mut_ptr(),
+            odrl.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, oicm, onm, ozm, orm, odrl)
@@ -852,15 +2522,43 @@ pub fn ref_write_inter_mode_tail(inp: &InterTailRef) -> (Vec<u8>, [u16; 52]) {
     let mut o_all = [0u16; 52];
     let n = unsafe {
         shim_write_inter_mode_tail(
-            inp.interintra_allowed as i32, inp.interintra, ii.as_mut_ptr(), inp.ii_mode,
-            iim.as_mut_ptr(), inp.wedge_used_ii as i32, inp.use_wedge_ii, wii.as_mut_ptr(),
-            inp.ii_wedge_index, wix.as_mut_ptr(), inp.motion_mode_present as i32, obmc.as_mut_ptr(),
-            mm.as_mut_ptr(), inp.last_motion_mode_allowed, inp.motion_mode, inp.has_second_ref as i32,
-            inp.masked_used as i32, inp.comp_group_idx, cgi.as_mut_ptr(), inp.dist_wtd as i32,
-            inp.compound_idx, cidx.as_mut_ptr(), inp.wedge_used_ct as i32, inp.comp_type,
-            ct.as_mut_ptr(), inp.ct_wedge_index, inp.wedge_sign, inp.mask_type, inp.interp_needed as i32,
-            inp.is_switchable as i32, inp.enable_dual as i32, inp.f0, inp.f1, ic0.as_mut_ptr(),
-            ic1.as_mut_ptr(), out.as_mut_ptr(), o_all.as_mut_ptr(),
+            inp.interintra_allowed as i32,
+            inp.interintra,
+            ii.as_mut_ptr(),
+            inp.ii_mode,
+            iim.as_mut_ptr(),
+            inp.wedge_used_ii as i32,
+            inp.use_wedge_ii,
+            wii.as_mut_ptr(),
+            inp.ii_wedge_index,
+            wix.as_mut_ptr(),
+            inp.motion_mode_present as i32,
+            obmc.as_mut_ptr(),
+            mm.as_mut_ptr(),
+            inp.last_motion_mode_allowed,
+            inp.motion_mode,
+            inp.has_second_ref as i32,
+            inp.masked_used as i32,
+            inp.comp_group_idx,
+            cgi.as_mut_ptr(),
+            inp.dist_wtd as i32,
+            inp.compound_idx,
+            cidx.as_mut_ptr(),
+            inp.wedge_used_ct as i32,
+            inp.comp_type,
+            ct.as_mut_ptr(),
+            inp.ct_wedge_index,
+            inp.wedge_sign,
+            inp.mask_type,
+            inp.interp_needed as i32,
+            inp.is_switchable as i32,
+            inp.enable_dual as i32,
+            inp.f0,
+            inp.f1,
+            ic0.as_mut_ptr(),
+            ic1.as_mut_ptr(),
+            out.as_mut_ptr(),
+            o_all.as_mut_ptr(),
         )
     };
     out.truncate(n as usize);
@@ -951,34 +2649,94 @@ pub fn ref_write_inter_prefix(inp: &InterPrefixRef) -> InterPrefixOut {
     let mut iic = *inp.intra_inter_cdf;
     let mut out = vec![0u8; 64];
     let (mut skip, mut skip_mode) = (0i32, 0i32);
-    let (mut opc, mut osc, mut osmc, mut oskc, mut octr) = ([0u16; 3], [0u16; 9], [0u16; 3], [0u16; 3], [0i32; 4]);
+    let (mut opc, mut osc, mut osmc, mut oskc, mut octr) =
+        ([0u16; 3], [0u16; 9], [0u16; 3], [0u16; 3], [0i32; 4]);
     let (mut odqc, mut odlmc, mut odlc) = ([0u16; 5], [0u16; 20], [0u16; 5]);
     let (mut obase, mut oxd, mut oxdb, mut oiic) = (0i32, [0i32; 4], 0i32, [0u16; 3]);
     let n = unsafe {
         shim_write_inter_prefix(
-            inp.update_map as i32, inp.segid_preskip as i32, inp.temporal_update as i32,
-            inp.seg_id_predicted, pc.as_mut_ptr(), sc.as_mut_ptr(), inp.seg_enabled as i32,
-            inp.segment_id, inp.seg_pred, inp.last_active_segid, smc.as_mut_ptr(),
-            inp.frame_skip_mode_flag as i32, inp.sm_seg_skip as i32, inp.sm_comp_allowed as i32,
-            inp.sm_seg_ref_gmv as i32, inp.skip_mode, skc.as_mut_ptr(), inp.skip_seg_active as i32,
-            inp.skip_txfm, inp.coded_lossless as i32, inp.allow_intrabc as i32, inp.mi_row,
-            inp.mi_col, inp.mib_size, inp.sb_size, inp.cdef_trans.as_ptr(), inp.cdef_bits,
-            inp.cdef_strength, inp.dq_present as i32, inp.dlf_present as i32, inp.dlf_multi as i32,
-            inp.num_planes, inp.bsize, inp.cur_qindex, inp.cur_base_qindex, inp.dq_res,
-            inp.mbmi_dlf.as_ptr(), inp.xd_dlf.as_ptr(), inp.mbmi_dlf_base, inp.xd_dlf_base,
-            inp.dlf_res, dqc.as_mut_ptr(), dlmc.as_mut_ptr(), dlc.as_mut_ptr(), iic.as_mut_ptr(),
-            inp.seg_ref_frame_active as i32, inp.seg_globalmv_active as i32, inp.is_inter,
-            out.as_mut_ptr(), &mut skip, &mut skip_mode, opc.as_mut_ptr(), osc.as_mut_ptr(),
-            osmc.as_mut_ptr(), oskc.as_mut_ptr(), octr.as_mut_ptr(), odqc.as_mut_ptr(),
-            odlmc.as_mut_ptr(), odlc.as_mut_ptr(), &mut obase, oxd.as_mut_ptr(), &mut oxdb,
+            inp.update_map as i32,
+            inp.segid_preskip as i32,
+            inp.temporal_update as i32,
+            inp.seg_id_predicted,
+            pc.as_mut_ptr(),
+            sc.as_mut_ptr(),
+            inp.seg_enabled as i32,
+            inp.segment_id,
+            inp.seg_pred,
+            inp.last_active_segid,
+            smc.as_mut_ptr(),
+            inp.frame_skip_mode_flag as i32,
+            inp.sm_seg_skip as i32,
+            inp.sm_comp_allowed as i32,
+            inp.sm_seg_ref_gmv as i32,
+            inp.skip_mode,
+            skc.as_mut_ptr(),
+            inp.skip_seg_active as i32,
+            inp.skip_txfm,
+            inp.coded_lossless as i32,
+            inp.allow_intrabc as i32,
+            inp.mi_row,
+            inp.mi_col,
+            inp.mib_size,
+            inp.sb_size,
+            inp.cdef_trans.as_ptr(),
+            inp.cdef_bits,
+            inp.cdef_strength,
+            inp.dq_present as i32,
+            inp.dlf_present as i32,
+            inp.dlf_multi as i32,
+            inp.num_planes,
+            inp.bsize,
+            inp.cur_qindex,
+            inp.cur_base_qindex,
+            inp.dq_res,
+            inp.mbmi_dlf.as_ptr(),
+            inp.xd_dlf.as_ptr(),
+            inp.mbmi_dlf_base,
+            inp.xd_dlf_base,
+            inp.dlf_res,
+            dqc.as_mut_ptr(),
+            dlmc.as_mut_ptr(),
+            dlc.as_mut_ptr(),
+            iic.as_mut_ptr(),
+            inp.seg_ref_frame_active as i32,
+            inp.seg_globalmv_active as i32,
+            inp.is_inter,
+            out.as_mut_ptr(),
+            &mut skip,
+            &mut skip_mode,
+            opc.as_mut_ptr(),
+            osc.as_mut_ptr(),
+            osmc.as_mut_ptr(),
+            oskc.as_mut_ptr(),
+            octr.as_mut_ptr(),
+            odqc.as_mut_ptr(),
+            odlmc.as_mut_ptr(),
+            odlc.as_mut_ptr(),
+            &mut obase,
+            oxd.as_mut_ptr(),
+            &mut oxdb,
             oiic.as_mut_ptr(),
         )
     };
     out.truncate(n as usize);
     InterPrefixOut {
-        bytes: out, skip, skip_mode, pred_cdf: opc, seg_cdf: osc, skip_mode_cdf: osmc,
-        skip_cdf: oskc, cdef_trans: octr, dq_cdf: odqc, dlf_multi_cdf: odlmc, dlf_cdf: odlc,
-        base_qindex: obase, xd_dlf: oxd, xd_dlf_base: oxdb, intra_inter_cdf: oiic,
+        bytes: out,
+        skip,
+        skip_mode,
+        pred_cdf: opc,
+        seg_cdf: osc,
+        skip_mode_cdf: osmc,
+        skip_cdf: oskc,
+        cdef_trans: octr,
+        dq_cdf: odqc,
+        dlf_multi_cdf: odlmc,
+        dlf_cdf: odlc,
+        base_qindex: obase,
+        xd_dlf: oxd,
+        xd_dlf_base: oxdb,
+        intra_inter_cdf: oiic,
     }
 }
 
@@ -986,18 +2744,40 @@ pub fn ref_write_inter_prefix(inp: &InterPrefixRef) -> InterPrefixOut {
 /// (bytes, pred_cdf[3], seg_cdf[9]).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_write_inter_segment_id(
-    update_map: bool, preskip: bool, segid_preskip: bool, skip: bool, temporal_update: bool,
-    seg_id_predicted: i32, pred_cdf: &[u16; 3], seg_cdf: &[u16; 9], seg_enabled: bool,
-    segment_id: i32, seg_pred: i32, last_active_segid: i32,
+    update_map: bool,
+    preskip: bool,
+    segid_preskip: bool,
+    skip: bool,
+    temporal_update: bool,
+    seg_id_predicted: i32,
+    pred_cdf: &[u16; 3],
+    seg_cdf: &[u16; 9],
+    seg_enabled: bool,
+    segment_id: i32,
+    seg_pred: i32,
+    last_active_segid: i32,
 ) -> (Vec<u8>, [u16; 3], [u16; 9]) {
     let (mut pc, mut sc) = (*pred_cdf, *seg_cdf);
     let mut out = vec![0u8; 16];
     let (mut opc, mut osc) = ([0u16; 3], [0u16; 9]);
     let n = unsafe {
-        shim_write_inter_segment_id(update_map as i32, preskip as i32, segid_preskip as i32,
-            skip as i32, temporal_update as i32, seg_id_predicted, pc.as_mut_ptr(), sc.as_mut_ptr(),
-            seg_enabled as i32, segment_id, seg_pred, last_active_segid, out.as_mut_ptr(),
-            opc.as_mut_ptr(), osc.as_mut_ptr())
+        shim_write_inter_segment_id(
+            update_map as i32,
+            preskip as i32,
+            segid_preskip as i32,
+            skip as i32,
+            temporal_update as i32,
+            seg_id_predicted,
+            pc.as_mut_ptr(),
+            sc.as_mut_ptr(),
+            seg_enabled as i32,
+            segment_id,
+            seg_pred,
+            last_active_segid,
+            out.as_mut_ptr(),
+            opc.as_mut_ptr(),
+            osc.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, opc, osc)
@@ -1009,10 +2789,25 @@ pub fn ref_write_inter_segment_id(
 /// new_xd_delta_lf[4], new_xd_delta_lf_from_base).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_delta_q_params_sb(
-    dq_present: bool, dlf_present: bool, dlf_multi: bool, num_planes: i32,
-    bsize: i32, sb_size: i32, skip: i32, sbul: bool, cur_qindex: i32, cur_base_qindex: i32,
-    dq_res: i32, mbmi_dlf: &[i32; 4], xd_dlf: &[i32; 4], mbmi_dlf_base: i32, xd_dlf_base: i32,
-    dlf_res: i32, dq_cdf: &[u16; 5], dlf_multi_cdf: &[u16; 20], dlf_cdf: &[u16; 5],
+    dq_present: bool,
+    dlf_present: bool,
+    dlf_multi: bool,
+    num_planes: i32,
+    bsize: i32,
+    sb_size: i32,
+    skip: i32,
+    sbul: bool,
+    cur_qindex: i32,
+    cur_base_qindex: i32,
+    dq_res: i32,
+    mbmi_dlf: &[i32; 4],
+    xd_dlf: &[i32; 4],
+    mbmi_dlf_base: i32,
+    xd_dlf_base: i32,
+    dlf_res: i32,
+    dq_cdf: &[u16; 5],
+    dlf_multi_cdf: &[u16; 20],
+    dlf_cdf: &[u16; 5],
 ) -> (Vec<u8>, [u16; 5], [u16; 20], [u16; 5], i32, [i32; 4], i32) {
     let (mut dqc, mut dlmc, mut dlc) = (*dq_cdf, *dlf_multi_cdf, *dlf_cdf);
     let mut out = vec![0u8; 64];
@@ -1020,11 +2815,31 @@ pub fn ref_write_delta_q_params_sb(
     let (mut o_base, mut o_xd_dlf, mut o_xd_dlf_base) = (0i32, [0i32; 4], 0i32);
     let n = unsafe {
         shim_write_delta_q_params_sb(
-            dq_present as i32, dlf_present as i32, dlf_multi as i32, num_planes, bsize, sb_size,
-            skip, sbul as i32, cur_qindex, cur_base_qindex, dq_res, mbmi_dlf.as_ptr(),
-            xd_dlf.as_ptr(), mbmi_dlf_base, xd_dlf_base, dlf_res, dqc.as_mut_ptr(),
-            dlmc.as_mut_ptr(), dlc.as_mut_ptr(), out.as_mut_ptr(), odqc.as_mut_ptr(),
-            odlmc.as_mut_ptr(), odlc.as_mut_ptr(), &mut o_base, o_xd_dlf.as_mut_ptr(),
+            dq_present as i32,
+            dlf_present as i32,
+            dlf_multi as i32,
+            num_planes,
+            bsize,
+            sb_size,
+            skip,
+            sbul as i32,
+            cur_qindex,
+            cur_base_qindex,
+            dq_res,
+            mbmi_dlf.as_ptr(),
+            xd_dlf.as_ptr(),
+            mbmi_dlf_base,
+            xd_dlf_base,
+            dlf_res,
+            dqc.as_mut_ptr(),
+            dlmc.as_mut_ptr(),
+            dlc.as_mut_ptr(),
+            out.as_mut_ptr(),
+            odqc.as_mut_ptr(),
+            odlmc.as_mut_ptr(),
+            odlc.as_mut_ptr(),
+            &mut o_base,
+            o_xd_dlf.as_mut_ptr(),
             &mut o_xd_dlf_base,
         )
     };
@@ -1036,15 +2851,34 @@ pub fn ref_write_delta_q_params_sb(
 /// updated cdef_transmitted[4]).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_write_cdef(
-    coded_lossless: bool, allow_intrabc: bool, mi_row: i32, mi_col: i32, mib_size: i32,
-    sb_size: i32, skip: i32, transmitted: &[i32; 4], cdef_bits: i32, cdef_strength: i32,
+    coded_lossless: bool,
+    allow_intrabc: bool,
+    mi_row: i32,
+    mi_col: i32,
+    mib_size: i32,
+    sb_size: i32,
+    skip: i32,
+    transmitted: &[i32; 4],
+    cdef_bits: i32,
+    cdef_strength: i32,
 ) -> (Vec<u8>, [i32; 4]) {
     let mut out = vec![0u8; 8];
     let mut tout = [0i32; 4];
     let n = unsafe {
-        shim_write_cdef(coded_lossless as i32, allow_intrabc as i32, mi_row, mi_col, mib_size,
-            sb_size, skip, transmitted.as_ptr(), cdef_bits, cdef_strength, out.as_mut_ptr(),
-            tout.as_mut_ptr())
+        shim_write_cdef(
+            coded_lossless as i32,
+            allow_intrabc as i32,
+            mi_row,
+            mi_col,
+            mib_size,
+            sb_size,
+            skip,
+            transmitted.as_ptr(),
+            cdef_bits,
+            cdef_strength,
+            out.as_mut_ptr(),
+            tout.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, tout)
@@ -1121,31 +2955,81 @@ pub fn ref_write_mb_modes_kf_prefix(inp: &KfPrefixRef) -> KfPrefixOut {
     let (mut obase, mut oxd, mut oxdb) = (0i32, [0i32; 4], 0i32);
     let n = unsafe {
         shim_write_mb_modes_kf_prefix(
-            inp.segid_preskip as i32, inp.seg_enabled as i32, inp.update_map as i32, inp.segment_id,
-            inp.seg_pred, inp.last_active_segid, seg.as_mut_ptr(), inp.seg_skip_active as i32,
-            inp.skip_txfm, skc.as_mut_ptr(), inp.coded_lossless as i32, inp.allow_intrabc as i32,
-            inp.mi_row, inp.mi_col, inp.mib_size, inp.sb_size, inp.cdef_trans.as_ptr(),
-            inp.cdef_bits, inp.cdef_strength, inp.dq_present as i32, inp.dlf_present as i32,
-            inp.dlf_multi as i32, inp.num_planes, inp.bsize, inp.cur_qindex, inp.cur_base_qindex,
-            inp.dq_res, inp.mbmi_dlf.as_ptr(), inp.xd_dlf.as_ptr(), inp.mbmi_dlf_base,
-            inp.xd_dlf_base, inp.dlf_res, dqc.as_mut_ptr(), dlmc.as_mut_ptr(), dlc.as_mut_ptr(),
-            out.as_mut_ptr(), &mut skip, oseg.as_mut_ptr(), oskc.as_mut_ptr(), octr.as_mut_ptr(),
-            odqc.as_mut_ptr(), odlmc.as_mut_ptr(), odlc.as_mut_ptr(), &mut obase, oxd.as_mut_ptr(),
+            inp.segid_preskip as i32,
+            inp.seg_enabled as i32,
+            inp.update_map as i32,
+            inp.segment_id,
+            inp.seg_pred,
+            inp.last_active_segid,
+            seg.as_mut_ptr(),
+            inp.seg_skip_active as i32,
+            inp.skip_txfm,
+            skc.as_mut_ptr(),
+            inp.coded_lossless as i32,
+            inp.allow_intrabc as i32,
+            inp.mi_row,
+            inp.mi_col,
+            inp.mib_size,
+            inp.sb_size,
+            inp.cdef_trans.as_ptr(),
+            inp.cdef_bits,
+            inp.cdef_strength,
+            inp.dq_present as i32,
+            inp.dlf_present as i32,
+            inp.dlf_multi as i32,
+            inp.num_planes,
+            inp.bsize,
+            inp.cur_qindex,
+            inp.cur_base_qindex,
+            inp.dq_res,
+            inp.mbmi_dlf.as_ptr(),
+            inp.xd_dlf.as_ptr(),
+            inp.mbmi_dlf_base,
+            inp.xd_dlf_base,
+            inp.dlf_res,
+            dqc.as_mut_ptr(),
+            dlmc.as_mut_ptr(),
+            dlc.as_mut_ptr(),
+            out.as_mut_ptr(),
+            &mut skip,
+            oseg.as_mut_ptr(),
+            oskc.as_mut_ptr(),
+            octr.as_mut_ptr(),
+            odqc.as_mut_ptr(),
+            odlmc.as_mut_ptr(),
+            odlc.as_mut_ptr(),
+            &mut obase,
+            oxd.as_mut_ptr(),
             &mut oxdb,
         )
     };
     out.truncate(n as usize);
     KfPrefixOut {
-        bytes: out, skip, seg_cdf: oseg, skip_cdf: oskc, cdef_trans: octr, dq_cdf: odqc,
-        dlf_multi_cdf: odlmc, dlf_cdf: odlc, base_qindex: obase, xd_dlf: oxd, xd_dlf_base: oxdb,
+        bytes: out,
+        skip,
+        seg_cdf: oseg,
+        skip_cdf: oskc,
+        cdef_trans: octr,
+        dq_cdf: odqc,
+        dlf_multi_cdf: odlmc,
+        dlf_cdf: odlc,
+        base_qindex: obase,
+        xd_dlf: oxd,
+        xd_dlf_base: oxdb,
     }
 }
 
 /// Reference `av1_use_angle_delta` / `av1_is_directional_mode` / `get_uv_mode` /
 /// `av1_allow_palette` / `is_cfl_allowed` — the intra-prediction-mode driver gates.
-pub fn ref_use_angle_delta(bsize: i32) -> bool { unsafe { shim_use_angle_delta(bsize) != 0 } }
-pub fn ref_is_directional_mode(mode: i32) -> bool { unsafe { shim_is_directional_mode(mode) != 0 } }
-pub fn ref_get_uv_mode(uv_mode: i32) -> i32 { unsafe { shim_get_uv_mode(uv_mode) } }
+pub fn ref_use_angle_delta(bsize: i32) -> bool {
+    unsafe { shim_use_angle_delta(bsize) != 0 }
+}
+pub fn ref_is_directional_mode(mode: i32) -> bool {
+    unsafe { shim_is_directional_mode(mode) != 0 }
+}
+pub fn ref_get_uv_mode(uv_mode: i32) -> i32 {
+    unsafe { shim_get_uv_mode(uv_mode) }
+}
 pub fn ref_allow_palette(allow_sct: bool, bsize: i32) -> bool {
     unsafe { shim_allow_palette(allow_sct as i32, bsize) != 0 }
 }
@@ -1156,14 +3040,26 @@ pub fn ref_is_cfl_allowed(bsize: i32, seg_id: i32, lossless: bool, ssx: i32, ssy
 /// Reference write_intra_prediction_modes piece 1 (Y mode + gated Y angle delta, over
 /// pristine C od_ec + real gates). Returns (bytes, y_cdf[14], y_angle_cdf[8]).
 pub fn ref_write_intra_y_and_angle(
-    mode: i32, bsize: i32, y_cdf: &[u16; 14], angle_delta_y: i32, y_angle_cdf: &[u16; 8],
+    mode: i32,
+    bsize: i32,
+    y_cdf: &[u16; 14],
+    angle_delta_y: i32,
+    y_angle_cdf: &[u16; 8],
 ) -> (Vec<u8>, [u16; 14], [u16; 8]) {
     let (mut yc, mut ac) = (*y_cdf, *y_angle_cdf);
     let mut out = vec![0u8; 16];
     let (mut oyc, mut oac) = ([0u16; 14], [0u16; 8]);
     let n = unsafe {
-        shim_write_intra_y_and_angle(mode, bsize, yc.as_mut_ptr(), angle_delta_y, ac.as_mut_ptr(),
-            out.as_mut_ptr(), oyc.as_mut_ptr(), oac.as_mut_ptr())
+        shim_write_intra_y_and_angle(
+            mode,
+            bsize,
+            yc.as_mut_ptr(),
+            angle_delta_y,
+            ac.as_mut_ptr(),
+            out.as_mut_ptr(),
+            oyc.as_mut_ptr(),
+            oac.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, oyc, oac)
@@ -1174,18 +3070,41 @@ pub fn ref_write_intra_y_and_angle(
 /// cfl_alpha_cdf[102], uv_angle_cdf[8]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_intra_uv_and_angle(
-    monochrome: bool, is_chroma_ref: bool, uv_mode: i32, cfl_allowed: bool, bsize: i32,
-    cfl_idx: i32, cfl_joint_sign: i32, angle_delta_uv: i32,
-    uv_mode_cdf: &[u16; 15], cfl_sign_cdf: &[u16; 9], cfl_alpha_cdf: &[u16; 102], uv_angle_cdf: &[u16; 8],
+    monochrome: bool,
+    is_chroma_ref: bool,
+    uv_mode: i32,
+    cfl_allowed: bool,
+    bsize: i32,
+    cfl_idx: i32,
+    cfl_joint_sign: i32,
+    angle_delta_uv: i32,
+    uv_mode_cdf: &[u16; 15],
+    cfl_sign_cdf: &[u16; 9],
+    cfl_alpha_cdf: &[u16; 102],
+    uv_angle_cdf: &[u16; 8],
 ) -> (Vec<u8>, [u16; 15], [u16; 9], [u16; 102], [u16; 8]) {
-    let (mut uc, mut sc, mut ac, mut uac) = (*uv_mode_cdf, *cfl_sign_cdf, *cfl_alpha_cdf, *uv_angle_cdf);
+    let (mut uc, mut sc, mut ac, mut uac) =
+        (*uv_mode_cdf, *cfl_sign_cdf, *cfl_alpha_cdf, *uv_angle_cdf);
     let mut out = vec![0u8; 32];
     let (mut ouc, mut osc, mut oac, mut ouac) = ([0u16; 15], [0u16; 9], [0u16; 102], [0u16; 8]);
     let n = unsafe {
         shim_write_intra_uv_and_angle(
-            monochrome as i32, is_chroma_ref as i32, uv_mode, cfl_allowed as i32, bsize, cfl_idx,
-            cfl_joint_sign, angle_delta_uv, uc.as_mut_ptr(), sc.as_mut_ptr(), ac.as_mut_ptr(),
-            uac.as_mut_ptr(), out.as_mut_ptr(), ouc.as_mut_ptr(), osc.as_mut_ptr(), oac.as_mut_ptr(),
+            monochrome as i32,
+            is_chroma_ref as i32,
+            uv_mode,
+            cfl_allowed as i32,
+            bsize,
+            cfl_idx,
+            cfl_joint_sign,
+            angle_delta_uv,
+            uc.as_mut_ptr(),
+            sc.as_mut_ptr(),
+            ac.as_mut_ptr(),
+            uac.as_mut_ptr(),
+            out.as_mut_ptr(),
+            ouc.as_mut_ptr(),
+            osc.as_mut_ptr(),
+            oac.as_mut_ptr(),
             ouac.as_mut_ptr(),
         )
     };
@@ -1254,15 +3173,45 @@ pub fn ref_write_intra_pred_modes(inp: &IntraPredModesRef) -> (Vec<u8>, [u16; 18
     let mut o_all = [0u16; 187];
     let n = unsafe {
         shim_write_intra_pred_modes(
-            inp.mode, inp.bsize, yc.as_mut_ptr(), inp.angle_delta_y, yac.as_mut_ptr(),
-            inp.monochrome as i32, inp.is_chroma_ref as i32, inp.uv_mode, inp.cfl_allowed as i32,
-            inp.cfl_idx, inp.cfl_joint_sign, inp.angle_delta_uv, uc.as_mut_ptr(), sc.as_mut_ptr(),
-            ac.as_mut_ptr(), uac.as_mut_ptr(), inp.allow_palette as i32, inp.bit_depth,
-            inp.palette_size.as_ptr(), inp.palette_colors.as_ptr(), inp.mb_to_top_edge,
-            inp.ha as i32, inp.a_colors.as_ptr(), inp.a_size[0], inp.a_size[1], inp.hl as i32,
-            inp.l_colors.as_ptr(), inp.l_size[0], inp.l_size[1], pym.as_mut_ptr(), pys.as_mut_ptr(),
-            pum.as_mut_ptr(), pus.as_mut_ptr(), inp.filter_allowed as i32, inp.use_filter_intra,
-            inp.filter_intra_mode, fiu.as_mut_ptr(), fim.as_mut_ptr(), out.as_mut_ptr(),
+            inp.mode,
+            inp.bsize,
+            yc.as_mut_ptr(),
+            inp.angle_delta_y,
+            yac.as_mut_ptr(),
+            inp.monochrome as i32,
+            inp.is_chroma_ref as i32,
+            inp.uv_mode,
+            inp.cfl_allowed as i32,
+            inp.cfl_idx,
+            inp.cfl_joint_sign,
+            inp.angle_delta_uv,
+            uc.as_mut_ptr(),
+            sc.as_mut_ptr(),
+            ac.as_mut_ptr(),
+            uac.as_mut_ptr(),
+            inp.allow_palette as i32,
+            inp.bit_depth,
+            inp.palette_size.as_ptr(),
+            inp.palette_colors.as_ptr(),
+            inp.mb_to_top_edge,
+            inp.ha as i32,
+            inp.a_colors.as_ptr(),
+            inp.a_size[0],
+            inp.a_size[1],
+            inp.hl as i32,
+            inp.l_colors.as_ptr(),
+            inp.l_size[0],
+            inp.l_size[1],
+            pym.as_mut_ptr(),
+            pys.as_mut_ptr(),
+            pum.as_mut_ptr(),
+            pus.as_mut_ptr(),
+            inp.filter_allowed as i32,
+            inp.use_filter_intra,
+            inp.filter_intra_mode,
+            fiu.as_mut_ptr(),
+            fim.as_mut_ptr(),
+            out.as_mut_ptr(),
             o_all.as_mut_ptr(),
         )
     };
@@ -1275,9 +3224,23 @@ pub fn ref_write_intra_pred_modes(inp: &IntraPredModesRef) -> (Vec<u8>, [u16; 18
 /// (bytes, intrabc_cdf[3], joints[5], mv_comp0[69], mv_comp1[69], intra CDFs o_all[187]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_kf_tail(
-    allow_intrabc: bool, intrabc_cdf: &[u16; 3], joints: &[u16; 5], comp0: &[u16; 69],
-    comp1: &[u16; 69], use_intrabc: bool, diff_row: i32, diff_col: i32, intra: &IntraPredModesRef,
-) -> (Vec<u8>, [u16; 3], [u16; 5], [u16; 69], [u16; 69], [u16; 187]) {
+    allow_intrabc: bool,
+    intrabc_cdf: &[u16; 3],
+    joints: &[u16; 5],
+    comp0: &[u16; 69],
+    comp1: &[u16; 69],
+    use_intrabc: bool,
+    diff_row: i32,
+    diff_col: i32,
+    intra: &IntraPredModesRef,
+) -> (
+    Vec<u8>,
+    [u16; 3],
+    [u16; 5],
+    [u16; 69],
+    [u16; 69],
+    [u16; 187],
+) {
     let (mut ib, mut jo, mut c0, mut c1) = (*intrabc_cdf, *joints, *comp0, *comp1);
     let mut yc = *intra.y_cdf;
     let mut yac = *intra.y_angle_cdf;
@@ -1296,18 +3259,57 @@ pub fn ref_write_kf_tail(
     let mut o_all = [0u16; 187];
     let n = unsafe {
         shim_kf_tail(
-            allow_intrabc as i32, ib.as_mut_ptr(), jo.as_mut_ptr(), c0.as_mut_ptr(), c1.as_mut_ptr(),
-            use_intrabc as i32, diff_row, diff_col, intra.mode, intra.bsize, yc.as_mut_ptr(),
-            intra.angle_delta_y, yac.as_mut_ptr(), intra.monochrome as i32, intra.is_chroma_ref as i32,
-            intra.uv_mode, intra.cfl_allowed as i32, intra.cfl_idx, intra.cfl_joint_sign,
-            intra.angle_delta_uv, uc.as_mut_ptr(), sc.as_mut_ptr(), ac.as_mut_ptr(), uac.as_mut_ptr(),
-            intra.allow_palette as i32, intra.bit_depth, intra.palette_size.as_ptr(),
-            intra.palette_colors.as_ptr(), intra.mb_to_top_edge, intra.ha as i32,
-            intra.a_colors.as_ptr(), intra.a_size[0], intra.a_size[1], intra.hl as i32,
-            intra.l_colors.as_ptr(), intra.l_size[0], intra.l_size[1], pym.as_mut_ptr(),
-            pys.as_mut_ptr(), pum.as_mut_ptr(), pus.as_mut_ptr(), intra.filter_allowed as i32,
-            intra.use_filter_intra, intra.filter_intra_mode, fiu.as_mut_ptr(), fim.as_mut_ptr(),
-            out.as_mut_ptr(), oib.as_mut_ptr(), ojo.as_mut_ptr(), oc0.as_mut_ptr(), oc1.as_mut_ptr(),
+            allow_intrabc as i32,
+            ib.as_mut_ptr(),
+            jo.as_mut_ptr(),
+            c0.as_mut_ptr(),
+            c1.as_mut_ptr(),
+            use_intrabc as i32,
+            diff_row,
+            diff_col,
+            intra.mode,
+            intra.bsize,
+            yc.as_mut_ptr(),
+            intra.angle_delta_y,
+            yac.as_mut_ptr(),
+            intra.monochrome as i32,
+            intra.is_chroma_ref as i32,
+            intra.uv_mode,
+            intra.cfl_allowed as i32,
+            intra.cfl_idx,
+            intra.cfl_joint_sign,
+            intra.angle_delta_uv,
+            uc.as_mut_ptr(),
+            sc.as_mut_ptr(),
+            ac.as_mut_ptr(),
+            uac.as_mut_ptr(),
+            intra.allow_palette as i32,
+            intra.bit_depth,
+            intra.palette_size.as_ptr(),
+            intra.palette_colors.as_ptr(),
+            intra.mb_to_top_edge,
+            intra.ha as i32,
+            intra.a_colors.as_ptr(),
+            intra.a_size[0],
+            intra.a_size[1],
+            intra.hl as i32,
+            intra.l_colors.as_ptr(),
+            intra.l_size[0],
+            intra.l_size[1],
+            pym.as_mut_ptr(),
+            pys.as_mut_ptr(),
+            pum.as_mut_ptr(),
+            pus.as_mut_ptr(),
+            intra.filter_allowed as i32,
+            intra.use_filter_intra,
+            intra.filter_intra_mode,
+            fiu.as_mut_ptr(),
+            fim.as_mut_ptr(),
+            out.as_mut_ptr(),
+            oib.as_mut_ptr(),
+            ojo.as_mut_ptr(),
+            oc0.as_mut_ptr(),
+            oc1.as_mut_ptr(),
             o_all.as_mut_ptr(),
         )
     };
@@ -1319,13 +3321,36 @@ pub fn ref_write_kf_tail(
 /// directly, real get_relative_dist + ctx arithmetic).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_get_comp_index_context(
-    enable: bool, bits_minus_1: i32, cur: i32, fwd: i32, bck: i32,
-    ha: bool, a_has2: bool, a_cidx: i32, a_rf0: i32,
-    hl: bool, l_has2: bool, l_cidx: i32, l_rf0: i32,
+    enable: bool,
+    bits_minus_1: i32,
+    cur: i32,
+    fwd: i32,
+    bck: i32,
+    ha: bool,
+    a_has2: bool,
+    a_cidx: i32,
+    a_rf0: i32,
+    hl: bool,
+    l_has2: bool,
+    l_cidx: i32,
+    l_rf0: i32,
 ) -> i32 {
     unsafe {
-        shim_get_comp_index_context(enable as i32, bits_minus_1, cur, fwd, bck, ha as i32,
-            a_has2 as i32, a_cidx, a_rf0, hl as i32, l_has2 as i32, l_cidx, l_rf0)
+        shim_get_comp_index_context(
+            enable as i32,
+            bits_minus_1,
+            cur,
+            fwd,
+            bck,
+            ha as i32,
+            a_has2 as i32,
+            a_cidx,
+            a_rf0,
+            hl as i32,
+            l_has2 as i32,
+            l_cidx,
+            l_rf0,
+        )
     }
 }
 
@@ -1333,20 +3358,43 @@ pub fn ref_get_comp_index_context(
 /// pre-selected. Returns (bytes, cgi_cdf[3], cidx_cdf[3], ctype_cdf[3], wedge_idx[17]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_compound_type_info(
-    masked_used: bool, comp_group_idx: i32, cgi_cdf: &[u16; 3],
-    dist_wtd: bool, compound_idx: i32, cidx_cdf: &[u16; 3],
-    wedge_used: bool, comp_type: i32, ctype_cdf: &[u16; 3],
-    wedge_index: i32, wedge_idx_cdf: &[u16; 17], wedge_sign: i32, mask_type: i32,
+    masked_used: bool,
+    comp_group_idx: i32,
+    cgi_cdf: &[u16; 3],
+    dist_wtd: bool,
+    compound_idx: i32,
+    cidx_cdf: &[u16; 3],
+    wedge_used: bool,
+    comp_type: i32,
+    ctype_cdf: &[u16; 3],
+    wedge_index: i32,
+    wedge_idx_cdf: &[u16; 17],
+    wedge_sign: i32,
+    mask_type: i32,
 ) -> (Vec<u8>, [u16; 3], [u16; 3], [u16; 3], [u16; 17]) {
     let (mut cgi, mut cidx, mut ct, mut wix) = (*cgi_cdf, *cidx_cdf, *ctype_cdf, *wedge_idx_cdf);
     let mut out = vec![0u8; 32];
     let (mut ocgi, mut ocidx, mut oct, mut owix) = ([0u16; 3], [0u16; 3], [0u16; 3], [0u16; 17]);
     let n = unsafe {
         shim_write_compound_type_info(
-            masked_used as i32, comp_group_idx, cgi.as_mut_ptr(), dist_wtd as i32, compound_idx,
-            cidx.as_mut_ptr(), wedge_used as i32, comp_type, ct.as_mut_ptr(), wedge_index,
-            wix.as_mut_ptr(), wedge_sign, mask_type, out.as_mut_ptr(),
-            ocgi.as_mut_ptr(), ocidx.as_mut_ptr(), oct.as_mut_ptr(), owix.as_mut_ptr(),
+            masked_used as i32,
+            comp_group_idx,
+            cgi.as_mut_ptr(),
+            dist_wtd as i32,
+            compound_idx,
+            cidx.as_mut_ptr(),
+            wedge_used as i32,
+            comp_type,
+            ct.as_mut_ptr(),
+            wedge_index,
+            wix.as_mut_ptr(),
+            wedge_sign,
+            mask_type,
+            out.as_mut_ptr(),
+            ocgi.as_mut_ptr(),
+            ocidx.as_mut_ptr(),
+            oct.as_mut_ptr(),
+            owix.as_mut_ptr(),
         )
     };
     out.truncate(n as usize);
@@ -1357,14 +3405,32 @@ pub fn ref_write_compound_type_info(
 /// 3*PALETTE_MAX_SIZE layout. Returns (cache[0..n], n).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_get_palette_cache(
-    plane: i32, mb_to_top_edge: i32,
-    ha: bool, a_colors: &[u16; 24], a_size0: i32, a_size1: i32,
-    hl: bool, l_colors: &[u16; 24], l_size0: i32, l_size1: i32,
+    plane: i32,
+    mb_to_top_edge: i32,
+    ha: bool,
+    a_colors: &[u16; 24],
+    a_size0: i32,
+    a_size1: i32,
+    hl: bool,
+    l_colors: &[u16; 24],
+    l_size0: i32,
+    l_size1: i32,
 ) -> (Vec<u16>, i32) {
     let mut cache = vec![0u16; 16];
     let n = unsafe {
-        shim_get_palette_cache(plane, mb_to_top_edge, ha as i32, a_colors.as_ptr(), a_size0, a_size1,
-            hl as i32, l_colors.as_ptr(), l_size0, l_size1, cache.as_mut_ptr())
+        shim_get_palette_cache(
+            plane,
+            mb_to_top_edge,
+            ha as i32,
+            a_colors.as_ptr(),
+            a_size0,
+            a_size1,
+            hl as i32,
+            l_colors.as_ptr(),
+            l_size0,
+            l_size1,
+            cache.as_mut_ptr(),
+        )
     };
     cache.truncate(n as usize);
     (cache, n)
@@ -1376,8 +3442,14 @@ pub fn ref_index_color_cache(cache: &[u16], colors: &[u16]) -> (Vec<u8>, Vec<i32
     let mut found = vec![0u8; cache.len().max(1)];
     let mut out_colors = vec![0i32; colors.len().max(1)];
     let n = unsafe {
-        shim_index_color_cache(cache.as_ptr(), cache.len() as i32, colors.as_ptr(),
-            colors.len() as i32, found.as_mut_ptr(), out_colors.as_mut_ptr())
+        shim_index_color_cache(
+            cache.as_ptr(),
+            cache.len() as i32,
+            colors.as_ptr(),
+            colors.len() as i32,
+            found.as_mut_ptr(),
+            out_colors.as_mut_ptr(),
+        )
     };
     out_colors.truncate(n as usize);
     (found, out_colors, n)
@@ -1388,25 +3460,54 @@ pub fn ref_index_color_cache(cache: &[u16], colors: &[u16]) -> (Vec<u8>, Vec<i32
 /// the caller. Returns (bytes, y_mode[3], y_size[8], uv_mode[3], uv_size[8]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ref_write_palette_mode_info(
-    mode_dc: bool, uv_dc: bool, bit_depth: i32,
-    palette_size: &[u8; 2], palette_colors: &[u16; 24],
+    mode_dc: bool,
+    uv_dc: bool,
+    bit_depth: i32,
+    palette_size: &[u8; 2],
+    palette_colors: &[u16; 24],
     mb_to_top_edge: i32,
-    ha: bool, a_colors: &[u16; 24], a_size: &[i32; 2],
-    hl: bool, l_colors: &[u16; 24], l_size: &[i32; 2],
-    y_mode_cdf: &[u16; 3], y_size_cdf: &[u16; 8],
-    uv_mode_cdf: &[u16; 3], uv_size_cdf: &[u16; 8],
+    ha: bool,
+    a_colors: &[u16; 24],
+    a_size: &[i32; 2],
+    hl: bool,
+    l_colors: &[u16; 24],
+    l_size: &[i32; 2],
+    y_mode_cdf: &[u16; 3],
+    y_size_cdf: &[u16; 8],
+    uv_mode_cdf: &[u16; 3],
+    uv_size_cdf: &[u16; 8],
 ) -> (Vec<u8>, [u16; 3], [u16; 8], [u16; 3], [u16; 8]) {
     let (mut ym, mut ys, mut um, mut us) = (*y_mode_cdf, *y_size_cdf, *uv_mode_cdf, *uv_size_cdf);
     let mut out = vec![0u8; 128];
     let (mut oym, mut oys, mut oum, mut ous) = ([0u16; 3], [0u16; 8], [0u16; 3], [0u16; 8]);
     let n = unsafe {
         shim_write_palette_mode_info(
-            mode_dc as i32, uv_dc as i32, bit_depth, 0, 0, 0,
-            palette_size.as_ptr(), palette_colors.as_ptr(), mb_to_top_edge,
-            ha as i32, a_colors.as_ptr(), a_size[0], a_size[1],
-            hl as i32, l_colors.as_ptr(), l_size[0], l_size[1],
-            ym.as_mut_ptr(), ys.as_mut_ptr(), um.as_mut_ptr(), us.as_mut_ptr(),
-            out.as_mut_ptr(), oym.as_mut_ptr(), oys.as_mut_ptr(), oum.as_mut_ptr(), ous.as_mut_ptr(),
+            mode_dc as i32,
+            uv_dc as i32,
+            bit_depth,
+            0,
+            0,
+            0,
+            palette_size.as_ptr(),
+            palette_colors.as_ptr(),
+            mb_to_top_edge,
+            ha as i32,
+            a_colors.as_ptr(),
+            a_size[0],
+            a_size[1],
+            hl as i32,
+            l_colors.as_ptr(),
+            l_size[0],
+            l_size[1],
+            ym.as_mut_ptr(),
+            ys.as_mut_ptr(),
+            um.as_mut_ptr(),
+            us.as_mut_ptr(),
+            out.as_mut_ptr(),
+            oym.as_mut_ptr(),
+            oys.as_mut_ptr(),
+            oum.as_mut_ptr(),
+            ous.as_mut_ptr(),
         )
     };
     out.truncate(n as usize);
@@ -1414,51 +3515,142 @@ pub fn ref_write_palette_mode_info(
 }
 
 /// Reference `av1_get_intra_inter_context` (facade over the real exported fn).
-pub fn ref_get_intra_inter_context(has_above: bool, above_inter: bool, has_left: bool, left_inter: bool) -> i32 {
-    unsafe { shim_get_intra_inter_context(has_above as i32, above_inter as i32, has_left as i32, left_inter as i32) }
+pub fn ref_get_intra_inter_context(
+    has_above: bool,
+    above_inter: bool,
+    has_left: bool,
+    left_inter: bool,
+) -> i32 {
+    unsafe {
+        shim_get_intra_inter_context(
+            has_above as i32,
+            above_inter as i32,
+            has_left as i32,
+            left_inter as i32,
+        )
+    }
 }
 
 /// Reference `write_motion_mode`.
-pub fn ref_write_motion_mode(obmc_cdf: &[u16; 3], mm_cdf: &[u16; 4], last_allowed: i32, mm: i32) -> (Vec<u8>, [u16; 3], [u16; 4]) {
-    let mut o = *obmc_cdf; let mut m = *mm_cdf; let mut out = vec![0u8; 16]; let mut oo = [0u16; 3]; let mut om = [0u16; 4];
-    let n = unsafe { shim_write_motion_mode(o.as_mut_ptr(), m.as_mut_ptr(), last_allowed, mm, out.as_mut_ptr(), oo.as_mut_ptr(), om.as_mut_ptr()) };
-    out.truncate(n as usize); (out, oo, om)
+pub fn ref_write_motion_mode(
+    obmc_cdf: &[u16; 3],
+    mm_cdf: &[u16; 4],
+    last_allowed: i32,
+    mm: i32,
+) -> (Vec<u8>, [u16; 3], [u16; 4]) {
+    let mut o = *obmc_cdf;
+    let mut m = *mm_cdf;
+    let mut out = vec![0u8; 16];
+    let mut oo = [0u16; 3];
+    let mut om = [0u16; 4];
+    let n = unsafe {
+        shim_write_motion_mode(
+            o.as_mut_ptr(),
+            m.as_mut_ptr(),
+            last_allowed,
+            mm,
+            out.as_mut_ptr(),
+            oo.as_mut_ptr(),
+            om.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oo, om)
 }
 
 /// Reference `write_inter_compound_mode`.
 pub fn ref_write_inter_compound_mode(cdf: &[u16; 9], mode: i32) -> (Vec<u8>, [u16; 9]) {
-    let mut c = *cdf; let mut out = vec![0u8; 16]; let mut oc = [0u16; 9];
-    let n = unsafe { shim_write_inter_compound_mode(c.as_mut_ptr(), mode, out.as_mut_ptr(), oc.as_mut_ptr()) };
-    out.truncate(n as usize); (out, oc)
+    let mut c = *cdf;
+    let mut out = vec![0u8; 16];
+    let mut oc = [0u16; 9];
+    let n = unsafe {
+        shim_write_inter_compound_mode(c.as_mut_ptr(), mode, out.as_mut_ptr(), oc.as_mut_ptr())
+    };
+    out.truncate(n as usize);
+    (out, oc)
 }
 
 /// Reference `write_is_inter`.
-pub fn ref_write_is_inter(cdf: &[u16; 3], seg_ref: bool, seg_gmv: bool, is_inter: i32) -> (Vec<u8>, [u16; 3]) {
-    let mut c = *cdf; let mut out = vec![0u8; 16]; let mut oc = [0u16; 3];
-    let n = unsafe { shim_write_is_inter(c.as_mut_ptr(), seg_ref as i32, seg_gmv as i32, is_inter, out.as_mut_ptr(), oc.as_mut_ptr()) };
-    out.truncate(n as usize); (out, oc)
+pub fn ref_write_is_inter(
+    cdf: &[u16; 3],
+    seg_ref: bool,
+    seg_gmv: bool,
+    is_inter: i32,
+) -> (Vec<u8>, [u16; 3]) {
+    let mut c = *cdf;
+    let mut out = vec![0u8; 16];
+    let mut oc = [0u16; 3];
+    let n = unsafe {
+        shim_write_is_inter(
+            c.as_mut_ptr(),
+            seg_ref as i32,
+            seg_gmv as i32,
+            is_inter,
+            out.as_mut_ptr(),
+            oc.as_mut_ptr(),
+        )
+    };
+    out.truncate(n as usize);
+    (out, oc)
 }
 
 /// Reference `write_filter_intra_mode_info` (over the pristine C od_ec + update_cdf).
-pub fn ref_write_filter_intra(use_cdf: &[u16; 3], mode_cdf: &[u16; 6], allowed: bool, use_fi: i32, mode: i32) -> (Vec<u8>, [u16; 3], [u16; 6]) {
-    let mut u = *use_cdf; let mut m = *mode_cdf;
+pub fn ref_write_filter_intra(
+    use_cdf: &[u16; 3],
+    mode_cdf: &[u16; 6],
+    allowed: bool,
+    use_fi: i32,
+    mode: i32,
+) -> (Vec<u8>, [u16; 3], [u16; 6]) {
+    let mut u = *use_cdf;
+    let mut m = *mode_cdf;
     let mut out = vec![0u8; 16];
-    let mut ou = [0u16; 3]; let mut om = [0u16; 6];
-    let n = unsafe { shim_write_filter_intra(u.as_mut_ptr(), m.as_mut_ptr(), allowed as i32, use_fi, mode, out.as_mut_ptr(), ou.as_mut_ptr(), om.as_mut_ptr()) };
+    let mut ou = [0u16; 3];
+    let mut om = [0u16; 6];
+    let n = unsafe {
+        shim_write_filter_intra(
+            u.as_mut_ptr(),
+            m.as_mut_ptr(),
+            allowed as i32,
+            use_fi,
+            mode,
+            out.as_mut_ptr(),
+            ou.as_mut_ptr(),
+            om.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, ou, om)
 }
 
 /// Reference `bsize_to_max_depth` / `bsize_to_tx_size_cat`.
-pub fn ref_bsize_to_max_depth(bsize: i32) -> usize { unsafe { shim_bsize_to_max_depth(bsize) as usize } }
-pub fn ref_bsize_to_tx_size_cat(bsize: i32) -> i32 { unsafe { shim_bsize_to_tx_size_cat(bsize) } }
+pub fn ref_bsize_to_max_depth(bsize: i32) -> usize {
+    unsafe { shim_bsize_to_max_depth(bsize) as usize }
+}
+pub fn ref_bsize_to_tx_size_cat(bsize: i32) -> i32 {
+    unsafe { shim_bsize_to_tx_size_cat(bsize) }
+}
 
 /// Reference `write_selected_tx_size` (over the pristine C od_ec + update_cdf).
-pub fn ref_write_selected_tx_size(cdf: &[u16; 4], bsize: i32, depth: i32, max_depths: i32) -> (Vec<u8>, [u16; 4]) {
+pub fn ref_write_selected_tx_size(
+    cdf: &[u16; 4],
+    bsize: i32,
+    depth: i32,
+    max_depths: i32,
+) -> (Vec<u8>, [u16; 4]) {
     let mut c = *cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 4];
-    let n = unsafe { shim_write_selected_tx_size(c.as_mut_ptr(), bsize, depth, max_depths, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_selected_tx_size(
+            c.as_mut_ptr(),
+            bsize,
+            depth,
+            max_depths,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
@@ -1468,7 +3660,14 @@ pub fn ref_write_angle_delta(cdf: &[u16; 8], angle_delta: i32) -> (Vec<u8>, [u16
     let mut c = *cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 8];
-    let n = unsafe { shim_write_angle_delta(c.as_mut_ptr(), angle_delta, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_angle_delta(
+            c.as_mut_ptr(),
+            angle_delta,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
@@ -1485,11 +3684,27 @@ pub fn ref_get_mv_class(z: i32) -> (i32, i32) {
 }
 
 /// Reference `write_drl_idx` (over the pristine C od_ec + the real av1_drl_ctx).
-pub fn ref_write_drl_idx(drl_cdf: &[u16; 9], mode: i32, ref_mv_idx: i32, ref_mv_count: i32, weight: &[u16; 4]) -> (Vec<u8>, [u16; 9]) {
+pub fn ref_write_drl_idx(
+    drl_cdf: &[u16; 9],
+    mode: i32,
+    ref_mv_idx: i32,
+    ref_mv_count: i32,
+    weight: &[u16; 4],
+) -> (Vec<u8>, [u16; 9]) {
     let mut cdf = *drl_cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 9];
-    let n = unsafe { shim_write_drl_idx(cdf.as_mut_ptr(), mode, ref_mv_idx, ref_mv_count, weight.as_ptr(), out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_drl_idx(
+            cdf.as_mut_ptr(),
+            mode,
+            ref_mv_idx,
+            ref_mv_count,
+            weight.as_ptr(),
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
@@ -1497,11 +3712,33 @@ pub fn ref_write_drl_idx(drl_cdf: &[u16; 9], mode: i32, ref_mv_idx: i32, ref_mv_
 /// Reference `write_inter_mode` (3-symbol cascade over the pristine C od_ec + update_cdf).
 /// Returns coded bytes + the adapted newmv[18]/zeromv[6]/refmv[18] flat CDF arrays.
 #[allow(clippy::type_complexity)]
-pub fn ref_write_inter_mode(newmv: &[u16; 18], zeromv: &[u16; 6], refmv: &[u16; 18], mode: i32, mode_ctx: i32) -> (Vec<u8>, [u16; 18], [u16; 6], [u16; 18]) {
-    let mut nm = *newmv; let mut zm = *zeromv; let mut rm = *refmv;
+pub fn ref_write_inter_mode(
+    newmv: &[u16; 18],
+    zeromv: &[u16; 6],
+    refmv: &[u16; 18],
+    mode: i32,
+    mode_ctx: i32,
+) -> (Vec<u8>, [u16; 18], [u16; 6], [u16; 18]) {
+    let mut nm = *newmv;
+    let mut zm = *zeromv;
+    let mut rm = *refmv;
     let mut out = vec![0u8; 16];
-    let mut onm = [0u16; 18]; let mut ozm = [0u16; 6]; let mut orm = [0u16; 18];
-    let n = unsafe { shim_write_inter_mode(nm.as_mut_ptr(), zm.as_mut_ptr(), rm.as_mut_ptr(), mode, mode_ctx, out.as_mut_ptr(), onm.as_mut_ptr(), ozm.as_mut_ptr(), orm.as_mut_ptr()) };
+    let mut onm = [0u16; 18];
+    let mut ozm = [0u16; 6];
+    let mut orm = [0u16; 18];
+    let n = unsafe {
+        shim_write_inter_mode(
+            nm.as_mut_ptr(),
+            zm.as_mut_ptr(),
+            rm.as_mut_ptr(),
+            mode,
+            mode_ctx,
+            out.as_mut_ptr(),
+            onm.as_mut_ptr(),
+            ozm.as_mut_ptr(),
+            orm.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, onm, ozm, orm)
 }
@@ -1512,18 +3749,42 @@ pub fn ref_size_group_lookup(bsize: i32) -> usize {
 }
 
 /// Reference `write_intra_uv_mode` (transcribed symbol over the pristine C od_ec + update_cdf).
-pub fn ref_write_intra_uv_mode(uv_mode_cdf: &[u16; 15], uv_mode: i32, cfl_allowed: bool) -> (Vec<u8>, [u16; 15]) {
+pub fn ref_write_intra_uv_mode(
+    uv_mode_cdf: &[u16; 15],
+    uv_mode: i32,
+    cfl_allowed: bool,
+) -> (Vec<u8>, [u16; 15]) {
     let mut cdf = *uv_mode_cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 15];
-    let n = unsafe { shim_write_intra_uv_mode(cdf.as_mut_ptr(), uv_mode, cfl_allowed as i32, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_intra_uv_mode(
+            cdf.as_mut_ptr(),
+            uv_mode,
+            cfl_allowed as i32,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
 
 /// Reference `get_y_mode_cdf` context (real intra_mode_context table + block-mode rule).
-pub fn ref_get_y_mode_ctx(above_present: bool, above_mode: i32, left_present: bool, left_mode: i32) -> (usize, usize) {
-    let v = unsafe { shim_get_y_mode_ctx(above_present as i32, above_mode, left_present as i32, left_mode) };
+pub fn ref_get_y_mode_ctx(
+    above_present: bool,
+    above_mode: i32,
+    left_present: bool,
+    left_mode: i32,
+) -> (usize, usize) {
+    let v = unsafe {
+        shim_get_y_mode_ctx(
+            above_present as i32,
+            above_mode,
+            left_present as i32,
+            left_mode,
+        )
+    };
     ((v >> 8) as usize, (v & 0xff) as usize)
 }
 
@@ -1532,20 +3793,42 @@ pub fn ref_write_intra_y_mode_kf(kf_y_cdf: &[u16; 14], mode: i32) -> (Vec<u8>, [
     let mut cdf = *kf_y_cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 14];
-    let n = unsafe { shim_write_intra_y_mode_kf(cdf.as_mut_ptr(), mode, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_intra_y_mode_kf(
+            cdf.as_mut_ptr(),
+            mode,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
 
 /// Reference `write_cfl_alphas` (transcribed over the pristine C od_ec + update_cdf).
 /// Returns coded bytes, the adapted sign CDF (9), and the adapted alpha CDFs (6x17 flat).
-pub fn ref_write_cfl_alphas(cfl_sign_cdf: &[u16; 9], cfl_alpha_cdf: &[u16; 102], idx: i32, joint_sign: i32) -> (Vec<u8>, [u16; 9], [u16; 102]) {
+pub fn ref_write_cfl_alphas(
+    cfl_sign_cdf: &[u16; 9],
+    cfl_alpha_cdf: &[u16; 102],
+    idx: i32,
+    joint_sign: i32,
+) -> (Vec<u8>, [u16; 9], [u16; 102]) {
     let mut sc = *cfl_sign_cdf;
     let mut ac = *cfl_alpha_cdf;
     let mut out = vec![0u8; 16];
     let mut osc = [0u16; 9];
     let mut oac = [0u16; 102];
-    let n = unsafe { shim_write_cfl_alphas(sc.as_mut_ptr(), ac.as_mut_ptr(), idx, joint_sign, out.as_mut_ptr(), osc.as_mut_ptr(), oac.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_cfl_alphas(
+            sc.as_mut_ptr(),
+            ac.as_mut_ptr(),
+            idx,
+            joint_sign,
+            out.as_mut_ptr(),
+            osc.as_mut_ptr(),
+            oac.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, osc, oac)
 }
@@ -1555,7 +3838,14 @@ pub fn ref_write_delta_lflevel(delta_lf_cdf: &[u16; 5], delta_lflevel: i32) -> (
     let mut cdf = *delta_lf_cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 5];
-    let n = unsafe { shim_write_delta_lflevel(cdf.as_mut_ptr(), delta_lflevel, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_delta_lflevel(
+            cdf.as_mut_ptr(),
+            delta_lflevel,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
@@ -1565,41 +3855,94 @@ pub fn ref_write_delta_qindex(delta_q_cdf: &[u16; 5], delta_qindex: i32) -> (Vec
     let mut cdf = *delta_q_cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 5];
-    let n = unsafe { shim_write_delta_qindex(cdf.as_mut_ptr(), delta_qindex, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_delta_qindex(
+            cdf.as_mut_ptr(),
+            delta_qindex,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
 
 /// Reference `av1_get_skip_txfm_context` (facade over the real static inline).
-pub fn ref_skip_txfm_context(above_present: bool, above_skip: i32, left_present: bool, left_skip: i32) -> i32 {
-    unsafe { shim_skip_txfm_context(above_present as i32, above_skip, left_present as i32, left_skip) }
+pub fn ref_skip_txfm_context(
+    above_present: bool,
+    above_skip: i32,
+    left_present: bool,
+    left_skip: i32,
+) -> i32 {
+    unsafe {
+        shim_skip_txfm_context(
+            above_present as i32,
+            above_skip,
+            left_present as i32,
+            left_skip,
+        )
+    }
 }
 
 /// Reference `write_skip` (transcribed symbol over the pristine C od_ec + update_cdf).
-pub fn ref_write_skip(skip_cdf: &[u16; 3], seg_skip_active: bool, skip_txfm: i32) -> (Vec<u8>, [u16; 3]) {
+pub fn ref_write_skip(
+    skip_cdf: &[u16; 3],
+    seg_skip_active: bool,
+    skip_txfm: i32,
+) -> (Vec<u8>, [u16; 3]) {
     let mut cdf = *skip_cdf;
     let mut out = vec![0u8; 16];
     let mut out_cdf = [0u16; 3];
-    let n = unsafe { shim_write_skip(cdf.as_mut_ptr(), seg_skip_active as i32, skip_txfm, out.as_mut_ptr(), out_cdf.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_skip(
+            cdf.as_mut_ptr(),
+            seg_skip_active as i32,
+            skip_txfm,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     (out, out_cdf)
 }
 
 /// Reference `write_partition` (transcribed body over the pristine C od_ec + update_cdf).
 /// Returns the coded bytes and the adapted partition CDF (`cdf_len+1` meaningful entries).
-pub fn ref_write_partition(partition_cdf: &[u16; 11], cdf_len: i32, p: i32, has_rows: bool, has_cols: bool, bsize: i32) -> (Vec<u8>, [u16; 11]) {
+pub fn ref_write_partition(
+    partition_cdf: &[u16; 11],
+    cdf_len: i32,
+    p: i32,
+    has_rows: bool,
+    has_cols: bool,
+    bsize: i32,
+) -> (Vec<u8>, [u16; 11]) {
     let mut cdf = *partition_cdf;
     let mut out = vec![0u8; 64];
     let mut out_cdf = [0u16; 11];
     let n = unsafe {
-        shim_write_partition(cdf.as_mut_ptr(), cdf_len, p, has_rows as i32, has_cols as i32, bsize, out.as_mut_ptr(), out_cdf.as_mut_ptr())
+        shim_write_partition(
+            cdf.as_mut_ptr(),
+            cdf_len,
+            p,
+            has_rows as i32,
+            has_cols as i32,
+            bsize,
+            out.as_mut_ptr(),
+            out_cdf.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     (out, out_cdf)
 }
 
 /// Reference `partition_plane_context` (facade over the real static inline).
-pub fn ref_partition_plane_context(above: &[i8], left: &[i8], mi_row: i32, mi_col: i32, bsize: i32) -> i32 {
+pub fn ref_partition_plane_context(
+    above: &[i8],
+    left: &[i8],
+    mi_row: i32,
+    mi_col: i32,
+    bsize: i32,
+) -> i32 {
     unsafe { shim_partition_plane_context(above.as_ptr(), left.as_ptr(), mi_row, mi_col, bsize) }
 }
 
@@ -1618,28 +3961,85 @@ pub fn ref_partition_gather_horz(cdf_in: &[u16; 11], bsize: i32) -> [u16; 2] {
 }
 
 /// Reference refresh-frame-context bit.
-pub fn ref_write_refresh_frame_context(reduced: bool, disable_cdf: bool, rfc_disabled: bool) -> Vec<u8> {
+pub fn ref_write_refresh_frame_context(
+    reduced: bool,
+    disable_cdf: bool,
+    rfc_disabled: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 4];
-    let n = unsafe { shim_write_refresh_frame_context(reduced as i32, disable_cdf as i32, rfc_disabled as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_refresh_frame_context(
+            reduced as i32,
+            disable_cdf as i32,
+            rfc_disabled as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference frame-header trailing flags.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_frame_header_trailing_flags(intra_only: bool, ref_mode_select: bool, skip_allowed: bool, skip_flag: bool, might_warp: bool, allow_warp: bool, reduced_tx_set: bool) -> Vec<u8> {
+pub fn ref_write_frame_header_trailing_flags(
+    intra_only: bool,
+    ref_mode_select: bool,
+    skip_allowed: bool,
+    skip_flag: bool,
+    might_warp: bool,
+    allow_warp: bool,
+    reduced_tx_set: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 4];
-    let n = unsafe { shim_write_frame_header_trailing_flags(intra_only as i32, ref_mode_select as i32, skip_allowed as i32, skip_flag as i32, might_warp as i32, allow_warp as i32, reduced_tx_set as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_frame_header_trailing_flags(
+            intra_only as i32,
+            ref_mode_select as i32,
+            skip_allowed as i32,
+            skip_flag as i32,
+            might_warp as i32,
+            allow_warp as i32,
+            reduced_tx_set as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference INTER/S-frame ref signaling (transcribed over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_inter_ref_signaling(enable_order_hint: bool, short_sig: bool, ref_map_idx: &[i32; 7], set_rfc: bool, rtc_reference: &[i32; 7], rtc_ref_idx: &[i32; 7], num_spatial_layers: i32, frame_id_present: bool, frame_id_len: u32, current_frame_id: i32, ref_frame_id: &[i32; 8], diff_len: u32) -> Vec<u8> {
+pub fn ref_write_inter_ref_signaling(
+    enable_order_hint: bool,
+    short_sig: bool,
+    ref_map_idx: &[i32; 7],
+    set_rfc: bool,
+    rtc_reference: &[i32; 7],
+    rtc_ref_idx: &[i32; 7],
+    num_spatial_layers: i32,
+    frame_id_present: bool,
+    frame_id_len: u32,
+    current_frame_id: i32,
+    ref_frame_id: &[i32; 8],
+    diff_len: u32,
+) -> Vec<u8> {
     let mut out = vec![0u8; 64];
     let n = unsafe {
-        shim_write_inter_ref_signaling(enable_order_hint as i32, short_sig as i32, ref_map_idx.as_ptr(), set_rfc as i32, rtc_reference.as_ptr(), rtc_ref_idx.as_ptr(), num_spatial_layers, frame_id_present as i32, frame_id_len as i32, current_frame_id, ref_frame_id.as_ptr(), diff_len as i32, out.as_mut_ptr())
+        shim_write_inter_ref_signaling(
+            enable_order_hint as i32,
+            short_sig as i32,
+            ref_map_idx.as_ptr(),
+            set_rfc as i32,
+            rtc_reference.as_ptr(),
+            rtc_ref_idx.as_ptr(),
+            num_spatial_layers,
+            frame_id_present as i32,
+            frame_id_len as i32,
+            current_frame_id,
+            ref_frame_id.as_ptr(),
+            diff_len as i32,
+            out.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     out
@@ -1647,19 +4047,73 @@ pub fn ref_write_inter_ref_signaling(enable_order_hint: bool, short_sig: bool, r
 
 /// Reference `write_frame_size_with_refs` (transcribed over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_frame_size_with_refs(up_w: i32, up_h: i32, rw: i32, rh: i32, valid: &[i32; 7], ycw: &[i32; 7], ych: &[i32; 7], rrw: &[i32; 7], rrh: &[i32; 7], enable_superres: bool, denom: i32, fs_num_bits_w: u32, fs_num_bits_h: u32, fs_up_w: i32, fs_up_h: i32, fs_scaling_active: bool, fs_rw: i32, fs_rh: i32) -> Vec<u8> {
+pub fn ref_write_frame_size_with_refs(
+    up_w: i32,
+    up_h: i32,
+    rw: i32,
+    rh: i32,
+    valid: &[i32; 7],
+    ycw: &[i32; 7],
+    ych: &[i32; 7],
+    rrw: &[i32; 7],
+    rrh: &[i32; 7],
+    enable_superres: bool,
+    denom: i32,
+    fs_num_bits_w: u32,
+    fs_num_bits_h: u32,
+    fs_up_w: i32,
+    fs_up_h: i32,
+    fs_scaling_active: bool,
+    fs_rw: i32,
+    fs_rh: i32,
+) -> Vec<u8> {
     let mut out = vec![0u8; 64];
     let n = unsafe {
-        shim_write_frame_size_with_refs(up_w, up_h, rw, rh, valid.as_ptr(), ycw.as_ptr(), ych.as_ptr(), rrw.as_ptr(), rrh.as_ptr(), enable_superres as i32, denom, fs_num_bits_w as i32, fs_num_bits_h as i32, fs_up_w, fs_up_h, fs_scaling_active as i32, fs_rw, fs_rh, out.as_mut_ptr())
+        shim_write_frame_size_with_refs(
+            up_w,
+            up_h,
+            rw,
+            rh,
+            valid.as_ptr(),
+            ycw.as_ptr(),
+            ych.as_ptr(),
+            rrw.as_ptr(),
+            rrh.as_ptr(),
+            enable_superres as i32,
+            denom,
+            fs_num_bits_w as i32,
+            fs_num_bits_h as i32,
+            fs_up_w,
+            fs_up_h,
+            fs_scaling_active as i32,
+            fs_rw,
+            fs_rh,
+            out.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `write_uncompressed_header_obu` prefix (transcribed over the real aom_wb).
-pub fn ref_write_frame_header_prefix(t: &[i64; 34], op_dmpp: &[i64; 32], op_idc: &[i64; 32], brt: &[i64; 32], ref_oh: &[i64; 8]) -> Vec<u8> {
+pub fn ref_write_frame_header_prefix(
+    t: &[i64; 34],
+    op_dmpp: &[i64; 32],
+    op_idc: &[i64; 32],
+    brt: &[i64; 32],
+    ref_oh: &[i64; 8],
+) -> Vec<u8> {
     let mut out = vec![0u8; 256];
-    let n = unsafe { shim_write_frame_header_prefix(t.as_ptr(), op_dmpp.as_ptr(), op_idc.as_ptr(), brt.as_ptr(), ref_oh.as_ptr(), out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_frame_header_prefix(
+            t.as_ptr(),
+            op_dmpp.as_ptr(),
+            op_idc.as_ptr(),
+            brt.as_ptr(),
+            ref_oh.as_ptr(),
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
@@ -1668,10 +4122,37 @@ pub fn ref_write_frame_header_prefix(t: &[i64; 34], op_dmpp: &[i64; 32], op_idc:
 /// `SequenceHeader` populated from the packed params (direct oracle, not a
 /// transcription).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_sequence_header_obu(top: &[i64; 16], sh: &[i64; 24], cc: &[i64; 11], idc: &[i64; 32], level: &[i64; 32], tier: &[i64; 32], dmpp: &[i64; 32], dispp: &[i64; 32], decdelay: &[i64; 32], encdelay: &[i64; 32], lowdelay: &[i64; 32], initdelay: &[i64; 32]) -> Vec<u8> {
+pub fn ref_write_sequence_header_obu(
+    top: &[i64; 16],
+    sh: &[i64; 24],
+    cc: &[i64; 11],
+    idc: &[i64; 32],
+    level: &[i64; 32],
+    tier: &[i64; 32],
+    dmpp: &[i64; 32],
+    dispp: &[i64; 32],
+    decdelay: &[i64; 32],
+    encdelay: &[i64; 32],
+    lowdelay: &[i64; 32],
+    initdelay: &[i64; 32],
+) -> Vec<u8> {
     let mut out = vec![0u8; 4096];
     let n = unsafe {
-        shim_write_sequence_header_obu(top.as_ptr(), sh.as_ptr(), cc.as_ptr(), idc.as_ptr(), level.as_ptr(), tier.as_ptr(), dmpp.as_ptr(), dispp.as_ptr(), decdelay.as_ptr(), encdelay.as_ptr(), lowdelay.as_ptr(), initdelay.as_ptr(), out.as_mut_ptr())
+        shim_write_sequence_header_obu(
+            top.as_ptr(),
+            sh.as_ptr(),
+            cc.as_ptr(),
+            idc.as_ptr(),
+            level.as_ptr(),
+            tier.as_ptr(),
+            dmpp.as_ptr(),
+            dispp.as_ptr(),
+            decdelay.as_ptr(),
+            encdelay.as_ptr(),
+            lowdelay.as_ptr(),
+            initdelay.as_ptr(),
+            out.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     out
@@ -1686,25 +4167,64 @@ pub fn ref_wb_uvlc(v: u32) -> Vec<u8> {
 }
 
 /// Reference `write_timing_info_header`.
-pub fn ref_write_timing_info(disp_tick: u32, time_scale: u32, equal_pic: bool, ticks_per_pic: u32) -> Vec<u8> {
+pub fn ref_write_timing_info(
+    disp_tick: u32,
+    time_scale: u32,
+    equal_pic: bool,
+    ticks_per_pic: u32,
+) -> Vec<u8> {
     let mut out = vec![0u8; 32];
-    let n = unsafe { shim_write_timing_info(disp_tick, time_scale, equal_pic as i32, ticks_per_pic, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_timing_info(
+            disp_tick,
+            time_scale,
+            equal_pic as i32,
+            ticks_per_pic,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `write_decoder_model_info`.
-pub fn ref_write_decoder_model_info(ed_delay_len: i32, dec_tick: u32, rem_time_len: i32, pres_time_len: i32) -> Vec<u8> {
+pub fn ref_write_decoder_model_info(
+    ed_delay_len: i32,
+    dec_tick: u32,
+    rem_time_len: i32,
+    pres_time_len: i32,
+) -> Vec<u8> {
     let mut out = vec![0u8; 16];
-    let n = unsafe { shim_write_decoder_model_info(ed_delay_len, dec_tick, rem_time_len, pres_time_len, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_decoder_model_info(
+            ed_delay_len,
+            dec_tick,
+            rem_time_len,
+            pres_time_len,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `write_dec_model_op_parameters`.
-pub fn ref_write_dec_model_op(dec_delay: u32, enc_delay: u32, low_delay: bool, delay_len: u32) -> Vec<u8> {
+pub fn ref_write_dec_model_op(
+    dec_delay: u32,
+    enc_delay: u32,
+    low_delay: bool,
+    delay_len: u32,
+) -> Vec<u8> {
     let mut out = vec![0u8; 16];
-    let n = unsafe { shim_write_dec_model_op(dec_delay, enc_delay, low_delay as i32, delay_len as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_dec_model_op(
+            dec_delay,
+            enc_delay,
+            low_delay as i32,
+            delay_len as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
@@ -1721,7 +4241,8 @@ pub fn ref_write_color_config(c: &[i32; 11]) -> Vec<u8> {
 /// Reference `write_ext_tile_info` after `pre_bits` zero bits (transcribed over the real aom_wb).
 pub fn ref_write_ext_tile_info(pre_bits: i32, rows: usize, cols: usize) -> Vec<u8> {
     let mut out = vec![0u8; 32];
-    let n = unsafe { shim_write_ext_tile_info(pre_bits, rows as i32, cols as i32, out.as_mut_ptr()) };
+    let n =
+        unsafe { shim_write_ext_tile_info(pre_bits, rows as i32, cols as i32, out.as_mut_ptr()) };
     out.truncate(n as usize);
     out
 }
@@ -1736,9 +4257,22 @@ pub fn ref_write_sequence_header(s: &[i32; 24]) -> Vec<u8> {
 }
 
 /// Reference `write_global_motion` (transcribed control flow over the real aom_wb).
-pub fn ref_write_global_motion(wmtype: &[i32; 7], wmmat: &[i32; 42], refmat: &[i32; 42], allow_hp: bool) -> Vec<u8> {
+pub fn ref_write_global_motion(
+    wmtype: &[i32; 7],
+    wmmat: &[i32; 42],
+    refmat: &[i32; 42],
+    allow_hp: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 512];
-    let n = unsafe { shim_write_global_motion(wmtype.as_ptr(), wmmat.as_ptr(), refmat.as_ptr(), allow_hp as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_global_motion(
+            wmtype.as_ptr(),
+            wmmat.as_ptr(),
+            refmat.as_ptr(),
+            allow_hp as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
@@ -1755,18 +4289,56 @@ pub fn ref_wb_signed_subexpfin(n: i32, k: i32, ref_: i32, v: i32) -> Vec<u8> {
 /// `s` packs the 24 scalars in the order the shim reads them; the point/coeff arrays
 /// are passed flat.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_film_grain_params(s: &[i32; 24], spy: &[i32; 28], spcb: &[i32; 20], spcr: &[i32; 20], ary: &[i32; 24], arcb: &[i32; 25], arcr: &[i32; 25]) -> Vec<u8> {
+pub fn ref_write_film_grain_params(
+    s: &[i32; 24],
+    spy: &[i32; 28],
+    spcb: &[i32; 20],
+    spcr: &[i32; 20],
+    ary: &[i32; 24],
+    arcb: &[i32; 25],
+    arcr: &[i32; 25],
+) -> Vec<u8> {
     let mut out = vec![0u8; 256];
-    let n = unsafe { shim_write_film_grain_params(s.as_ptr(), spy.as_ptr(), spcb.as_ptr(), spcr.as_ptr(), ary.as_ptr(), arcb.as_ptr(), arcr.as_ptr(), out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_film_grain_params(
+            s.as_ptr(),
+            spy.as_ptr(),
+            spcb.as_ptr(),
+            spcr.as_ptr(),
+            ary.as_ptr(),
+            arcb.as_ptr(),
+            arcr.as_ptr(),
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `write_delta_q_params` (transcribed control flow over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_delta_q_params(base_qindex: i32, delta_q_present: bool, delta_q_res: i32, allow_intrabc: bool, delta_lf_present: bool, delta_lf_res: i32, delta_lf_multi: bool) -> Vec<u8> {
+pub fn ref_write_delta_q_params(
+    base_qindex: i32,
+    delta_q_present: bool,
+    delta_q_res: i32,
+    allow_intrabc: bool,
+    delta_lf_present: bool,
+    delta_lf_res: i32,
+    delta_lf_multi: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 8];
-    let n = unsafe { shim_write_delta_q_params(base_qindex, delta_q_present as i32, delta_q_res, allow_intrabc as i32, delta_lf_present as i32, delta_lf_res, delta_lf_multi as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_delta_q_params(
+            base_qindex,
+            delta_q_present as i32,
+            delta_q_res,
+            allow_intrabc as i32,
+            delta_lf_present as i32,
+            delta_lf_res,
+            delta_lf_multi as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
@@ -1774,44 +4346,138 @@ pub fn ref_write_delta_q_params(base_qindex: i32, delta_q_present: bool, delta_q
 /// Reference `write_tx_mode`.
 pub fn ref_write_tx_mode(coded_lossless: bool, tx_mode_select: bool) -> Vec<u8> {
     let mut out = vec![0u8; 4];
-    let n = unsafe { shim_write_tx_mode(coded_lossless as i32, tx_mode_select as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_tx_mode(
+            coded_lossless as i32,
+            tx_mode_select as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `encode_restoration_mode` (transcribed control flow over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_encode_restoration_mode(enable_restoration: bool, allow_intrabc: bool, frame_restoration_type: &[i32; 3], sb_size_128: bool, restoration_unit_size: &[i32; 3], ssx: i32, ssy: i32, num_planes: usize) -> Vec<u8> {
+pub fn ref_encode_restoration_mode(
+    enable_restoration: bool,
+    allow_intrabc: bool,
+    frame_restoration_type: &[i32; 3],
+    sb_size_128: bool,
+    restoration_unit_size: &[i32; 3],
+    ssx: i32,
+    ssy: i32,
+    num_planes: usize,
+) -> Vec<u8> {
     let mut out = vec![0u8; 16];
-    let n = unsafe { shim_encode_restoration_mode(enable_restoration as i32, allow_intrabc as i32, frame_restoration_type.as_ptr(), sb_size_128 as i32, restoration_unit_size.as_ptr(), ssx, ssy, num_planes as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_encode_restoration_mode(
+            enable_restoration as i32,
+            allow_intrabc as i32,
+            frame_restoration_type.as_ptr(),
+            sb_size_128 as i32,
+            restoration_unit_size.as_ptr(),
+            ssx,
+            ssy,
+            num_planes as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `write_tile_group_header` (transcribed over the real aom_wb).
-pub fn ref_write_tile_group_header(start_tile: i32, end_tile: i32, tiles_log2: i32, present_flag: bool) -> Vec<u8> {
+pub fn ref_write_tile_group_header(
+    start_tile: i32,
+    end_tile: i32,
+    tiles_log2: i32,
+    present_flag: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 8];
-    let n = unsafe { shim_write_tile_group_header(start_tile, end_tile, tiles_log2, present_flag as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_tile_group_header(
+            start_tile,
+            end_tile,
+            tiles_log2,
+            present_flag as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `write_tile_info` (transcribed control flow over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_tile_info(mi_cols: i32, mi_rows: i32, mib_size_log2: u32, uniform_spacing: bool, log2_cols: i32, min_log2_cols: i32, max_log2_cols: i32, log2_rows: i32, min_log2_rows: i32, max_log2_rows: i32, cols: usize, rows: usize, col_start_sb: &[i32; 65], row_start_sb: &[i32; 65], max_width_sb: i32, max_height_sb: i32) -> Vec<u8> {
+pub fn ref_write_tile_info(
+    mi_cols: i32,
+    mi_rows: i32,
+    mib_size_log2: u32,
+    uniform_spacing: bool,
+    log2_cols: i32,
+    min_log2_cols: i32,
+    max_log2_cols: i32,
+    log2_rows: i32,
+    min_log2_rows: i32,
+    max_log2_rows: i32,
+    cols: usize,
+    rows: usize,
+    col_start_sb: &[i32; 65],
+    row_start_sb: &[i32; 65],
+    max_width_sb: i32,
+    max_height_sb: i32,
+) -> Vec<u8> {
     let mut out = vec![0u8; 128];
     let n = unsafe {
-        shim_write_tile_info(mi_cols, mi_rows, mib_size_log2 as i32, uniform_spacing as i32, log2_cols, min_log2_cols, max_log2_cols, log2_rows, min_log2_rows, max_log2_rows, cols as i32, rows as i32, col_start_sb.as_ptr(), row_start_sb.as_ptr(), max_width_sb, max_height_sb, out.as_mut_ptr())
+        shim_write_tile_info(
+            mi_cols,
+            mi_rows,
+            mib_size_log2 as i32,
+            uniform_spacing as i32,
+            log2_cols,
+            min_log2_cols,
+            max_log2_cols,
+            log2_rows,
+            min_log2_rows,
+            max_log2_rows,
+            cols as i32,
+            rows as i32,
+            col_start_sb.as_ptr(),
+            row_start_sb.as_ptr(),
+            max_width_sb,
+            max_height_sb,
+            out.as_mut_ptr(),
+        )
     };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `encode_segmentation` (transcribed control flow over the real aom_wb + seg tables).
-pub fn ref_encode_segmentation(enabled: bool, has_primary_ref: bool, update_map: bool, temporal_update: bool, update_data: bool, feature_mask: &[u32; 8], feature_data: &[[i32; 8]; 8]) -> Vec<u8> {
+pub fn ref_encode_segmentation(
+    enabled: bool,
+    has_primary_ref: bool,
+    update_map: bool,
+    temporal_update: bool,
+    update_data: bool,
+    feature_mask: &[u32; 8],
+    feature_data: &[[i32; 8]; 8],
+) -> Vec<u8> {
     let flat: Vec<i32> = feature_data.iter().flatten().copied().collect();
     let mut out = vec![0u8; 64];
-    let n = unsafe { shim_encode_segmentation(enabled as i32, has_primary_ref as i32, update_map as i32, temporal_update as i32, update_data as i32, feature_mask.as_ptr(), flat.as_ptr(), out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_encode_segmentation(
+            enabled as i32,
+            has_primary_ref as i32,
+            update_map as i32,
+            temporal_update as i32,
+            update_data as i32,
+            feature_mask.as_ptr(),
+            flat.as_ptr(),
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
@@ -1842,44 +4508,162 @@ pub fn ref_write_render_size(scaling_active: bool, rw: i32, rh: i32) -> Vec<u8> 
 
 /// Reference `write_frame_size`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_frame_size(frame_size_override: bool, num_bits_width: u32, num_bits_height: u32, up_w: i32, up_h: i32, enable_superres: bool, denom: i32, scaling_active: bool, rw: i32, rh: i32) -> Vec<u8> {
+pub fn ref_write_frame_size(
+    frame_size_override: bool,
+    num_bits_width: u32,
+    num_bits_height: u32,
+    up_w: i32,
+    up_h: i32,
+    enable_superres: bool,
+    denom: i32,
+    scaling_active: bool,
+    rw: i32,
+    rh: i32,
+) -> Vec<u8> {
     let mut out = vec![0u8; 16];
-    let n = unsafe { shim_write_frame_size(frame_size_override as i32, num_bits_width as i32, num_bits_height as i32, up_w, up_h, enable_superres as i32, denom, scaling_active as i32, rw, rh, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_frame_size(
+            frame_size_override as i32,
+            num_bits_width as i32,
+            num_bits_height as i32,
+            up_w,
+            up_h,
+            enable_superres as i32,
+            denom,
+            scaling_active as i32,
+            rw,
+            rh,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `encode_cdef` (transcribed control flow over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_encode_cdef(enable_cdef: bool, allow_intrabc: bool, damping: i32, cdef_bits: i32, nb: usize, y: &[i32; 8], uv: &[i32; 8], num_planes: usize) -> Vec<u8> {
+pub fn ref_encode_cdef(
+    enable_cdef: bool,
+    allow_intrabc: bool,
+    damping: i32,
+    cdef_bits: i32,
+    nb: usize,
+    y: &[i32; 8],
+    uv: &[i32; 8],
+    num_planes: usize,
+) -> Vec<u8> {
     let mut out = vec![0u8; 32];
-    let n = unsafe { shim_encode_cdef(enable_cdef as i32, allow_intrabc as i32, damping, cdef_bits, nb as i32, y.as_ptr(), uv.as_ptr(), num_planes as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_encode_cdef(
+            enable_cdef as i32,
+            allow_intrabc as i32,
+            damping,
+            cdef_bits,
+            nb as i32,
+            y.as_ptr(),
+            uv.as_ptr(),
+            num_planes as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `encode_loopfilter` (transcribed control flow over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_encode_loopfilter(allow_intrabc: bool, filter_level: [i32; 2], flu: i32, flv: i32, sharpness: i32, mode_ref_enabled: bool, mode_ref_update: bool, ref_deltas: &[i8; 8], mode_deltas: &[i8; 2], last_ref: &[i8; 8], last_mode: &[i8; 2], num_planes: usize) -> Vec<u8> {
+pub fn ref_encode_loopfilter(
+    allow_intrabc: bool,
+    filter_level: [i32; 2],
+    flu: i32,
+    flv: i32,
+    sharpness: i32,
+    mode_ref_enabled: bool,
+    mode_ref_update: bool,
+    ref_deltas: &[i8; 8],
+    mode_deltas: &[i8; 2],
+    last_ref: &[i8; 8],
+    last_mode: &[i8; 2],
+    num_planes: usize,
+) -> Vec<u8> {
     let mut out = vec![0u8; 32];
-    let n = unsafe { shim_encode_loopfilter(allow_intrabc as i32, filter_level[0], filter_level[1], flu, flv, sharpness, mode_ref_enabled as i32, mode_ref_update as i32, ref_deltas.as_ptr(), mode_deltas.as_ptr(), last_ref.as_ptr(), last_mode.as_ptr(), num_planes as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_encode_loopfilter(
+            allow_intrabc as i32,
+            filter_level[0],
+            filter_level[1],
+            flu,
+            flv,
+            sharpness,
+            mode_ref_enabled as i32,
+            mode_ref_update as i32,
+            ref_deltas.as_ptr(),
+            mode_deltas.as_ptr(),
+            last_ref.as_ptr(),
+            last_mode.as_ptr(),
+            num_planes as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `encode_quantization` (transcribed control flow over the real aom_wb).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_encode_quantization(base_qindex: i32, y_dc: i32, u_dc: i32, u_ac: i32, v_dc: i32, v_ac: i32, using_qm: bool, qm_y: i32, qm_u: i32, qm_v: i32, num_planes: usize, separate_uv: bool) -> Vec<u8> {
+pub fn ref_encode_quantization(
+    base_qindex: i32,
+    y_dc: i32,
+    u_dc: i32,
+    u_ac: i32,
+    v_dc: i32,
+    v_ac: i32,
+    using_qm: bool,
+    qm_y: i32,
+    qm_u: i32,
+    qm_v: i32,
+    num_planes: usize,
+    separate_uv: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 32];
-    let n = unsafe { shim_encode_quantization(base_qindex, y_dc, u_dc, u_ac, v_dc, v_ac, using_qm as i32, qm_y, qm_u, qm_v, num_planes as i32, separate_uv as i32, out.as_mut_ptr()) };
+    let n = unsafe {
+        shim_encode_quantization(
+            base_qindex,
+            y_dc,
+            u_dc,
+            u_ac,
+            v_dc,
+            v_ac,
+            using_qm as i32,
+            qm_y,
+            qm_u,
+            qm_v,
+            num_planes as i32,
+            separate_uv as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(n as usize);
     out
 }
 
 /// Reference `av1_write_obu_header` byte output (transcribed shim). Returns the header bytes.
-pub fn ref_write_obu_header(obu_type: u32, has_nonzero_op: bool, is_layer_specific: bool, obu_extension: u8) -> Vec<u8> {
+pub fn ref_write_obu_header(
+    obu_type: u32,
+    has_nonzero_op: bool,
+    is_layer_specific: bool,
+    obu_extension: u8,
+) -> Vec<u8> {
     let mut dst = [0u8; 2];
-    let n = unsafe { shim_write_obu_header(obu_type as i32, has_nonzero_op as i32, is_layer_specific as i32, obu_extension as i32, dst.as_mut_ptr()) };
+    let n = unsafe {
+        shim_write_obu_header(
+            obu_type as i32,
+            has_nonzero_op as i32,
+            is_layer_specific as i32,
+            obu_extension as i32,
+            dst.as_mut_ptr(),
+        )
+    };
     dst[..n as usize].to_vec()
 }
 
@@ -1906,7 +4690,11 @@ pub fn ref_uleb_decode(buffer: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut length = 0usize;
     let rc = unsafe { aom_uleb_decode(buffer.as_ptr(), buffer.len(), &mut value, &mut length) };
-    if rc == 0 { Some((value, length)) } else { None }
+    if rc == 0 {
+        Some((value, length))
+    } else {
+        None
+    }
 }
 
 /// Reference `aom_write_bit_buffer`: apply a sequence of literal ops (kind 0 =
@@ -1915,7 +4703,15 @@ pub fn ref_uleb_decode(buffer: &[u8]) -> Option<(u64, usize)> {
 pub fn ref_wb_apply(data: &[u32], bits: &[i32], kind: &[i32]) -> Vec<u8> {
     let n = data.len();
     let mut out = vec![0u8; 1 << 16];
-    let written = unsafe { shim_wb_apply(data.as_ptr(), bits.as_ptr(), kind.as_ptr(), n as i32, out.as_mut_ptr()) };
+    let written = unsafe {
+        shim_wb_apply(
+            data.as_ptr(),
+            bits.as_ptr(),
+            kind.as_ptr(),
+            n as i32,
+            out.as_mut_ptr(),
+        )
+    };
     out.truncate(written as usize);
     out
 }
@@ -1932,7 +4728,9 @@ pub fn ref_sum_squares_i16(src: &[i16]) -> u64 {
 
 /// Reference `aom_sum_squares_2d_i16_c` (2-D strided residual energy).
 pub fn ref_sum_squares_2d_i16(src: &[i16], src_stride: usize, width: usize, height: usize) -> u64 {
-    unsafe { aom_sum_squares_2d_i16_c(src.as_ptr(), src_stride as i32, width as i32, height as i32) }
+    unsafe {
+        aom_sum_squares_2d_i16_c(src.as_ptr(), src_stride as i32, width as i32, height as i32)
+    }
 }
 
 /// Reference `av1_model_rd_from_var_lapndz` (Laplacian RD model). Returns (rate, dist).
@@ -1945,35 +4743,106 @@ pub fn ref_model_rd_from_var_lapndz(var: i64, n_log2: u32, qstep: u32) -> (i32, 
 
 /// Reference `av1_block_error_qm` (QM-weighted transform-domain distortion; the
 /// static inline is transcribed in sadvar_shim.c). Returns (error, ssz).
-pub fn ref_block_error_qm(coeff: &[i32], dqcoeff: &[i32], qmatrix: &[u8], scan: &[i16], bd: u8) -> (i64, i64) {
+pub fn ref_block_error_qm(
+    coeff: &[i32],
+    dqcoeff: &[i32],
+    qmatrix: &[u8],
+    scan: &[i16],
+    bd: u8,
+) -> (i64, i64) {
     let mut ssz = 0i64;
-    let err = unsafe { shim_block_error_qm(coeff.as_ptr(), dqcoeff.as_ptr(), coeff.len() as isize, qmatrix.as_ptr(), scan.as_ptr(), &mut ssz, bd as i32) };
+    let err = unsafe {
+        shim_block_error_qm(
+            coeff.as_ptr(),
+            dqcoeff.as_ptr(),
+            coeff.len() as isize,
+            qmatrix.as_ptr(),
+            scan.as_ptr(),
+            &mut ssz,
+            bd as i32,
+        )
+    };
     (err, ssz)
 }
 
 /// Reference `aom_subtract_block_c` (residual = src - pred). Writes `diff`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_subtract_block(rows: usize, cols: usize, diff: &mut [i16], diff_stride: usize, src: &[u8], src_stride: usize, pred: &[u8], pred_stride: usize) {
-    unsafe { aom_subtract_block_c(rows as i32, cols as i32, diff.as_mut_ptr(), diff_stride as isize, src.as_ptr(), src_stride as isize, pred.as_ptr(), pred_stride as isize) }
+pub fn ref_subtract_block(
+    rows: usize,
+    cols: usize,
+    diff: &mut [i16],
+    diff_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    pred: &[u8],
+    pred_stride: usize,
+) {
+    unsafe {
+        aom_subtract_block_c(
+            rows as i32,
+            cols as i32,
+            diff.as_mut_ptr(),
+            diff_stride as isize,
+            src.as_ptr(),
+            src_stride as isize,
+            pred.as_ptr(),
+            pred_stride as isize,
+        )
+    }
 }
 
 /// Reference `aom_highbd_subtract_block_c` (residual = src - pred, u16).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_highbd_subtract_block(rows: usize, cols: usize, diff: &mut [i16], diff_stride: usize, src: &[u16], src_stride: usize, pred: &[u16], pred_stride: usize) {
-    unsafe { shim_highbd_subtract_block(rows as i32, cols as i32, diff.as_mut_ptr(), diff_stride as i32, src.as_ptr(), src_stride as i32, pred.as_ptr(), pred_stride as i32) }
+pub fn ref_highbd_subtract_block(
+    rows: usize,
+    cols: usize,
+    diff: &mut [i16],
+    diff_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    pred: &[u16],
+    pred_stride: usize,
+) {
+    unsafe {
+        shim_highbd_subtract_block(
+            rows as i32,
+            cols as i32,
+            diff.as_mut_ptr(),
+            diff_stride as i32,
+            src.as_ptr(),
+            src_stride as i32,
+            pred.as_ptr(),
+            pred_stride as i32,
+        )
+    }
 }
 
 /// Reference `av1_block_error_c` (transform-domain distortion). Returns (error, ssz).
 pub fn ref_block_error(coeff: &[i32], dqcoeff: &[i32]) -> (i64, i64) {
     let mut ssz = 0i64;
-    let err = unsafe { av1_block_error_c(coeff.as_ptr(), dqcoeff.as_ptr(), coeff.len() as isize, &mut ssz) };
+    let err = unsafe {
+        av1_block_error_c(
+            coeff.as_ptr(),
+            dqcoeff.as_ptr(),
+            coeff.len() as isize,
+            &mut ssz,
+        )
+    };
     (err, ssz)
 }
 
 /// Reference `av1_highbd_block_error_c` (highbd transform-domain distortion).
 pub fn ref_highbd_block_error(coeff: &[i32], dqcoeff: &[i32], bd: u8) -> (i64, i64) {
     let mut ssz = 0i64;
-    let err = unsafe { av1_highbd_block_error_c(coeff.as_ptr(), dqcoeff.as_ptr(), coeff.len() as isize, &mut ssz, bd as i32) };
+    let err = unsafe {
+        av1_highbd_block_error_c(
+            coeff.as_ptr(),
+            dqcoeff.as_ptr(),
+            coeff.len() as isize,
+            &mut ssz,
+            bd as i32,
+        )
+    };
     (err, ssz)
 }
 
@@ -1984,8 +4853,30 @@ pub fn ref_obmc_sad(idx: usize, r: &[u8], rs: usize, ws: &[i32], m: &[i32]) -> u
 
 /// Reference `aom_masked_sad<W>x<H>_c` (wedge / diff-weighted compound RD).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_masked_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize, sp: &[u8], m: &[u8], ms: usize, inv: bool) -> u32 {
-    unsafe { shim_masked_sad(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32, sp.as_ptr(), m.as_ptr(), ms as i32, inv as i32) }
+pub fn ref_masked_sad(
+    idx: usize,
+    s: &[u8],
+    ss: usize,
+    r: &[u8],
+    rs: usize,
+    sp: &[u8],
+    m: &[u8],
+    ms: usize,
+    inv: bool,
+) -> u32 {
+    unsafe {
+        shim_masked_sad(
+            idx as i32,
+            s.as_ptr(),
+            ss as i32,
+            r.as_ptr(),
+            rs as i32,
+            sp.as_ptr(),
+            m.as_ptr(),
+            ms as i32,
+            inv as i32,
+        )
+    }
 }
 
 /// Reference `aom_sad<W>x<H>_avg_c` (compound-prediction SAD) for size index `idx`.
@@ -1994,7 +4885,16 @@ pub fn ref_masked_sad(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize, sp: 
 /// (a null fn-pointer until `aom_dsp_rtcd()` runs), so init RTCD first.
 pub fn ref_sad_avg(idx: usize, s: &[u8], ss: usize, r: &[u8], rs: usize, sp: &[u8]) -> u32 {
     ref_init();
-    unsafe { shim_sad_avg(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32, sp.as_ptr()) }
+    unsafe {
+        shim_sad_avg(
+            idx as i32,
+            s.as_ptr(),
+            ss as i32,
+            r.as_ptr(),
+            rs as i32,
+            sp.as_ptr(),
+        )
+    }
 }
 
 extern "C" {
@@ -2018,16 +4918,42 @@ pub fn prod_sad(w: usize, s: &[u8], ss: usize, r: &[u8], rs: usize) -> u32 {
 /// Reference `aom_variance<W>x<H>_c`; returns (variance, sse).
 pub fn ref_variance(idx: usize, a: &[u8], as_: usize, b: &[u8], bs: usize) -> (u32, u32) {
     let mut sse = 0u32;
-    let v = unsafe { shim_variance(idx as i32, a.as_ptr(), as_ as i32, b.as_ptr(), bs as i32, &mut sse) };
+    let v = unsafe {
+        shim_variance(
+            idx as i32,
+            a.as_ptr(),
+            as_ as i32,
+            b.as_ptr(),
+            bs as i32,
+            &mut sse,
+        )
+    };
     (v, sse)
 }
 
 /// Reference `aom_sub_pixel_variance<W>x<H>_c`; returns (variance, sse).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_subpel_var(idx: usize, a: &[u8], as_: usize, xo: usize, yo: usize, b: &[u8], bs: usize) -> (u32, u32) {
+pub fn ref_subpel_var(
+    idx: usize,
+    a: &[u8],
+    as_: usize,
+    xo: usize,
+    yo: usize,
+    b: &[u8],
+    bs: usize,
+) -> (u32, u32) {
     let mut sse = 0u32;
     let v = unsafe {
-        shim_subpel_var(idx as i32, a.as_ptr(), as_ as i32, xo as i32, yo as i32, b.as_ptr(), bs as i32, &mut sse)
+        shim_subpel_var(
+            idx as i32,
+            a.as_ptr(),
+            as_ as i32,
+            xo as i32,
+            yo as i32,
+            b.as_ptr(),
+            bs as i32,
+            &mut sse,
+        )
     };
     (v, sse)
 }
@@ -2035,11 +4961,46 @@ pub fn ref_subpel_var(idx: usize, a: &[u8], as_: usize, xo: usize, yo: usize, b:
 // hbd_sadvar_shim.c — highbd SAD / variance (CONVERT_TO_BYTEPTR internally).
 extern "C" {
     fn shim_hbd_sad(i: i32, s: *const u16, ss: i32, r: *const u16, rs: i32) -> u32;
-    fn shim_hbd_var(i: i32, bd: i32, a: *const u16, as_: i32, b: *const u16, bs: i32, sse: *mut u32) -> u32;
-    fn shim_hbd_subpel_var(i: i32, bd: i32, a: *const u16, as_: i32, xo: i32, yo: i32, b: *const u16, bs: i32, sse: *mut u32) -> u32;
-    fn shim_hbd_sad_avg(i: i32, s: *const u16, ss: i32, r: *const u16, rs: i32, p: *const u16) -> u32;
+    fn shim_hbd_var(
+        i: i32,
+        bd: i32,
+        a: *const u16,
+        as_: i32,
+        b: *const u16,
+        bs: i32,
+        sse: *mut u32,
+    ) -> u32;
+    fn shim_hbd_subpel_var(
+        i: i32,
+        bd: i32,
+        a: *const u16,
+        as_: i32,
+        xo: i32,
+        yo: i32,
+        b: *const u16,
+        bs: i32,
+        sse: *mut u32,
+    ) -> u32;
+    fn shim_hbd_sad_avg(
+        i: i32,
+        s: *const u16,
+        ss: i32,
+        r: *const u16,
+        rs: i32,
+        p: *const u16,
+    ) -> u32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_hbd_masked_sad(i: i32, s: *const u16, ss: i32, r: *const u16, rs: i32, p: *const u16, m: *const u8, ms: i32, inv: i32) -> u32;
+    fn shim_hbd_masked_sad(
+        i: i32,
+        s: *const u16,
+        ss: i32,
+        r: *const u16,
+        rs: i32,
+        p: *const u16,
+        m: *const u8,
+        ms: i32,
+        inv: i32,
+    ) -> u32;
     fn shim_hbd_obmc_sad(i: i32, r: *const u16, rs: i32, ws: *const i32, m: *const i32) -> u32;
 }
 
@@ -2050,15 +5011,46 @@ pub fn ref_hbd_obmc_sad(idx: usize, r: &[u16], rs: usize, ws: &[i32], m: &[i32])
 
 /// Reference `aom_highbd_masked_sad<W>x<H>_c` (highbd wedge / compound SAD).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_hbd_masked_sad(idx: usize, s: &[u16], ss: usize, r: &[u16], rs: usize, p: &[u16], m: &[u8], ms: usize, inv: bool) -> u32 {
-    unsafe { shim_hbd_masked_sad(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32, p.as_ptr(), m.as_ptr(), ms as i32, inv as i32) }
+pub fn ref_hbd_masked_sad(
+    idx: usize,
+    s: &[u16],
+    ss: usize,
+    r: &[u16],
+    rs: usize,
+    p: &[u16],
+    m: &[u8],
+    ms: usize,
+    inv: bool,
+) -> u32 {
+    unsafe {
+        shim_hbd_masked_sad(
+            idx as i32,
+            s.as_ptr(),
+            ss as i32,
+            r.as_ptr(),
+            rs as i32,
+            p.as_ptr(),
+            m.as_ptr(),
+            ms as i32,
+            inv as i32,
+        )
+    }
 }
 
 /// Reference `aom_highbd_sad<W>x<H>_avg_c` (highbd compound-prediction SAD).
 /// Calls `ref_init()` first (invokes RTCD-dispatched `aom_highbd_comp_avg_pred`).
 pub fn ref_hbd_sad_avg(idx: usize, s: &[u16], ss: usize, r: &[u16], rs: usize, p: &[u16]) -> u32 {
     ref_init();
-    unsafe { shim_hbd_sad_avg(idx as i32, s.as_ptr(), ss as i32, r.as_ptr(), rs as i32, p.as_ptr()) }
+    unsafe {
+        shim_hbd_sad_avg(
+            idx as i32,
+            s.as_ptr(),
+            ss as i32,
+            r.as_ptr(),
+            rs as i32,
+            p.as_ptr(),
+        )
+    }
 }
 
 /// Reference `aom_highbd_sad<W>x<H>_c` for size index `idx`.
@@ -2067,36 +5059,98 @@ pub fn ref_hbd_sad(idx: usize, s: &[u16], ss: usize, r: &[u16], rs: usize) -> u3
 }
 
 /// Reference `aom_highbd_<bd>_variance<W>x<H>_c`; returns (variance, sse).
-pub fn ref_hbd_variance(idx: usize, bd: u8, a: &[u16], as_: usize, b: &[u16], bs: usize) -> (u32, u32) {
+pub fn ref_hbd_variance(
+    idx: usize,
+    bd: u8,
+    a: &[u16],
+    as_: usize,
+    b: &[u16],
+    bs: usize,
+) -> (u32, u32) {
     let mut sse = 0u32;
     let v = unsafe {
-        shim_hbd_var(idx as i32, bd as i32, a.as_ptr(), as_ as i32, b.as_ptr(), bs as i32, &mut sse)
+        shim_hbd_var(
+            idx as i32,
+            bd as i32,
+            a.as_ptr(),
+            as_ as i32,
+            b.as_ptr(),
+            bs as i32,
+            &mut sse,
+        )
     };
     (v, sse)
 }
 
 /// Reference `aom_highbd_<bd>_sub_pixel_variance<W>x<H>_c`; returns (variance, sse).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_hbd_subpel_var(idx: usize, bd: u8, a: &[u16], as_: usize, xo: usize, yo: usize, b: &[u16], bs: usize) -> (u32, u32) {
+pub fn ref_hbd_subpel_var(
+    idx: usize,
+    bd: u8,
+    a: &[u16],
+    as_: usize,
+    xo: usize,
+    yo: usize,
+    b: &[u16],
+    bs: usize,
+) -> (u32, u32) {
     let mut sse = 0u32;
     let v = unsafe {
-        shim_hbd_subpel_var(idx as i32, bd as i32, a.as_ptr(), as_ as i32, xo as i32, yo as i32, b.as_ptr(), bs as i32, &mut sse)
+        shim_hbd_subpel_var(
+            idx as i32,
+            bd as i32,
+            a.as_ptr(),
+            as_ as i32,
+            xo as i32,
+            yo as i32,
+            b.as_ptr(),
+            bs as i32,
+            &mut sse,
+        )
     };
     (v, sse)
 }
 
 // hbd_lpf_shim.c — highbd deblocking edge filters.
 extern "C" {
-    fn shim_hbd_lpf(dir: i32, width: i32, s: *mut u16, p: i32, bl: *const u8, li: *const u8, th: *const u8, bd: i32);
+    fn shim_hbd_lpf(
+        dir: i32,
+        width: i32,
+        s: *mut u16,
+        p: i32,
+        bl: *const u8,
+        li: *const u8,
+        th: *const u8,
+        bd: i32,
+    );
 }
 
 /// Apply a reference highbd loop filter in place. `dir`: 'h'/'v'.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_hbd_lpf(dir: u8, width: u32, buf: &mut [u16], center: usize, pitch: usize, bl: u8, li: u8, th: u8, bd: i32) {
+pub fn ref_hbd_lpf(
+    dir: u8,
+    width: u32,
+    buf: &mut [u16],
+    center: usize,
+    pitch: usize,
+    bl: u8,
+    li: u8,
+    th: u8,
+    bd: i32,
+) {
     let (b, l, t) = ([bl], [li], [th]);
     let d = if dir == b'h' { 0 } else { 1 };
     unsafe {
-        shim_hbd_lpf(d, width as i32, buf.as_mut_ptr().add(center), pitch as i32, b.as_ptr(), l.as_ptr(), t.as_ptr(), bd);
+        shim_hbd_lpf(
+            d,
+            width as i32,
+            buf.as_mut_ptr().add(center),
+            pitch as i32,
+            b.as_ptr(),
+            l.as_ptr(),
+            t.as_ptr(),
+            bd,
+        );
     }
 }
 
@@ -2116,7 +5170,16 @@ extern "C" {
 /// Apply a reference loop filter in place. `dir`: 'h'/'v'. `center` is the
 /// index of `s[0]` in `buf`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_lpf(dir: u8, width: u32, buf: &mut [u8], center: usize, pitch: usize, blimit: u8, limit: u8, thresh: u8) {
+pub fn ref_lpf(
+    dir: u8,
+    width: u32,
+    buf: &mut [u8],
+    center: usize,
+    pitch: usize,
+    blimit: u8,
+    limit: u8,
+    thresh: u8,
+) {
     let b = [blimit];
     let l = [limit];
     let t = [thresh];
@@ -2132,35 +5195,88 @@ pub fn ref_lpf(dir: u8, width: u32, buf: &mut [u8], center: usize, pitch: usize,
         _ => unreachable!(),
     };
     unsafe {
-        f(buf.as_mut_ptr().add(center), pitch as i32, b.as_ptr(), l.as_ptr(), t.as_ptr());
+        f(
+            buf.as_mut_ptr().add(center),
+            pitch as i32,
+            b.as_ptr(),
+            l.as_ptr(),
+            t.as_ptr(),
+        );
     }
 }
 
 // av1/common/reconintra.c — directional predictors (edges passed at +pad).
 extern "C" {
     pub fn av1_dr_prediction_z1_c(
-        dst: *mut u8, stride: isize, bw: i32, bh: i32, above: *const u8, left: *const u8,
-        upsample_above: i32, dx: i32, dy: i32,
+        dst: *mut u8,
+        stride: isize,
+        bw: i32,
+        bh: i32,
+        above: *const u8,
+        left: *const u8,
+        upsample_above: i32,
+        dx: i32,
+        dy: i32,
     );
     pub fn av1_dr_prediction_z2_c(
-        dst: *mut u8, stride: isize, bw: i32, bh: i32, above: *const u8, left: *const u8,
-        upsample_above: i32, upsample_left: i32, dx: i32, dy: i32,
+        dst: *mut u8,
+        stride: isize,
+        bw: i32,
+        bh: i32,
+        above: *const u8,
+        left: *const u8,
+        upsample_above: i32,
+        upsample_left: i32,
+        dx: i32,
+        dy: i32,
     );
     pub fn av1_dr_prediction_z3_c(
-        dst: *mut u8, stride: isize, bw: i32, bh: i32, above: *const u8, left: *const u8,
-        upsample_left: i32, dx: i32, dy: i32,
+        dst: *mut u8,
+        stride: isize,
+        bw: i32,
+        bh: i32,
+        above: *const u8,
+        left: *const u8,
+        upsample_left: i32,
+        dx: i32,
+        dy: i32,
     );
     pub fn av1_highbd_dr_prediction_z1_c(
-        dst: *mut u16, stride: isize, bw: i32, bh: i32, above: *const u16, left: *const u16,
-        upsample_above: i32, dx: i32, dy: i32, bd: i32,
+        dst: *mut u16,
+        stride: isize,
+        bw: i32,
+        bh: i32,
+        above: *const u16,
+        left: *const u16,
+        upsample_above: i32,
+        dx: i32,
+        dy: i32,
+        bd: i32,
     );
     pub fn av1_highbd_dr_prediction_z2_c(
-        dst: *mut u16, stride: isize, bw: i32, bh: i32, above: *const u16, left: *const u16,
-        upsample_above: i32, upsample_left: i32, dx: i32, dy: i32, bd: i32,
+        dst: *mut u16,
+        stride: isize,
+        bw: i32,
+        bh: i32,
+        above: *const u16,
+        left: *const u16,
+        upsample_above: i32,
+        upsample_left: i32,
+        dx: i32,
+        dy: i32,
+        bd: i32,
     );
     pub fn av1_highbd_dr_prediction_z3_c(
-        dst: *mut u16, stride: isize, bw: i32, bh: i32, above: *const u16, left: *const u16,
-        upsample_left: i32, dx: i32, dy: i32, bd: i32,
+        dst: *mut u16,
+        stride: isize,
+        bw: i32,
+        bh: i32,
+        above: *const u16,
+        left: *const u16,
+        upsample_left: i32,
+        dx: i32,
+        dy: i32,
+        bd: i32,
     );
 }
 
@@ -2170,13 +5286,43 @@ extern "C" {
 /// the `txw*txh` block (row stride `txw`).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_hbd_predict_intra(
-    recon: &[u16], ref_off: usize, ref_stride: usize, mode: usize, angle_delta: i32, use_filter_intra: bool, filter_intra_mode: usize, disable_edge_filter: bool, filt_type: i32, tx_size: usize, txw: usize, txh: usize, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32,
+    recon: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    mode: usize,
+    angle_delta: i32,
+    use_filter_intra: bool,
+    filter_intra_mode: usize,
+    disable_edge_filter: bool,
+    filt_type: i32,
+    tx_size: usize,
+    txw: usize,
+    txh: usize,
+    n_top_px: i32,
+    n_topright_px: i32,
+    n_left_px: i32,
+    n_bottomleft_px: i32,
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; txw * txh];
     unsafe {
         shim_hbd_predict_intra(
-            recon.as_ptr().add(ref_off), ref_stride as i32, mode as i32, angle_delta, use_filter_intra as i32, filter_intra_mode as i32, disable_edge_filter as i32, filt_type, tx_size as i32,
-            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, bd, dst.as_mut_ptr(), txw as i32,
+            recon.as_ptr().add(ref_off),
+            ref_stride as i32,
+            mode as i32,
+            angle_delta,
+            use_filter_intra as i32,
+            filter_intra_mode as i32,
+            disable_edge_filter as i32,
+            filt_type,
+            tx_size as i32,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+            bd,
+            dst.as_mut_ptr(),
+            txw as i32,
         )
     }
     dst
@@ -2186,12 +5332,24 @@ pub fn ref_hbd_predict_intra(
 /// `above` is a `[-1..]` view (index 0 the corner), `left` is `left[0..bh]`;
 /// `mode` is the `FILTER_INTRA_MODE`. Returns the `bw*bh` block (row stride `bw`).
 pub fn ref_hbd_filter_intra(
-    tx_size: usize, bw: usize, bh: usize, above: &[u16], left: &[u16], mode: usize, bd: i32,
+    tx_size: usize,
+    bw: usize,
+    bh: usize,
+    above: &[u16],
+    left: &[u16],
+    mode: usize,
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; bw * bh];
     unsafe {
         shim_hbd_filter_intra_predict(
-            dst.as_mut_ptr(), bw as isize, tx_size as i32, above.as_ptr(), left.as_ptr(), mode as i32, bd,
+            dst.as_mut_ptr(),
+            bw as isize,
+            tx_size as i32,
+            above.as_ptr(),
+            left.as_ptr(),
+            mode as i32,
+            bd,
         )
     }
     dst
@@ -2204,13 +5362,39 @@ pub fn ref_hbd_filter_intra(
 /// / `n_bottomleft_px` are `-1` when unavailable. Returns the `txw*txh` block.
 #[allow(clippy::too_many_arguments)]
 pub fn ref_hbd_build_dir_intra(
-    recon: &[u16], ref_off: usize, ref_stride: usize, p_angle: i32, disable_edge_filter: bool, filt_type: i32, tx_size: usize, txw: usize, txh: usize, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32,
+    recon: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    p_angle: i32,
+    disable_edge_filter: bool,
+    filt_type: i32,
+    tx_size: usize,
+    txw: usize,
+    txh: usize,
+    n_top_px: i32,
+    n_topright_px: i32,
+    n_left_px: i32,
+    n_bottomleft_px: i32,
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; txw * txh];
     unsafe {
         shim_hbd_build_dir_intra(
-            recon.as_ptr().add(ref_off), ref_stride as i32, p_angle, disable_edge_filter as i32, filt_type, tx_size as i32,
-            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, 0, 0, bd, dst.as_mut_ptr(), txw as i32,
+            recon.as_ptr().add(ref_off),
+            ref_stride as i32,
+            p_angle,
+            disable_edge_filter as i32,
+            filt_type,
+            tx_size as i32,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+            0,
+            0,
+            bd,
+            dst.as_mut_ptr(),
+            txw as i32,
         )
     }
     dst
@@ -2222,13 +5406,37 @@ pub fn ref_hbd_build_dir_intra(
 /// `recon[ref_off]` is the block top-left. Returns the `txw*txh` block.
 #[allow(clippy::too_many_arguments)]
 pub fn ref_hbd_build_filter_intra(
-    recon: &[u16], ref_off: usize, ref_stride: usize, filter_intra_mode: i32, tx_size: usize, txw: usize, txh: usize, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32,
+    recon: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    filter_intra_mode: i32,
+    tx_size: usize,
+    txw: usize,
+    txh: usize,
+    n_top_px: i32,
+    n_topright_px: i32,
+    n_left_px: i32,
+    n_bottomleft_px: i32,
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; txw * txh];
     unsafe {
         shim_hbd_build_dir_intra(
-            recon.as_ptr().add(ref_off), ref_stride as i32, 90, 0, 0, tx_size as i32,
-            n_top_px, n_topright_px, n_left_px, n_bottomleft_px, 1, filter_intra_mode, bd, dst.as_mut_ptr(), txw as i32,
+            recon.as_ptr().add(ref_off),
+            ref_stride as i32,
+            90,
+            0,
+            0,
+            tx_size as i32,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+            1,
+            filter_intra_mode,
+            bd,
+            dst.as_mut_ptr(),
+            txw as i32,
         )
     }
     dst
@@ -2240,13 +5448,29 @@ pub fn ref_hbd_build_filter_intra(
 /// origin, `data[pad-1]` the corner). Returns the `txw*txh` block (row stride `txw`).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_hbd_dr_predict(
-    tx_size: usize, txw: usize, txh: usize, above_data: &[u16], left_data: &[u16], pad: usize, up_above: i32, up_left: i32, angle: i32, bd: i32,
+    tx_size: usize,
+    txw: usize,
+    txh: usize,
+    above_data: &[u16],
+    left_data: &[u16],
+    pad: usize,
+    up_above: i32,
+    up_left: i32,
+    angle: i32,
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; txw * txh];
     unsafe {
         shim_hbd_dr_predict(
-            dst.as_mut_ptr(), txw as isize, tx_size as i32,
-            above_data.as_ptr().add(pad), left_data.as_ptr().add(pad), up_above, up_left, angle, bd,
+            dst.as_mut_ptr(),
+            txw as isize,
+            tx_size as i32,
+            above_data.as_ptr().add(pad),
+            left_data.as_ptr().add(pad),
+            up_above,
+            up_left,
+            angle,
+            bd,
         )
     }
     dst
@@ -2257,17 +5481,60 @@ pub fn ref_hbd_dr_predict(
 /// (row stride `bw`).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_highbd_dr_pred(
-    kind: u8, bw: usize, bh: usize, above: &[u16], left: &[u16], pad: usize,
-    up_above: i32, up_left: i32, dx: i32, dy: i32, bd: i32,
+    kind: u8,
+    bw: usize,
+    bh: usize,
+    above: &[u16],
+    left: &[u16],
+    pad: usize,
+    up_above: i32,
+    up_left: i32,
+    dx: i32,
+    dy: i32,
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; bw * bh];
     let ap = unsafe { above.as_ptr().add(pad) };
     let lp = unsafe { left.as_ptr().add(pad) };
     unsafe {
         match kind {
-            1 => av1_highbd_dr_prediction_z1_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_above, dx, dy, bd),
-            2 => av1_highbd_dr_prediction_z2_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_above, up_left, dx, dy, bd),
-            3 => av1_highbd_dr_prediction_z3_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_left, dx, dy, bd),
+            1 => av1_highbd_dr_prediction_z1_c(
+                dst.as_mut_ptr(),
+                bw as isize,
+                bw as i32,
+                bh as i32,
+                ap,
+                lp,
+                up_above,
+                dx,
+                dy,
+                bd,
+            ),
+            2 => av1_highbd_dr_prediction_z2_c(
+                dst.as_mut_ptr(),
+                bw as isize,
+                bw as i32,
+                bh as i32,
+                ap,
+                lp,
+                up_above,
+                up_left,
+                dx,
+                dy,
+                bd,
+            ),
+            3 => av1_highbd_dr_prediction_z3_c(
+                dst.as_mut_ptr(),
+                bw as isize,
+                bw as i32,
+                bh as i32,
+                ap,
+                lp,
+                up_left,
+                dx,
+                dy,
+                bd,
+            ),
             _ => unreachable!(),
         }
     }
@@ -2278,17 +5545,56 @@ pub fn ref_highbd_dr_pred(
 /// pointer is taken at offset `pad`. Returns the `bw*bh` block (stride = bw).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_dr_pred(
-    kind: u8, bw: usize, bh: usize, above: &[u8], left: &[u8], pad: usize,
-    up_above: i32, up_left: i32, dx: i32, dy: i32,
+    kind: u8,
+    bw: usize,
+    bh: usize,
+    above: &[u8],
+    left: &[u8],
+    pad: usize,
+    up_above: i32,
+    up_left: i32,
+    dx: i32,
+    dy: i32,
 ) -> Vec<u8> {
     let mut dst = vec![0u8; bw * bh];
     let ap = unsafe { above.as_ptr().add(pad) };
     let lp = unsafe { left.as_ptr().add(pad) };
     unsafe {
         match kind {
-            1 => av1_dr_prediction_z1_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_above, dx, dy),
-            2 => av1_dr_prediction_z2_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_above, up_left, dx, dy),
-            3 => av1_dr_prediction_z3_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_left, dx, dy),
+            1 => av1_dr_prediction_z1_c(
+                dst.as_mut_ptr(),
+                bw as isize,
+                bw as i32,
+                bh as i32,
+                ap,
+                lp,
+                up_above,
+                dx,
+                dy,
+            ),
+            2 => av1_dr_prediction_z2_c(
+                dst.as_mut_ptr(),
+                bw as isize,
+                bw as i32,
+                bh as i32,
+                ap,
+                lp,
+                up_above,
+                up_left,
+                dx,
+                dy,
+            ),
+            3 => av1_dr_prediction_z3_c(
+                dst.as_mut_ptr(),
+                bw as isize,
+                bw as i32,
+                bh as i32,
+                ap,
+                lp,
+                up_left,
+                dx,
+                dy,
+            ),
             _ => unreachable!(),
         }
     }
@@ -2298,41 +5604,114 @@ pub fn ref_dr_pred(
 // intra_shim.c — dispatch to aom_<mode>_predictor_<W>x<H>_c.
 extern "C" {
     fn shim_intra_pred(
-        mode: i32, size_idx: i32, dst: *mut u8, stride: isize, above: *const u8, left: *const u8,
+        mode: i32,
+        size_idx: i32,
+        dst: *mut u8,
+        stride: isize,
+        above: *const u8,
+        left: *const u8,
     );
 }
 
 extern "C" {
     fn shim_highbd_intra_pred(
-        mode: i32, size_idx: i32, dst: *mut u16, stride: isize, above: *const u16, left: *const u16, bd: i32,
+        mode: i32,
+        size_idx: i32,
+        dst: *mut u16,
+        stride: isize,
+        above: *const u16,
+        left: *const u16,
+        bd: i32,
     );
     fn shim_hbd_build_nd_intra(
-        r: *const u16, ref_stride: i32, av1_mode: i32, tx_size: i32, n_top_px: i32, n_left_px: i32, bd: i32, dst: *mut u16, dst_stride: i32,
+        r: *const u16,
+        ref_stride: i32,
+        av1_mode: i32,
+        tx_size: i32,
+        n_top_px: i32,
+        n_left_px: i32,
+        bd: i32,
+        dst: *mut u16,
+        dst_stride: i32,
     );
     fn shim_hbd_dr_predict(
-        dst: *mut u16, stride: isize, tx_size: i32, above: *const u16, left: *const u16, up_above: i32, up_left: i32, angle: i32, bd: i32,
+        dst: *mut u16,
+        stride: isize,
+        tx_size: i32,
+        above: *const u16,
+        left: *const u16,
+        up_above: i32,
+        up_left: i32,
+        angle: i32,
+        bd: i32,
     );
     fn shim_hbd_build_dir_intra(
-        r: *const u16, ref_stride: i32, p_angle: i32, disable_edge_filter: i32, filt_type: i32, tx_size: i32, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, use_filter_intra: i32, filter_intra_mode: i32, bd: i32, dst: *mut u16, dst_stride: i32,
+        r: *const u16,
+        ref_stride: i32,
+        p_angle: i32,
+        disable_edge_filter: i32,
+        filt_type: i32,
+        tx_size: i32,
+        n_top_px: i32,
+        n_topright_px: i32,
+        n_left_px: i32,
+        n_bottomleft_px: i32,
+        use_filter_intra: i32,
+        filter_intra_mode: i32,
+        bd: i32,
+        dst: *mut u16,
+        dst_stride: i32,
     );
     fn shim_hbd_filter_intra_predict(
-        dst: *mut u16, stride: isize, tx_size: i32, above: *const u16, left: *const u16, mode: i32, bd: i32,
+        dst: *mut u16,
+        stride: isize,
+        tx_size: i32,
+        above: *const u16,
+        left: *const u16,
+        mode: i32,
+        bd: i32,
     );
     fn shim_hbd_predict_intra(
-        r: *const u16, ref_stride: i32, mode: i32, angle_delta: i32, use_filter_intra: i32, filter_intra_mode: i32, disable_edge_filter: i32, filt_type: i32, tx_size: i32, n_top_px: i32, n_topright_px: i32, n_left_px: i32, n_bottomleft_px: i32, bd: i32, dst: *mut u16, dst_stride: i32,
+        r: *const u16,
+        ref_stride: i32,
+        mode: i32,
+        angle_delta: i32,
+        use_filter_intra: i32,
+        filter_intra_mode: i32,
+        disable_edge_filter: i32,
+        filt_type: i32,
+        tx_size: i32,
+        n_top_px: i32,
+        n_topright_px: i32,
+        n_left_px: i32,
+        n_bottomleft_px: i32,
+        bd: i32,
+        dst: *mut u16,
+        dst_stride: i32,
     );
 }
 
 /// Reference highbd intra prediction. Returns the `bw*bh` predicted block.
 #[allow(clippy::too_many_arguments)]
 pub fn ref_highbd_intra_pred(
-    mode: usize, size_idx: usize, bw: usize, bh: usize, above_tl: &[u16], left: &[u16], bd: i32,
+    mode: usize,
+    size_idx: usize,
+    bw: usize,
+    bh: usize,
+    above_tl: &[u16],
+    left: &[u16],
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; bw * bh];
     unsafe {
         shim_highbd_intra_pred(
-            mode as i32, size_idx as i32, dst.as_mut_ptr(), bw as isize,
-            above_tl.as_ptr().add(1), left.as_ptr(), bd,
+            mode as i32,
+            size_idx as i32,
+            dst.as_mut_ptr(),
+            bw as isize,
+            above_tl.as_ptr().add(1),
+            left.as_ptr(),
+            bd,
         )
     }
     dst
@@ -2346,13 +5725,29 @@ pub fn ref_highbd_intra_pred(
 /// (row stride `txw`).
 #[allow(clippy::too_many_arguments)]
 pub fn ref_hbd_build_nd_intra(
-    recon: &[u16], ref_off: usize, ref_stride: usize, av1_mode: usize, tx_size: usize, txw: usize, txh: usize, n_top_px: usize, n_left_px: usize, bd: i32,
+    recon: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    av1_mode: usize,
+    tx_size: usize,
+    txw: usize,
+    txh: usize,
+    n_top_px: usize,
+    n_left_px: usize,
+    bd: i32,
 ) -> Vec<u16> {
     let mut dst = vec![0u16; txw * txh];
     unsafe {
         shim_hbd_build_nd_intra(
-            recon.as_ptr().add(ref_off), ref_stride as i32, av1_mode as i32, tx_size as i32,
-            n_top_px as i32, n_left_px as i32, bd, dst.as_mut_ptr(), txw as i32,
+            recon.as_ptr().add(ref_off),
+            ref_stride as i32,
+            av1_mode as i32,
+            tx_size as i32,
+            n_top_px as i32,
+            n_left_px as i32,
+            bd,
+            dst.as_mut_ptr(),
+            txw as i32,
         )
     }
     dst
@@ -2373,8 +5768,12 @@ pub fn ref_intra_pred(
     unsafe {
         // C `above` points past the top-left sample so above[-1] is valid.
         shim_intra_pred(
-            mode as i32, size_idx as i32, dst.as_mut_ptr(), bw as isize,
-            above_tl.as_ptr().add(1), left.as_ptr(),
+            mode as i32,
+            size_idx as i32,
+            dst.as_mut_ptr(),
+            bw as isize,
+            above_tl.as_ptr().add(1),
+            left.as_ptr(),
         )
     }
     dst
@@ -2392,8 +5791,12 @@ pub fn ref_adapt_encode(syms: &[i32], cdf_init: &[u16], nsymbs: usize) -> Vec<u8
     let mut out = vec![0u8; syms.len() * 4 + 64];
     let n = unsafe {
         shim_adapt_encode(
-            syms.as_ptr(), syms.len() as i32, cdf_init.as_ptr(), nsymbs as i32,
-            out.as_mut_ptr(), out.len() as u32,
+            syms.as_ptr(),
+            syms.len() as i32,
+            cdf_init.as_ptr(),
+            nsymbs as i32,
+            out.as_mut_ptr(),
+            out.len() as u32,
         )
     };
     out.truncate(n as usize);
@@ -2405,7 +5808,11 @@ pub fn ref_adapt_decode(buf: &[u8], n: usize, cdf_init: &[u16], nsymbs: usize) -
     let mut out = vec![0i32; n];
     unsafe {
         shim_adapt_decode(
-            buf.as_ptr(), buf.len() as u32, n as i32, cdf_init.as_ptr(), nsymbs as i32,
+            buf.as_ptr(),
+            buf.len() as u32,
+            n as i32,
+            cdf_init.as_ptr(),
+            nsymbs as i32,
             out.as_mut_ptr(),
         )
     }
@@ -2504,14 +5911,28 @@ pub fn ref_txfm1d(
     stage_range: &[i8],
 ) -> Vec<i32> {
     let mut out = vec![0i32; input.len()];
-    unsafe { f(input.as_ptr(), out.as_mut_ptr(), cos_bit, stage_range.as_ptr()) }
+    unsafe {
+        f(
+            input.as_ptr(),
+            out.as_mut_ptr(),
+            cos_bit,
+            stage_range.as_ptr(),
+        )
+    }
     out
 }
 
 /// Convenience wrapper kept for the original fdct4 harness.
 pub fn ref_fdct4(input: &[i32; 4], cos_bit: i8, stage_range: &[i8; 8]) -> [i32; 4] {
     let mut out = [0i32; 4];
-    unsafe { av1_fdct4(input.as_ptr(), out.as_mut_ptr(), cos_bit, stage_range.as_ptr()) }
+    unsafe {
+        av1_fdct4(
+            input.as_ptr(),
+            out.as_mut_ptr(),
+            cos_bit,
+            stage_range.as_ptr(),
+        )
+    }
     out
 }
 
@@ -2543,8 +5964,12 @@ extern "C" {
 /// Reference forward 2-D transform for `tx_size` (0..19), returning `wide*high`
 /// coefficients. `bd` is fixed at 8 (does not affect output).
 pub fn ref_fwd_txfm2d(tx_size: usize, input: &[i16], stride: usize, tx_type: usize) -> Vec<i32> {
-    const W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-    const H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+    const W: [usize; 19] = [
+        4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+    ];
+    const H: [usize; 19] = [
+        4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+    ];
     let f: Fwd2dFn = match tx_size {
         0 => av1_fwd_txfm2d_4x4_c,
         1 => av1_fwd_txfm2d_8x8_c,
@@ -2569,7 +5994,15 @@ pub fn ref_fwd_txfm2d(tx_size: usize, input: &[i16], stride: usize, tx_type: usi
     };
     ref_init();
     let mut out = vec![0i32; W[tx_size] * H[tx_size]];
-    unsafe { f(input.as_ptr(), out.as_mut_ptr(), stride as i32, tx_type as i32, 8) }
+    unsafe {
+        f(
+            input.as_ptr(),
+            out.as_mut_ptr(),
+            stride as i32,
+            tx_type as i32,
+            8,
+        )
+    }
     out
 }
 
@@ -2600,24 +6033,61 @@ extern "C" {
 
 // av1/encoder/av1_quantize.c — fast-path quantizers (no quant matrix).
 pub type QuantFpFn = unsafe extern "C" fn(
-    *const i32, isize, *const i16, *const i16, *const i16, *const i16, *mut i32, *mut i32,
-    *const i16, *mut u16, *const i16, *const i16,
+    *const i32,
+    isize,
+    *const i16,
+    *const i16,
+    *const i16,
+    *const i16,
+    *mut i32,
+    *mut i32,
+    *const i16,
+    *mut u16,
+    *const i16,
+    *const i16,
 );
 extern "C" {
     pub fn av1_quantize_fp_c(
-        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
-        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
-        eob: *mut u16, scan: *const i16, iscan: *const i16,
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
     );
     pub fn av1_quantize_fp_32x32_c(
-        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
-        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
-        eob: *mut u16, scan: *const i16, iscan: *const i16,
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
     );
     pub fn av1_quantize_fp_64x64_c(
-        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
-        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
-        eob: *mut u16, scan: *const i16, iscan: *const i16,
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
     );
 }
 
@@ -2645,9 +6115,18 @@ pub fn ref_quantize_fp(
     };
     unsafe {
         f(
-            coeff.as_ptr(), n as isize, dummy.as_ptr(), round.as_ptr(), quant.as_ptr(),
-            dummy.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
-            &mut eob, scan.as_ptr(), dummy.as_ptr(),
+            coeff.as_ptr(),
+            n as isize,
+            dummy.as_ptr(),
+            round.as_ptr(),
+            quant.as_ptr(),
+            dummy.as_ptr(),
+            qcoeff.as_mut_ptr(),
+            dqcoeff.as_mut_ptr(),
+            dequant.as_ptr(),
+            &mut eob,
+            scan.as_ptr(),
+            dummy.as_ptr(),
         )
     }
     (qcoeff, dqcoeff, eob)
@@ -2657,9 +6136,20 @@ pub fn ref_quantize_fp(
 extern "C" {
     #[allow(clippy::too_many_arguments)]
     pub fn aom_quantize_b_helper_c(
-        coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16,
-        quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16,
-        eob: *mut u16, scan: *const i16, iscan: *const i16, qm: *const u8, iqm: *const u8,
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
+        qm: *const u8,
+        iqm: *const u8,
         log_scale: i32,
     );
 }
@@ -2684,9 +6174,21 @@ pub fn ref_quantize_b(
     let dummy = vec![0i16; n.max(2)];
     unsafe {
         aom_quantize_b_helper_c(
-            coeff.as_ptr(), n as isize, zbin.as_ptr(), round.as_ptr(), quant.as_ptr(),
-            quant_shift.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
-            &mut eob, scan.as_ptr(), dummy.as_ptr(), std::ptr::null(), std::ptr::null(), log_scale,
+            coeff.as_ptr(),
+            n as isize,
+            zbin.as_ptr(),
+            round.as_ptr(),
+            quant.as_ptr(),
+            quant_shift.as_ptr(),
+            qcoeff.as_mut_ptr(),
+            dqcoeff.as_mut_ptr(),
+            dequant.as_ptr(),
+            &mut eob,
+            scan.as_ptr(),
+            dummy.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            log_scale,
         )
     }
     (qcoeff, dqcoeff, eob)
@@ -2714,9 +6216,21 @@ pub fn ref_quantize_b_qm(
     let dummy = vec![0i16; n.max(2)];
     unsafe {
         aom_quantize_b_helper_c(
-            coeff.as_ptr(), n as isize, zbin.as_ptr(), round.as_ptr(), quant.as_ptr(),
-            quant_shift.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
-            &mut eob, scan.as_ptr(), dummy.as_ptr(), qm.as_ptr(), iqm.as_ptr(), log_scale,
+            coeff.as_ptr(),
+            n as isize,
+            zbin.as_ptr(),
+            round.as_ptr(),
+            quant.as_ptr(),
+            quant_shift.as_ptr(),
+            qcoeff.as_mut_ptr(),
+            dqcoeff.as_mut_ptr(),
+            dequant.as_ptr(),
+            &mut eob,
+            scan.as_ptr(),
+            dummy.as_ptr(),
+            qm.as_ptr(),
+            iqm.as_ptr(),
+            log_scale,
         )
     }
     (qcoeff, dqcoeff, eob)
@@ -2744,9 +6258,21 @@ pub fn ref_highbd_quantize_b_qm(
     let dummy = vec![0i16; n.max(2)];
     unsafe {
         aom_highbd_quantize_b_helper_c(
-            coeff.as_ptr(), n as isize, zbin.as_ptr(), round.as_ptr(), quant.as_ptr(),
-            quant_shift.as_ptr(), qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), dequant.as_ptr(),
-            &mut eob, scan.as_ptr(), dummy.as_ptr(), qm.as_ptr(), iqm.as_ptr(), log_scale,
+            coeff.as_ptr(),
+            n as isize,
+            zbin.as_ptr(),
+            round.as_ptr(),
+            quant.as_ptr(),
+            quant_shift.as_ptr(),
+            qcoeff.as_mut_ptr(),
+            dqcoeff.as_mut_ptr(),
+            dequant.as_ptr(),
+            &mut eob,
+            scan.as_ptr(),
+            dummy.as_ptr(),
+            qm.as_ptr(),
+            iqm.as_ptr(),
+            log_scale,
         )
     }
     (qcoeff, dqcoeff, eob)
@@ -2785,62 +6311,248 @@ pub fn ref_inv_txfm2d_add(
         _ => unreachable!(),
     };
     ref_init();
-    unsafe { f(input.as_ptr(), dest.as_mut_ptr(), stride as i32, tx_type as i32, bd) }
+    unsafe {
+        f(
+            input.as_ptr(),
+            dest.as_mut_ptr(),
+            stride as i32,
+            tx_type as i32,
+            bd,
+        )
+    }
 }
 
 // txb_shim.c — transform-block coefficient-coding kernels + scan/ctx data.
 extern "C" {
     fn shim_txb_init_levels(coeff: *const i32, width: i32, height: i32, levels: *mut u8);
-    fn shim_get_nz_map_contexts(levels: *const u8, scan: *const i16, eob: i32, tx_size: i32, tx_class: i32, out: *mut i8);
+    fn shim_get_nz_map_contexts(
+        levels: *const u8,
+        scan: *const i16,
+        eob: i32,
+        tx_size: i32,
+        tx_class: i32,
+        out: *mut i8,
+    );
     fn shim_eob_pos_token(eob: i32, extra: *mut i32) -> i32;
     fn shim_nz_ctx_offset(tx_size: i32) -> *const i8;
     fn shim_scan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_iscan(tx_size: i32, tx_type: i32) -> *const i16;
     fn shim_cost_tokens_from_cdf(costs: *mut i32, cdf: *const u16, inv_map: *const i32);
-    fn shim_get_txb_ctx(plane_bsize: i32, tx_size: i32, plane: i32, a: *const i8, l: *const i8, out: *mut i32);
+    fn shim_get_txb_ctx(
+        plane_bsize: i32,
+        tx_size: i32,
+        plane: i32,
+        a: *const i8,
+        l: *const i8,
+        out: *mut i32,
+    );
     fn shim_txb_entropy_context(qcoeff: *const i32, tx_size: i32, tx_type: i32, eob: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_optimize_txb(tx_size: i32, tx_type: i32, qcoeff: *mut i32, dqcoeff: *mut i32, tcoeff: *const i32, eob: i32, dequant: *const i16, rdmult: i64, dc_sign_ctx: i32, txb_skip_ctx: i32, sharpness: i32, scan: *const i16, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32, iqm: *const u8, qm: *const u8, out_rate: *mut i32) -> i32;
+    fn shim_optimize_txb(
+        tx_size: i32,
+        tx_type: i32,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        tcoeff: *const i32,
+        eob: i32,
+        dequant: *const i16,
+        rdmult: i64,
+        dc_sign_ctx: i32,
+        txb_skip_ctx: i32,
+        sharpness: i32,
+        scan: *const i16,
+        txb_skip_cost: *const i32,
+        base_eob_cost: *const i32,
+        base_cost: *const i32,
+        eob_extra_cost: *const i32,
+        dc_sign_cost: *const i32,
+        lps_cost: *const i32,
+        eob_cost: *const i32,
+        iqm: *const u8,
+        qm: *const u8,
+        out_rate: *mut i32,
+    ) -> i32;
     fn shim_get_dqv(dequant: *const i16, coeff_idx: i32, iqm: *const u8) -> i32;
-    fn shim_get_coeff_dist(tcoeff: i32, dqcoeff: i32, shift: i32, qm: *const u8, coeff_idx: i32) -> i64;
+    fn shim_get_coeff_dist(
+        tcoeff: i32,
+        dqcoeff: i32,
+        shift: i32,
+        qm: *const u8,
+        coeff_idx: i32,
+    ) -> i64;
     #[allow(clippy::too_many_arguments)]
-    fn shim_two_coeff_cost_simple(ci: i32, abs_qc: i32, coeff_ctx: i32, base: *const i32, lps: *const i32, bhl: i32, tx_class: i32, levels: *const u8, cost_low: *mut i32) -> i32;
+    fn shim_two_coeff_cost_simple(
+        ci: i32,
+        abs_qc: i32,
+        coeff_ctx: i32,
+        base: *const i32,
+        lps: *const i32,
+        bhl: i32,
+        tx_class: i32,
+        levels: *const u8,
+        cost_low: *mut i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_coeff_cost_eob(ci: i32, abs_qc: i32, sign: i32, coeff_ctx: i32, dc_sign_ctx: i32, base_eob: *const i32, dc_sign: *const i32, lps: *const i32, bhl: i32, tx_class: i32) -> i32;
+    fn shim_coeff_cost_eob(
+        ci: i32,
+        abs_qc: i32,
+        sign: i32,
+        coeff_ctx: i32,
+        dc_sign_ctx: i32,
+        base_eob: *const i32,
+        dc_sign: *const i32,
+        lps: *const i32,
+        bhl: i32,
+        tx_class: i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_coeff_cost_general(is_last: i32, ci: i32, abs_qc: i32, sign: i32, coeff_ctx: i32, dc_sign_ctx: i32, base_eob: *const i32, base: *const i32, dc_sign: *const i32, lps: *const i32, bhl: i32, tx_class: i32, levels: *const u8) -> i32;
+    fn shim_coeff_cost_general(
+        is_last: i32,
+        ci: i32,
+        abs_qc: i32,
+        sign: i32,
+        coeff_ctx: i32,
+        dc_sign_ctx: i32,
+        base_eob: *const i32,
+        base: *const i32,
+        dc_sign: *const i32,
+        lps: *const i32,
+        bhl: i32,
+        tx_class: i32,
+        levels: *const u8,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_ext_tx_derive(tx_size: i32, is_inter: i32, reduced: i32, tx_type: i32, use_fi: i32, fi_mode: i32, mode: i32, out: *mut i32);
+    fn shim_ext_tx_derive(
+        tx_size: i32,
+        is_inter: i32,
+        reduced: i32,
+        tx_type: i32,
+        use_fi: i32,
+        fi_mode: i32,
+        mode: i32,
+        out: *mut i32,
+    );
     #[allow(clippy::too_many_arguments)]
-    fn shim_fill_lv_map(txb_skip_cdf: *const u16, base_eob_cdf: *const u16, base_cdf: *const u16, eob_extra_cdf: *const u16, dc_sign_cdf: *const u16, br_cdf: *const u16, o_txb_skip: *mut i32, o_base_eob: *mut i32, o_base: *mut i32, o_eob_extra: *mut i32, o_dc_sign: *mut i32, o_lps: *mut i32);
+    fn shim_fill_lv_map(
+        txb_skip_cdf: *const u16,
+        base_eob_cdf: *const u16,
+        base_cdf: *const u16,
+        eob_extra_cdf: *const u16,
+        dc_sign_cdf: *const u16,
+        br_cdf: *const u16,
+        o_txb_skip: *mut i32,
+        o_base_eob: *mut i32,
+        o_base: *mut i32,
+        o_eob_extra: *mut i32,
+        o_dc_sign: *mut i32,
+        o_lps: *mut i32,
+    );
     #[allow(clippy::too_many_arguments)]
-    fn shim_cost_coeffs_txb(qcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, txb_skip_cost: *const i32, base_eob_cost: *const i32, base_cost: *const i32, eob_extra_cost: *const i32, dc_sign_cost: *const i32, lps_cost: *const i32, eob_cost: *const i32) -> i32;
+    fn shim_cost_coeffs_txb(
+        qcoeff: *const i32,
+        eob: i32,
+        tx_size: i32,
+        tx_type: i32,
+        txb_skip_ctx: i32,
+        dc_sign_ctx: i32,
+        txb_skip_cost: *const i32,
+        base_eob_cost: *const i32,
+        base_cost: *const i32,
+        eob_extra_cost: *const i32,
+        dc_sign_cost: *const i32,
+        lps_cost: *const i32,
+        eob_cost: *const i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_write_coeffs_txb(tcoeff: *const i32, eob: i32, tx_size: i32, tx_type: i32, plane_type: i32, txb_skip_ctx: i32, dc_sign_ctx: i32, allow_update_cdf: i32, cdfs: *mut u16, ext_tx_cdf: *mut u16, is_inter: i32, reduced: i32, use_fi: i32, fi_mode: i32, mode: i32, signal_gate: i32, out: *mut u8, out_cap: i32) -> i32;
-    fn shim_dequant_txb(qcoeff: *const i32, dqcoeff: *mut i32, area: i32, tx_size: i32, dequant: *const i16, iqmatrix: *const u8, bd: i32);
+    fn shim_write_coeffs_txb(
+        tcoeff: *const i32,
+        eob: i32,
+        tx_size: i32,
+        tx_type: i32,
+        plane_type: i32,
+        txb_skip_ctx: i32,
+        dc_sign_ctx: i32,
+        allow_update_cdf: i32,
+        cdfs: *mut u16,
+        ext_tx_cdf: *mut u16,
+        is_inter: i32,
+        reduced: i32,
+        use_fi: i32,
+        fi_mode: i32,
+        mode: i32,
+        signal_gate: i32,
+        out: *mut u8,
+        out_cap: i32,
+    ) -> i32;
+    fn shim_dequant_txb(
+        qcoeff: *const i32,
+        dqcoeff: *mut i32,
+        area: i32,
+        tx_size: i32,
+        dequant: *const i16,
+        iqmatrix: *const u8,
+        bd: i32,
+    );
 }
 
 /// Reference `av1_txb_init_levels_c` (writes into `levels`).
 pub fn ref_txb_init_levels(coeff: &[i32], width: usize, height: usize, levels: &mut [u8]) {
-    unsafe { shim_txb_init_levels(coeff.as_ptr(), width as i32, height as i32, levels.as_mut_ptr()) }
+    unsafe {
+        shim_txb_init_levels(
+            coeff.as_ptr(),
+            width as i32,
+            height as i32,
+            levels.as_mut_ptr(),
+        )
+    }
 }
 
 /// Reference decoder dequant (`av1_read_coeffs_txb` math, decodetxb.c): signed
 /// `qcoeff` (raster, len `area`) → `dqcoeff` (raster). `iqmatrix` per raster
 /// position, `None` for no quant matrix. Applies the `0xfffff`/`0xffffff` masks,
 /// `av1_get_tx_scale` shift, and `±(1<<(7+bd))` clamp exactly as the C decoder.
-pub fn ref_dequant_txb(qcoeff: &[i32], tx_size: usize, dequant: [i16; 2], iqmatrix: Option<&[u8]>, bd: i32) -> Vec<i32> {
+pub fn ref_dequant_txb(
+    qcoeff: &[i32],
+    tx_size: usize,
+    dequant: [i16; 2],
+    iqmatrix: Option<&[u8]>,
+    bd: i32,
+) -> Vec<i32> {
     let area = qcoeff.len();
     let mut dq = vec![0i32; area];
     let iqp = iqmatrix.map_or(core::ptr::null(), |s| s.as_ptr());
-    unsafe { shim_dequant_txb(qcoeff.as_ptr(), dq.as_mut_ptr(), area as i32, tx_size as i32, dequant.as_ptr(), iqp, bd) }
+    unsafe {
+        shim_dequant_txb(
+            qcoeff.as_ptr(),
+            dq.as_mut_ptr(),
+            area as i32,
+            tx_size as i32,
+            dequant.as_ptr(),
+            iqp,
+            bd,
+        )
+    }
     dq
 }
 
 /// Reference `av1_get_nz_map_contexts_c` (writes `out[scan[i]]` for `i < eob`).
-pub fn ref_get_nz_map_contexts(levels: &[u8], scan: &[i16], eob: usize, tx_size: usize, tx_class: i32, out: &mut [i8]) {
+pub fn ref_get_nz_map_contexts(
+    levels: &[u8],
+    scan: &[i16],
+    eob: usize,
+    tx_size: usize,
+    tx_class: i32,
+    out: &mut [i8],
+) {
     unsafe {
-        shim_get_nz_map_contexts(levels.as_ptr(), scan.as_ptr(), eob as i32, tx_size as i32, tx_class, out.as_mut_ptr())
+        shim_get_nz_map_contexts(
+            levels.as_ptr(),
+            scan.as_ptr(),
+            eob as i32,
+            tx_size as i32,
+            tx_class,
+            out.as_mut_ptr(),
+        )
     }
 }
 
@@ -2869,12 +6581,41 @@ pub fn ref_iscan_order(tx_size: usize, tx_type: usize, len: usize) -> Vec<i16> {
 /// Reference `av1_write_coeffs_txb` (transcribed harness). Mutates `cdfs` when
 /// `allow_update_cdf`; returns the produced bitstream bytes.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_coeffs_txb(tcoeff: &[i32], eob: usize, tx_size: usize, tx_type: usize, plane_type: usize, txb_skip_ctx: usize, dc_sign_ctx: usize, allow_update_cdf: bool, cdfs: &mut [u16]) -> Vec<u8> {
+pub fn ref_write_coeffs_txb(
+    tcoeff: &[i32],
+    eob: usize,
+    tx_size: usize,
+    tx_type: usize,
+    plane_type: usize,
+    txb_skip_ctx: usize,
+    dc_sign_ctx: usize,
+    allow_update_cdf: bool,
+    cdfs: &mut [u16],
+) -> Vec<u8> {
     let mut out = vec![0u8; 1 << 16];
     let mut dummy = [0u16; 16];
     // signal_gate = 0 => no tx_type write (reproduces the coeff-only path).
     let n = unsafe {
-        shim_write_coeffs_txb(tcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, plane_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, allow_update_cdf as i32, cdfs.as_mut_ptr(), dummy.as_mut_ptr(), 0, 0, 0, 0, 0, 0, out.as_mut_ptr(), out.len() as i32)
+        shim_write_coeffs_txb(
+            tcoeff.as_ptr(),
+            eob as i32,
+            tx_size as i32,
+            tx_type as i32,
+            plane_type as i32,
+            txb_skip_ctx as i32,
+            dc_sign_ctx as i32,
+            allow_update_cdf as i32,
+            cdfs.as_mut_ptr(),
+            dummy.as_mut_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            out.as_mut_ptr(),
+            out.len() as i32,
+        )
     };
     out.truncate(n as usize);
     out
@@ -2884,10 +6625,46 @@ pub fn ref_write_coeffs_txb(tcoeff: &[i32], eob: usize, tx_size: usize, tx_type:
 /// matching aom-txb's `write_coeffs_txb_full`. `ext_tx_cdf` is the selected ext-tx
 /// CDF slot; the tx_type context mirrors the encoder mbmi/frame state. Returns bytes.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_write_coeffs_txb_full(tcoeff: &[i32], eob: usize, tx_size: usize, tx_type: usize, plane_type: usize, txb_skip_ctx: usize, dc_sign_ctx: usize, allow_update_cdf: bool, cdfs: &mut [u16], ext_tx_cdf: &mut [u16], is_inter: bool, reduced: bool, use_fi: bool, fi_mode: usize, mode: usize, signal_gate: bool) -> Vec<u8> {
+pub fn ref_write_coeffs_txb_full(
+    tcoeff: &[i32],
+    eob: usize,
+    tx_size: usize,
+    tx_type: usize,
+    plane_type: usize,
+    txb_skip_ctx: usize,
+    dc_sign_ctx: usize,
+    allow_update_cdf: bool,
+    cdfs: &mut [u16],
+    ext_tx_cdf: &mut [u16],
+    is_inter: bool,
+    reduced: bool,
+    use_fi: bool,
+    fi_mode: usize,
+    mode: usize,
+    signal_gate: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 1 << 16];
     let n = unsafe {
-        shim_write_coeffs_txb(tcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, plane_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, allow_update_cdf as i32, cdfs.as_mut_ptr(), ext_tx_cdf.as_mut_ptr(), is_inter as i32, reduced as i32, use_fi as i32, fi_mode as i32, mode as i32, signal_gate as i32, out.as_mut_ptr(), out.len() as i32)
+        shim_write_coeffs_txb(
+            tcoeff.as_ptr(),
+            eob as i32,
+            tx_size as i32,
+            tx_type as i32,
+            plane_type as i32,
+            txb_skip_ctx as i32,
+            dc_sign_ctx as i32,
+            allow_update_cdf as i32,
+            cdfs.as_mut_ptr(),
+            ext_tx_cdf.as_mut_ptr(),
+            is_inter as i32,
+            reduced as i32,
+            use_fi as i32,
+            fi_mode as i32,
+            mode as i32,
+            signal_gate as i32,
+            out.as_mut_ptr(),
+            out.len() as i32,
+        )
     };
     out.truncate(n as usize);
     out
@@ -2898,9 +6675,37 @@ pub fn ref_write_coeffs_txb_full(tcoeff: &[i32], eob: usize, tx_size: usize, tx_
 /// base_cost[42][8], eob_extra_cost[9][2], dc_sign_cost[3][2], lps_cost[21][26],
 /// eob_cost[2][11].
 #[allow(clippy::too_many_arguments)]
-pub fn ref_cost_coeffs_txb(qcoeff: &[i32], eob: usize, tx_size: usize, tx_type: usize, txb_skip_ctx: usize, dc_sign_ctx: usize, txb_skip_cost: &[i32], base_eob_cost: &[i32], base_cost: &[i32], eob_extra_cost: &[i32], dc_sign_cost: &[i32], lps_cost: &[i32], eob_cost: &[i32]) -> i32 {
+pub fn ref_cost_coeffs_txb(
+    qcoeff: &[i32],
+    eob: usize,
+    tx_size: usize,
+    tx_type: usize,
+    txb_skip_ctx: usize,
+    dc_sign_ctx: usize,
+    txb_skip_cost: &[i32],
+    base_eob_cost: &[i32],
+    base_cost: &[i32],
+    eob_extra_cost: &[i32],
+    dc_sign_cost: &[i32],
+    lps_cost: &[i32],
+    eob_cost: &[i32],
+) -> i32 {
     unsafe {
-        shim_cost_coeffs_txb(qcoeff.as_ptr(), eob as i32, tx_size as i32, tx_type as i32, txb_skip_ctx as i32, dc_sign_ctx as i32, txb_skip_cost.as_ptr(), base_eob_cost.as_ptr(), base_cost.as_ptr(), eob_extra_cost.as_ptr(), dc_sign_cost.as_ptr(), lps_cost.as_ptr(), eob_cost.as_ptr())
+        shim_cost_coeffs_txb(
+            qcoeff.as_ptr(),
+            eob as i32,
+            tx_size as i32,
+            tx_type as i32,
+            txb_skip_ctx as i32,
+            dc_sign_ctx as i32,
+            txb_skip_cost.as_ptr(),
+            base_eob_cost.as_ptr(),
+            base_cost.as_ptr(),
+            eob_extra_cost.as_ptr(),
+            dc_sign_cost.as_ptr(),
+            lps_cost.as_ptr(),
+            eob_cost.as_ptr(),
+        )
     }
 }
 
@@ -2917,7 +6722,14 @@ pub fn ref_cost_tokens_from_cdf(nsymbs: usize, cdf: &[u16], inv_map: Option<&[i3
 /// (txb_skip[13*2], base_eob[4*3], base[42*8], eob_extra[9*2], dc_sign[3*2],
 /// lps[21*26]) tables.
 #[allow(clippy::type_complexity)]
-pub fn ref_fill_lv_map(txb_skip_cdf: &[u16], base_eob_cdf: &[u16], base_cdf: &[u16], eob_extra_cdf: &[u16], dc_sign_cdf: &[u16], br_cdf: &[u16]) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>) {
+pub fn ref_fill_lv_map(
+    txb_skip_cdf: &[u16],
+    base_eob_cdf: &[u16],
+    base_cdf: &[u16],
+    eob_extra_cdf: &[u16],
+    dc_sign_cdf: &[u16],
+    br_cdf: &[u16],
+) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>) {
     let mut txb_skip = vec![0i32; 13 * 2];
     let mut base_eob = vec![0i32; 4 * 3];
     let mut base = vec![0i32; 42 * 8];
@@ -2925,7 +6737,20 @@ pub fn ref_fill_lv_map(txb_skip_cdf: &[u16], base_eob_cdf: &[u16], base_cdf: &[u
     let mut dc_sign = vec![0i32; 3 * 2];
     let mut lps = vec![0i32; 21 * 26];
     unsafe {
-        shim_fill_lv_map(txb_skip_cdf.as_ptr(), base_eob_cdf.as_ptr(), base_cdf.as_ptr(), eob_extra_cdf.as_ptr(), dc_sign_cdf.as_ptr(), br_cdf.as_ptr(), txb_skip.as_mut_ptr(), base_eob.as_mut_ptr(), base.as_mut_ptr(), eob_extra.as_mut_ptr(), dc_sign.as_mut_ptr(), lps.as_mut_ptr());
+        shim_fill_lv_map(
+            txb_skip_cdf.as_ptr(),
+            base_eob_cdf.as_ptr(),
+            base_cdf.as_ptr(),
+            eob_extra_cdf.as_ptr(),
+            dc_sign_cdf.as_ptr(),
+            br_cdf.as_ptr(),
+            txb_skip.as_mut_ptr(),
+            base_eob.as_mut_ptr(),
+            base.as_mut_ptr(),
+            eob_extra.as_mut_ptr(),
+            dc_sign.as_mut_ptr(),
+            lps.as_mut_ptr(),
+        );
     }
     (txb_skip, base_eob, base, eob_extra, dc_sign, lps)
 }
@@ -2933,38 +6758,177 @@ pub fn ref_fill_lv_map(txb_skip_cdf: &[u16], base_eob_cdf: &[u16], base_cdf: &[u
 /// Reference ext-tx derivation for `av1_write_tx_type`. Returns
 /// (set_type, num, eset, square_tx_size, symb, used, intra_dir).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_ext_tx_derive(tx_size: usize, is_inter: bool, reduced: bool, tx_type: usize, use_fi: bool, fi_mode: usize, mode: usize) -> [i32; 7] {
+pub fn ref_ext_tx_derive(
+    tx_size: usize,
+    is_inter: bool,
+    reduced: bool,
+    tx_type: usize,
+    use_fi: bool,
+    fi_mode: usize,
+    mode: usize,
+) -> [i32; 7] {
     let mut out = [0i32; 7];
-    unsafe { shim_ext_tx_derive(tx_size as i32, is_inter as i32, reduced as i32, tx_type as i32, use_fi as i32, fi_mode as i32, mode as i32, out.as_mut_ptr()) }
+    unsafe {
+        shim_ext_tx_derive(
+            tx_size as i32,
+            is_inter as i32,
+            reduced as i32,
+            tx_type as i32,
+            use_fi as i32,
+            fi_mode as i32,
+            mode as i32,
+            out.as_mut_ptr(),
+        )
+    }
     out
 }
 
 /// Reference `get_two_coeff_cost_simple`; returns (cost, cost_low).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_two_coeff_cost_simple(ci: usize, abs_qc: i32, coeff_ctx: usize, base: &[i32], lps: &[i32], bhl: u32, tx_class: i32, levels: &[u8]) -> (i32, i32) {
+pub fn ref_two_coeff_cost_simple(
+    ci: usize,
+    abs_qc: i32,
+    coeff_ctx: usize,
+    base: &[i32],
+    lps: &[i32],
+    bhl: u32,
+    tx_class: i32,
+    levels: &[u8],
+) -> (i32, i32) {
     let mut cost_low = 0i32;
-    let cost = unsafe { shim_two_coeff_cost_simple(ci as i32, abs_qc, coeff_ctx as i32, base.as_ptr(), lps.as_ptr(), bhl as i32, tx_class, levels.as_ptr(), &mut cost_low) };
+    let cost = unsafe {
+        shim_two_coeff_cost_simple(
+            ci as i32,
+            abs_qc,
+            coeff_ctx as i32,
+            base.as_ptr(),
+            lps.as_ptr(),
+            bhl as i32,
+            tx_class,
+            levels.as_ptr(),
+            &mut cost_low,
+        )
+    };
     (cost, cost_low)
 }
 
 /// Reference `get_coeff_cost_eob`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_coeff_cost_eob(ci: usize, abs_qc: i32, sign: usize, coeff_ctx: usize, dc_sign_ctx: usize, base_eob: &[i32], dc_sign: &[i32], lps: &[i32], bhl: u32, tx_class: i32) -> i32 {
-    unsafe { shim_coeff_cost_eob(ci as i32, abs_qc, sign as i32, coeff_ctx as i32, dc_sign_ctx as i32, base_eob.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), bhl as i32, tx_class) }
+pub fn ref_coeff_cost_eob(
+    ci: usize,
+    abs_qc: i32,
+    sign: usize,
+    coeff_ctx: usize,
+    dc_sign_ctx: usize,
+    base_eob: &[i32],
+    dc_sign: &[i32],
+    lps: &[i32],
+    bhl: u32,
+    tx_class: i32,
+) -> i32 {
+    unsafe {
+        shim_coeff_cost_eob(
+            ci as i32,
+            abs_qc,
+            sign as i32,
+            coeff_ctx as i32,
+            dc_sign_ctx as i32,
+            base_eob.as_ptr(),
+            dc_sign.as_ptr(),
+            lps.as_ptr(),
+            bhl as i32,
+            tx_class,
+        )
+    }
 }
 
 /// Reference `get_coeff_cost_general`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_coeff_cost_general(is_last: bool, ci: usize, abs_qc: i32, sign: usize, coeff_ctx: usize, dc_sign_ctx: usize, base_eob: &[i32], base: &[i32], dc_sign: &[i32], lps: &[i32], bhl: u32, tx_class: i32, levels: &[u8]) -> i32 {
-    unsafe { shim_coeff_cost_general(is_last as i32, ci as i32, abs_qc, sign as i32, coeff_ctx as i32, dc_sign_ctx as i32, base_eob.as_ptr(), base.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), bhl as i32, tx_class, levels.as_ptr()) }
+pub fn ref_coeff_cost_general(
+    is_last: bool,
+    ci: usize,
+    abs_qc: i32,
+    sign: usize,
+    coeff_ctx: usize,
+    dc_sign_ctx: usize,
+    base_eob: &[i32],
+    base: &[i32],
+    dc_sign: &[i32],
+    lps: &[i32],
+    bhl: u32,
+    tx_class: i32,
+    levels: &[u8],
+) -> i32 {
+    unsafe {
+        shim_coeff_cost_general(
+            is_last as i32,
+            ci as i32,
+            abs_qc,
+            sign as i32,
+            coeff_ctx as i32,
+            dc_sign_ctx as i32,
+            base_eob.as_ptr(),
+            base.as_ptr(),
+            dc_sign.as_ptr(),
+            lps.as_ptr(),
+            bhl as i32,
+            tx_class,
+            levels.as_ptr(),
+        )
+    }
 }
 
 /// Reference `av1_optimize_txb` (non-QM trellis). Optimizes qcoeff/dqcoeff in
 /// place; returns (eob, rate_cost).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_optimize_txb(tx_size: usize, tx_type: usize, qcoeff: &mut [i32], dqcoeff: &mut [i32], tcoeff: &[i32], eob: usize, dequant: &[i16], rdmult: i64, dc_sign_ctx: usize, txb_skip_ctx: usize, sharpness: i32, scan: &[i16], txb_skip: &[i32], base_eob: &[i32], base: &[i32], eob_extra: &[i32], dc_sign: &[i32], lps: &[i32], eob_cost: &[i32]) -> (usize, i32) {
+pub fn ref_optimize_txb(
+    tx_size: usize,
+    tx_type: usize,
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+    tcoeff: &[i32],
+    eob: usize,
+    dequant: &[i16],
+    rdmult: i64,
+    dc_sign_ctx: usize,
+    txb_skip_ctx: usize,
+    sharpness: i32,
+    scan: &[i16],
+    txb_skip: &[i32],
+    base_eob: &[i32],
+    base: &[i32],
+    eob_extra: &[i32],
+    dc_sign: &[i32],
+    lps: &[i32],
+    eob_cost: &[i32],
+) -> (usize, i32) {
     let mut rate = 0i32;
-    let e = unsafe { shim_optimize_txb(tx_size as i32, tx_type as i32, qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), tcoeff.as_ptr(), eob as i32, dequant.as_ptr(), rdmult, dc_sign_ctx as i32, txb_skip_ctx as i32, sharpness, scan.as_ptr(), txb_skip.as_ptr(), base_eob.as_ptr(), base.as_ptr(), eob_extra.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), eob_cost.as_ptr(), core::ptr::null(), core::ptr::null(), &mut rate) };
+    let e = unsafe {
+        shim_optimize_txb(
+            tx_size as i32,
+            tx_type as i32,
+            qcoeff.as_mut_ptr(),
+            dqcoeff.as_mut_ptr(),
+            tcoeff.as_ptr(),
+            eob as i32,
+            dequant.as_ptr(),
+            rdmult,
+            dc_sign_ctx as i32,
+            txb_skip_ctx as i32,
+            sharpness,
+            scan.as_ptr(),
+            txb_skip.as_ptr(),
+            base_eob.as_ptr(),
+            base.as_ptr(),
+            eob_extra.as_ptr(),
+            dc_sign.as_ptr(),
+            lps.as_ptr(),
+            eob_cost.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut rate,
+        )
+    };
     (e as usize, rate)
 }
 
@@ -2972,9 +6936,56 @@ pub fn ref_optimize_txb(tx_size: usize, tx_type: usize, qcoeff: &mut [i32], dqco
 /// per-position dequant (`get_dqv`), `qm` folds into the distortion
 /// (`get_coeff_dist`). Both indexed by raster position. Returns (eob, rate).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_optimize_txb_qm(tx_size: usize, tx_type: usize, qcoeff: &mut [i32], dqcoeff: &mut [i32], tcoeff: &[i32], eob: usize, dequant: &[i16], rdmult: i64, dc_sign_ctx: usize, txb_skip_ctx: usize, sharpness: i32, scan: &[i16], txb_skip: &[i32], base_eob: &[i32], base: &[i32], eob_extra: &[i32], dc_sign: &[i32], lps: &[i32], eob_cost: &[i32], iqm: &[u8], qm: &[u8]) -> (usize, i32) {
+pub fn ref_optimize_txb_qm(
+    tx_size: usize,
+    tx_type: usize,
+    qcoeff: &mut [i32],
+    dqcoeff: &mut [i32],
+    tcoeff: &[i32],
+    eob: usize,
+    dequant: &[i16],
+    rdmult: i64,
+    dc_sign_ctx: usize,
+    txb_skip_ctx: usize,
+    sharpness: i32,
+    scan: &[i16],
+    txb_skip: &[i32],
+    base_eob: &[i32],
+    base: &[i32],
+    eob_extra: &[i32],
+    dc_sign: &[i32],
+    lps: &[i32],
+    eob_cost: &[i32],
+    iqm: &[u8],
+    qm: &[u8],
+) -> (usize, i32) {
     let mut rate = 0i32;
-    let e = unsafe { shim_optimize_txb(tx_size as i32, tx_type as i32, qcoeff.as_mut_ptr(), dqcoeff.as_mut_ptr(), tcoeff.as_ptr(), eob as i32, dequant.as_ptr(), rdmult, dc_sign_ctx as i32, txb_skip_ctx as i32, sharpness, scan.as_ptr(), txb_skip.as_ptr(), base_eob.as_ptr(), base.as_ptr(), eob_extra.as_ptr(), dc_sign.as_ptr(), lps.as_ptr(), eob_cost.as_ptr(), iqm.as_ptr(), qm.as_ptr(), &mut rate) };
+    let e = unsafe {
+        shim_optimize_txb(
+            tx_size as i32,
+            tx_type as i32,
+            qcoeff.as_mut_ptr(),
+            dqcoeff.as_mut_ptr(),
+            tcoeff.as_ptr(),
+            eob as i32,
+            dequant.as_ptr(),
+            rdmult,
+            dc_sign_ctx as i32,
+            txb_skip_ctx as i32,
+            sharpness,
+            scan.as_ptr(),
+            txb_skip.as_ptr(),
+            base_eob.as_ptr(),
+            base.as_ptr(),
+            eob_extra.as_ptr(),
+            dc_sign.as_ptr(),
+            lps.as_ptr(),
+            eob_cost.as_ptr(),
+            iqm.as_ptr(),
+            qm.as_ptr(),
+            &mut rate,
+        )
+    };
     (e as usize, rate)
 }
 
@@ -2985,21 +6996,44 @@ pub fn ref_get_dqv(dequant: &[i16; 2], coeff_idx: usize, iqm: Option<&[u8]>) -> 
 }
 
 /// Reference `get_coeff_dist` (squared-error distortion, folding qmatrix).
-pub fn ref_get_coeff_dist(tcoeff: i32, dqcoeff: i32, shift: i32, qm: Option<&[u8]>, coeff_idx: usize) -> i64 {
+pub fn ref_get_coeff_dist(
+    tcoeff: i32,
+    dqcoeff: i32,
+    shift: i32,
+    qm: Option<&[u8]>,
+    coeff_idx: usize,
+) -> i64 {
     let qp = qm.map_or(core::ptr::null(), |s| s.as_ptr());
     unsafe { shim_get_coeff_dist(tcoeff, dqcoeff, shift, qp, coeff_idx as i32) }
 }
 
 /// Reference `get_txb_ctx`; returns (txb_skip_ctx, dc_sign_ctx).
-pub fn ref_get_txb_ctx(plane_bsize: usize, tx_size: usize, plane: usize, a: &[i8], l: &[i8]) -> (i32, i32) {
+pub fn ref_get_txb_ctx(
+    plane_bsize: usize,
+    tx_size: usize,
+    plane: usize,
+    a: &[i8],
+    l: &[i8],
+) -> (i32, i32) {
     let mut out = [0i32; 2];
-    unsafe { shim_get_txb_ctx(plane_bsize as i32, tx_size as i32, plane as i32, a.as_ptr(), l.as_ptr(), out.as_mut_ptr()) }
+    unsafe {
+        shim_get_txb_ctx(
+            plane_bsize as i32,
+            tx_size as i32,
+            plane as i32,
+            a.as_ptr(),
+            l.as_ptr(),
+            out.as_mut_ptr(),
+        )
+    }
     (out[0], out[1])
 }
 
 /// Reference `av1_get_txb_entropy_context`.
 pub fn ref_txb_entropy_context(qcoeff: &[i32], tx_size: usize, tx_type: usize, eob: usize) -> u8 {
-    unsafe { shim_txb_entropy_context(qcoeff.as_ptr(), tx_size as i32, tx_type as i32, eob as i32) as u8 }
+    unsafe {
+        shim_txb_entropy_context(qcoeff.as_ptr(), tx_size as i32, tx_type as i32, eob as i32) as u8
+    }
 }
 
 // intra_edge_shim.c — intra edge filter / upsample DSP + strength decisions.
@@ -3050,27 +7084,107 @@ pub fn ref_highbd_upsample_intra_edge(buf: &mut [u16], off: usize, sz: usize, bd
 // Highbd quantizers (exported av1_quantize.c / quantize.c symbols).
 extern "C" {
     #[allow(clippy::too_many_arguments)]
-    pub fn av1_highbd_quantize_fp_c(coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16, quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16, eob: *mut u16, scan: *const i16, iscan: *const i16, log_scale: i32);
+    pub fn av1_highbd_quantize_fp_c(
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
+        log_scale: i32,
+    );
     #[allow(clippy::too_many_arguments)]
-    pub fn aom_highbd_quantize_b_helper_c(coeff: *const i32, n: isize, zbin: *const i16, round: *const i16, quant: *const i16, quant_shift: *const i16, qcoeff: *mut i32, dqcoeff: *mut i32, dequant: *const i16, eob: *mut u16, scan: *const i16, iscan: *const i16, qm: *const u8, iqm: *const u8, log_scale: i32);
+    pub fn aom_highbd_quantize_b_helper_c(
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
+        qm: *const u8,
+        iqm: *const u8,
+        log_scale: i32,
+    );
 }
 
 /// Reference `av1_highbd_quantize_fp` (no qmatrix). Returns (qcoeff, dqcoeff, eob).
-pub fn ref_highbd_quantize_fp(log_scale: i32, coeff: &[i32], round: &[i16; 2], quant: &[i16; 2], dequant: &[i16; 2], scan: &[i16]) -> (Vec<i32>, Vec<i32>, u16) {
+pub fn ref_highbd_quantize_fp(
+    log_scale: i32,
+    coeff: &[i32],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    dequant: &[i16; 2],
+    scan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
     let n = coeff.len();
     let (mut q, mut dq, mut eob) = (vec![0i32; n], vec![0i32; n], 0u16);
     let dummy = vec![0i16; n.max(2)];
-    unsafe { av1_highbd_quantize_fp_c(coeff.as_ptr(), n as isize, dummy.as_ptr(), round.as_ptr(), quant.as_ptr(), dummy.as_ptr(), q.as_mut_ptr(), dq.as_mut_ptr(), dequant.as_ptr(), &mut eob, scan.as_ptr(), dummy.as_ptr(), log_scale); }
+    unsafe {
+        av1_highbd_quantize_fp_c(
+            coeff.as_ptr(),
+            n as isize,
+            dummy.as_ptr(),
+            round.as_ptr(),
+            quant.as_ptr(),
+            dummy.as_ptr(),
+            q.as_mut_ptr(),
+            dq.as_mut_ptr(),
+            dequant.as_ptr(),
+            &mut eob,
+            scan.as_ptr(),
+            dummy.as_ptr(),
+            log_scale,
+        );
+    }
     (q, dq, eob)
 }
 
 /// Reference `aom_highbd_quantize_b_helper_c` (no qmatrix). Returns (qcoeff, dqcoeff, eob).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_highbd_quantize_b(log_scale: i32, coeff: &[i32], zbin: &[i16; 2], round: &[i16; 2], quant: &[i16; 2], quant_shift: &[i16; 2], dequant: &[i16; 2], scan: &[i16]) -> (Vec<i32>, Vec<i32>, u16) {
+pub fn ref_highbd_quantize_b(
+    log_scale: i32,
+    coeff: &[i32],
+    zbin: &[i16; 2],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    quant_shift: &[i16; 2],
+    dequant: &[i16; 2],
+    scan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
     let n = coeff.len();
     let (mut q, mut dq, mut eob) = (vec![0i32; n], vec![0i32; n], 0u16);
     let dummy = vec![0i16; n.max(2)];
-    unsafe { aom_highbd_quantize_b_helper_c(coeff.as_ptr(), n as isize, zbin.as_ptr(), round.as_ptr(), quant.as_ptr(), quant_shift.as_ptr(), q.as_mut_ptr(), dq.as_mut_ptr(), dequant.as_ptr(), &mut eob, scan.as_ptr(), dummy.as_ptr(), core::ptr::null(), core::ptr::null(), log_scale); }
+    unsafe {
+        aom_highbd_quantize_b_helper_c(
+            coeff.as_ptr(),
+            n as isize,
+            zbin.as_ptr(),
+            round.as_ptr(),
+            quant.as_ptr(),
+            quant_shift.as_ptr(),
+            q.as_mut_ptr(),
+            dq.as_mut_ptr(),
+            dequant.as_ptr(),
+            &mut eob,
+            scan.as_ptr(),
+            dummy.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            log_scale,
+        );
+    }
     (q, dq, eob)
 }
 
@@ -3078,90 +7192,380 @@ pub fn ref_highbd_quantize_b(log_scale: i32, coeff: &[i32], zbin: &[i16; 2], rou
 // shim/quant_fp_shim.c). round/quant/dequant are the [2]-entry QTX tables.
 extern "C" {
     #[allow(clippy::too_many_arguments)]
-    fn shim_quantize_fp_qm(coeff: *const i32, n: i32, round: *const i16, quant: *const i16, dequant: *const i16, scan: *const i16, iscan: *const i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
+    fn shim_quantize_fp_qm(
+        coeff: *const i32,
+        n: i32,
+        round: *const i16,
+        quant: *const i16,
+        dequant: *const i16,
+        scan: *const i16,
+        iscan: *const i16,
+        qm: *const u8,
+        iqm: *const u8,
+        log_scale: i32,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+    ) -> u16;
     #[allow(clippy::too_many_arguments)]
-    fn shim_highbd_quantize_fp_qm(coeff: *const i32, n: i32, round: *const i16, quant: *const i16, dequant: *const i16, scan: *const i16, iscan: *const i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
+    fn shim_highbd_quantize_fp_qm(
+        coeff: *const i32,
+        n: i32,
+        round: *const i16,
+        quant: *const i16,
+        dequant: *const i16,
+        scan: *const i16,
+        iscan: *const i16,
+        qm: *const u8,
+        iqm: *const u8,
+        log_scale: i32,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+    ) -> u16;
     #[allow(clippy::too_many_arguments)]
-    fn shim_quantize_dc(coeff: *const i32, n: i32, round: *const i16, quant: i16, dequant: i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
+    fn shim_quantize_dc(
+        coeff: *const i32,
+        n: i32,
+        round: *const i16,
+        quant: i16,
+        dequant: i16,
+        qm: *const u8,
+        iqm: *const u8,
+        log_scale: i32,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+    ) -> u16;
     #[allow(clippy::too_many_arguments)]
-    fn shim_highbd_quantize_dc(coeff: *const i32, n: i32, round: *const i16, quant: i16, dequant: i16, qm: *const u8, iqm: *const u8, log_scale: i32, qcoeff: *mut i32, dqcoeff: *mut i32) -> u16;
+    fn shim_highbd_quantize_dc(
+        coeff: *const i32,
+        n: i32,
+        round: *const i16,
+        quant: i16,
+        dequant: i16,
+        qm: *const u8,
+        iqm: *const u8,
+        log_scale: i32,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+    ) -> u16;
 }
 
 /// Reference `av1_quantize_dc_facade` (`quantize_dc`, DC-only). `qm`/`iqm` are
 /// `None` for the flat path. Returns (qcoeff, dqcoeff, eob).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_quantize_dc(log_scale: i32, coeff: &[i32], round: &[i16; 2], quant: i16, dequant: i16, qm: Option<&[u8]>, iqm: Option<&[u8]>) -> (Vec<i32>, Vec<i32>, u16) {
+pub fn ref_quantize_dc(
+    log_scale: i32,
+    coeff: &[i32],
+    round: &[i16; 2],
+    quant: i16,
+    dequant: i16,
+    qm: Option<&[u8]>,
+    iqm: Option<&[u8]>,
+) -> (Vec<i32>, Vec<i32>, u16) {
     let n = coeff.len();
     let (mut q, mut dq) = (vec![0i32; n], vec![0i32; n]);
     let qp = qm.map_or(core::ptr::null(), |s| s.as_ptr());
     let iqp = iqm.map_or(core::ptr::null(), |s| s.as_ptr());
-    let eob = unsafe { shim_quantize_dc(coeff.as_ptr(), n as i32, round.as_ptr(), quant, dequant, qp, iqp, log_scale, q.as_mut_ptr(), dq.as_mut_ptr()) };
+    let eob = unsafe {
+        shim_quantize_dc(
+            coeff.as_ptr(),
+            n as i32,
+            round.as_ptr(),
+            quant,
+            dequant,
+            qp,
+            iqp,
+            log_scale,
+            q.as_mut_ptr(),
+            dq.as_mut_ptr(),
+        )
+    };
     (q, dq, eob)
 }
 
 /// Reference `av1_highbd_quantize_dc_facade` (`highbd_quantize_dc`, DC-only).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_highbd_quantize_dc(log_scale: i32, coeff: &[i32], round: &[i16; 2], quant: i16, dequant: i16, qm: Option<&[u8]>, iqm: Option<&[u8]>) -> (Vec<i32>, Vec<i32>, u16) {
+pub fn ref_highbd_quantize_dc(
+    log_scale: i32,
+    coeff: &[i32],
+    round: &[i16; 2],
+    quant: i16,
+    dequant: i16,
+    qm: Option<&[u8]>,
+    iqm: Option<&[u8]>,
+) -> (Vec<i32>, Vec<i32>, u16) {
     let n = coeff.len();
     let (mut q, mut dq) = (vec![0i32; n], vec![0i32; n]);
     let qp = qm.map_or(core::ptr::null(), |s| s.as_ptr());
     let iqp = iqm.map_or(core::ptr::null(), |s| s.as_ptr());
-    let eob = unsafe { shim_highbd_quantize_dc(coeff.as_ptr(), n as i32, round.as_ptr(), quant, dequant, qp, iqp, log_scale, q.as_mut_ptr(), dq.as_mut_ptr()) };
+    let eob = unsafe {
+        shim_highbd_quantize_dc(
+            coeff.as_ptr(),
+            n as i32,
+            round.as_ptr(),
+            quant,
+            dequant,
+            qp,
+            iqp,
+            log_scale,
+            q.as_mut_ptr(),
+            dq.as_mut_ptr(),
+        )
+    };
     (q, dq, eob)
 }
 
 /// Reference lowbd `av1_quantize_fp_facade` QM path (`quantize_fp_helper_c` with
 /// non-NULL qm/iqm). Returns (qcoeff, dqcoeff, eob).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_quantize_fp_qm(log_scale: i32, coeff: &[i32], round: &[i16; 2], quant: &[i16; 2], dequant: &[i16; 2], qm: &[u8], iqm: &[u8], scan: &[i16], iscan: &[i16]) -> (Vec<i32>, Vec<i32>, u16) {
+pub fn ref_quantize_fp_qm(
+    log_scale: i32,
+    coeff: &[i32],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    dequant: &[i16; 2],
+    qm: &[u8],
+    iqm: &[u8],
+    scan: &[i16],
+    iscan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
     let n = coeff.len();
     let (mut q, mut dq) = (vec![0i32; n], vec![0i32; n]);
-    let eob = unsafe { shim_quantize_fp_qm(coeff.as_ptr(), n as i32, round.as_ptr(), quant.as_ptr(), dequant.as_ptr(), scan.as_ptr(), iscan.as_ptr(), qm.as_ptr(), iqm.as_ptr(), log_scale, q.as_mut_ptr(), dq.as_mut_ptr()) };
+    let eob = unsafe {
+        shim_quantize_fp_qm(
+            coeff.as_ptr(),
+            n as i32,
+            round.as_ptr(),
+            quant.as_ptr(),
+            dequant.as_ptr(),
+            scan.as_ptr(),
+            iscan.as_ptr(),
+            qm.as_ptr(),
+            iqm.as_ptr(),
+            log_scale,
+            q.as_mut_ptr(),
+            dq.as_mut_ptr(),
+        )
+    };
     (q, dq, eob)
 }
 
 /// Reference highbd `av1_highbd_quantize_fp_facade` QM path
 /// (`highbd_quantize_fp_helper_c` with non-NULL qm/iqm). Returns (qcoeff, dqcoeff, eob).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_highbd_quantize_fp_qm(log_scale: i32, coeff: &[i32], round: &[i16; 2], quant: &[i16; 2], dequant: &[i16; 2], qm: &[u8], iqm: &[u8], scan: &[i16], iscan: &[i16]) -> (Vec<i32>, Vec<i32>, u16) {
+pub fn ref_highbd_quantize_fp_qm(
+    log_scale: i32,
+    coeff: &[i32],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    dequant: &[i16; 2],
+    qm: &[u8],
+    iqm: &[u8],
+    scan: &[i16],
+    iscan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
     let n = coeff.len();
     let (mut q, mut dq) = (vec![0i32; n], vec![0i32; n]);
-    let eob = unsafe { shim_highbd_quantize_fp_qm(coeff.as_ptr(), n as i32, round.as_ptr(), quant.as_ptr(), dequant.as_ptr(), scan.as_ptr(), iscan.as_ptr(), qm.as_ptr(), iqm.as_ptr(), log_scale, q.as_mut_ptr(), dq.as_mut_ptr()) };
+    let eob = unsafe {
+        shim_highbd_quantize_fp_qm(
+            coeff.as_ptr(),
+            n as i32,
+            round.as_ptr(),
+            quant.as_ptr(),
+            dequant.as_ptr(),
+            scan.as_ptr(),
+            iscan.as_ptr(),
+            qm.as_ptr(),
+            iqm.as_ptr(),
+            log_scale,
+            q.as_mut_ptr(),
+            dq.as_mut_ptr(),
+        )
+    };
     (q, dq, eob)
 }
 
 // av1/common/reconintra.c — intra neighbour availability (verbatim-paste shim).
 extern "C" {
     #[allow(clippy::too_many_arguments)]
-    fn shim_has_top_right(sb_size: i32, bsize: i32, mi_row: i32, mi_col: i32, top_available: i32, right_available: i32, partition: i32, txsz: i32, row_off: i32, col_off: i32, ss_x: i32, ss_y: i32) -> i32;
+    fn shim_has_top_right(
+        sb_size: i32,
+        bsize: i32,
+        mi_row: i32,
+        mi_col: i32,
+        top_available: i32,
+        right_available: i32,
+        partition: i32,
+        txsz: i32,
+        row_off: i32,
+        col_off: i32,
+        ss_x: i32,
+        ss_y: i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_has_bottom_left(sb_size: i32, bsize: i32, mi_row: i32, mi_col: i32, bottom_available: i32, left_available: i32, partition: i32, txsz: i32, row_off: i32, col_off: i32, ss_x: i32, ss_y: i32) -> i32;
+    fn shim_has_bottom_left(
+        sb_size: i32,
+        bsize: i32,
+        mi_row: i32,
+        mi_col: i32,
+        bottom_available: i32,
+        left_available: i32,
+        partition: i32,
+        txsz: i32,
+        row_off: i32,
+        col_off: i32,
+        ss_x: i32,
+        ss_y: i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_intra_avail(sb_size: i32, bsize: i32, mi_row: i32, mi_col: i32, up_available: i32, left_available: i32, tile_col_end: i32, tile_row_end: i32, partition: i32, tx_size: i32, ss_x: i32, ss_y: i32, row_off: i32, col_off: i32, wpx: i32, hpx: i32, mi_cols: i32, mi_rows: i32, mode: i32, angle_delta: i32, use_filter_intra: i32, out: *mut i32);
+    fn shim_intra_avail(
+        sb_size: i32,
+        bsize: i32,
+        mi_row: i32,
+        mi_col: i32,
+        up_available: i32,
+        left_available: i32,
+        tile_col_end: i32,
+        tile_row_end: i32,
+        partition: i32,
+        tx_size: i32,
+        ss_x: i32,
+        ss_y: i32,
+        row_off: i32,
+        col_off: i32,
+        wpx: i32,
+        hpx: i32,
+        mi_cols: i32,
+        mi_rows: i32,
+        mode: i32,
+        angle_delta: i32,
+        use_filter_intra: i32,
+        out: *mut i32,
+    );
 }
 
 /// Reference `has_top_right` (reconintra.c): is the block's top-right reference
 /// available and coded? Returns 0/1.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_has_top_right(sb_size: usize, bsize: usize, mi_row: i32, mi_col: i32, top_available: bool, right_available: bool, partition: usize, txsz: usize, row_off: i32, col_off: i32, ss_x: i32, ss_y: i32) -> i32 {
-    unsafe { shim_has_top_right(sb_size as i32, bsize as i32, mi_row, mi_col, top_available as i32, right_available as i32, partition as i32, txsz as i32, row_off, col_off, ss_x, ss_y) }
+pub fn ref_has_top_right(
+    sb_size: usize,
+    bsize: usize,
+    mi_row: i32,
+    mi_col: i32,
+    top_available: bool,
+    right_available: bool,
+    partition: usize,
+    txsz: usize,
+    row_off: i32,
+    col_off: i32,
+    ss_x: i32,
+    ss_y: i32,
+) -> i32 {
+    unsafe {
+        shim_has_top_right(
+            sb_size as i32,
+            bsize as i32,
+            mi_row,
+            mi_col,
+            top_available as i32,
+            right_available as i32,
+            partition as i32,
+            txsz as i32,
+            row_off,
+            col_off,
+            ss_x,
+            ss_y,
+        )
+    }
 }
 
 /// Reference `has_bottom_left` (reconintra.c): is the block's bottom-left
 /// reference available and coded? Returns 0/1.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_has_bottom_left(sb_size: usize, bsize: usize, mi_row: i32, mi_col: i32, bottom_available: bool, left_available: bool, partition: usize, txsz: usize, row_off: i32, col_off: i32, ss_x: i32, ss_y: i32) -> i32 {
-    unsafe { shim_has_bottom_left(sb_size as i32, bsize as i32, mi_row, mi_col, bottom_available as i32, left_available as i32, partition as i32, txsz as i32, row_off, col_off, ss_x, ss_y) }
+pub fn ref_has_bottom_left(
+    sb_size: usize,
+    bsize: usize,
+    mi_row: i32,
+    mi_col: i32,
+    bottom_available: bool,
+    left_available: bool,
+    partition: usize,
+    txsz: usize,
+    row_off: i32,
+    col_off: i32,
+    ss_x: i32,
+    ss_y: i32,
+) -> i32 {
+    unsafe {
+        shim_has_bottom_left(
+            sb_size as i32,
+            bsize as i32,
+            mi_row,
+            mi_col,
+            bottom_available as i32,
+            left_available as i32,
+            partition as i32,
+            txsz as i32,
+            row_off,
+            col_off,
+            ss_x,
+            ss_y,
+        )
+    }
 }
 
 /// Reference intra neighbour-availability composition (the counts computed inside
 /// `av1_predict_intra_block`). Returns `(n_top_px, n_topright_px, n_left_px,
 /// n_bottomleft_px)`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_intra_avail(sb_size: usize, bsize: usize, mi_row: i32, mi_col: i32, up_available: bool, left_available: bool, tile_col_end: i32, tile_row_end: i32, partition: usize, tx_size: usize, ss_x: i32, ss_y: i32, row_off: i32, col_off: i32, wpx: i32, hpx: i32, mi_cols: i32, mi_rows: i32, mode: usize, angle_delta: i32, use_filter_intra: bool) -> (i32, i32, i32, i32) {
+pub fn ref_intra_avail(
+    sb_size: usize,
+    bsize: usize,
+    mi_row: i32,
+    mi_col: i32,
+    up_available: bool,
+    left_available: bool,
+    tile_col_end: i32,
+    tile_row_end: i32,
+    partition: usize,
+    tx_size: usize,
+    ss_x: i32,
+    ss_y: i32,
+    row_off: i32,
+    col_off: i32,
+    wpx: i32,
+    hpx: i32,
+    mi_cols: i32,
+    mi_rows: i32,
+    mode: usize,
+    angle_delta: i32,
+    use_filter_intra: bool,
+) -> (i32, i32, i32, i32) {
     let mut out = [0i32; 4];
     unsafe {
-        shim_intra_avail(sb_size as i32, bsize as i32, mi_row, mi_col, up_available as i32, left_available as i32, tile_col_end, tile_row_end, partition as i32, tx_size as i32, ss_x, ss_y, row_off, col_off, wpx, hpx, mi_cols, mi_rows, mode as i32, angle_delta, use_filter_intra as i32, out.as_mut_ptr());
+        shim_intra_avail(
+            sb_size as i32,
+            bsize as i32,
+            mi_row,
+            mi_col,
+            up_available as i32,
+            left_available as i32,
+            tile_col_end,
+            tile_row_end,
+            partition as i32,
+            tx_size as i32,
+            ss_x,
+            ss_y,
+            row_off,
+            col_off,
+            wpx,
+            hpx,
+            mi_cols,
+            mi_rows,
+            mode as i32,
+            angle_delta,
+            use_filter_intra as i32,
+            out.as_mut_ptr(),
+        );
     }
     (out[0], out[1], out[2], out[3])
 }
@@ -3170,9 +7574,11 @@ pub fn ref_intra_avail(sb_size: usize, bsize: usize, mi_row: i32, mi_col: i32, u
 // exported `_c` getter tables (one getter per subsample family + subtract-average +
 // hbd predict). Plain externs into libaom.a; the kernels are pure loops (no RTCD).
 // TX_SIZE parameters are `uint8_t` in C (UENUM1BYTE) — declared `u8` here.
-type CflSubsampleHbdFn = unsafe extern "C" fn(input: *const u16, input_stride: i32, output_q3: *mut u16);
+type CflSubsampleHbdFn =
+    unsafe extern "C" fn(input: *const u16, input_stride: i32, output_q3: *mut u16);
 type CflSubtractAverageFn = unsafe extern "C" fn(src: *const u16, dst: *mut i16);
-type CflPredictHbdFn = unsafe extern "C" fn(src: *const i16, dst: *mut u16, dst_stride: i32, alpha_q3: i32, bd: i32);
+type CflPredictHbdFn =
+    unsafe extern "C" fn(src: *const i16, dst: *mut u16, dst_stride: i32, alpha_q3: i32, bd: i32);
 extern "C" {
     fn cfl_get_luma_subsampling_420_hbd_c(tx_size: u8) -> Option<CflSubsampleHbdFn>;
     fn cfl_get_luma_subsampling_422_hbd_c(tx_size: u8) -> Option<CflSubsampleHbdFn>;
@@ -3185,7 +7591,13 @@ extern "C" {
 /// (dims ≤ 32×32): subsample `input` (strided luma, u16) into the Q3
 /// `CFL_BUF_LINE`(32)-strided `out` buffer. `ss = (ss_x, ss_y)` selects the
 /// family: (1,1)=420, (1,0)=422, (0,0)=444.
-pub fn ref_cfl_subsample_hbd(ss: (i32, i32), tx_size: usize, input: &[u16], input_stride: usize, out: &mut [u16; 1024]) {
+pub fn ref_cfl_subsample_hbd(
+    ss: (i32, i32),
+    tx_size: usize,
+    input: &[u16],
+    input_stride: usize,
+    out: &mut [u16; 1024],
+) {
     let f = unsafe {
         match ss {
             (1, 1) => cfl_get_luma_subsampling_420_hbd_c(tx_size as u8),
@@ -3208,10 +7620,25 @@ pub fn ref_cfl_subtract_average(tx_size: usize, src: &[u16; 1024], dst: &mut [i1
 
 /// Reference `cfl_predict_hbd_WxH_c` for the CHROMA `tx_size`: `dst` holds the
 /// DC prediction on entry and receives `clip(dst + scaled_luma(alpha_q3, ac))`.
-pub fn ref_cfl_predict_hbd(tx_size: usize, ac: &[i16; 1024], dst: &mut [u16], dst_stride: usize, alpha_q3: i32, bd: i32) {
+pub fn ref_cfl_predict_hbd(
+    tx_size: usize,
+    ac: &[i16; 1024],
+    dst: &mut [u16],
+    dst_stride: usize,
+    alpha_q3: i32,
+    bd: i32,
+) {
     let f = unsafe { cfl_get_predict_hbd_fn_c(tx_size as u8) }
         .expect("no C cfl predict kernel for this tx_size");
-    unsafe { f(ac.as_ptr(), dst.as_mut_ptr(), dst_stride as i32, alpha_q3, bd) }
+    unsafe {
+        f(
+            ac.as_ptr(),
+            dst.as_mut_ptr(),
+            dst_stride as i32,
+            alpha_q3,
+            bd,
+        )
+    }
 }
 
 // dec_shim.c — decoder-track MACROBLOCKD facades over real static inlines
@@ -3220,39 +7647,130 @@ pub fn ref_cfl_predict_hbd(tx_size: usize, ac: &[i16; 1024], dst: &mut [u16], ds
 // av1_setup_past_independence, and the REAL public codec API (av1_cx/av1_dx).
 extern "C" {
     #[allow(clippy::too_many_arguments)]
-    fn shim_get_tx_size_context(bsize: i32, above_txfm: u8, left_txfm: u8, up_available: i32, left_available: i32, above_bsize: i32, above_inter: i32, left_bsize: i32, left_inter: i32) -> i32;
-    fn shim_set_txfm_ctxs(tx_size: i32, n4_w: i32, n4_h: i32, skip: i32, above: *mut u8, left: *mut u8);
+    fn shim_get_tx_size_context(
+        bsize: i32,
+        above_txfm: u8,
+        left_txfm: u8,
+        up_available: i32,
+        left_available: i32,
+        above_bsize: i32,
+        above_inter: i32,
+        left_bsize: i32,
+        left_inter: i32,
+    ) -> i32;
+    fn shim_set_txfm_ctxs(
+        tx_size: i32,
+        n4_w: i32,
+        n4_h: i32,
+        skip: i32,
+        above: *mut u8,
+        left: *mut u8,
+    );
     fn shim_is_chroma_reference(mi_row: i32, mi_col: i32, bsize: i32, ss_x: i32, ss_y: i32) -> i32;
     fn shim_get_max_uv_txsize(bsize: i32, ss_x: i32, ss_y: i32) -> i32;
     fn shim_intra_mode_to_tx_type(y_mode: i32, uv_mode: i32, plane_type: i32) -> i32;
-    fn shim_av1_get_tx_type_uv_intra(y_mode: i32, uv_mode: i32, uv_tx_size: i32, reduced_tx_set: i32, lossless: i32) -> i32;
+    fn shim_av1_get_tx_type_uv_intra(
+        y_mode: i32,
+        uv_mode: i32,
+        uv_tx_size: i32,
+        reduced_tx_set: i32,
+        lossless: i32,
+    ) -> i32;
     fn shim_tx_size_from_tx_mode(bsize: i32, tx_mode: i32) -> i32;
     fn shim_depth_to_tx_size(depth: i32, bsize: i32) -> i32;
     fn shim_scale_chroma_bsize(bsize: i32, ss_x: i32, ss_y: i32) -> i32;
     fn shim_dump_default_kf_fc(base_qindex: i32, out: *mut u16) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_encode_av1_kf(y: *const u16, u: *const u16, v: *const u16, w: i32, h: i32, bd: i32, mono: i32, ss_x: i32, ss_y: i32, cq_level: i32, cpu_used: i32, enable_cdef: i32, out: *mut u8, out_cap: usize) -> i64;
+    fn shim_encode_av1_kf(
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        enable_cdef: i32,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
     #[allow(clippy::too_many_arguments)]
-    fn shim_decode_av1_kf(data: *const u8, len: usize, expect_w: i32, expect_h: i32, y: *mut u16, u: *mut u16, v: *mut u16, info_out: *mut i32) -> i32;
+    fn shim_decode_av1_kf(
+        data: *const u8,
+        len: usize,
+        expect_w: i32,
+        expect_h: i32,
+        y: *mut u16,
+        u: *mut u16,
+        v: *mut u16,
+        info_out: *mut i32,
+    ) -> i32;
 }
 
 /// Reference `get_tx_size_context` (pred_common.h) over a constructed
 /// MACROBLOCKD (neighbour txfm-context bytes + availability + neighbour
 /// bsize/inter-ness).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_get_tx_size_context(bsize: usize, above_txfm: u8, left_txfm: u8, up_available: bool, left_available: bool, above_bsize: usize, above_inter: bool, left_bsize: usize, left_inter: bool) -> i32 {
-    unsafe { shim_get_tx_size_context(bsize as i32, above_txfm, left_txfm, up_available as i32, left_available as i32, above_bsize as i32, above_inter as i32, left_bsize as i32, left_inter as i32) }
+pub fn ref_get_tx_size_context(
+    bsize: usize,
+    above_txfm: u8,
+    left_txfm: u8,
+    up_available: bool,
+    left_available: bool,
+    above_bsize: usize,
+    above_inter: bool,
+    left_bsize: usize,
+    left_inter: bool,
+) -> i32 {
+    unsafe {
+        shim_get_tx_size_context(
+            bsize as i32,
+            above_txfm,
+            left_txfm,
+            up_available as i32,
+            left_available as i32,
+            above_bsize as i32,
+            above_inter as i32,
+            left_bsize as i32,
+            left_inter as i32,
+        )
+    }
 }
 
 /// Reference `set_txfm_ctxs` (av1_common_int.h): stamps `above[..n4_w]` /
 /// `left[..n4_h]`.
-pub fn ref_set_txfm_ctxs(tx_size: usize, n4_w: usize, n4_h: usize, skip: bool, above: &mut [u8], left: &mut [u8]) {
+pub fn ref_set_txfm_ctxs(
+    tx_size: usize,
+    n4_w: usize,
+    n4_h: usize,
+    skip: bool,
+    above: &mut [u8],
+    left: &mut [u8],
+) {
     assert!(above.len() >= n4_w && left.len() >= n4_h);
-    unsafe { shim_set_txfm_ctxs(tx_size as i32, n4_w as i32, n4_h as i32, skip as i32, above.as_mut_ptr(), left.as_mut_ptr()) }
+    unsafe {
+        shim_set_txfm_ctxs(
+            tx_size as i32,
+            n4_w as i32,
+            n4_h as i32,
+            skip as i32,
+            above.as_mut_ptr(),
+            left.as_mut_ptr(),
+        )
+    }
 }
 
 /// Reference `is_chroma_reference` (av1_common_int.h).
-pub fn ref_is_chroma_reference(mi_row: i32, mi_col: i32, bsize: usize, ss_x: i32, ss_y: i32) -> bool {
+pub fn ref_is_chroma_reference(
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    ss_x: i32,
+    ss_y: i32,
+) -> bool {
     unsafe { shim_is_chroma_reference(mi_row, mi_col, bsize as i32, ss_x, ss_y) != 0 }
 }
 
@@ -3268,8 +7786,22 @@ pub fn ref_intra_mode_to_tx_type(y_mode: usize, uv_mode: usize, plane_type: usiz
 }
 
 /// Reference `av1_get_tx_type` (blockd.h), intra UV arm.
-pub fn ref_av1_get_tx_type_uv_intra(y_mode: usize, uv_mode: usize, uv_tx_size: usize, reduced_tx_set: bool, lossless: bool) -> usize {
-    unsafe { shim_av1_get_tx_type_uv_intra(y_mode as i32, uv_mode as i32, uv_tx_size as i32, reduced_tx_set as i32, lossless as i32) as usize }
+pub fn ref_av1_get_tx_type_uv_intra(
+    y_mode: usize,
+    uv_mode: usize,
+    uv_tx_size: usize,
+    reduced_tx_set: bool,
+    lossless: bool,
+) -> usize {
+    unsafe {
+        shim_av1_get_tx_type_uv_intra(
+            y_mode as i32,
+            uv_mode as i32,
+            uv_tx_size as i32,
+            reduced_tx_set as i32,
+            lossless as i32,
+        ) as usize
+    }
 }
 
 /// Reference `tx_size_from_tx_mode` (blockd.h).
@@ -3307,13 +7839,45 @@ pub fn ref_dump_default_kf_fc(base_qindex: i32) -> Vec<u16> {
 /// --deltaq-mode=0 --aq-mode=0 --enable-palette=0 --enable-intrabc=0`.
 /// Planes are u16 at every bit depth; chroma dims are `(w+ss)>>ss`.
 #[allow(clippy::too_many_arguments)]
-pub fn ref_encode_av1_kf(y: &[u16], u: &[u16], v: &[u16], w: usize, h: usize, bd: i32, mono: bool, ss_x: i32, ss_y: i32, cq_level: i32, cpu_used: i32, enable_cdef: bool) -> Vec<u8> {
-    let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y) };
+pub fn ref_encode_av1_kf(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    enable_cdef: bool,
+) -> Vec<u8> {
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+    };
     assert_eq!(y.len(), w * h);
     assert!(mono || (u.len() == cw * ch && v.len() == cw * ch));
     let mut out = vec![0u8; w * h * 8 + 65536];
     let n = unsafe {
-        shim_encode_av1_kf(y.as_ptr(), u.as_ptr(), v.as_ptr(), w as i32, h as i32, bd, mono as i32, ss_x, ss_y, cq_level, cpu_used, enable_cdef as i32, out.as_mut_ptr(), out.len())
+        shim_encode_av1_kf(
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            enable_cdef as i32,
+            out.as_mut_ptr(),
+            out.len(),
+        )
     };
     assert!(n > 0, "shim_encode_av1_kf failed ({n})");
     out.truncate(n as usize);
@@ -3339,7 +7903,16 @@ pub fn ref_decode_av1_kf(data: &[u8], expect_w: usize, expect_h: usize) -> RefDe
     let mut v = vec![0u16; expect_w * expect_h];
     let mut info = [0i32; 6];
     let rc = unsafe {
-        shim_decode_av1_kf(data.as_ptr(), data.len(), expect_w as i32, expect_h as i32, y.as_mut_ptr(), u.as_mut_ptr(), v.as_mut_ptr(), info.as_mut_ptr())
+        shim_decode_av1_kf(
+            data.as_ptr(),
+            data.len(),
+            expect_w as i32,
+            expect_h as i32,
+            y.as_mut_ptr(),
+            u.as_mut_ptr(),
+            v.as_mut_ptr(),
+            info.as_mut_ptr(),
+        )
     };
     assert_eq!(rc, 0, "shim_decode_av1_kf failed ({rc})");
     let (mono, ss_x, ss_y) = (info[1] != 0, info[2] as usize, info[3] as usize);
@@ -3355,29 +7928,304 @@ pub fn ref_decode_av1_kf(data: &[u8], expect_w: usize, expect_h: usize) -> RefDe
     RefDecodedFrame { y, u, v, info }
 }
 
+// Loop-filter application oracles (dec_shim.c section 4): facades over the
+// REAL exported av1_loop_filter_frame_init + av1_filter_block_plane_vert/horz
+// driven in the exact single-threaded loop_filter_rows order.
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_lf_frame_init_tables(
+        filter_level: *const i32,
+        sharpness: i32,
+        mode_ref_delta_enabled: i32,
+        ref_deltas: *const i8,
+        mode_deltas: *const i8,
+        seg_enabled: i32,
+        seg_active: *const i32,
+        seg_data: *const i32,
+        plane_start: i32,
+        plane_end: i32,
+        lfthr_out: *mut u8,
+        lvl_out: *mut u8,
+    );
+    #[allow(clippy::too_many_arguments)]
+    fn shim_lf_filter_frame(
+        y: *mut u16,
+        y_stride: i32,
+        u: *mut u16,
+        v: *mut u16,
+        uv_stride: i32,
+        crop_w: i32,
+        crop_h: i32,
+        ss_x: i32,
+        ss_y: i32,
+        bd: i32,
+        mi_rows: i32,
+        mi_cols: i32,
+        grid_stride: i32,
+        g_bsize: *const i32,
+        g_txsize: *const i32,
+        g_seg: *const i32,
+        g_ref0: *const i32,
+        g_mode: *const i32,
+        g_skip: *const i32,
+        g_intrabc: *const i32,
+        g_dlf_base: *const i8,
+        g_dlf: *const i8,
+        filter_level: *const i32,
+        sharpness: i32,
+        mode_ref_delta_enabled: i32,
+        ref_deltas: *const i8,
+        mode_deltas: *const i8,
+        delta_lf_present: i32,
+        delta_lf_multi: i32,
+        lossless: *const i32,
+        seg_enabled: i32,
+        seg_active: *const i32,
+        seg_data: *const i32,
+        plane_start: i32,
+        plane_end: i32,
+    ) -> i32;
+}
+
+/// Loop-filter frame parameters for the reference facades (mirrors
+/// `struct loopfilter` + the delta-lf flags + `xd->lossless` + the 4
+/// segmentation LF features [Y_V, Y_H, U, V] per segment).
+#[derive(Clone, Copy)]
+pub struct RefLfParams {
+    /// `[y_vert, y_horz, u, v]`.
+    pub filter_level: [i32; 4],
+    pub sharpness: i32,
+    pub mode_ref_delta_enabled: bool,
+    pub ref_deltas: [i8; 8],
+    pub mode_deltas: [i8; 2],
+    pub delta_lf_present: bool,
+    pub delta_lf_multi: bool,
+    pub lossless: [bool; 8],
+    pub seg_enabled: bool,
+    pub seg_active: [[bool; 4]; 8],
+    pub seg_data: [[i32; 4]; 8],
+}
+
+impl RefLfParams {
+    fn seg_flat(&self) -> ([i32; 32], [i32; 32]) {
+        let (mut a, mut d) = ([0i32; 32], [0i32; 32]);
+        for s in 0..8 {
+            for f in 0..4 {
+                a[s * 4 + f] = self.seg_active[s][f] as i32;
+                d[s * 4 + f] = self.seg_data[s][f];
+            }
+        }
+        (a, d)
+    }
+}
+
+/// Reference `av1_loop_filter_init` + `av1_loop_filter_frame_init` table dump:
+/// `(lfthr[64] as (mblim, lim, hev_thr), lvl[plane][seg][dir][ref][mode])`.
+pub fn ref_lf_frame_init_tables(
+    p: &RefLfParams,
+    plane_start: i32,
+    plane_end: i32,
+) -> (Vec<[u8; 3]>, Vec<u8>) {
+    let (a, d) = p.seg_flat();
+    let mut lfthr = vec![0u8; 64 * 3];
+    let mut lvl = vec![0u8; 3 * 8 * 2 * 8 * 2];
+    unsafe {
+        shim_lf_frame_init_tables(
+            p.filter_level.as_ptr(),
+            p.sharpness,
+            p.mode_ref_delta_enabled as i32,
+            p.ref_deltas.as_ptr(),
+            p.mode_deltas.as_ptr(),
+            p.seg_enabled as i32,
+            a.as_ptr(),
+            d.as_ptr(),
+            plane_start,
+            plane_end,
+            lfthr.as_mut_ptr(),
+            lvl.as_mut_ptr(),
+        );
+    }
+    (
+        lfthr.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+        lvl,
+    )
+}
+
+/// Per-mi-cell grid arrays for [`ref_lf_filter_frame`] (parallel, all length
+/// `mi_rows * grid_stride`, cells beyond `mi_cols` ignored). `dlf` holds 4
+/// i8 per cell.
+pub struct RefLfGrid<'a> {
+    pub mi_rows: i32,
+    pub mi_cols: i32,
+    pub grid_stride: i32,
+    pub bsize: &'a [i32],
+    pub txsize: &'a [i32],
+    pub seg: &'a [i32],
+    pub ref0: &'a [i32],
+    pub mode: &'a [i32],
+    pub skip: &'a [i32],
+    pub intrabc: &'a [i32],
+    pub dlf_base: &'a [i8],
+    pub dlf: &'a [i8],
+}
+
+/// Run the REAL loop-filter application over u16 planes (bd == 8 uses the
+/// real lowbd path on internal u8 copies — what the production decoder does
+/// for 8-bit streams). `y` must hold `y_stride * (mi_rows * 4)` samples; the
+/// chroma planes `uv_stride * ((mi_rows * 4) >> ss_y)` (empty + `uv_stride ==
+/// 0` for monochrome). Filters in place.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_lf_filter_frame(
+    y: &mut [u16],
+    y_stride: usize,
+    u: &mut [u16],
+    v: &mut [u16],
+    uv_stride: usize,
+    crop_w: i32,
+    crop_h: i32,
+    ss_x: i32,
+    ss_y: i32,
+    bd: i32,
+    grid: &RefLfGrid,
+    p: &RefLfParams,
+    plane_start: i32,
+    plane_end: i32,
+) {
+    let ncells = (grid.mi_rows * grid.grid_stride) as usize;
+    assert!(
+        grid.bsize.len() >= ncells
+            && grid.txsize.len() >= ncells
+            && grid.seg.len() >= ncells
+            && grid.ref0.len() >= ncells
+            && grid.mode.len() >= ncells
+            && grid.skip.len() >= ncells
+            && grid.intrabc.len() >= ncells
+            && grid.dlf_base.len() >= ncells
+            && grid.dlf.len() >= 4 * ncells
+    );
+    assert!(y.len() >= y_stride * (grid.mi_rows as usize * 4));
+    assert!(u.len() >= uv_stride * ((grid.mi_rows as usize * 4) >> ss_y) && v.len() == u.len());
+    let (a, d) = p.seg_flat();
+    let lossless: [i32; 8] = core::array::from_fn(|i| p.lossless[i] as i32);
+    let rc = unsafe {
+        shim_lf_filter_frame(
+            y.as_mut_ptr(),
+            y_stride as i32,
+            u.as_mut_ptr(),
+            v.as_mut_ptr(),
+            uv_stride as i32,
+            crop_w,
+            crop_h,
+            ss_x,
+            ss_y,
+            bd,
+            grid.mi_rows,
+            grid.mi_cols,
+            grid.grid_stride,
+            grid.bsize.as_ptr(),
+            grid.txsize.as_ptr(),
+            grid.seg.as_ptr(),
+            grid.ref0.as_ptr(),
+            grid.mode.as_ptr(),
+            grid.skip.as_ptr(),
+            grid.intrabc.as_ptr(),
+            grid.dlf_base.as_ptr(),
+            grid.dlf.as_ptr(),
+            p.filter_level.as_ptr(),
+            p.sharpness,
+            p.mode_ref_delta_enabled as i32,
+            p.ref_deltas.as_ptr(),
+            p.mode_deltas.as_ptr(),
+            p.delta_lf_present as i32,
+            p.delta_lf_multi as i32,
+            lossless.as_ptr(),
+            p.seg_enabled as i32,
+            a.as_ptr(),
+            d.as_ptr(),
+            plane_start,
+            plane_end,
+        )
+    };
+    assert_eq!(rc, 0, "shim_lf_filter_frame failed ({rc})");
+}
+
 // av1/encoder/rd.c + rd.h (RD multiplier / RDCOST) and av1/common/quant_common.c
 // (dc/ac quant lookups) — rd_shim.c. All exported symbols / real macros; no RTCD.
 extern "C" {
-    fn shim_compute_rd_mult_based_on_qindex(bit_depth: i32, update_type: i32, qindex: i32, tuning: i32, mode: i32) -> i32;
+    fn shim_compute_rd_mult_based_on_qindex(
+        bit_depth: i32,
+        update_type: i32,
+        qindex: i32,
+        tuning: i32,
+        mode: i32,
+    ) -> i32;
     #[allow(clippy::too_many_arguments)]
-    fn shim_compute_rd_mult(qindex: i32, bit_depth: i32, update_type: i32, layer_depth: i32, boost_index: i32, frame_type: i32, use_fixed_qp_offsets: i32, is_stat_consumption_stage: i32, tuning: i32, mode: i32) -> i32;
+    fn shim_compute_rd_mult(
+        qindex: i32,
+        bit_depth: i32,
+        update_type: i32,
+        layer_depth: i32,
+        boost_index: i32,
+        frame_type: i32,
+        use_fixed_qp_offsets: i32,
+        is_stat_consumption_stage: i32,
+        tuning: i32,
+        mode: i32,
+    ) -> i32;
     fn shim_dc_quant_qtx(qindex: i32, delta: i32, bit_depth: i32) -> i32;
     fn shim_ac_quant_qtx(qindex: i32, delta: i32, bit_depth: i32) -> i32;
     fn shim_rdcost(rm: i32, rate: i32, dist: i64) -> i64;
     fn shim_rdcost_neg_r(rm: i32, rate: i32, dist: i64) -> i64;
-    fn shim_dist_block_tx_domain(coeff: *const i32, dqcoeff: *const i32, tx_size: i32, bd: i32, out_dist: *mut i64, out_sse: *mut i64);
+    fn shim_dist_block_tx_domain(
+        coeff: *const i32,
+        dqcoeff: *const i32,
+        tx_size: i32,
+        bd: i32,
+        out_dist: *mut i64,
+        out_sse: *mut i64,
+    );
 }
 
 /// Reference `av1_compute_rd_mult_based_on_qindex` (rd.c). Enum args are passed
 /// as their integer C values.
-pub fn ref_compute_rd_mult_based_on_qindex(bit_depth: i32, update_type: i32, qindex: i32, tuning: i32, mode: i32) -> i32 {
+pub fn ref_compute_rd_mult_based_on_qindex(
+    bit_depth: i32,
+    update_type: i32,
+    qindex: i32,
+    tuning: i32,
+    mode: i32,
+) -> i32 {
     unsafe { shim_compute_rd_mult_based_on_qindex(bit_depth, update_type, qindex, tuning, mode) }
 }
 
 /// Reference `av1_compute_rd_mult` (rd.c).
 #[allow(clippy::too_many_arguments)]
-pub fn ref_compute_rd_mult(qindex: i32, bit_depth: i32, update_type: i32, layer_depth: i32, boost_index: i32, frame_type: i32, use_fixed_qp_offsets: i32, is_stat_consumption_stage: i32, tuning: i32, mode: i32) -> i32 {
-    unsafe { shim_compute_rd_mult(qindex, bit_depth, update_type, layer_depth, boost_index, frame_type, use_fixed_qp_offsets, is_stat_consumption_stage, tuning, mode) }
+pub fn ref_compute_rd_mult(
+    qindex: i32,
+    bit_depth: i32,
+    update_type: i32,
+    layer_depth: i32,
+    boost_index: i32,
+    frame_type: i32,
+    use_fixed_qp_offsets: i32,
+    is_stat_consumption_stage: i32,
+    tuning: i32,
+    mode: i32,
+) -> i32 {
+    unsafe {
+        shim_compute_rd_mult(
+            qindex,
+            bit_depth,
+            update_type,
+            layer_depth,
+            boost_index,
+            frame_type,
+            use_fixed_qp_offsets,
+            is_stat_consumption_stage,
+            tuning,
+            mode,
+        )
+    }
 }
 
 /// Reference `av1_dc_quant_QTX` (quant_common.c).
@@ -3402,9 +8250,23 @@ pub fn ref_rdcost_neg_r(rm: i32, rate: i32, dist: i64) -> i64 {
 
 /// Reference `dist_block_tx_domain` non-QM path (tx_search.c) — transform-domain
 /// `(dist, sse)` for one txb (`buffer_length` derived from `tx_size` inside C).
-pub fn ref_dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, bd: u8) -> (i64, i64) {
+pub fn ref_dist_block_tx_domain(
+    coeff: &[i32],
+    dqcoeff: &[i32],
+    tx_size: usize,
+    bd: u8,
+) -> (i64, i64) {
     let (mut d, mut s) = (0i64, 0i64);
-    unsafe { shim_dist_block_tx_domain(coeff.as_ptr(), dqcoeff.as_ptr(), tx_size as i32, bd as i32, &mut d, &mut s) };
+    unsafe {
+        shim_dist_block_tx_domain(
+            coeff.as_ptr(),
+            dqcoeff.as_ptr(),
+            tx_size as i32,
+            bd as i32,
+            &mut d,
+            &mut s,
+        )
+    };
     (d, s)
 }
 
@@ -4079,7 +8941,13 @@ pub fn ref_tx_size_cost(
 ) -> i32 {
     assert_eq!(costs.len(), 4 * 3 * 3);
     unsafe {
-        shim_tx_size_cost(costs.as_ptr(), tx_mode_is_select as i32, bsize, tx_size, tx_size_ctx)
+        shim_tx_size_cost(
+            costs.as_ptr(),
+            tx_mode_is_select as i32,
+            bsize,
+            tx_size,
+            tx_size_ctx,
+        )
     }
 }
 
@@ -4413,7 +9281,12 @@ pub fn ref_get_tx_type_uv_intra(
     reduced: bool,
 ) -> usize {
     let t = unsafe {
-        shim_get_tx_type_uv_intra(uv_mode as i32, lossless as i32, tx_size as i32, reduced as i32)
+        shim_get_tx_type_uv_intra(
+            uv_mode as i32,
+            lossless as i32,
+            tx_size as i32,
+            reduced as i32,
+        )
     };
     assert!(t >= 0, "shim_get_tx_type_uv_intra alloc failed");
     t as usize
@@ -4462,7 +9335,11 @@ pub fn ref_fill_cfl_costs(cfl_sign_cdf: &[u16], cfl_alpha_cdf: &[u16]) -> Vec<i3
     assert_eq!(cfl_alpha_cdf.len(), 6 * 17);
     let mut out = vec![0i32; 8 * 2 * 16];
     unsafe {
-        shim_fill_cfl_costs(cfl_sign_cdf.as_ptr(), cfl_alpha_cdf.as_ptr(), out.as_mut_ptr())
+        shim_fill_cfl_costs(
+            cfl_sign_cdf.as_ptr(),
+            cfl_alpha_cdf.as_ptr(),
+            out.as_mut_ptr(),
+        )
     };
     out
 }
@@ -4615,4 +9492,79 @@ pub fn ref_cfl_predict_block(
         )
     };
     st.params_computed = pc != 0;
+}
+
+// ---- winner re-encode (av1_encode_intra_block_plane) LUMA map oracles --------
+
+extern "C" {
+    fn shim_get_tx_type_y(
+        lossless: i32,
+        tx_size: i32,
+        reduced_tx_set_used: i32,
+        tx_type_map: *const u8,
+        map_stride: i32,
+        blk_row: i32,
+        blk_col: i32,
+    ) -> i32;
+    fn shim_update_txk_array(
+        tx_type_map: *mut u8,
+        map_stride: i32,
+        blk_row: i32,
+        blk_col: i32,
+        tx_size: i32,
+        tx_type: i32,
+    ) -> i32;
+}
+
+/// The REAL `av1_get_tx_type` (blockd.h:1283) for `PLANE_TYPE_Y` on an INTRA
+/// block over a stack MACROBLOCKD stub with the RDO-time block-local
+/// `tx_type_map` (stride `mi_size_wide[bsize]`) marshalled in. The map's
+/// origin cells must hold in-set types for `(tx_size, reduced)` — the C
+/// in-set assert is LIVE in this build.
+pub fn ref_get_tx_type_y(
+    lossless: bool,
+    tx_size: usize,
+    reduced: bool,
+    tx_type_map: &[u8],
+    map_stride: usize,
+    blk_row: usize,
+    blk_col: usize,
+) -> usize {
+    let t = unsafe {
+        shim_get_tx_type_y(
+            lossless as i32,
+            tx_size as i32,
+            reduced as i32,
+            tx_type_map.as_ptr(),
+            map_stride as i32,
+            blk_row as i32,
+            blk_col as i32,
+        )
+    };
+    assert!(t >= 0, "shim_get_tx_type_y alloc failed");
+    t as usize
+}
+
+/// The REAL `update_txk_array` (blockd.h:1260) over the block-local
+/// `tx_type_map` — the `eob == 0` DCT_DCT reset write (encodemb.c:770-779)
+/// incl. the 64-side 16x16-unit fill.
+pub fn ref_update_txk_array(
+    tx_type_map: &mut [u8],
+    map_stride: usize,
+    blk_row: usize,
+    blk_col: usize,
+    tx_size: usize,
+    tx_type: usize,
+) {
+    let r = unsafe {
+        shim_update_txk_array(
+            tx_type_map.as_mut_ptr(),
+            map_stride as i32,
+            blk_row as i32,
+            blk_col as i32,
+            tx_size as i32,
+            tx_type as i32,
+        )
+    };
+    assert!(r == 0, "shim_update_txk_array alloc failed");
 }

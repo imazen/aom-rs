@@ -486,3 +486,212 @@ int shim_decode_av1_kf(const uint8_t *data, size_t len, int expect_w,
   aom_codec_destroy(&ctx);
   return extra ? 5 : 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* 4. Loop-filter application oracles                                  */
+/*                                                                     */
+/* Facades over the REAL exported av1_loop_filter_frame_init and       */
+/* av1_filter_block_plane_vert / _horz (av1/common/av1_loopfilter.c),  */
+/* plus the real static-inline check_planes_to_loop_filter /           */
+/* skip_loop_filter_plane from av1/common/thread_common.h, driven in   */
+/* the exact loop_filter_rows order (thread_common.c:467, the          */
+/* single-worker lpf_opt_level==0 path the decoder takes). No filter   */
+/* logic is transcribed: a synthetic AV1_COMMON + per-cell MB_MODE_INFO*/
+/* grid is built from flat arrays and the real functions do the work.  */
+/*                                                                     */
+/* Per-cell flattening: every mi cell gets its OWN MB_MODE_INFO whose  */
+/* tx_size AND all inter_tx_size[] entries hold the cell's tx value,   */
+/* so get_transform_size resolves to it on every branch (intra, inter  */
+/* vartx, skip). bd==8 runs the real LOWBD path (u8 planes,            */
+/* use_highbitdepth=0 — what the production decoder does for 8-bit     */
+/* streams); bd>8 the real highbd path via CONVERT_TO_BYTEPTR.         */
+/* ------------------------------------------------------------------ */
+
+#include "av1/common/av1_loopfilter.h"
+#include "av1/common/thread_common.h"
+
+void shim_lf_frame_init_tables(
+    const int32_t *filter_level /*[4]: y_v, y_h, u, v*/, int sharpness,
+    int mode_ref_delta_enabled, const int8_t *ref_deltas /*[8]*/,
+    const int8_t *mode_deltas /*[2]*/, int seg_enabled,
+    const int32_t *seg_active /*[8*4] LF features Y_V,Y_H,U,V*/,
+    const int32_t *seg_data /*[8*4]*/, int plane_start, int plane_end,
+    uint8_t *lfthr_out /*[64*3]: mblim,lim,hev_thr per level*/,
+    uint8_t *lvl_out /*[3*8*2*8*2]*/) {
+  AV1_COMMON *cm = (AV1_COMMON *)calloc(1, sizeof(*cm));
+  cm->lf.filter_level[0] = filter_level[0];
+  cm->lf.filter_level[1] = filter_level[1];
+  cm->lf.filter_level_u = filter_level[2];
+  cm->lf.filter_level_v = filter_level[3];
+  cm->lf.sharpness_level = sharpness;
+  cm->lf.mode_ref_delta_enabled = (uint8_t)mode_ref_delta_enabled;
+  memcpy(cm->lf.ref_deltas, ref_deltas, REF_FRAMES);
+  memcpy(cm->lf.mode_deltas, mode_deltas, MAX_MODE_LF_DELTAS);
+  cm->seg.enabled = (uint8_t)seg_enabled;
+  for (int s = 0; s < MAX_SEGMENTS; s++) {
+    for (int f = 0; f < 4; f++) { /* SEG_LVL_ALT_LF_Y_V..SEG_LVL_ALT_LF_V */
+      if (seg_active[s * 4 + f]) {
+        cm->seg.feature_mask[s] |= 1 << (SEG_LVL_ALT_LF_Y_V + f);
+        cm->seg.feature_data[s][SEG_LVL_ALT_LF_Y_V + f] =
+            (int16_t)seg_data[s * 4 + f];
+      }
+    }
+  }
+  /* hev_thr comes from av1_loop_filter_init (decoder does it at alloc). */
+  av1_loop_filter_init(cm);
+  av1_loop_filter_frame_init(cm, plane_start, plane_end);
+  for (int l = 0; l <= MAX_LOOP_FILTER; l++) {
+    lfthr_out[l * 3 + 0] = cm->lf_info.lfthr[l].mblim[0];
+    lfthr_out[l * 3 + 1] = cm->lf_info.lfthr[l].lim[0];
+    lfthr_out[l * 3 + 2] = cm->lf_info.lfthr[l].hev_thr[0];
+  }
+  memcpy(lvl_out, cm->lf_info.lvl, sizeof(cm->lf_info.lvl));
+  free(cm);
+}
+
+int shim_lf_filter_frame(
+    uint16_t *y, int y_stride, uint16_t *u, uint16_t *v, int uv_stride,
+    int crop_w, int crop_h, int ss_x, int ss_y, int bd, int mi_rows,
+    int mi_cols, int grid_stride, const int32_t *g_bsize,
+    const int32_t *g_txsize, const int32_t *g_seg, const int32_t *g_ref0,
+    const int32_t *g_mode, const int32_t *g_skip, const int32_t *g_intrabc,
+    const int8_t *g_dlf_base, const int8_t *g_dlf /*[4] per cell*/,
+    const int32_t *filter_level, int sharpness, int mode_ref_delta_enabled,
+    const int8_t *ref_deltas, const int8_t *mode_deltas, int delta_lf_present,
+    int delta_lf_multi, const int32_t *lossless /*[8]*/, int seg_enabled,
+    const int32_t *seg_active, const int32_t *seg_data, int plane_start,
+    int plane_end) {
+  const int ncells = mi_rows * grid_stride;
+  MB_MODE_INFO *cells = (MB_MODE_INFO *)calloc(ncells, sizeof(*cells));
+  MB_MODE_INFO **grid = (MB_MODE_INFO **)calloc(ncells, sizeof(*grid));
+  AV1_COMMON *cm = (AV1_COMMON *)calloc(1, sizeof(*cm));
+  SequenceHeader *seq = (SequenceHeader *)calloc(1, sizeof(*seq));
+  MACROBLOCKD *xd = (MACROBLOCKD *)calloc(1, sizeof(*xd));
+  if (!cells || !grid || !cm || !seq || !xd) return -1;
+
+  for (int r = 0; r < mi_rows; r++) {
+    for (int c = 0; c < mi_cols; c++) {
+      const int i = r * grid_stride + c;
+      MB_MODE_INFO *mi = &cells[i];
+      mi->bsize = (BLOCK_SIZE)g_bsize[i];
+      mi->tx_size = (TX_SIZE)g_txsize[i];
+      for (int k = 0; k < INTER_TX_SIZE_BUF_LEN; k++)
+        mi->inter_tx_size[k] = (TX_SIZE)g_txsize[i];
+      mi->segment_id = (uint8_t)g_seg[i];
+      mi->ref_frame[0] = (MV_REFERENCE_FRAME)g_ref0[i];
+      mi->ref_frame[1] = NONE_FRAME;
+      mi->mode = (PREDICTION_MODE)g_mode[i];
+      mi->skip_txfm = (uint8_t)g_skip[i];
+      mi->use_intrabc = (uint8_t)g_intrabc[i];
+      mi->delta_lf_from_base = g_dlf_base[i];
+      for (int k = 0; k < FRAME_LF_COUNT; k++)
+        mi->delta_lf[k] = g_dlf[i * FRAME_LF_COUNT + k];
+      grid[i] = mi;
+    }
+  }
+
+  cm->mi_params.mi_grid_base = grid;
+  cm->mi_params.mi_stride = grid_stride;
+  cm->mi_params.mi_rows = mi_rows;
+  cm->mi_params.mi_cols = mi_cols;
+  cm->lf.filter_level[0] = filter_level[0];
+  cm->lf.filter_level[1] = filter_level[1];
+  cm->lf.filter_level_u = filter_level[2];
+  cm->lf.filter_level_v = filter_level[3];
+  cm->lf.sharpness_level = sharpness;
+  cm->lf.mode_ref_delta_enabled = (uint8_t)mode_ref_delta_enabled;
+  memcpy(cm->lf.ref_deltas, ref_deltas, REF_FRAMES);
+  memcpy(cm->lf.mode_deltas, mode_deltas, MAX_MODE_LF_DELTAS);
+  cm->delta_q_info.delta_lf_present_flag = delta_lf_present;
+  cm->delta_q_info.delta_lf_multi = delta_lf_multi;
+  cm->seg.enabled = (uint8_t)seg_enabled;
+  for (int s = 0; s < MAX_SEGMENTS; s++) {
+    for (int f = 0; f < 4; f++) {
+      if (seg_active[s * 4 + f]) {
+        cm->seg.feature_mask[s] |= 1 << (SEG_LVL_ALT_LF_Y_V + f);
+        cm->seg.feature_data[s][SEG_LVL_ALT_LF_Y_V + f] =
+            (int16_t)seg_data[s * 4 + f];
+      }
+    }
+  }
+  seq->bit_depth = (aom_bit_depth_t)bd;
+  seq->use_highbitdepth = bd > 8;
+  cm->seq_params = seq;
+  for (int s = 0; s < MAX_SEGMENTS; s++) xd->lossless[s] = lossless[s];
+
+  /* Plane buffers: logical mi-aligned area. bd==8 -> real lowbd path on u8
+   * copies; bd>8 -> highbd path on the u16 buffers via CONVERT_TO_BYTEPTR. */
+  const int y_rows = mi_rows * MI_SIZE;
+  const int uv_rows = y_rows >> ss_y;
+  const long uv_len = (long)uv_stride * uv_rows; /* 0 for monochrome */
+  uint8_t *y8 = NULL, *u8b = NULL, *v8b = NULL;
+  if (bd == 8) {
+    y8 = (uint8_t *)malloc((size_t)y_stride * y_rows);
+    u8b = (uint8_t *)malloc(uv_len ? (size_t)uv_len : 1);
+    v8b = (uint8_t *)malloc(uv_len ? (size_t)uv_len : 1);
+    if (!y8 || !u8b || !v8b) return -2;
+    for (long i = 0; i < (long)y_stride * y_rows; i++) y8[i] = (uint8_t)y[i];
+    for (long i = 0; i < uv_len; i++) {
+      u8b[i] = (uint8_t)u[i];
+      v8b[i] = (uint8_t)v[i];
+    }
+  }
+
+  int planes_to_lf[MAX_MB_PLANE];
+  if (check_planes_to_loop_filter(&cm->lf, planes_to_lf, plane_start,
+                                  plane_end)) {
+    av1_loop_filter_init(cm);
+    av1_loop_filter_frame_init(cm, plane_start, plane_end);
+
+    struct macroblockd_plane pd[MAX_MB_PLANE];
+    memset(pd, 0, sizeof(pd));
+    for (int mi_row = 0; mi_row < mi_rows; mi_row += MAX_MIB_SIZE) {
+      for (int plane = 0; plane < MAX_MB_PLANE; plane++) {
+        if (skip_loop_filter_plane(planes_to_lf, plane, 0)) continue;
+        const int sx = plane ? ss_x : 0, sy = plane ? ss_y : 0;
+        for (int dir = 0; dir < 2; dir++) {
+          for (int mi_col = 0; mi_col < mi_cols; mi_col += MAX_MIB_SIZE) {
+            /* av1_setup_dst_planes for this plane+SB position. */
+            struct macroblockd_plane *p = &pd[plane];
+            p->subsampling_x = sx;
+            p->subsampling_y = sy;
+            const int px = (MI_SIZE * mi_col) >> sx;
+            const int py = (MI_SIZE * mi_row) >> sy;
+            const int stride = plane ? uv_stride : y_stride;
+            p->dst.stride = stride;
+            p->dst.width = plane ? (crop_w + ss_x) >> ss_x : crop_w;
+            p->dst.height = plane ? (crop_h + ss_y) >> ss_y : crop_h;
+            if (bd == 8) {
+              uint8_t *base = plane == 0 ? y8 : (plane == 1 ? u8b : v8b);
+              p->dst.buf = base + (ptrdiff_t)py * stride + px;
+            } else {
+              uint16_t *base = plane == 0 ? y : (plane == 1 ? u : v);
+              p->dst.buf = CONVERT_TO_BYTEPTR(base) + (ptrdiff_t)py * stride + px;
+            }
+            if (dir == 0)
+              av1_filter_block_plane_vert(cm, xd, plane, p, mi_row, mi_col);
+            else
+              av1_filter_block_plane_horz(cm, xd, plane, p, mi_row, mi_col);
+          }
+        }
+      }
+    }
+  }
+
+  if (bd == 8) {
+    for (long i = 0; i < (long)y_stride * y_rows; i++) y[i] = y8[i];
+    for (long i = 0; i < uv_len; i++) {
+      u[i] = u8b[i];
+      v[i] = v8b[i];
+    }
+    free(y8);
+    free(u8b);
+    free(v8b);
+  }
+  free(xd);
+  free(seq);
+  free(cm);
+  free(grid);
+  free(cells);
+  return 0;
+}
