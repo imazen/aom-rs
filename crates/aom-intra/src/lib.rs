@@ -454,3 +454,44 @@ pub fn build_non_directional_intra_high(
     let above = AboveRef16(&above_buf[..1 + txwpx]);
     predict_highbd(pmode, dst, dst_stride, txwpx, txhpx, &above, &left_buf[1..1 + txhpx], bd);
 }
+
+/// `highbd_dr_predictor` (reconintra.c): dispatch the highbd directional
+/// predictor by `angle` (0 < angle < 270). `above_data`/`left_data` are the
+/// assembled + edge-filtered + upsampled reference buffers with `pad` samples
+/// before the edge origin: `above_data[pad]` is `above_row[0]`, `above_data[pad-1]`
+/// the top-left corner (z2 and V/H read into the pad, so `pad >= 2`). z1/z2/z3
+/// handle the non-cardinal zones; the cardinals fall to V (90) / H (180).
+#[allow(clippy::too_many_arguments)]
+pub fn dr_predict_high(
+    dst: &mut [u16],
+    dst_stride: usize,
+    tx_size: usize,
+    above_data: &[u16],
+    left_data: &[u16],
+    pad: usize,
+    upsample_above: i32,
+    upsample_left: i32,
+    angle: i32,
+    bd: i32,
+) {
+    let (bw, bh) = (TX_W[tx_size], TX_H[tx_size]);
+    let dx = dir::get_dx(angle);
+    let dy = dir::get_dy(angle);
+    if angle > 0 && angle < 90 {
+        let above = dir::EdgeRef16::new(above_data, pad);
+        dir::z1_high(dst, dst_stride, bw, bh, &above, upsample_above, dx);
+    } else if angle > 90 && angle < 180 {
+        let above = dir::EdgeRef16::new(above_data, pad);
+        let left = dir::EdgeRef16::new(left_data, pad);
+        dir::z2_high(dst, dst_stride, bw, bh, &above, &left, upsample_above, upsample_left, dx, dy);
+    } else if angle > 180 && angle < 270 {
+        let left = dir::EdgeRef16::new(left_data, pad);
+        dir::z3_high(dst, dst_stride, bw, bh, &left, upsample_left, dy);
+    } else if angle == 90 {
+        let above = AboveRef16(&above_data[pad - 1..]);
+        predict_highbd(V, dst, dst_stride, bw, bh, &above, &left_data[pad..pad + bh], bd);
+    } else if angle == 180 {
+        let above = AboveRef16(&above_data[pad - 1..]);
+        predict_highbd(H, dst, dst_stride, bw, bh, &above, &left_data[pad..pad + bh], bd);
+    }
+}

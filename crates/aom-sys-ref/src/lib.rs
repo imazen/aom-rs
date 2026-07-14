@@ -2164,6 +2164,24 @@ extern "C" {
     );
 }
 
+/// Reference highbd directional predictor dispatch (`highbd_dr_predictor`):
+/// route by `angle` to z1/z2/z3 or V/H. `above_data`/`left_data` are padded `u16`
+/// buffers; the C edge pointer is taken at offset `pad` (`data[pad]` is the edge
+/// origin, `data[pad-1]` the corner). Returns the `txw*txh` block (row stride `txw`).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_hbd_dr_predict(
+    tx_size: usize, txw: usize, txh: usize, above_data: &[u16], left_data: &[u16], pad: usize, up_above: i32, up_left: i32, angle: i32, bd: i32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; txw * txh];
+    unsafe {
+        shim_hbd_dr_predict(
+            dst.as_mut_ptr(), txw as isize, tx_size as i32,
+            above_data.as_ptr().add(pad), left_data.as_ptr().add(pad), up_above, up_left, angle, bd,
+        )
+    }
+    dst
+}
+
 /// Reference highbd directional predictor. `above`/`left` are padded `u16`
 /// buffers; the C pointer is taken at offset `pad`. Returns the `bw*bh` block
 /// (row stride `bw`).
@@ -2220,6 +2238,9 @@ extern "C" {
     );
     fn shim_hbd_build_nd_intra(
         r: *const u16, ref_stride: i32, av1_mode: i32, tx_size: i32, n_top_px: i32, n_left_px: i32, bd: i32, dst: *mut u16, dst_stride: i32,
+    );
+    fn shim_hbd_dr_predict(
+        dst: *mut u16, stride: isize, tx_size: i32, above: *const u16, left: *const u16, up_above: i32, up_left: i32, angle: i32, bd: i32,
     );
 }
 

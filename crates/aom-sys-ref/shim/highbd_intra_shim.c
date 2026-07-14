@@ -450,3 +450,50 @@ void shim_hbd_build_nd_intra(const uint16_t *ref, int ref_stride, int av1_mode,
 
   shim_highbd_intra_pred(shim_mode, tx_size, dst, dst_stride, above_row, left_col, bd);
 }
+
+/* ---- highbd directional predictor dispatch (highbd_dr_predictor) -----------
+ * Transcription of highbd_dr_predictor (reconintra.c): route by angle to the
+ * public av1_highbd_dr_prediction_z{1,2,3}_c, or V/H at the cardinals (via the
+ * shim_highbd_intra_pred dispatch above). dx/dy derived independently from the
+ * dr_intra_derivative table (av1_get_dx/av1_get_dy). above/left point at the edge
+ * origin (above[0]=above_row[0], above[-1]=corner). */
+void av1_highbd_dr_prediction_z1_c(uint16_t *, ptrdiff_t, int, int, const uint16_t *, const uint16_t *, int, int, int, int);
+void av1_highbd_dr_prediction_z2_c(uint16_t *, ptrdiff_t, int, int, const uint16_t *, const uint16_t *, int, int, int, int, int);
+void av1_highbd_dr_prediction_z3_c(uint16_t *, ptrdiff_t, int, int, const uint16_t *, const uint16_t *, int, int, int, int);
+
+static const int sh_dr_deriv[90] = {
+  0, 0, 0, 1023, 0, 0, 547, 0, 0, 372, 0, 0, 0, 0, 273, 0, 0, 215, 0, 0,
+  178, 0, 0, 151, 0, 0, 132, 0, 0, 116, 0, 0, 102, 0, 0, 0, 90, 0, 0, 80,
+  0, 0, 71, 0, 0, 64, 0, 0, 57, 0, 0, 51, 0, 0, 45, 0, 0, 0, 40, 0, 0, 35,
+  0, 0, 31, 0, 0, 27, 0, 0, 23, 0, 0, 19, 0, 0, 15, 0, 0, 0, 0, 11, 0, 0,
+  7, 0, 0, 3, 0, 0,
+};
+static int sh_get_dx(int angle) {
+  if (angle > 0 && angle < 90) return sh_dr_deriv[angle];
+  else if (angle > 90 && angle < 180) return sh_dr_deriv[180 - angle];
+  else return 1;
+}
+static int sh_get_dy(int angle) {
+  if (angle > 90 && angle < 180) return sh_dr_deriv[angle - 90];
+  else if (angle > 180 && angle < 270) return sh_dr_deriv[270 - angle];
+  else return 1;
+}
+
+void shim_hbd_dr_predict(uint16_t *dst, ptrdiff_t stride, int tx_size,
+                         const uint16_t *above, const uint16_t *left,
+                         int up_above, int up_left, int angle, int bd) {
+  static const int txw[19] = { 4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64 };
+  static const int txh[19] = { 4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16 };
+  const int bw = txw[tx_size], bh = txh[tx_size];
+  const int dx = sh_get_dx(angle), dy = sh_get_dy(angle);
+  if (angle > 0 && angle < 90)
+    av1_highbd_dr_prediction_z1_c(dst, stride, bw, bh, above, left, up_above, dx, dy, bd);
+  else if (angle > 90 && angle < 180)
+    av1_highbd_dr_prediction_z2_c(dst, stride, bw, bh, above, left, up_above, up_left, dx, dy, bd);
+  else if (angle > 180 && angle < 270)
+    av1_highbd_dr_prediction_z3_c(dst, stride, bw, bh, above, left, up_left, dx, dy, bd);
+  else if (angle == 90)
+    shim_highbd_intra_pred(4, tx_size, dst, stride, above, left, bd); /* V_PRED */
+  else if (angle == 180)
+    shim_highbd_intra_pred(5, tx_size, dst, stride, above, left, bd); /* H_PRED */
+}
