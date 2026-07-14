@@ -453,6 +453,45 @@ pub fn pixel_distortion(
     aom_dist::highbd_sse(&recon, w, source, w, w, h)
 }
 
+/// `RIGHT_SIGNED_SHIFT(value, n)` (`aom_ports/mem.h`): arithmetic right shift for
+/// `n >= 0`, or a left shift by `-n` for `n < 0`.
+#[inline]
+fn right_signed_shift_i64(value: i64, n: i32) -> i64 {
+    if n < 0 {
+        value << (-n)
+    } else {
+        value >> n
+    }
+}
+
+/// `dist_block_tx_domain` non-QM path (av1/encoder/tx_search.c) — the
+/// transform-domain distortion (`dist`) and coefficient energy (`sse`) for one
+/// transform block, normalized to the common Q4 scale. This is the distortion
+/// term the per-txb intra RD cost feeds to [`rd::rdcost`], computed without an
+/// inverse transform (unlike [`pixel_distortion`]).
+///
+/// Composes the validated [`aom_dist::block_error`] /
+/// [`aom_dist::highbd_block_error`] with the exact per-tx-size normalization
+/// shift `(MAX_TX_SCALE - av1_get_tx_scale(tx_size)) * 2` (with `MAX_TX_SCALE ==
+/// 1`); the shift is **negative** — a left shift — for 64-wide transforms
+/// (`tx_scale == 2`). `coeff` / `dqcoeff` must each hold at least
+/// `av1_get_max_eob(tx_size) = txb_wide * txb_high` entries; only that prefix is
+/// read (matching C's `buffer_length`). Returns `(dist, sse)`.
+pub fn dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, bd: u8) -> (i64, i64) {
+    let n = txb_wide(tx_size) * txb_high(tx_size);
+    let (dist, sse) = if bd > 8 {
+        aom_dist::highbd_block_error(&coeff[..n], &dqcoeff[..n], bd)
+    } else {
+        aom_dist::block_error(&coeff[..n], &dqcoeff[..n])
+    };
+    // shift = (MAX_TX_SCALE - av1_get_tx_scale(tx_size)) * 2, MAX_TX_SCALE = 1.
+    let shift = (1 - tx_scale(tx_size)) * 2;
+    (
+        right_signed_shift_i64(dist, shift),
+        right_signed_shift_i64(sse, shift),
+    )
+}
+
 /// `read_coding_block_plane` — decode inverse of [`encode_coding_block_plane`]: iterate a
 /// plane's transform blocks in raster order, reading each txb's coefficients via
 /// `read_coeffs_txb_full` with the `get_txb_ctx`-derived contexts, threading the above/left

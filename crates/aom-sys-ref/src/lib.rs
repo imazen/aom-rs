@@ -3176,6 +3176,7 @@ extern "C" {
     fn shim_ac_quant_qtx(qindex: i32, delta: i32, bit_depth: i32) -> i32;
     fn shim_rdcost(rm: i32, rate: i32, dist: i64) -> i64;
     fn shim_rdcost_neg_r(rm: i32, rate: i32, dist: i64) -> i64;
+    fn shim_dist_block_tx_domain(coeff: *const i32, dqcoeff: *const i32, tx_size: i32, bd: i32, out_dist: *mut i64, out_sse: *mut i64);
 }
 
 /// Reference `av1_compute_rd_mult_based_on_qindex` (rd.c). Enum args are passed
@@ -3208,4 +3209,12 @@ pub fn ref_rdcost(rm: i32, rate: i32, dist: i64) -> i64 {
 /// Reference `RDCOST_NEG_R(rm, rate, dist)` macro (rd.h).
 pub fn ref_rdcost_neg_r(rm: i32, rate: i32, dist: i64) -> i64 {
     unsafe { shim_rdcost_neg_r(rm, rate, dist) }
+}
+
+/// Reference `dist_block_tx_domain` non-QM path (tx_search.c) — transform-domain
+/// `(dist, sse)` for one txb (`buffer_length` derived from `tx_size` inside C).
+pub fn ref_dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, bd: u8) -> (i64, i64) {
+    let (mut d, mut s) = (0i64, 0i64);
+    unsafe { shim_dist_block_tx_domain(coeff.as_ptr(), dqcoeff.as_ptr(), tx_size as i32, bd as i32, &mut d, &mut s) };
+    (d, s)
 }
