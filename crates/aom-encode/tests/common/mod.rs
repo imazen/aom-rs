@@ -1411,3 +1411,553 @@ pub fn c_rd_pick_intra_sbuv_mode(
     assert!(best.8 < i64::MAX);
     (best, visits)
 }
+
+// ---- moved verbatim from intra_sby_mode_loop_diff.rs (shared with the
+// ---- rd_pick_intra_mode_sb composition diff) --------------------------------
+use aom_encode::intra_rd::{INTRA_MODES, MAX_ANGLE_DELTA, TOP_INTRA_MODEL_COUNT};
+use aom_encode::mode_costs::{
+    fill_intra_mode_costs, IntraModeCosts, BLOCK_SIZES_ALL, BLOCK_SIZE_GROUPS,
+    DIRECTIONAL_MODES, FILTER_INTRA_MODES, KF_MODE_CONTEXTS, PALETTE_BSIZE_CTXS,
+    PALETTE_Y_MODE_CONTEXTS, UV_INTRA_MODES,
+};
+
+/// The C loop's static gate chain (intra_mode_search.c:1555-1594) at the
+/// aomenc-default tool flags — an independent transcription (the Rust side
+/// gates live in IntraSbyGates::visits). Speed-0: every intra_mode_cfg flag
+/// on, disable_smooth_intra off, intra_y_mode_mask all-ones,
+/// use_mb_mode_cache off.
+pub fn c_gate_visits(mode: usize, luma_delta_angle: i32, bsize: usize, skip_mask: &[bool; 13]) -> bool {
+    let is_directional = (1..=8).contains(&mode);
+    // enable_diagonal_intra / enable_directional_intra / smooth flags /
+    // enable_paeth_intra: all true (CLI defaults) — their `continue`s never
+    // fire. directional_mode_skip_mask is the HOG output.
+    if is_directional && skip_mask[mode] {
+        return false;
+    }
+    // av1_use_angle_delta(bsize) = bsize >= BLOCK_8X8 (&& enable_angle_delta).
+    if is_directional && bsize < 3 && luma_delta_angle != 0 {
+        return false;
+    }
+    true // intra_y_mode_mask = INTRA_ALL
+}
+
+#[allow(clippy::type_complexity)]
+pub struct CLoopOut {
+    /// (mode, delta, tx_size, winners, rate, rate_tokenonly, dist, rd,
+    ///  use_filter_intra, filter_intra_mode)
+    pub best: Option<(usize, i32, usize, Vec<(usize, u16, u8)>, i32, i32, i64, i64, bool, usize)>,
+    pub rd_table: [[i64; 9]; 13],
+    /// Candidates whose ALLINTRA factor was != 1.0 (coverage signal).
+    pub factor_fired: usize,
+}
+
+/// The mode-info CDF set + the dual fill (Rust tables + the C reference
+/// tables from the SAME CDFs) — the fill path is already differentially
+/// validated in intra_mode_cost_diff.rs.
+pub struct CdfSet {
+    pub kf_y: Vec<u16>,
+    pub y_mode: Vec<u16>,
+    pub uv: Vec<u16>,
+    pub fi_mode: Vec<u16>,
+    pub fi: Vec<u16>,
+    pub pal_y_mode: Vec<u16>,
+    pub angle: Vec<u16>,
+    pub intrabc: Vec<u16>,
+}
+
+pub fn gen_all_cdfs(rng: &mut Rng) -> CdfSet {
+    let mut uv = gen_cdfs(rng, INTRA_MODES, UV_INTRA_MODES - 1, UV_INTRA_MODES + 1);
+    uv.extend_from_slice(&gen_cdfs(rng, INTRA_MODES, UV_INTRA_MODES, UV_INTRA_MODES + 1));
+    CdfSet {
+        kf_y: gen_cdfs(rng, KF_MODE_CONTEXTS * KF_MODE_CONTEXTS, INTRA_MODES, INTRA_MODES + 1),
+        y_mode: gen_cdfs(rng, BLOCK_SIZE_GROUPS, INTRA_MODES, INTRA_MODES + 1),
+        uv,
+        fi_mode: gen_cdfs(rng, 1, FILTER_INTRA_MODES, FILTER_INTRA_MODES + 1),
+        fi: gen_cdfs(rng, BLOCK_SIZES_ALL, 2, 3),
+        pal_y_mode: gen_cdfs(rng, PALETTE_BSIZE_CTXS * PALETTE_Y_MODE_CONTEXTS, 2, 3),
+        angle: gen_cdfs(rng, DIRECTIONAL_MODES, 7, 8),
+        intrabc: gen_cdfs(rng, 1, 2, 3),
+    }
+}
+
+pub fn fill_both(cdfs: &CdfSet, enable_fi: bool) -> (Box<IntraModeCosts>, c::RefIntraModeCosts) {
+    let want = c::ref_fill_intra_mode_costs(
+        &cdfs.kf_y, &cdfs.y_mode, &cdfs.uv, &cdfs.fi_mode, &cdfs.fi, &cdfs.pal_y_mode,
+        &cdfs.angle, &cdfs.intrabc, enable_fi,
+    );
+    let mut costs = IntraModeCosts::zeroed();
+    fill_intra_mode_costs(
+        &mut costs, &cdfs.kf_y, &cdfs.y_mode, &cdfs.uv, &cdfs.fi_mode, &cdfs.fi,
+        &cdfs.pal_y_mode, &cdfs.angle, &cdfs.intrabc, enable_fi,
+    );
+    (costs, want)
+}
+
+/// The C-side mode loop: an independent transcription of
+/// intra_mode_search.c:1545-1661 over REAL reference pieces.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn c_mode_loop(
+    bsize: usize,
+    geometry: (i32, i32, usize, usize, usize),
+    sb_size: usize,
+    recon_c: &mut [u16],
+    src: &[u16],
+    reduced: bool,
+    bd: u8,
+    plane_rows_c: &[i16],
+    dequant: [i16; 2],
+    above_ctx: &[i8],
+    left_ctx: &[i8],
+    rdmult: i32,
+    best_rd_in: i64,
+    coeff_tbls: (&[i32], &[i32], &[i32], &[i32], &[i32], &[i32], &[i32]),
+    ttc_tables: (&[i32], &[i32]),
+    skip_costs: &[[i32; 2]; 3],
+    skip_ctx: usize,
+    ts_flat: &[i32],
+    tx_size_ctx: usize,
+    source_variance: u32,
+    skip_mask: &[bool; 13],
+    neigh_modes: (Option<i32>, Option<i32>),
+    qindex: i32,
+    c_costs: &c::RefIntraModeCosts,
+    allintra: bool,
+    cvar: &mut [i32],
+    clog: &mut [f64],
+) -> CLoopOut {
+    let (mi_row, mi_col, ref_off, src_off, stride) = geometry;
+    let (above_mode, left_mode) = neigh_modes;
+    // bmode_costs = y_mode_costs[above_ctx][left_ctx] — the kf ctx pair from
+    // intra_mode_context[above/left mode] (absent neighbour = DC_PRED),
+    // costed from the SAME kf CDF the Rust tables were filled from, via the
+    // real av1_cost_tokens_from_cdf (ref_cost_tokens_from_cdf).
+    const INTRA_MODE_CONTEXT: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0];
+    let actx = INTRA_MODE_CONTEXT[above_mode.unwrap_or(0) as usize];
+    let lctx = INTRA_MODE_CONTEXT[left_mode.unwrap_or(0) as usize];
+    let bmode_costs = &c_costs.y_mode[(actx * 5 + lctx) * 13..(actx * 5 + lctx) * 13 + 13];
+
+    let mut best_rd = best_rd_in;
+    #[allow(clippy::type_complexity)]
+    let mut best: Option<(usize, i32, usize, Vec<(usize, u16, u8)>, i32, i32, i64, i64, bool, usize)> =
+        None;
+    let mut best_model_rd = i64::MAX;
+    let mut top_model = [i64::MAX; TOP_INTRA_MODEL_COUNT];
+    let mut rd_table = [[i64::MAX; 9]; 13];
+    let mut factor_fired = 0usize;
+    let model_tx = MAX_TXSIZE_LOOKUP[bsize].min(3);
+
+    for mode_idx in 0..61 {
+        // REAL exported set_y_mode_and_delta_angle
+        // (prune_luma_odd_delta_angles_in_intra = 0 at speed 0).
+        let (mode_i, delta) = c::ref_set_y_mode_and_delta_angle(mode_idx, false);
+        let mode = mode_i as usize;
+        if !c_gate_visits(mode, delta, bsize, skip_mask) {
+            continue;
+        }
+        // prune_luma_odd_delta_angles_using_rd_cost: sf OFF at speed 0 — the
+        // C body returns 0 immediately.
+
+        // intra_model_rd (prediction walk mutates the C recon).
+        let this_model_rd = c_intra_model_rd(
+            bsize,
+            model_tx,
+            recon_c,
+            src,
+            (mi_row, mi_col, ref_off, src_off, stride),
+            mode,
+            delta,
+            false,
+            0,
+            bd,
+        );
+        let idx = c::ref_get_model_rd_index_for_pruning(
+            mode,
+            qindex,
+            TOP_INTRA_MODEL_COUNT as i32,
+            false,
+            left_mode.map(|m| m as usize),
+            above_mode.map(|m| m as usize),
+        );
+        if c::ref_prune_intra_y_mode(
+            this_model_rd,
+            &mut best_model_rd,
+            &mut top_model,
+            TOP_INTRA_MODEL_COUNT,
+            idx as usize,
+        ) {
+            continue;
+        }
+
+        // av1_pick_uniform_tx_size_type_yrd with the RUNNING best_rd.
+        let Some((tx_size, _rd_pick, rate_tok_raw, dist, _sse, winners)) =
+            c_pick_uniform_tx_size_type_yrd(
+                bsize,
+                (mi_row, mi_col, ref_off, src_off, stride),
+                recon_c,
+                src,
+                mode,
+                delta,
+                false,
+                0,
+                false,
+                reduced,
+                bd,
+                plane_rows_c,
+                dequant,
+                above_ctx,
+                left_ctx,
+                rdmult,
+                best_rd,
+                coeff_tbls,
+                ttc_tables,
+                skip_costs,
+                skip_ctx,
+                ts_flat,
+                tx_size_ctx,
+                source_variance,
+            )
+        else {
+            continue; // rate == INT_MAX
+        };
+
+        // tx-size cost subtraction (lossless off; block_signals_txsize =
+        // bsize > BLOCK_4X4).
+        let mut rate_tokenonly = rate_tok_raw;
+        if bsize > 0 {
+            rate_tokenonly -=
+                c::ref_tx_size_cost(ts_flat, true, bsize as i32, tx_size as i32, tx_size_ctx as i32);
+        }
+        // intra_mode_info_cost_y over the REAL shim (no palette / fi off /
+        // no intrabc; enable_filter_intra on -> fi flag bit costed on
+        // eligible bsizes; angle-delta rate on directional modes).
+        let mode_info_rate = c::ref_intra_mode_info_cost_y(
+            c_costs,
+            bmode_costs[mode],
+            mode as i32,
+            bsize as i32,
+            delta,
+            false,
+            0,
+            false,
+            false,
+            0,
+            0,
+            true,
+            false,
+        );
+        let this_rate = rate_tok_raw + mode_info_rate;
+        let mut this_rd = c::ref_rdcost(rdmult, this_rate, dist);
+        if allintra && this_rd != i64::MAX {
+            let factor = c::ref_intra_rd_variance_factor(
+                0, src, src_off, stride, recon_c, ref_off, stride, bsize, sb_size, mi_row,
+                mi_col, 1 << 12, 1 << 12, bd, cvar, clog,
+            );
+            if factor != 1.0 {
+                factor_fired += 1;
+            }
+            this_rd = (this_rd as f64 * factor) as i64;
+        }
+        rd_table[mode][(delta + MAX_ANGLE_DELTA + 1) as usize] = this_rd;
+        // store_winner_mode_stats: MULTI_WINNER_MODE_OFF no-op.
+        if this_rd < best_rd {
+            best_rd = this_rd;
+            best = Some((
+                mode, delta, tx_size, winners, this_rate, rate_tokenonly, dist, this_rd,
+                false, 0,
+            ));
+        }
+    }
+
+    // rd_pick_filter_intra_sby (intra_mode_search.c:1672 + 231): runs when a
+    // Y mode beat best_rd_in and filter-intra is allowed on this bsize (all
+    // harness bsizes are <= 32x32; enable_filter_intra on). mbmi carries the
+    // STALE angle_delta of loop index 60 (set_y_mode_and_delta_angle mutates
+    // before the gates) — mirrored via the last (mode, delta) pair.
+    let stale_delta = c::ref_set_y_mode_and_delta_angle(60, false).1;
+    if best.is_some() {
+        let best_mode_so_far = best.as_ref().map_or(0, |b| b.0);
+        let _ = best_mode_so_far; // prune_filter_intra_level = 0: no level-1 gate
+        for fim in 0..5usize {
+            // model_intra_yrd_and_prune: the model walk (fi prediction) +
+            // the INTEGER prune on the SHARED best_model_rd.
+            let this_model_rd = c_intra_model_rd(
+                bsize,
+                model_tx,
+                recon_c,
+                src,
+                (mi_row, mi_col, ref_off, src_off, stride),
+                0, // DC_PRED
+                stale_delta,
+                true,
+                fim,
+                bd,
+            );
+            if best_model_rd != i64::MAX
+                && this_model_rd > best_model_rd + (best_model_rd >> 2)
+            {
+                continue;
+            } else if this_model_rd < best_model_rd {
+                best_model_rd = this_model_rd;
+            }
+            let Some((tx_size, _rd_pick, rate_tok_raw, dist, _sse, winners)) =
+                c_pick_uniform_tx_size_type_yrd(
+                    bsize,
+                    (mi_row, mi_col, ref_off, src_off, stride),
+                    recon_c,
+                    src,
+                    0,
+                    stale_delta,
+                    true,
+                    fim,
+                    false,
+                    reduced,
+                    bd,
+                    plane_rows_c,
+                    dequant,
+                    above_ctx,
+                    left_ctx,
+                    rdmult,
+                    best_rd,
+                    coeff_tbls,
+                    ttc_tables,
+                    skip_costs,
+                    skip_ctx,
+                    ts_flat,
+                    tx_size_ctx,
+                    source_variance,
+                )
+            else {
+                continue;
+            };
+            // NOTE: no tx-size-cost subtraction in the filter-intra path —
+            // *rate_tokenonly takes the raw tx-search rate.
+            let mode_info_rate = c::ref_intra_mode_info_cost_y(
+                c_costs,
+                bmode_costs[0], // DC_PRED
+                0,
+                bsize as i32,
+                0,
+                true,
+                fim as i32,
+                false,
+                false,
+                0,
+                0,
+                true,
+                false,
+            );
+            let this_rate = rate_tok_raw + mode_info_rate;
+            let mut this_rd = c::ref_rdcost(rdmult, this_rate, dist);
+            if allintra && this_rd != i64::MAX {
+                let factor = c::ref_intra_rd_variance_factor(
+                    0, src, src_off, stride, recon_c, ref_off, stride, bsize, sb_size,
+                    mi_row, mi_col, 1 << 12, 1 << 12, bd, cvar, clog,
+                );
+                if factor != 1.0 {
+                    factor_fired += 1;
+                }
+                this_rd = (this_rd as f64 * factor) as i64;
+            }
+            if this_rd < best_rd {
+                best_rd = this_rd;
+                best = Some((
+                    0, stale_delta, tx_size, winners, this_rate, rate_tok_raw, dist,
+                    this_rd, true, fim,
+                ));
+            }
+        }
+    }
+    CLoopOut { best, rd_table, factor_fired }
+}
+
+// ---- the C-side av1_encode_intra_block_plane (luma) walk over REAL pieces
+// ---- (shared by encode_intra_plane_diff + the rd_pick composition diff) ----
+
+/// One C-side re-encoded txb: (tx_type, eob, entropy ctx, qcoeff, dqcoeff).
+pub type CTxb = (usize, u16, u8, Vec<i32>, Vec<i32>);
+
+/// The seven coefficient cost tables (txb_skip, base_eob, base, eob_extra,
+/// dc_sign, lps, eob).
+pub type CCoeffTbls<'a> = (&'a [i32], &'a [i32], &'a [i32], &'a [i32], &'a [i32], &'a [i32], &'a [i32]);
+
+/// The C-side `av1_encode_intra_block_plane(AOM_PLANE_Y)` walk arguments.
+pub struct CEncPlaneArgs<'a> {
+    pub bsize: usize,
+    pub tx_size: usize,
+    /// (mi_row, mi_col, ref_off, src_off, stride)
+    pub geometry: (i32, i32, usize, usize, usize),
+    pub sb_size: usize,
+    pub src: &'a [u16],
+    pub mode: usize,
+    pub angle_delta: i32,
+    pub use_fi: bool,
+    pub fi_mode: usize,
+    pub skip_txfm: bool,
+    /// `is_trellis_used(enable_optimize_b, dry_run)`.
+    pub use_trellis: bool,
+    /// `enable_optimize_b != NO_TRELLIS_OPT` (the ta/tl load gate).
+    pub load_ctx: bool,
+    pub sharpness: i32,
+    pub reduced: bool,
+    pub bd: u8,
+    pub plane_rows_c: &'a [i16],
+    pub dequant: [i16; 2],
+    pub above_ctx: &'a [i8],
+    pub left_ctx: &'a [i8],
+    pub rdmult: i32,
+    pub coeff_tbls: CCoeffTbls<'a>,
+    /// `xd->cfl.store_y` + the cfl subsampling.
+    pub store: bool,
+    pub ss: (i32, i32),
+}
+
+/// The C-side walk: per txb ref_intra_avail + ref_hbd_predict_intra (into
+/// the C recon) -> ref_highbd_subtract_block -> ref_get_tx_type_y (REAL,
+/// over the marshalled block-local map) -> ref_fwd_txfm2d +
+/// ref_quant_plane_rows (FP when trellis / B when not) -> [trellis:
+/// ref_get_txb_ctx + ref_optimize_txb + ref_txb_entropy_context] ->
+/// ref_inv_txfm2d_add -> [eob 0: ref_update_txk_array DCT reset] ->
+/// [store: ref_cfl_store_tx] -> the av1_set_txb_context stamp.
+/// Returns (txbs, ta, tl).
+#[allow(clippy::type_complexity)]
+pub fn c_encode_intra_block_plane_y(
+    a: &CEncPlaneArgs,
+    recon_c: &mut [u16],
+    map_c: &mut [u8],
+    cfl_c: &mut c::RefCflState,
+) -> (Vec<CTxb>, Vec<i8>, Vec<i8>) {
+    use aom_encode::tx_search::trellis_rdmult_intra;
+    const MI_W_B: [usize; 22] =
+        [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
+    const MI_H_B: [usize; 22] =
+        [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
+    let (mi_row, mi_col, ref_off, src_off, stride) = a.geometry;
+    let (bw, bh) = (BLK_W[a.bsize], BLK_H[a.bsize]);
+    let (txw, txh) = (TX_W[a.tx_size], TX_H[a.tx_size]);
+    let (txwu, txhu) = (txw >> 2, txh >> 2);
+    let (mbw, mbh) = (MI_W_B[a.bsize], MI_H_B[a.bsize]);
+    let map_stride = mbw;
+    let (txb_skip, base_eob, base, eob_extra, dc_sign, lps, eob_tbl) = a.coeff_tbls;
+
+    let mut ta_c = vec![0i8; mbw];
+    let mut tl_c = vec![0i8; mbh];
+    if a.load_ctx {
+        ta_c.copy_from_slice(&a.above_ctx[..mbw]);
+        tl_c.copy_from_slice(&a.left_ctx[..mbh]);
+    }
+    let mut txbs: Vec<CTxb> = Vec::new();
+    for blk_row in (0..mbh).step_by(txhu) {
+        for blk_col in (0..mbw).step_by(txwu) {
+            let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
+                a.sb_size, a.bsize, mi_row, mi_col, true, true, 1 << 16, 1 << 16, 0,
+                a.tx_size, 0, 0, blk_row as i32, blk_col as i32, bw as i32, bh as i32, 512,
+                512, a.mode, a.angle_delta * 3, a.use_fi,
+            );
+            let txb_off = ref_off + (blk_row * stride + blk_col) * 4;
+            let pred = c::ref_hbd_predict_intra(
+                recon_c, txb_off, stride, a.mode, a.angle_delta * 3, a.use_fi, a.fi_mode,
+                false, 0, a.tx_size, txw, txh, n_top, n_tr, n_left, n_bl, a.bd as i32,
+            );
+            for r in 0..txh {
+                recon_c[txb_off + r * stride..txb_off + r * stride + txw]
+                    .copy_from_slice(&pred[r * txw..r * txw + txw]);
+            }
+
+            let mut tx_type_c = 0usize;
+            let (mut qc, mut dqc): (Vec<i32>, Vec<i32>) = (Vec::new(), Vec::new());
+            let (eob_c, ctx_c);
+            if a.skip_txfm {
+                eob_c = 0usize;
+                ctx_c = 0u8;
+            } else {
+                let src_txb_off = src_off + (blk_row * stride + blk_col) * 4;
+                let mut residual = vec![0i16; txw * txh];
+                c::ref_highbd_subtract_block(
+                    txh, txw, &mut residual, txw, &a.src[src_txb_off..], stride, &pred, txw,
+                );
+                tx_type_c = c::ref_get_tx_type_y(
+                    false, a.tx_size, a.reduced, map_c, map_stride, blk_row, blk_col,
+                );
+                let n_coeffs = txb_wide(a.tx_size) * txb_high(a.tx_size);
+                let coeff = c::ref_fwd_txfm2d(a.tx_size, &residual, txw, tx_type_c);
+                let tcoeff = coeff[..n_coeffs].to_vec();
+                qc = vec![0i32; n_coeffs];
+                dqc = vec![0i32; n_coeffs];
+                let kind_c = if a.use_trellis { 0 } else { 1 }; // FP : B
+                let eob0 = c::ref_quant_plane_rows(
+                    kind_c,
+                    a.bd > 8,
+                    &tcoeff,
+                    a.plane_rows_c,
+                    scan(a.tx_size, tx_type_c),
+                    aom_txb::iscan(a.tx_size, tx_type_c),
+                    aom_encode::tx_scale(a.tx_size),
+                    &mut qc,
+                    &mut dqc,
+                ) as usize;
+                if a.use_trellis {
+                    let (txb_skip_ctx_c, dc_sign_ctx_c) = c::ref_get_txb_ctx(
+                        a.bsize, a.tx_size, 0, &ta_c[blk_col..], &tl_c[blk_row..],
+                    );
+                    if eob0 == 0 {
+                        eob_c = 0;
+                        ctx_c = 0;
+                    } else {
+                        let (ne, _rate) = c::ref_optimize_txb(
+                            a.tx_size,
+                            tx_type_c,
+                            &mut qc,
+                            &mut dqc,
+                            &tcoeff,
+                            eob0,
+                            &a.dequant,
+                            trellis_rdmult_intra(a.rdmult, a.sharpness, a.bd, 0),
+                            dc_sign_ctx_c as usize,
+                            txb_skip_ctx_c as usize,
+                            a.sharpness,
+                            scan(a.tx_size, tx_type_c),
+                            txb_skip,
+                            base_eob,
+                            base,
+                            eob_extra,
+                            dc_sign,
+                            lps,
+                            eob_tbl,
+                        );
+                        eob_c = ne;
+                        ctx_c = c::ref_txb_entropy_context(&qc, a.tx_size, tx_type_c, ne);
+                    }
+                } else {
+                    eob_c = eob0;
+                    ctx_c = c::ref_txb_entropy_context(&qc, a.tx_size, tx_type_c, eob0);
+                }
+            }
+
+            if eob_c > 0 {
+                let mut tight = pred.clone();
+                c::ref_inv_txfm2d_add(a.tx_size, &dqc, &mut tight, txw, tx_type_c, a.bd as i32);
+                for r in 0..txh {
+                    recon_c[txb_off + r * stride..txb_off + r * stride + txw]
+                        .copy_from_slice(&tight[r * txw..r * txw + txw]);
+                }
+            }
+            if eob_c == 0 {
+                c::ref_update_txk_array(map_c, map_stride, blk_row, blk_col, a.tx_size, 0);
+            }
+            if a.store {
+                c::ref_cfl_store_tx(
+                    cfl_c, recon_c, ref_off, stride, blk_row as i32, blk_col as i32,
+                    a.tx_size, a.bsize, mi_row, mi_col, a.ss.0, a.ss.1, a.bd,
+                );
+            }
+            for x in ta_c[blk_col..blk_col + txwu].iter_mut() {
+                *x = ctx_c as i8;
+            }
+            for x in tl_c[blk_row..blk_row + txhu].iter_mut() {
+                *x = ctx_c as i8;
+            }
+            txbs.push((tx_type_c, eob_c as u16, ctx_c, qc, dqc));
+        }
+    }
+    (txbs, ta_c, tl_c)
+}
