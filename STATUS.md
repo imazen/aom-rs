@@ -396,6 +396,37 @@ TX_MODE_SELECT live. Deferred-shim backlog closed the same session: CfL kernels 
 tx-size/chroma facades now diffed DIRECTLY vs C (dec_shim.c), shared-misread risk
 retired.
 
+## Deblocking applied — lf==0 envelope constraint DROPPED (2026-07-14, decoder track)
+
+**The biggest envelope constraint is gone** (10a5fae application layer, e7c96ab wiring):
+`aom_loopfilter::frame` ports the `av1_loop_filter_frame` application walk — the
+`lpf_opt_level == 0` single-threaded decoder path: `check_planes_to_loop_filter` →
+`av1_loop_filter_frame_init` (sharpness limits + hev + the seg/ref/mode-delta level
+table) → per-32-mi-strip → plane → dir(vert, horz) → SB-col
+`av1_filter_block_plane_vert/horz` with per-4px-line `set_lpf_parameters` (tu-edge
+gate, skip rules `(curr||pv) && (!pv_skip || !curr_skip || pu_edge)`, min-tx filter
+length luma {4,8,14}/chroma {4,6}, level fallback to the non-skipped side), dispatching
+into the already-bit-exact kernels. u16 planes at every depth (hbd kernels at bd 8 ==
+C's lowbd path — proven by the diff, whose C side runs the REAL lowbd path).
+Oracle is REAL exported functions, zero transcription: `shim_lf_filter_frame`
+(dec_shim.c §4) builds a synthetic `AV1_COMMON` + per-cell `MB_MODE_INFO` grid and
+drives `av1_filter_block_plane_vert/horz` + `av1_loop_filter_frame_init` in
+`loop_filter_rows` order. `lf_apply_diff.rs`: 400 init-table cases + 224 whole-frame
+cases (6 shapes incl. non-8-multiple crops + multi-strip, 420/444/mono full + 422
+luma-only, bd 8/10/12, intra/inter/intrabc/skip cells, per-cell vartx, delta-lf,
+seg LF features, lossless segments, sharpness 0-7, strided buffers) + zero-level
+no-op + zero-DERIVED-level walk-runs-but-touches-nothing — all byte-identical;
+harness mutation-verified. `real_bitstream.rs` now: **87 real cpu-used=0 KEY streams
+byte-identical** — 76 level-0 + **11 genuinely deblocked (6 also chroma)**, incl.
+the previously-excluded bd10 cq>6 arm and (100x76,444) cq36. The one wiring bug the
+real gate caught (synthetic diff could not): aligned-vs-crop dims passed as the
+`dst.width` guard — fixed to header frame dims. Remaining deblock envelope hole:
+**4:2:2 chroma deblocking rejected** (libaom reads
+`max_txsize_rect_lookup[BLOCK_INVALID=255]` OOB for tall blocks at ss=(1,0) —
+NDEBUG production build; not portable). 4:2:2 luma-only IS in envelope. Next
+envelope tools: CDEF (kernels partial), segmentation, palette, SB128, multi-tile,
+loop restoration, superres, intrabc.
+
 ## Perf gate honest number
 
 Like-for-like vs C's production AVX2 (`aom_sad64x64_avx2`): Rust AVX2 SAD is
