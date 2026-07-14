@@ -1577,12 +1577,42 @@ diverge at DEEP small-block nodes:
   ours=HORZ.
 
 Both are genuine deep RD-parity differences (the port over-selects HORZ at
-small blocks), NOT desyncs — the bytes round-trip perfectly, the port's search
-simply makes a different (valid) partition choice than real's RDO. This is the
-real, still-open RD gap; it is tracked diagnostic-only in the same test (the
-`FIRST DIVERGENCE` print, unasserted) and is a separate, harder investigation.
-The HORZ over-selection being the shared shape across both cases is the lead to
-start from.
+small blocks), NOT desyncs — the bytes round-trip perfectly (self-consistency
+asserted), the port's search simply makes a different (valid) partition choice
+than real's RDO. Tracked diagnostic-only in the same test (the `FIRST
+DIVERGENCE` print, unasserted).
+
+**Measured port-side costs at the two diverging nodes** (env-gated PART_DBG
+instrumentation in `rd_pick_partition_real`, run then reverted — NOT committed;
+`rdmult` folded, PSNR, cq=32):
+- "top split/bottom flat" (2,12,BLOCK_8X8): NONE rdcost=4,208,820 (dist=6021),
+  SPLIT=4,183,283 (dist=3030), HORZ=**4,005,471** (dist=3392) — HORZ wins by
+  ~4.9% over NONE / ~4.3% over SPLIT. NONE's whole-8x8 distortion (6021) is ~2x
+  the sub-partitioned versions; not a near-tie. Real nonetheless picks NONE.
+- "left flat/right split" (8,12,BLOCK_16X16): SPLIT rdcost=17,329,743
+  (dist=17779), HORZ=**17,248,986** (dist=15366) — HORZ wins by only **0.47%**
+  (HORZ trades +rate for −dist). A genuine near-tie; a sub-1% rate/dist error
+  flips it. Real picks SPLIT.
+
+**Ruled out** (so the next session doesn't re-check): this is NOT a cost-table,
+speed, or config difference. The AB-probe and the byte-exact e2e gate
+(`encoder_gate_e2e_byte_match`, 7/7 textured) build costs with the IDENTICAL
+`derive_real_costs(&kf_write, …)` (now FULL per-`txs_ctx` coeff costs) and use
+byte-for-byte identical `PickFrameCfg` (speed 0, `less_rectangular_check_level`
+= 1, `enable_ab/1to4/rect_partitions` = true, min/max partition 0/15). The ONLY
+variable is content — the checkerboard exposes a per-node RD divergence on the
+SAME machinery that is byte-exact on the 7 textured cases.
+
+**Concrete next attempt** (not yet done — the real remaining chunk): extract the
+C oracle's OWN per-node NONE/SPLIT/HORZ `rdcost` at these two exact nodes (a new
+append-only trace hook in `rd_shim.c`, which the encoder track owns) and diff
+against the measured port values above. That is the only way to localize whether
+the port's NONE-dist (case 1) or its HORZ rate/dist (case 2 near-tie) is the one
+that disagrees with C — port and C share cost tables + speed + config, so the
+divergence is in a per-node cost/context term that only a C-side dump can pin
+down. The `x->source_variance` / entropy-context state feeding these leaves (all
+correct-by-construction since the tree matches real to node 10) is the first
+suspect for a context-carried difference.
 
 ## Gate posture (honest)
 
