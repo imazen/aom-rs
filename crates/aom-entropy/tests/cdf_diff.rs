@@ -66,12 +66,17 @@ fn adaptive_symbol_coding_matches_c() {
 
         // Must be byte-identical to the C adaptive encoder.
         let cbuf = c::ref_adapt_encode(&syms, &cdf_init, nsymbs);
-        assert_eq!(rbuf, cbuf, "adaptive encode byte divergence nsymbs={nsymbs} n={n}");
+        assert_eq!(
+            rbuf, cbuf,
+            "adaptive encode byte divergence nsymbs={nsymbs} n={n}"
+        );
 
         // Rust adaptive decode recovers the symbols.
         let mut dec = OdEcDec::new(&cbuf);
         let mut cdf_d = cdf_init.clone();
-        let dec_syms: Vec<i32> = (0..n).map(|_| read_symbol(&mut dec, &mut cdf_d, nsymbs)).collect();
+        let dec_syms: Vec<i32> = (0..n)
+            .map(|_| read_symbol(&mut dec, &mut cdf_d, nsymbs))
+            .collect();
         assert_eq!(dec_syms, syms, "adaptive decode != original symbols");
 
         // C decoder agrees.

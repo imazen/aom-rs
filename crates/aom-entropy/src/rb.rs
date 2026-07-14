@@ -15,7 +15,11 @@ pub struct ReadBitBuffer<'a> {
 
 impl<'a> ReadBitBuffer<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        Self { buf, bit_offset: 0, error: false }
+        Self {
+            buf,
+            bit_offset: 0,
+            error: false,
+        }
     }
 
     /// `aom_rb_read_bit`: one bit at the current MSB-first position.

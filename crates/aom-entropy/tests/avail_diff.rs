@@ -9,12 +9,18 @@
 use aom_entropy::partition::{has_bottom_left, has_top_right};
 use aom_sys_ref as c;
 
-const MI_SIZE_WIDE: [i32; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_SIZE_HIGH: [i32; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
-const BLOCK_SIZE_WIDE: [i32; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLOCK_SIZE_HIGH: [i32; 22] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const MI_SIZE_WIDE: [i32; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const MI_SIZE_HIGH: [i32; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
+const BLOCK_SIZE_WIDE: [i32; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BLOCK_SIZE_HIGH: [i32; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 // Block sizes whose has_*_vert_table is non-NULL (VERT_A/VERT_B partitions).
 const VERT_OK: [usize; 10] = [1, 3, 4, 6, 7, 9, 10, 12, 13, 15];
 
@@ -33,8 +39,11 @@ fn has_top_right_bottom_left_match_c() {
                 continue;
             }
             // Partitions: NONE (0), and VERT_A (6) when a vert table exists.
-            let parts: &[usize] =
-                if VERT_OK.contains(&bsize) { &[0usize, 6] } else { &[0usize] };
+            let parts: &[usize] = if VERT_OK.contains(&bsize) {
+                &[0usize, 6]
+            } else {
+                &[0usize]
+            };
             for &partition in parts {
                 for &(ssx, ssy) in &[(0i32, 0i32), (1, 1), (1, 0), (0, 1)] {
                     let pbw = (MI_SIZE_WIDE[bsize] >> ssx).max(1);
@@ -49,8 +58,7 @@ fn has_top_right_bottom_left_match_c() {
                                 // the table branches.
                                 for &co in &[0, pbw - 1, pbw] {
                                     for &ro in &[0, pbh - 1, pbh] {
-                                        for &(a, b) in
-                                            &[(true, true), (true, false), (false, true)]
+                                        for &(a, b) in &[(true, true), (true, false), (false, true)]
                                         {
                                             let g = has_top_right(
                                                 sb, bsize, mi_row, mi_col, a, b, partition, txsz,

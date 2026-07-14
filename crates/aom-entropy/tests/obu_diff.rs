@@ -13,7 +13,10 @@ fn obu_header_matches_c() {
                 for ext in [0u8, 1, 0x55, 0xff] {
                     let got = write_obu_header(obu_type, has_nz, is_layer, ext);
                     let want = c::ref_write_obu_header(obu_type, has_nz, is_layer, ext);
-                    assert_eq!(got, want, "obu ty={obu_type} nz={has_nz} layer={is_layer} ext={ext}");
+                    assert_eq!(
+                        got, want,
+                        "obu ty={obu_type} nz={has_nz} layer={is_layer} ext={ext}"
+                    );
                 }
             }
         }

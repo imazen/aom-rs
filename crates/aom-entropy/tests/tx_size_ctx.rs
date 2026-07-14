@@ -10,8 +10,8 @@
 //! values, and the aom-decode tile roundtrip pins the decode/encode symmetry.
 
 use aom_entropy::partition::{
-    TXFM_CTX_INIT, TxMode, bsize_to_max_depth, bsize_to_tx_size_cat, depth_to_tx_size,
-    get_tx_size_context, set_txfm_ctxs, tx_size_from_tx_mode, tx_size_to_depth,
+    bsize_to_max_depth, bsize_to_tx_size_cat, depth_to_tx_size, get_tx_size_context, set_txfm_ctxs,
+    tx_size_from_tx_mode, tx_size_to_depth, TxMode, TXFM_CTX_INIT,
 };
 
 // ---- independent transcriptions of the C tables (common_data.h) ------------------
@@ -28,13 +28,19 @@ const MAX_TXSIZE_RECT: [usize; BLOCK_SIZES_ALL] = [
 /// `sub_tx_size_map[TX_SIZES_ALL]`.
 const SUB_TX: [usize; TX_SIZES_ALL] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
 /// `tx_size_wide[TX_SIZES_ALL]` / `tx_size_high[TX_SIZES_ALL]`.
-const TXW: [i32; TX_SIZES_ALL] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TXH: [i32; TX_SIZES_ALL] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TXW: [i32; TX_SIZES_ALL] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TXH: [i32; TX_SIZES_ALL] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 /// `block_size_wide` / `block_size_high` `[BLOCK_SIZES_ALL]`.
-const BW: [i32; BLOCK_SIZES_ALL] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BH: [i32; BLOCK_SIZES_ALL] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const BW: [i32; BLOCK_SIZES_ALL] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BH: [i32; BLOCK_SIZES_ALL] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 const TX_4X4: usize = 0;
 const BLOCK_4X4: usize = 0;
@@ -204,21 +210,47 @@ fn tx_size_context_hand_traced_vectors() {
     // Fresh tile: both txfm-context bytes at the 64 reset value.
     // 8x8 block (max rect TX_8X8: 8 wide, 8 high): 64 >= 8 both ways.
     assert_eq!(
-        get_tx_size_context(BLOCK_8X8, TXFM_CTX_INIT, TXFM_CTX_INIT, true, true, None, None),
+        get_tx_size_context(
+            BLOCK_8X8,
+            TXFM_CTX_INIT,
+            TXFM_CTX_INIT,
+            true,
+            true,
+            None,
+            None
+        ),
         2
     );
     // Tile origin: nothing available -> 0 regardless of bytes.
-    assert_eq!(get_tx_size_context(BLOCK_8X8, 64, 64, false, false, None, None), 0);
+    assert_eq!(
+        get_tx_size_context(BLOCK_8X8, 64, 64, false, false, None, None),
+        0
+    );
     // First SB row: only left available -> the left bit alone.
-    assert_eq!(get_tx_size_context(BLOCK_8X8, 64, 64, false, true, None, None), 1);
+    assert_eq!(
+        get_tx_size_context(BLOCK_8X8, 64, 64, false, true, None, None),
+        1
+    );
     // Above neighbour stamped TX_4X4 (4 px): 4 >= 8 is false -> above 0, left 1.
-    assert_eq!(get_tx_size_context(BLOCK_8X8, 4, 64, true, true, None, None), 1);
+    assert_eq!(
+        get_tx_size_context(BLOCK_8X8, 4, 64, true, true, None, None),
+        1
+    );
     // Both stamped 4: 0.
-    assert_eq!(get_tx_size_context(BLOCK_8X8, 4, 4, true, true, None, None), 0);
+    assert_eq!(
+        get_tx_size_context(BLOCK_8X8, 4, 4, true, true, None, None),
+        0
+    );
     // 64x64 block (max rect TX_64X64): reset 64 >= 64 -> 1 per direction.
-    assert_eq!(get_tx_size_context(BLOCK_64X64, 64, 64, true, true, None, None), 2);
+    assert_eq!(
+        get_tx_size_context(BLOCK_64X64, 64, 64, true, true, None, None),
+        2
+    );
     // ... but a 32-stamped neighbour (TX_32X32) fails 32 >= 64.
-    assert_eq!(get_tx_size_context(BLOCK_64X64, 32, 64, true, true, None, None), 1);
+    assert_eq!(
+        get_tx_size_context(BLOCK_64X64, 32, 64, true, true, None, None),
+        1
+    );
     // Rect block 4x8 (bsize 1, max rect TX_4X8: 4 wide, 8 high): width compares
     // against 4, height against 8 -> above byte 4 passes, left byte 4 fails.
     assert_eq!(get_tx_size_context(1, 4, 4, true, true, None, None), 1);

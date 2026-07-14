@@ -91,7 +91,10 @@ fn set_txfm_ctxs_matches_c() {
                     let mut l_c = [0x55u8; 33];
                     set_txfm_ctxs(&mut a_r, &mut l_r, tx_size, n4_w, n4_h, skip);
                     c::ref_set_txfm_ctxs(tx_size, n4_w, n4_h, skip, &mut a_c, &mut l_c);
-                    assert_eq!(a_r, a_c, "above tx={tx_size} n4=({n4_w},{n4_h}) skip={skip}");
+                    assert_eq!(
+                        a_r, a_c,
+                        "above tx={tx_size} n4=({n4_w},{n4_h}) skip={skip}"
+                    );
                     assert_eq!(l_r, l_c, "left tx={tx_size} n4=({n4_w},{n4_h}) skip={skip}");
                     cases += 1;
                 }
@@ -106,7 +109,11 @@ fn tx_size_maps_match_c() {
     // tx_size_from_tx_mode over every (bsize, mode) — including the dead-under-
     // conformance ONLY_4X4 rect arm the port carries verbatim.
     for bsize in 0..BLOCK_SIZES_ALL {
-        for (mode, tm) in [(0, TxMode::Only4x4), (1, TxMode::Largest), (2, TxMode::Select)] {
+        for (mode, tm) in [
+            (0, TxMode::Only4x4),
+            (1, TxMode::Largest),
+            (2, TxMode::Select),
+        ] {
             assert_eq!(
                 tx_size_from_tx_mode(bsize, tm),
                 c::ref_tx_size_from_tx_mode(bsize, mode),

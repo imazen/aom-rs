@@ -22,10 +22,22 @@ fn uleb_size_and_encode_match_c() {
     let mut rng = Rng(0x1eb1_2800_9e37_79b9);
     for _ in 0..300_000 {
         // Mix in-range (<=u32::MAX) and out-of-range (>u32::MAX) values.
-        let value = if rng.next().is_multiple_of(4) { rng.next() } else { rng.next() % (1u64 << 33) };
-        assert_eq!(uleb_size_in_bytes(value), c::ref_uleb_size_in_bytes(value), "size {value}");
+        let value = if rng.next().is_multiple_of(4) {
+            rng.next()
+        } else {
+            rng.next() % (1u64 << 33)
+        };
+        assert_eq!(
+            uleb_size_in_bytes(value),
+            c::ref_uleb_size_in_bytes(value),
+            "size {value}"
+        );
         let available = (rng.next() % 10) as usize; // sometimes too small
-        assert_eq!(uleb_encode(value, available), c::ref_uleb_encode(value, available), "encode {value} avail={available}");
+        assert_eq!(
+            uleb_encode(value, available),
+            c::ref_uleb_encode(value, available),
+            "encode {value} avail={available}"
+        );
     }
 }
 
@@ -36,6 +48,10 @@ fn uleb_decode_matches_c() {
         // Random byte streams (some valid LEB128, some overrunning / over-cap).
         let n = (rng.next() % 10) as usize;
         let buffer: Vec<u8> = (0..n).map(|_| (rng.next() % 256) as u8).collect();
-        assert_eq!(uleb_decode(&buffer), c::ref_uleb_decode(&buffer), "decode {buffer:?}");
+        assert_eq!(
+            uleb_decode(&buffer),
+            c::ref_uleb_decode(&buffer),
+            "decode {buffer:?}"
+        );
     }
 }

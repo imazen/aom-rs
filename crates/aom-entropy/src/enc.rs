@@ -45,7 +45,14 @@ impl Default for OdEcEnc {
 
 impl OdEcEnc {
     pub fn new() -> Self {
-        let mut e = OdEcEnc { buf: Vec::new(), offs: 0, low: 0, rng: 0x8000, cnt: -9, error: false };
+        let mut e = OdEcEnc {
+            buf: Vec::new(),
+            offs: 0,
+            low: 0,
+            rng: 0x8000,
+            cnt: -9,
+            error: false,
+        };
         e.reset();
         e
     }
@@ -131,7 +138,11 @@ impl OdEcEnc {
 
     /// `od_ec_encode_cdf_q15`. `icdf` is the inverse CDF (Q15), `icdf[nsyms-1]==0`.
     pub fn encode_cdf_q15(&mut self, s: i32, icdf: &[u16], nsyms: i32) {
-        let fl = if s > 0 { icdf[(s - 1) as usize] as u32 } else { CDF_PROB_TOP };
+        let fl = if s > 0 {
+            icdf[(s - 1) as usize] as u32
+        } else {
+            CDF_PROB_TOP
+        };
         let fh = icdf[s as usize] as u32;
         self.encode_q15(fl, fh, s, nsyms);
     }

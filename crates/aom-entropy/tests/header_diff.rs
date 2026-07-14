@@ -18,7 +18,11 @@ impl Rng {
     }
     fn dq(&mut self) -> i32 {
         // delta-q is a 7-bit inverse-signed field: [-63, 63], often 0.
-        if self.next().is_multiple_of(3) { 0 } else { (self.next() % 127) as i32 - 63 }
+        if self.next().is_multiple_of(3) {
+            0
+        } else {
+            (self.next() % 127) as i32 - 63
+        }
     }
     fn range(&mut self, lo: i32, hi: i32) -> i32 {
         lo + (self.next() % (hi - lo) as u64) as i32
@@ -48,11 +52,23 @@ fn encode_quantization_matches_c() {
         encode_quantization(&mut wb, &qp, num_planes, separate_uv);
         let got = wb.bytes().to_vec();
         let want = c::ref_encode_quantization(
-            qp.base_qindex, qp.y_dc_delta_q, qp.u_dc_delta_q, qp.u_ac_delta_q, qp.v_dc_delta_q,
-            qp.v_ac_delta_q, qp.using_qmatrix, qp.qmatrix_level_y, qp.qmatrix_level_u,
-            qp.qmatrix_level_v, num_planes, separate_uv,
+            qp.base_qindex,
+            qp.y_dc_delta_q,
+            qp.u_dc_delta_q,
+            qp.u_ac_delta_q,
+            qp.v_dc_delta_q,
+            qp.v_ac_delta_q,
+            qp.using_qmatrix,
+            qp.qmatrix_level_y,
+            qp.qmatrix_level_u,
+            qp.qmatrix_level_v,
+            num_planes,
+            separate_uv,
         );
-        assert_eq!(got, want, "encode_quantization {qp:?} np={num_planes} sep={separate_uv}");
+        assert_eq!(
+            got, want,
+            "encode_quantization {qp:?} np={num_planes} sep={separate_uv}"
+        );
     }
 }
 
@@ -94,9 +110,17 @@ fn encode_loopfilter_matches_c() {
         };
         // Sometimes make last == current so "changed"/"meaningful" go both ways.
         let ref_deltas = deltas8(&mut rng);
-        let last_ref = if rng.next().is_multiple_of(3) { ref_deltas } else { deltas8(&mut rng) };
+        let last_ref = if rng.next().is_multiple_of(3) {
+            ref_deltas
+        } else {
+            deltas8(&mut rng)
+        };
         let mode_deltas = deltas2(&mut rng);
-        let last_mode = if rng.next().is_multiple_of(3) { mode_deltas } else { deltas2(&mut rng) };
+        let last_mode = if rng.next().is_multiple_of(3) {
+            mode_deltas
+        } else {
+            deltas2(&mut rng)
+        };
         let lf = LoopfilterHeader {
             allow_intrabc: rng.next().is_multiple_of(7),
             filter_level: [rng.range(0, 64), rng.range(0, 64)],
@@ -115,9 +139,18 @@ fn encode_loopfilter_matches_c() {
         encode_loopfilter(&mut wb, &lf, num_planes);
         let got = wb.bytes().to_vec();
         let want = c::ref_encode_loopfilter(
-            lf.allow_intrabc, lf.filter_level, lf.filter_level_u, lf.filter_level_v,
-            lf.sharpness_level, lf.mode_ref_delta_enabled, lf.mode_ref_delta_update, &lf.ref_deltas,
-            &lf.mode_deltas, &lf.last_ref_deltas, &lf.last_mode_deltas, num_planes,
+            lf.allow_intrabc,
+            lf.filter_level,
+            lf.filter_level_u,
+            lf.filter_level_v,
+            lf.sharpness_level,
+            lf.mode_ref_delta_enabled,
+            lf.mode_ref_delta_update,
+            &lf.ref_deltas,
+            &lf.mode_deltas,
+            &lf.last_ref_deltas,
+            &lf.last_mode_deltas,
+            num_planes,
         );
         assert_eq!(got, want, "encode_loopfilter {lf:?} np={num_planes}");
     }
@@ -149,7 +182,16 @@ fn encode_cdef_matches_c() {
         let mut wb = WriteBitBuffer::new();
         encode_cdef(&mut wb, &cdef, num_planes);
         let got = wb.bytes().to_vec();
-        let want = c::ref_encode_cdef(cdef.enable_cdef, cdef.allow_intrabc, cdef.cdef_damping, cdef.cdef_bits, nb, &y, &uv, num_planes);
+        let want = c::ref_encode_cdef(
+            cdef.enable_cdef,
+            cdef.allow_intrabc,
+            cdef.cdef_damping,
+            cdef.cdef_bits,
+            nb,
+            &y,
+            &uv,
+            num_planes,
+        );
         assert_eq!(got, want, "encode_cdef {cdef:?} np={num_planes}");
     }
 }
@@ -181,7 +223,15 @@ fn encode_segmentation_matches_c() {
         let mut wb = WriteBitBuffer::new();
         encode_segmentation(&mut wb, &seg);
         let got = wb.bytes().to_vec();
-        let want = c::ref_encode_segmentation(seg.enabled, seg.has_primary_ref, seg.update_map, seg.temporal_update, seg.update_data, &feature_mask, &feature_data);
+        let want = c::ref_encode_segmentation(
+            seg.enabled,
+            seg.has_primary_ref,
+            seg.update_map,
+            seg.temporal_update,
+            seg.update_data,
+            &feature_mask,
+            &feature_data,
+        );
         assert_eq!(got, want, "encode_segmentation {seg:?}");
     }
 }
@@ -198,14 +248,26 @@ fn frame_size_cluster_matches_c() {
         let filter = rng.range(0, 5);
         let mut wb = WriteBitBuffer::new();
         write_frame_interp_filter(&mut wb, filter);
-        assert_eq!(wb.bytes(), &c::ref_write_frame_interp_filter(filter)[..], "interp_filter {filter}");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_frame_interp_filter(filter)[..],
+            "interp_filter {filter}"
+        );
 
         // superres: denom == 8 (no scale) or [9, 16)
         let enable_superres = rng.next().is_multiple_of(2);
-        let denom = if rng.next().is_multiple_of(2) { 8 } else { rng.range(9, 17) };
+        let denom = if rng.next().is_multiple_of(2) {
+            8
+        } else {
+            rng.range(9, 17)
+        };
         let mut wb = WriteBitBuffer::new();
         write_superres_scale(&mut wb, enable_superres, denom);
-        assert_eq!(wb.bytes(), &c::ref_write_superres_scale(enable_superres, denom)[..], "superres en={enable_superres} d={denom}");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_superres_scale(enable_superres, denom)[..],
+            "superres en={enable_superres} d={denom}"
+        );
 
         // render size
         let scaling_active = rng.next().is_multiple_of(2);
@@ -213,7 +275,11 @@ fn frame_size_cluster_matches_c() {
         let rh = rng.range(1, 65536);
         let mut wb = WriteBitBuffer::new();
         write_render_size(&mut wb, scaling_active, rw, rh);
-        assert_eq!(wb.bytes(), &c::ref_write_render_size(scaling_active, rw, rh)[..], "render {scaling_active} {rw}x{rh}");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_render_size(scaling_active, rw, rh)[..],
+            "render {scaling_active} {rw}x{rh}"
+        );
 
         // full frame size
         let fs = FrameSizeHeader {
@@ -230,7 +296,18 @@ fn frame_size_cluster_matches_c() {
         };
         let mut wb = WriteBitBuffer::new();
         write_frame_size(&mut wb, &fs);
-        let want = c::ref_write_frame_size(fs.frame_size_override, fs.num_bits_width, fs.num_bits_height, fs.superres_upscaled_width, fs.superres_upscaled_height, fs.enable_superres, fs.scale_denominator, fs.scaling_active, fs.render_width, fs.render_height);
+        let want = c::ref_write_frame_size(
+            fs.frame_size_override,
+            fs.num_bits_width,
+            fs.num_bits_height,
+            fs.superres_upscaled_width,
+            fs.superres_upscaled_height,
+            fs.enable_superres,
+            fs.scale_denominator,
+            fs.scaling_active,
+            fs.render_width,
+            fs.render_height,
+        );
         assert_eq!(wb.bytes(), &want[..], "frame_size {fs:?}");
     }
 }
@@ -245,7 +322,20 @@ fn write_tile_info_matches_c() {
         let mut col_start_sb = [0i32; 65];
         let mut row_start_sb = [0i32; 65];
 
-        let (mi_cols, mi_rows, cols, rows, log2_cols, log2_rows, min_c, max_c, min_r, max_r, max_width_sb, max_height_sb);
+        let (
+            mi_cols,
+            mi_rows,
+            cols,
+            rows,
+            log2_cols,
+            log2_rows,
+            min_c,
+            max_c,
+            min_r,
+            max_r,
+            max_width_sb,
+            max_height_sb,
+        );
         if uniform {
             // uniform spacing: log2 in [min, max]; the partition arrays are unused.
             min_c = rng.range(0, 3);
@@ -293,15 +383,44 @@ fn write_tile_info_matches_c() {
         }
 
         let t = TileInfoHeader {
-            mi_cols, mi_rows, mib_size_log2, uniform_spacing: uniform,
-            log2_cols, min_log2_cols: min_c, max_log2_cols: max_c,
-            log2_rows, min_log2_rows: min_r, max_log2_rows: max_r,
-            cols, rows, col_start_sb, row_start_sb, max_width_sb, max_height_sb,
+            mi_cols,
+            mi_rows,
+            mib_size_log2,
+            uniform_spacing: uniform,
+            log2_cols,
+            min_log2_cols: min_c,
+            max_log2_cols: max_c,
+            log2_rows,
+            min_log2_rows: min_r,
+            max_log2_rows: max_r,
+            cols,
+            rows,
+            col_start_sb,
+            row_start_sb,
+            max_width_sb,
+            max_height_sb,
         };
         let mut wb = WriteBitBuffer::new();
         write_tile_info(&mut wb, &t);
         let got = wb.bytes().to_vec();
-        let want = c::ref_write_tile_info(mi_cols, mi_rows, mib_size_log2, uniform, log2_cols, min_c, max_c, log2_rows, min_r, max_r, cols, rows, &col_start_sb, &row_start_sb, max_width_sb, max_height_sb);
+        let want = c::ref_write_tile_info(
+            mi_cols,
+            mi_rows,
+            mib_size_log2,
+            uniform,
+            log2_cols,
+            min_c,
+            max_c,
+            log2_rows,
+            min_r,
+            max_r,
+            cols,
+            rows,
+            &col_start_sb,
+            &row_start_sb,
+            max_width_sb,
+            max_height_sb,
+        );
         assert_eq!(got, want, "write_tile_info {t:?}");
     }
 }
@@ -318,7 +437,11 @@ fn encode_restoration_mode_matches_c() {
         // restoration_unit_size: exercise the >64 / >128 branches (valid: 64/128/256).
         let rus_pick = |rng: &mut Rng| -> i32 { [64, 128, 256][rng.range(0, 3) as usize] };
         let rus0 = rus_pick(&mut rng);
-        let rus1 = if rng.next().is_multiple_of(2) { rus0 } else { rus_pick(&mut rng) };
+        let rus1 = if rng.next().is_multiple_of(2) {
+            rus0
+        } else {
+            rus_pick(&mut rng)
+        };
         let r = RestorationHeader {
             enable_restoration: rng.next().is_multiple_of(2),
             allow_intrabc: rng.next().is_multiple_of(7),
@@ -333,7 +456,16 @@ fn encode_restoration_mode_matches_c() {
         encode_restoration_mode(&mut wb, &r, num_planes);
         let got = wb.bytes().to_vec();
         let frt_i = [frt[0] as i32, frt[1] as i32, frt[2] as i32];
-        let want = c::ref_encode_restoration_mode(r.enable_restoration, r.allow_intrabc, &frt_i, r.sb_size_128, &r.restoration_unit_size, r.subsampling_x, r.subsampling_y, num_planes);
+        let want = c::ref_encode_restoration_mode(
+            r.enable_restoration,
+            r.allow_intrabc,
+            &frt_i,
+            r.sb_size_128,
+            &r.restoration_unit_size,
+            r.subsampling_x,
+            r.subsampling_y,
+            num_planes,
+        );
         assert_eq!(got, want, "encode_restoration_mode {r:?} np={num_planes}");
     }
 }
@@ -359,7 +491,15 @@ fn write_delta_q_params_and_tx_mode_match_c() {
         let mut wb = WriteBitBuffer::new();
         write_delta_q_params(&mut wb, &d);
         let got = wb.bytes().to_vec();
-        let want = c::ref_write_delta_q_params(d.base_qindex, d.delta_q_present, d.delta_q_res, d.allow_intrabc, d.delta_lf_present, d.delta_lf_res, d.delta_lf_multi);
+        let want = c::ref_write_delta_q_params(
+            d.base_qindex,
+            d.delta_q_present,
+            d.delta_q_res,
+            d.allow_intrabc,
+            d.delta_lf_present,
+            d.delta_lf_res,
+            d.delta_lf_multi,
+        );
         assert_eq!(got, want, "write_delta_q_params {d:?}");
 
         // tx mode
@@ -367,7 +507,11 @@ fn write_delta_q_params_and_tx_mode_match_c() {
         let tx_mode_select = rng.next().is_multiple_of(2);
         let mut wb = WriteBitBuffer::new();
         write_tx_mode(&mut wb, coded_lossless, tx_mode_select);
-        assert_eq!(wb.bytes(), &c::ref_write_tx_mode(coded_lossless, tx_mode_select)[..], "tx_mode cl={coded_lossless} sel={tx_mode_select}");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_tx_mode(coded_lossless, tx_mode_select)[..],
+            "tx_mode cl={coded_lossless} sel={tx_mode_select}"
+        );
     }
 }
 
@@ -448,19 +592,44 @@ fn write_film_grain_params_matches_c() {
         let got = wb.bytes().to_vec();
 
         let s = [
-            p.apply_grain as i32, p.random_seed, p.is_inter_frame as i32,
-            p.update_parameters as i32, p.ref_idx, p.num_y_points, p.monochrome as i32,
-            p.chroma_scaling_from_luma as i32, p.subsampling_x, p.subsampling_y,
-            p.num_cb_points, p.num_cr_points, p.scaling_shift, p.ar_coeff_lag,
-            p.ar_coeff_shift, p.grain_scale_shift, p.cb_mult, p.cb_luma_mult, p.cb_offset,
-            p.cr_mult, p.cr_luma_mult, p.cr_offset, p.overlap_flag as i32,
+            p.apply_grain as i32,
+            p.random_seed,
+            p.is_inter_frame as i32,
+            p.update_parameters as i32,
+            p.ref_idx,
+            p.num_y_points,
+            p.monochrome as i32,
+            p.chroma_scaling_from_luma as i32,
+            p.subsampling_x,
+            p.subsampling_y,
+            p.num_cb_points,
+            p.num_cr_points,
+            p.scaling_shift,
+            p.ar_coeff_lag,
+            p.ar_coeff_shift,
+            p.grain_scale_shift,
+            p.cb_mult,
+            p.cb_luma_mult,
+            p.cb_offset,
+            p.cr_mult,
+            p.cr_luma_mult,
+            p.cr_offset,
+            p.overlap_flag as i32,
             p.clip_to_restricted_range as i32,
         ];
         let flat2 = |a: &[[i32; 2]]| -> Vec<i32> { a.iter().flatten().copied().collect() };
         let spy: [i32; 28] = flat2(&scaling_points_y).try_into().unwrap();
         let spcb: [i32; 20] = flat2(&scaling_points_cb).try_into().unwrap();
         let spcr: [i32; 20] = flat2(&scaling_points_cr).try_into().unwrap();
-        let want = c::ref_write_film_grain_params(&s, &spy, &spcb, &spcr, &ar_coeffs_y, &ar_coeffs_cb, &ar_coeffs_cr);
+        let want = c::ref_write_film_grain_params(
+            &s,
+            &spy,
+            &spcb,
+            &spcr,
+            &ar_coeffs_y,
+            &ar_coeffs_cb,
+            &ar_coeffs_cr,
+        );
         assert_eq!(got, want, "write_film_grain_params {p:?}");
     }
 }
@@ -471,8 +640,20 @@ fn write_global_motion_matches_c() {
     let mut rng = Rng(0x610b_c0de_a11a_0009);
     // Build wmmat[i] realizing a coded arg in [-4096,4096]: idx 0/1 use shift 10,
     // idx 2/3/4/5 shift 1; idx 2/5 subtract 1<<15. Recovered arg stays in i16 range.
-    let shift = |idx: usize| -> u32 { if idx < 2 { 10 } else { 1 } };
-    let subtract = |idx: usize| -> i32 { if idx == 2 || idx == 5 { 1 << 15 } else { 0 } };
+    let shift = |idx: usize| -> u32 {
+        if idx < 2 {
+            10
+        } else {
+            1
+        }
+    };
+    let subtract = |idx: usize| -> i32 {
+        if idx == 2 || idx == 5 {
+            1 << 15
+        } else {
+            0
+        }
+    };
     for _ in 0..300_000 {
         let allow_hp = rng.next().is_multiple_of(2);
         let mut wmtype = [0i32; 7];
@@ -483,7 +664,11 @@ fn write_global_motion_matches_c() {
             wmtype[f] = [0i32, 2, 3][rng.range(0, 3) as usize];
             for i in 0..6 {
                 let a = rng.range(-4096, 4097);
-                let ra = if rng.next().is_multiple_of(3) { a } else { rng.range(-4096, 4097) };
+                let ra = if rng.next().is_multiple_of(3) {
+                    a
+                } else {
+                    rng.range(-4096, 4097)
+                };
                 wmmat[f * 6 + i] = (a + subtract(i)) << shift(i);
                 refmat[f * 6 + i] = (ra + subtract(i)) << shift(i);
             }
@@ -500,7 +685,10 @@ fn write_global_motion_matches_c() {
         write_global_motion(&mut wb, &gm, &refgm, allow_hp);
         let got = wb.bytes().to_vec();
         let want = c::ref_write_global_motion(&wmtype, &wmmat, &refmat, allow_hp);
-        assert_eq!(got, want, "write_global_motion hp={allow_hp} types={wmtype:?}");
+        assert_eq!(
+            got, want,
+            "write_global_motion hp={allow_hp} types={wmtype:?}"
+        );
     }
 }
 
@@ -515,7 +703,7 @@ fn write_sequence_header_matches_c() {
         let delta_frame_id_length = rng.range(2, 18); // -2 fits 4 bits
         let frame_id_length = delta_frame_id_length + 1 + rng.range(0, 8); // -delta-1 fits 3 bits
         let force_sct = rng.range(0, 3); // 0,1,2
-        // when force_sct == 0, force_integer_mv must be 2 (SELECT); else 0/1/2
+                                         // when force_sct == 0, force_integer_mv must be 2 (SELECT); else 0/1/2
         let force_integer_mv = if force_sct == 0 { 2 } else { rng.range(0, 3) };
         let s = SequenceHeaderParams {
             num_bits_width,
@@ -547,14 +735,30 @@ fn write_sequence_header_matches_c() {
         write_sequence_header(&mut wb, &s);
         let got = wb.bytes().to_vec();
         let packed = [
-            s.num_bits_width as i32, s.num_bits_height as i32, s.max_frame_width, s.max_frame_height,
-            s.reduced_still_picture_hdr as i32, s.frame_id_numbers_present_flag as i32,
-            s.delta_frame_id_length, s.frame_id_length, s.sb_size_128 as i32,
-            s.enable_filter_intra as i32, s.enable_intra_edge_filter as i32, s.enable_interintra_compound as i32,
-            s.enable_masked_compound as i32, s.enable_warped_motion as i32, s.enable_dual_filter as i32,
-            s.enable_order_hint as i32, s.enable_dist_wtd_comp as i32, s.enable_ref_frame_mvs as i32,
-            s.force_screen_content_tools, s.force_integer_mv, s.order_hint_bits_minus_1,
-            s.enable_superres as i32, s.enable_cdef as i32, s.enable_restoration as i32,
+            s.num_bits_width as i32,
+            s.num_bits_height as i32,
+            s.max_frame_width,
+            s.max_frame_height,
+            s.reduced_still_picture_hdr as i32,
+            s.frame_id_numbers_present_flag as i32,
+            s.delta_frame_id_length,
+            s.frame_id_length,
+            s.sb_size_128 as i32,
+            s.enable_filter_intra as i32,
+            s.enable_intra_edge_filter as i32,
+            s.enable_interintra_compound as i32,
+            s.enable_masked_compound as i32,
+            s.enable_warped_motion as i32,
+            s.enable_dual_filter as i32,
+            s.enable_order_hint as i32,
+            s.enable_dist_wtd_comp as i32,
+            s.enable_ref_frame_mvs as i32,
+            s.force_screen_content_tools,
+            s.force_integer_mv,
+            s.order_hint_bits_minus_1,
+            s.enable_superres as i32,
+            s.enable_cdef as i32,
+            s.enable_restoration as i32,
         ];
         let want = c::ref_write_sequence_header(&packed);
         assert_eq!(got, want, "write_sequence_header {s:?}");
@@ -576,7 +780,10 @@ fn write_ext_tile_info_matches_c() {
         write_ext_tile_info(&mut wb, rows, cols);
         let got = wb.bytes().to_vec();
         let want = c::ref_write_ext_tile_info(pre_bits, rows, cols);
-        assert_eq!(got, want, "write_ext_tile_info pre={pre_bits} {rows}x{cols}");
+        assert_eq!(
+            got, want,
+            "write_ext_tile_info pre={pre_bits} {rows}x{cols}"
+        );
     }
 }
 
@@ -595,8 +802,8 @@ fn write_color_config_matches_c() {
         let monochrome = profile != 1 && rng.next().is_multiple_of(3);
         // color description: unspecified triple, the sRGB triple, or random CICP.
         let (cp, tc, mc) = match rng.range(0, 3) {
-            0 => (2, 2, 2),   // all unspecified -> no description
-            1 => (1, 13, 0),  // sRGB special case
+            0 => (2, 2, 2),  // all unspecified -> no description
+            1 => (1, 13, 0), // sRGB special case
             _ => (rng.range(0, 256), rng.range(0, 256), rng.range(0, 256)),
         };
         let c = ColorConfigParams {
@@ -616,9 +823,17 @@ fn write_color_config_matches_c() {
         write_color_config(&mut wb, &c);
         let got = wb.bytes().to_vec();
         let packed = [
-            c.bit_depth, c.profile, c.monochrome as i32, c.color_primaries,
-            c.transfer_characteristics, c.matrix_coefficients, c.color_range as i32,
-            c.subsampling_x, c.subsampling_y, c.chroma_sample_position, c.separate_uv_delta_q as i32,
+            c.bit_depth,
+            c.profile,
+            c.monochrome as i32,
+            c.color_primaries,
+            c.transfer_characteristics,
+            c.matrix_coefficients,
+            c.color_range as i32,
+            c.subsampling_x,
+            c.subsampling_y,
+            c.chroma_sample_position,
+            c.separate_uv_delta_q as i32,
         ];
         let want = c::ref_write_color_config(&packed);
         assert_eq!(got, want, "write_color_config {c:?}");
@@ -642,7 +857,16 @@ fn timing_and_decoder_model_match_c() {
         };
         let mut wb = WriteBitBuffer::new();
         write_timing_info_header(&mut wb, &t);
-        assert_eq!(wb.bytes(), &c::ref_write_timing_info(t.num_units_in_display_tick, t.time_scale, t.equal_picture_interval, t.num_ticks_per_picture)[..], "timing {t:?}");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_timing_info(
+                t.num_units_in_display_tick,
+                t.time_scale,
+                t.equal_picture_interval,
+                t.num_ticks_per_picture
+            )[..],
+            "timing {t:?}"
+        );
 
         // decoder model info: the *_length fields are in [1, 32] (written -1 in 5 bits)
         let d = DecoderModelInfo {
@@ -653,17 +877,34 @@ fn timing_and_decoder_model_match_c() {
         };
         let mut wb = WriteBitBuffer::new();
         write_decoder_model_info(&mut wb, &d);
-        assert_eq!(wb.bytes(), &c::ref_write_decoder_model_info(d.encoder_decoder_buffer_delay_length, d.num_units_in_decoding_tick, d.buffer_removal_time_length, d.frame_presentation_time_length)[..], "decoder_model {d:?}");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_decoder_model_info(
+                d.encoder_decoder_buffer_delay_length,
+                d.num_units_in_decoding_tick,
+                d.buffer_removal_time_length,
+                d.frame_presentation_time_length
+            )[..],
+            "decoder_model {d:?}"
+        );
 
         // op parameters: delay_len in [1, 32]; delays fit that width
         let delay_len = rng.range(1, 33) as u32;
-        let mask: u32 = if delay_len >= 32 { u32::MAX } else { (1u32 << delay_len) - 1 };
+        let mask: u32 = if delay_len >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << delay_len) - 1
+        };
         let dec_delay = rng.next() as u32 & mask;
         let enc_delay = rng.next() as u32 & mask;
         let low_delay = rng.next().is_multiple_of(2);
         let mut wb = WriteBitBuffer::new();
         write_dec_model_op_parameters(&mut wb, dec_delay, enc_delay, low_delay, delay_len);
-        assert_eq!(wb.bytes(), &c::ref_write_dec_model_op(dec_delay, enc_delay, low_delay, delay_len)[..], "op_params len={delay_len}");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_dec_model_op(dec_delay, enc_delay, low_delay, delay_len)[..],
+            "op_params len={delay_len}"
+        );
     }
 }
 
@@ -709,7 +950,11 @@ fn write_sequence_header_obu_matches_real_c() {
         let mut op_enc_delay = [0u32; 32];
         let mut op_low_delay = [false; 32];
         let mut op_init_delay = [0i32; 32];
-        let delay_mask: u32 = if ed_delay_len >= 32 { u32::MAX } else { (1u32 << ed_delay_len) - 1 };
+        let delay_mask: u32 = if ed_delay_len >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << ed_delay_len) - 1
+        };
         for i in 0..=(op_cnt_m1 as usize) {
             operating_point_idc[i] = rng.range(0, 4096);
             seq_level_idx[i] = valid_levels[rng.range(0, 5) as usize];
@@ -757,7 +1002,11 @@ fn write_sequence_header_obu_matches_real_c() {
         };
 
         // color config (spec-valid subsampling per profile; unspecified CICP)
-        let bit_depth = if profile == 2 { [8, 10, 12][rng.range(0, 3) as usize] } else { [8, 10][rng.range(0, 2) as usize] };
+        let bit_depth = if profile == 2 {
+            [8, 10, 12][rng.range(0, 3) as usize]
+        } else {
+            [8, 10][rng.range(0, 2) as usize]
+        };
         let monochrome = profile != 1 && rng.next().is_multiple_of(3);
         let (ssx, ssy) = if profile == 0 {
             (1, 1)
@@ -776,9 +1025,9 @@ fn write_sequence_header_obu_matches_real_c() {
             bit_depth,
             profile,
             monochrome,
-            color_primaries: 2,          // unspecified (CICP paths covered elsewhere)
+            color_primaries: 2, // unspecified (CICP paths covered elsewhere)
             transfer_characteristics: 2, // unspecified
-            matrix_coefficients: 2,      // unspecified
+            matrix_coefficients: 2, // unspecified
             color_range: rng.next().is_multiple_of(2),
             subsampling_x: ssx,
             subsampling_y: ssy,
@@ -816,40 +1065,83 @@ fn write_sequence_header_obu_matches_real_c() {
 
         // pack for the direct C oracle
         let top: [i64; 16] = [
-            profile as i64, still_picture as i64, reduced as i64, timing_present as i64,
-            dm_present as i64, disp_present as i64, op_cnt_m1 as i64, s.film_grain_params_present as i64,
-            timing_info.num_units_in_display_tick as i64, timing_info.time_scale as i64,
-            timing_info.equal_picture_interval as i64, timing_info.num_ticks_per_picture as i64,
+            profile as i64,
+            still_picture as i64,
+            reduced as i64,
+            timing_present as i64,
+            dm_present as i64,
+            disp_present as i64,
+            op_cnt_m1 as i64,
+            s.film_grain_params_present as i64,
+            timing_info.num_units_in_display_tick as i64,
+            timing_info.time_scale as i64,
+            timing_info.equal_picture_interval as i64,
+            timing_info.num_ticks_per_picture as i64,
             decoder_model_info.encoder_decoder_buffer_delay_length as i64,
             decoder_model_info.num_units_in_decoding_tick as i64,
             decoder_model_info.buffer_removal_time_length as i64,
             decoder_model_info.frame_presentation_time_length as i64,
         ];
         let sh: [i64; 24] = [
-            nbw as i64, nbh as i64, seq_header.max_frame_width as i64, seq_header.max_frame_height as i64,
-            reduced as i64, seq_header.frame_id_numbers_present_flag as i64, delta_frame_id_length as i64,
-            frame_id_length as i64, seq_header.sb_size_128 as i64, seq_header.enable_filter_intra as i64,
-            seq_header.enable_intra_edge_filter as i64, seq_header.enable_interintra_compound as i64,
-            seq_header.enable_masked_compound as i64, seq_header.enable_warped_motion as i64,
-            seq_header.enable_dual_filter as i64, seq_header.enable_order_hint as i64,
-            seq_header.enable_dist_wtd_comp as i64, seq_header.enable_ref_frame_mvs as i64,
-            force_sct as i64, force_int_mv as i64, seq_header.order_hint_bits_minus_1 as i64,
-            seq_header.enable_superres as i64, seq_header.enable_cdef as i64, seq_header.enable_restoration as i64,
+            nbw as i64,
+            nbh as i64,
+            seq_header.max_frame_width as i64,
+            seq_header.max_frame_height as i64,
+            reduced as i64,
+            seq_header.frame_id_numbers_present_flag as i64,
+            delta_frame_id_length as i64,
+            frame_id_length as i64,
+            seq_header.sb_size_128 as i64,
+            seq_header.enable_filter_intra as i64,
+            seq_header.enable_intra_edge_filter as i64,
+            seq_header.enable_interintra_compound as i64,
+            seq_header.enable_masked_compound as i64,
+            seq_header.enable_warped_motion as i64,
+            seq_header.enable_dual_filter as i64,
+            seq_header.enable_order_hint as i64,
+            seq_header.enable_dist_wtd_comp as i64,
+            seq_header.enable_ref_frame_mvs as i64,
+            force_sct as i64,
+            force_int_mv as i64,
+            seq_header.order_hint_bits_minus_1 as i64,
+            seq_header.enable_superres as i64,
+            seq_header.enable_cdef as i64,
+            seq_header.enable_restoration as i64,
         ];
         let cc: [i64; 11] = [
-            bit_depth as i64, profile as i64, monochrome as i64, 2, 2, 2,
-            color_config.color_range as i64, ssx as i64, ssy as i64,
-            color_config.chroma_sample_position as i64, color_config.separate_uv_delta_q as i64,
+            bit_depth as i64,
+            profile as i64,
+            monochrome as i64,
+            2,
+            2,
+            2,
+            color_config.color_range as i64,
+            ssx as i64,
+            ssy as i64,
+            color_config.chroma_sample_position as i64,
+            color_config.separate_uv_delta_q as i64,
         ];
         let to_i64 = |a: &[i32; 32]| -> [i64; 32] { std::array::from_fn(|i| a[i] as i64) };
         let bool_i64 = |a: &[bool; 32]| -> [i64; 32] { std::array::from_fn(|i| a[i] as i64) };
         let u32_i64 = |a: &[u32; 32]| -> [i64; 32] { std::array::from_fn(|i| a[i] as i64) };
         let want = c::ref_write_sequence_header_obu(
-            &top, &sh, &cc, &to_i64(&operating_point_idc), &to_i64(&seq_level_idx), &to_i64(&tier),
-            &bool_i64(&op_dmpp), &bool_i64(&op_dispp), &u32_i64(&op_dec_delay), &u32_i64(&op_enc_delay),
-            &bool_i64(&op_low_delay), &to_i64(&op_init_delay),
+            &top,
+            &sh,
+            &cc,
+            &to_i64(&operating_point_idc),
+            &to_i64(&seq_level_idx),
+            &to_i64(&tier),
+            &bool_i64(&op_dmpp),
+            &bool_i64(&op_dispp),
+            &u32_i64(&op_dec_delay),
+            &u32_i64(&op_enc_delay),
+            &bool_i64(&op_low_delay),
+            &to_i64(&op_init_delay),
         );
-        assert_eq!(got, want, "write_sequence_header_obu profile={profile} reduced={reduced} op_cnt={op_cnt_m1}");
+        assert_eq!(
+            got, want,
+            "write_sequence_header_obu profile={profile} reduced={reduced} op_cnt={op_cnt_m1}"
+        );
     }
 }
 
@@ -857,7 +1149,13 @@ fn write_sequence_header_obu_matches_real_c() {
 fn write_frame_header_prefix_matches_c() {
     use aom_entropy::header::{write_frame_header_prefix, FrameHeaderPrefix};
     let mut rng = Rng(0xf4ed_c0de_a11a_0009);
-    let mask = |bits: u32| -> u32 { if bits >= 32 { u32::MAX } else { (1u32 << bits) - 1 } };
+    let mask = |bits: u32| -> u32 {
+        if bits >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << bits) - 1
+        }
+    };
     for _ in 0..300_000 {
         let reduced = rng.next().is_multiple_of(5);
         // reduced still picture => KEY, shown, no decoder-model, no show-existing.
@@ -866,7 +1164,11 @@ fn write_frame_header_prefix_matches_c() {
         let show_frame = reduced || rng.next().is_multiple_of(3);
         let dm_present = !reduced && rng.next().is_multiple_of(3);
         // S_FRAME requires error_resilient (asserted); keep spec-valid.
-        let error_resilient = if frame_type == 3 { true } else { !reduced && rng.next().is_multiple_of(2) };
+        let error_resilient = if frame_type == 3 {
+            true
+        } else {
+            !reduced && rng.next().is_multiple_of(2)
+        };
 
         let frame_id_present = rng.next().is_multiple_of(2);
         let frame_id_length = rng.range(2, 17) as u32;
@@ -881,8 +1183,16 @@ fn write_frame_header_prefix_matches_c() {
         // superres <= max (larger triggers internal_error). Sometimes equal.
         let max_w = rng.range(16, 4097);
         let max_h = rng.range(16, 4097);
-        let up_w = if rng.next().is_multiple_of(2) { max_w } else { rng.range(1, max_w + 1) };
-        let up_h = if rng.next().is_multiple_of(2) { max_h } else { rng.range(1, max_h + 1) };
+        let up_w = if rng.next().is_multiple_of(2) {
+            max_w
+        } else {
+            rng.range(1, max_w + 1)
+        };
+        let up_h = if rng.next().is_multiple_of(2) {
+            max_h
+        } else {
+            rng.range(1, max_h + 1)
+        };
 
         let mut op_dmpp = [false; 32];
         let mut op_idc = [0i32; 32];
@@ -943,22 +1253,50 @@ fn write_frame_header_prefix_matches_c() {
         let got = wb.bytes().to_vec();
 
         let t: [i64; 34] = [
-            reduced as i64, show_existing as i64, p.existing_fb_idx_to_show as i64, dm_present as i64,
-            p.equal_picture_interval as i64, p.frame_presentation_time as i64, fpt_len as i64,
-            frame_id_present as i64, frame_id_length as i64, p.display_frame_id as i64, frame_type as i64,
-            show_frame as i64, p.showable_frame as i64, error_resilient as i64, p.disable_cdf_update as i64,
-            force_sct as i64, p.allow_screen_content_tools as i64, force_int_mv as i64,
-            p.cur_frame_force_integer_mv as i64, up_w as i64, up_h as i64, max_w as i64, max_h as i64,
-            p.current_frame_id as i64, p.enable_order_hint as i64, p.order_hint as i64, oh_bits_m1 as i64,
-            p.primary_ref_frame as i64, p.buffer_removal_time_present as i64, op_cnt_m1 as i64,
-            p.temporal_layer_id as i64, p.spatial_layer_id as i64, brt_len as i64, p.refresh_frame_flags as i64,
+            reduced as i64,
+            show_existing as i64,
+            p.existing_fb_idx_to_show as i64,
+            dm_present as i64,
+            p.equal_picture_interval as i64,
+            p.frame_presentation_time as i64,
+            fpt_len as i64,
+            frame_id_present as i64,
+            frame_id_length as i64,
+            p.display_frame_id as i64,
+            frame_type as i64,
+            show_frame as i64,
+            p.showable_frame as i64,
+            error_resilient as i64,
+            p.disable_cdf_update as i64,
+            force_sct as i64,
+            p.allow_screen_content_tools as i64,
+            force_int_mv as i64,
+            p.cur_frame_force_integer_mv as i64,
+            up_w as i64,
+            up_h as i64,
+            max_w as i64,
+            max_h as i64,
+            p.current_frame_id as i64,
+            p.enable_order_hint as i64,
+            p.order_hint as i64,
+            oh_bits_m1 as i64,
+            p.primary_ref_frame as i64,
+            p.buffer_removal_time_present as i64,
+            op_cnt_m1 as i64,
+            p.temporal_layer_id as i64,
+            p.spatial_layer_id as i64,
+            brt_len as i64,
+            p.refresh_frame_flags as i64,
         ];
         let op_dmpp_i: [i64; 32] = std::array::from_fn(|i| op_dmpp[i] as i64);
         let op_idc_i: [i64; 32] = std::array::from_fn(|i| op_idc[i] as i64);
         let brt_i: [i64; 32] = std::array::from_fn(|i| brt[i] as i64);
         let ref_oh_i: [i64; 8] = std::array::from_fn(|i| ref_oh[i] as i64);
         let want = c::ref_write_frame_header_prefix(&t, &op_dmpp_i, &op_idc_i, &brt_i, &ref_oh_i);
-        assert_eq!(got, want, "frame_header_prefix ft={frame_type} reduced={reduced} show_ex={show_existing}");
+        assert_eq!(
+            got, want,
+            "frame_header_prefix ft={frame_type} reduced={reduced} show_ex={show_existing}"
+        );
     }
 }
 
@@ -974,7 +1312,11 @@ fn write_frame_size_with_refs_matches_c() {
         let rw = rng.range(1, 65536);
         let rh = rng.range(1, 65536);
         let enable_superres = rng.next().is_multiple_of(2);
-        let denom = if rng.next().is_multiple_of(2) { 8 } else { rng.range(9, 17) };
+        let denom = if rng.next().is_multiple_of(2) {
+            8
+        } else {
+            rng.range(9, 17)
+        };
         let scaling_active = rng.next().is_multiple_of(2);
 
         let mut valid = [false; 7];
@@ -1028,7 +1370,26 @@ fn write_frame_size_with_refs_matches_c() {
         write_frame_size_with_refs(&mut wb, &w);
         let got = wb.bytes().to_vec();
         let vi: [i32; 7] = std::array::from_fn(|i| valid[i] as i32);
-        let want = c::ref_write_frame_size_with_refs(up_w, up_h, rw, rh, &vi, &ycw, &ych, &rrw, &rrh, enable_superres, denom, num_bits_w, num_bits_h, up_w, up_h, scaling_active, rw, rh);
+        let want = c::ref_write_frame_size_with_refs(
+            up_w,
+            up_h,
+            rw,
+            rh,
+            &vi,
+            &ycw,
+            &ych,
+            &rrw,
+            &rrh,
+            enable_superres,
+            denom,
+            num_bits_w,
+            num_bits_h,
+            up_w,
+            up_h,
+            scaling_active,
+            rw,
+            rh,
+        );
         assert_eq!(got, want, "frame_size_with_refs");
     }
 }
@@ -1072,7 +1433,20 @@ fn write_inter_ref_signaling_matches_c() {
         let mut wb = WriteBitBuffer::new();
         write_inter_ref_signaling(&mut wb, &s);
         let got = wb.bytes().to_vec();
-        let want = c::ref_write_inter_ref_signaling(s.enable_order_hint, s.frame_refs_short_signaling, &ref_map_idx, s.set_ref_frame_config, &rtc_reference, &rtc_ref_idx, s.number_spatial_layers, s.frame_id_numbers_present_flag, frame_id_length, s.current_frame_id, &ref_frame_id, delta_frame_id_length);
+        let want = c::ref_write_inter_ref_signaling(
+            s.enable_order_hint,
+            s.frame_refs_short_signaling,
+            &ref_map_idx,
+            s.set_ref_frame_config,
+            &rtc_reference,
+            &rtc_ref_idx,
+            s.number_spatial_layers,
+            s.frame_id_numbers_present_flag,
+            frame_id_length,
+            s.current_frame_id,
+            &ref_frame_id,
+            delta_frame_id_length,
+        );
         assert_eq!(got, want, "inter_ref_signaling");
     }
 }
@@ -1087,7 +1461,11 @@ fn frame_header_connective_flags_match_c() {
         let rfc_disabled = rng.next().is_multiple_of(2);
         let mut wb = WriteBitBuffer::new();
         write_refresh_frame_context(&mut wb, reduced, disable_cdf, rfc_disabled);
-        assert_eq!(wb.bytes(), &c::ref_write_refresh_frame_context(reduced, disable_cdf, rfc_disabled)[..], "refresh_frame_context");
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_refresh_frame_context(reduced, disable_cdf, rfc_disabled)[..],
+            "refresh_frame_context"
+        );
 
         let intra_only = rng.next().is_multiple_of(2);
         let ref_mode_select = rng.next().is_multiple_of(2);
@@ -1097,8 +1475,29 @@ fn frame_header_connective_flags_match_c() {
         let allow_warp = rng.next().is_multiple_of(2);
         let reduced_tx_set = rng.next().is_multiple_of(2);
         let mut wb = WriteBitBuffer::new();
-        write_frame_header_trailing_flags(&mut wb, intra_only, ref_mode_select, skip_allowed, skip_flag, might_warp, allow_warp, reduced_tx_set);
-        assert_eq!(wb.bytes(), &c::ref_write_frame_header_trailing_flags(intra_only, ref_mode_select, skip_allowed, skip_flag, might_warp, allow_warp, reduced_tx_set)[..], "trailing_flags");
+        write_frame_header_trailing_flags(
+            &mut wb,
+            intra_only,
+            ref_mode_select,
+            skip_allowed,
+            skip_flag,
+            might_warp,
+            allow_warp,
+            reduced_tx_set,
+        );
+        assert_eq!(
+            wb.bytes(),
+            &c::ref_write_frame_header_trailing_flags(
+                intra_only,
+                ref_mode_select,
+                skip_allowed,
+                skip_flag,
+                might_warp,
+                allow_warp,
+                reduced_tx_set
+            )[..],
+            "trailing_flags"
+        );
     }
 }
 
@@ -1175,7 +1574,10 @@ fn minimal_frame_header_obu() -> aom_entropy::header::FrameHeaderObu {
         render_width: 64,
         render_height: 64,
     };
-    let zero_wmp = WarpedMotionParams { wmtype: 0, wmmat: [0; 6] };
+    let zero_wmp = WarpedMotionParams {
+        wmtype: 0,
+        wmmat: [0; 6],
+    };
     let tile_info = TileInfoHeader {
         mi_cols: 16,
         mi_rows: 16,
@@ -1353,7 +1755,11 @@ fn write_frame_header_obu_key_minimal_spec_anchor() {
     let p = minimal_frame_header_obu();
     let mut wb = WriteBitBuffer::new();
     write_frame_header_obu(&mut wb, &p);
-    assert_eq!(wb.bytes(), &[0x10, 0x90, 0x00], "minimal KEY frame-header OBU byte layout");
+    assert_eq!(
+        wb.bytes(),
+        &[0x10, 0x90, 0x00],
+        "minimal KEY frame-header OBU byte layout"
+    );
 }
 
 #[test]
@@ -1397,7 +1803,10 @@ fn write_tile_group_header_matches_c() {
                     write_tile_group_header(&mut wb, start, end, tiles_log2, present);
                     let got = wb.bytes().to_vec();
                     let want = c::ref_write_tile_group_header(start, end, tiles_log2, present);
-                    assert_eq!(got, want, "tiles_log2={tiles_log2} present={present} start={start} end={end}");
+                    assert_eq!(
+                        got, want,
+                        "tiles_log2={tiles_log2} present={present} start={start} end={end}"
+                    );
                 }
             }
         }

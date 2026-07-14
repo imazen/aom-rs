@@ -29,7 +29,11 @@ fn read_bit_buffer_inverts_write() {
         let lv = (rng.next() % (1u64 << lb)) as i32;
         // unsigned literal (1..=32 bits)
         let ub = 1 + (rng.next() % 32) as u32;
-        let uv = if ub == 32 { rng.next() as u32 } else { (rng.next() % (1u64 << ub)) as u32 };
+        let uv = if ub == 32 {
+            rng.next() as u32
+        } else {
+            (rng.next() % (1u64 << ub)) as u32
+        };
         // inv-signed (bits+1 written; value in [-(2^bits), 2^bits))
         let ib = 1 + (rng.next() % 16) as u32;
         let iv = (rng.next() % (1u64 << (ib + 1))) as i32 - (1i32 << ib);
@@ -122,12 +126,20 @@ fn read_header_components_invert_write() {
         }
         // delta_q_params
         {
-            let base = if rng.next() & 1 == 1 { 1 + (rng.next() % 255) as i32 } else { 0 };
+            let base = if rng.next() & 1 == 1 {
+                1 + (rng.next() % 255) as i32
+            } else {
+                0
+            };
             let intrabc = rng.next() & 1 == 1;
             let dq_present = base > 0 && rng.next() & 1 == 1;
             let dq_res = if dq_present { 1 << (rng.next() % 4) } else { 1 };
             let dlf_present = dq_present && !intrabc && rng.next() & 1 == 1;
-            let dlf_res = if dlf_present { 1 << (rng.next() % 4) } else { 1 };
+            let dlf_res = if dlf_present {
+                1 << (rng.next() % 4)
+            } else {
+                1
+            };
             let dlf_multi = dlf_present && rng.next() & 1 == 1;
             let d = DeltaQParams {
                 base_qindex: base,
@@ -144,7 +156,13 @@ fn read_header_components_invert_write() {
             let mut rb = ReadBitBuffer::new(&b);
             let g = read_delta_q_params(&mut rb, base, intrabc);
             assert_eq!(
-                (g.delta_q_present, g.delta_q_res, g.delta_lf_present, g.delta_lf_res, g.delta_lf_multi),
+                (
+                    g.delta_q_present,
+                    g.delta_q_res,
+                    g.delta_lf_present,
+                    g.delta_lf_res,
+                    g.delta_lf_multi
+                ),
                 (dq_present, dq_res, dlf_present, dlf_res, dlf_multi),
                 "delta_q base={base} intrabc={intrabc}"
             );
@@ -173,7 +191,11 @@ fn read_header_components_invert_write() {
             let b = wb.bytes().to_vec();
             let mut rb = ReadBitBuffer::new(&b);
             let got = read_superres_scale(&mut rb, enable);
-            assert_eq!(got, if enable { denom } else { 8 }, "superres enable={enable}");
+            assert_eq!(
+                got,
+                if enable { denom } else { 8 },
+                "superres enable={enable}"
+            );
         }
         // render_size
         {
@@ -211,7 +233,11 @@ fn read_quant_cdef_headers_invert_write() {
             let (udc, uac, vdc, vac) = if num_planes > 1 {
                 let udc = dgen(&mut rng);
                 let uac = dgen(&mut rng);
-                let (vdc, vac) = if separate { (dgen(&mut rng), dgen(&mut rng)) } else { (udc, uac) };
+                let (vdc, vac) = if separate {
+                    (dgen(&mut rng), dgen(&mut rng))
+                } else {
+                    (udc, uac)
+                };
                 (udc, uac, vdc, vac)
             } else {
                 (0, 0, 0, 0)
@@ -220,7 +246,11 @@ fn read_quant_cdef_headers_invert_write() {
             let (qy, qu, qv) = if using_qm {
                 let qy = (rng.next() % 16) as i32;
                 let qu = (rng.next() % 16) as i32;
-                let qv = if separate { (rng.next() % 16) as i32 } else { qu };
+                let qv = if separate {
+                    (rng.next() % 16) as i32
+                } else {
+                    qu
+                };
                 (qy, qu, qv)
             } else {
                 (0, 0, 0)
@@ -243,12 +273,24 @@ fn read_quant_cdef_headers_invert_write() {
             let mut rb = ReadBitBuffer::new(&b);
             let g = read_quantization(&mut rb, num_planes, separate);
             assert_eq!(
-                (g.base_qindex, g.y_dc_delta_q, g.u_dc_delta_q, g.u_ac_delta_q, g.v_dc_delta_q, g.v_ac_delta_q),
+                (
+                    g.base_qindex,
+                    g.y_dc_delta_q,
+                    g.u_dc_delta_q,
+                    g.u_ac_delta_q,
+                    g.v_dc_delta_q,
+                    g.v_ac_delta_q
+                ),
                 (base, ydc, udc, uac, vdc, vac),
                 "quant deltas np={num_planes} sep={separate}"
             );
             assert_eq!(
-                (g.using_qmatrix, g.qmatrix_level_y, g.qmatrix_level_u, g.qmatrix_level_v),
+                (
+                    g.using_qmatrix,
+                    g.qmatrix_level_y,
+                    g.qmatrix_level_u,
+                    g.qmatrix_level_v
+                ),
                 (using_qm, qy, qu, qv),
                 "quant qm np={num_planes} sep={separate}"
             );
@@ -263,7 +305,11 @@ fn read_quant_cdef_headers_invert_write() {
             let mut uv = [0i32; 8];
             for i in 0..nb {
                 s[i] = (rng.next() % 64) as i32;
-                uv[i] = if num_planes > 1 { (rng.next() % 64) as i32 } else { 0 };
+                uv[i] = if num_planes > 1 {
+                    (rng.next() % 64) as i32
+                } else {
+                    0
+                };
             }
             let c = CdefHeader {
                 enable_cdef: true,
@@ -302,15 +348,27 @@ fn read_loopfilter_inverts_write() {
         let fl0 = (rng.next() % 64) as i32;
         let fl1 = (rng.next() % 64) as i32;
         let uv_coded = num_planes > 1 && (fl0 != 0 || fl1 != 0);
-        let flu = if uv_coded { (rng.next() % 64) as i32 } else { 0 };
-        let flv = if uv_coded { (rng.next() % 64) as i32 } else { 0 };
+        let flu = if uv_coded {
+            (rng.next() % 64) as i32
+        } else {
+            0
+        };
+        let flv = if uv_coded {
+            (rng.next() % 64) as i32
+        } else {
+            0
+        };
         let sharp = (rng.next() % 8) as i32;
         let enabled = rng.next() & 1 == 1;
 
         let mut last_ref = [0i8; 8];
         let mut last_mode = [0i8; 2];
-        for r in last_ref.iter_mut() { *r = d8(&mut rng); }
-        for m in last_mode.iter_mut() { *m = d8(&mut rng); }
+        for r in last_ref.iter_mut() {
+            *r = d8(&mut rng);
+        }
+        for m in last_mode.iter_mut() {
+            *m = d8(&mut rng);
+        }
 
         // Scenario A: some deltas change (meaningful=update=true). Scenario B: none (update=false).
         let scenario_a = enabled && rng.next() & 1 == 1;
@@ -322,7 +380,11 @@ fn read_loopfilter_inverts_write() {
             // guarantee >=1 change vs last[0], staying in the su(6)=[-63,63] range.
             let mut nv = d8(&mut rng);
             if nv == last_ref[0] {
-                nv = if last_ref[0] < 63 { last_ref[0] + 1 } else { last_ref[0] - 1 };
+                nv = if last_ref[0] < 63 {
+                    last_ref[0] + 1
+                } else {
+                    last_ref[0] - 1
+                };
             }
             ref_d[0] = nv;
             for r in ref_d[1..].iter_mut() {
@@ -358,10 +420,17 @@ fn read_loopfilter_inverts_write() {
         let mut rb = ReadBitBuffer::new(&b);
         let g = read_loopfilter(&mut rb, false, num_planes, last_ref, last_mode);
         assert_eq!(g.filter_level, [fl0, fl1], "filter levels");
-        assert_eq!((g.filter_level_u, g.filter_level_v), (flu, flv), "uv levels");
+        assert_eq!(
+            (g.filter_level_u, g.filter_level_v),
+            (flu, flv),
+            "uv levels"
+        );
         assert_eq!(g.sharpness_level, sharp, "sharpness");
         assert_eq!(g.mode_ref_delta_enabled, enabled, "enabled");
-        assert_eq!(g.mode_ref_delta_update, update, "update np={num_planes} a={scenario_a}");
+        assert_eq!(
+            g.mode_ref_delta_update, update,
+            "update np={num_planes} a={scenario_a}"
+        );
         assert_eq!(g.ref_deltas, ref_d, "ref_deltas");
         assert_eq!(g.mode_deltas, mode_d, "mode_deltas");
     }
@@ -442,10 +511,17 @@ fn read_frame_size_inverts_write() {
         let w = 1 + (rng.next() % (1u64 << nbw)) as i32;
         let h = 1 + (rng.next() % (1u64 << nbh)) as i32;
         let en_sr = rng.next() & 1 == 1;
-        let denom = if en_sr && rng.next() & 1 == 1 { 9 + (rng.next() % 8) as i32 } else { 8 };
+        let denom = if en_sr && rng.next() & 1 == 1 {
+            9 + (rng.next() % 8) as i32
+        } else {
+            8
+        };
         let sc_active = rng.next() & 1 == 1;
         let (rw, rh) = if sc_active {
-            (1 + (rng.next() % 65536) as i32, 1 + (rng.next() % 65536) as i32)
+            (
+                1 + (rng.next() % 65536) as i32,
+                1 + (rng.next() % 65536) as i32,
+            )
         } else {
             (0, 0)
         };
@@ -472,7 +548,11 @@ fn read_frame_size_inverts_write() {
             (w, h),
             "frame size over={over}"
         );
-        assert_eq!(g.scale_denominator, if en_sr { denom } else { 8 }, "superres");
+        assert_eq!(
+            g.scale_denominator,
+            if en_sr { denom } else { 8 },
+            "superres"
+        );
         assert_eq!(g.scaling_active, sc_active, "render active");
         if sc_active {
             assert_eq!((g.render_width, g.render_height), (rw, rh), "render size");
@@ -556,14 +636,33 @@ fn read_color_config_inverts_write() {
         let mut rb = ReadBitBuffer::new(&b);
         let g = read_color_config(&mut rb, profile);
         let want = (
-            bit_depth, monochrome, cp, tc, mc, color_range, ssx, ssy, chroma_pos, sep_uv,
+            bit_depth,
+            monochrome,
+            cp,
+            tc,
+            mc,
+            color_range,
+            ssx,
+            ssy,
+            chroma_pos,
+            sep_uv,
         );
         let got = (
-            g.bit_depth, g.monochrome, g.color_primaries, g.transfer_characteristics,
-            g.matrix_coefficients, g.color_range, g.subsampling_x, g.subsampling_y,
-            g.chroma_sample_position, g.separate_uv_delta_q,
+            g.bit_depth,
+            g.monochrome,
+            g.color_primaries,
+            g.transfer_characteristics,
+            g.matrix_coefficients,
+            g.color_range,
+            g.subsampling_x,
+            g.subsampling_y,
+            g.chroma_sample_position,
+            g.separate_uv_delta_q,
         );
-        assert_eq!(got, want, "color_config profile={profile} bd={bit_depth} mono={monochrome} srgb={want_srgb}");
+        assert_eq!(
+            got, want,
+            "color_config profile={profile} bd={bit_depth} mono={monochrome} srgb={want_srgb}"
+        );
     }
 }
 
@@ -586,7 +685,14 @@ fn read_trailing_and_restoration_invert_write() {
             let reduced = rng.next() & 1 == 1;
             let mut wb = WriteBitBuffer::new();
             write_frame_header_trailing_flags(
-                &mut wb, intra_only, ref_sel, skip_allowed, skip_flag, might_warp, warp, reduced,
+                &mut wb,
+                intra_only,
+                ref_sel,
+                skip_allowed,
+                skip_flag,
+                might_warp,
+                warp,
+                reduced,
             );
             let b = wb.bytes().to_vec();
             let mut rb = ReadBitBuffer::new(&b);
@@ -609,7 +715,10 @@ fn read_trailing_and_restoration_invert_write() {
                 }
             }
             let all_none = ft[..num_planes].iter().all(|&t| t == 0);
-            let chroma_none = ft[..num_planes].iter().enumerate().all(|(p, &t)| t == 0 || p == 0);
+            let chroma_none = ft[..num_planes]
+                .iter()
+                .enumerate()
+                .all(|(p, &t)| t == 0 || p == 0);
             let mut rus = [256i32; 3];
             if enable && !intrabc && !all_none {
                 let rus0 = if sb128 {
@@ -639,7 +748,10 @@ fn read_trailing_and_restoration_invert_write() {
             let b = wb.bytes().to_vec();
             let mut rb = ReadBitBuffer::new(&b);
             let g = read_restoration_mode(&mut rb, enable, intrabc, sb128, ssx, ssy, num_planes);
-            assert_eq!(g.frame_restoration_type, ft, "restoration types np={num_planes}");
+            assert_eq!(
+                g.frame_restoration_type, ft,
+                "restoration types np={num_planes}"
+            );
             assert_eq!(g.restoration_unit_size, rus, "restoration unit size");
         }
     }
@@ -671,7 +783,10 @@ fn read_global_motion_inverts_write() {
     use aom_entropy::header::{
         read_global_motion_params, write_global_motion_params, WarpedMotionParams,
     };
-    let ident = WarpedMotionParams { wmtype: 0, wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16] };
+    let ident = WarpedMotionParams {
+        wmtype: 0,
+        wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16],
+    };
     let mut rng = Rng(0x1e_92c0_c0de_0190);
     for _ in 0..300_000 {
         let allow_hp = rng.next() & 1 == 1;
@@ -696,11 +811,16 @@ fn read_global_motion_inverts_write() {
                 (12u32, 10u32)
             };
             let bound = 1i64 << tb;
-            let tc = |rng: &mut Rng| -> i32 { (rng.next() % (2 * bound as u64 + 1)) as i32 - bound as i32 };
+            let tc = |rng: &mut Rng| -> i32 {
+                (rng.next() % (2 * bound as u64 + 1)) as i32 - bound as i32
+            };
             wm[0] = tc(&mut rng) << tpd;
             wm[1] = tc(&mut rng) << tpd;
         }
-        let params = WarpedMotionParams { wmtype: ty, wmmat: wm };
+        let params = WarpedMotionParams {
+            wmtype: ty,
+            wmmat: wm,
+        };
         let mut wb = WriteBitBuffer::new();
         write_global_motion_params(&mut wb, &params, &ident, allow_hp);
         let bytes = wb.bytes().to_vec();
@@ -726,18 +846,28 @@ fn read_timing_and_decoder_model_invert_write() {
                 num_units_in_display_tick: rng.next() as u32,
                 time_scale: rng.next() as u32,
                 equal_picture_interval: equal,
-                num_ticks_per_picture: if equal { 1 + (rng.next() % (1 << 20)) as u32 } else { 1 },
+                num_ticks_per_picture: if equal {
+                    1 + (rng.next() % (1 << 20)) as u32
+                } else {
+                    1
+                },
             };
             let mut wb = WriteBitBuffer::new();
             write_timing_info_header(&mut wb, &t);
             let b = wb.bytes().to_vec();
             let mut rb = ReadBitBuffer::new(&b);
             let g = read_timing_info_header(&mut rb);
-            assert_eq!(g.num_units_in_display_tick, t.num_units_in_display_tick, "timing units");
+            assert_eq!(
+                g.num_units_in_display_tick, t.num_units_in_display_tick,
+                "timing units"
+            );
             assert_eq!(g.time_scale, t.time_scale, "timing scale");
             assert_eq!(g.equal_picture_interval, equal, "timing equal");
             if equal {
-                assert_eq!(g.num_ticks_per_picture, t.num_ticks_per_picture, "timing ticks");
+                assert_eq!(
+                    g.num_ticks_per_picture, t.num_ticks_per_picture,
+                    "timing ticks"
+                );
             }
         }
         // decoder model info
@@ -754,10 +884,18 @@ fn read_timing_and_decoder_model_invert_write() {
             let mut rb = ReadBitBuffer::new(&b);
             let g = read_decoder_model_info(&mut rb);
             assert_eq!(
-                (g.encoder_decoder_buffer_delay_length, g.num_units_in_decoding_tick,
-                 g.buffer_removal_time_length, g.frame_presentation_time_length),
-                (d.encoder_decoder_buffer_delay_length, d.num_units_in_decoding_tick,
-                 d.buffer_removal_time_length, d.frame_presentation_time_length),
+                (
+                    g.encoder_decoder_buffer_delay_length,
+                    g.num_units_in_decoding_tick,
+                    g.buffer_removal_time_length,
+                    g.frame_presentation_time_length
+                ),
+                (
+                    d.encoder_decoder_buffer_delay_length,
+                    d.num_units_in_decoding_tick,
+                    d.buffer_removal_time_length,
+                    d.frame_presentation_time_length
+                ),
                 "decoder model"
             );
         }
@@ -785,20 +923,36 @@ fn read_tile_info_inverts_write() {
             let min_r = (rng.next() % 3) as i32;
             let max_r = min_r + (rng.next() % 3) as i32;
             let log2_r = min_r + (rng.next() % (max_r - min_r + 1) as u64) as i32;
-            let (mi_cols, mi_rows) = (1 + (rng.next() % 4096) as i32, 1 + (rng.next() % 4096) as i32);
+            let (mi_cols, mi_rows) = (
+                1 + (rng.next() % 4096) as i32,
+                1 + (rng.next() % 4096) as i32,
+            );
             let (cols, rows) = (1usize << log2_c, 1usize << log2_r);
             let t = TileInfoHeader {
-                mi_cols, mi_rows, mib_size_log2: mib, uniform_spacing: true,
-                log2_cols: log2_c, min_log2_cols: min_c, max_log2_cols: max_c,
-                log2_rows: log2_r, min_log2_rows: min_r, max_log2_rows: max_r,
-                cols, rows, col_start_sb: [0; 65], row_start_sb: [0; 65],
-                max_width_sb: 64, max_height_sb: 64,
+                mi_cols,
+                mi_rows,
+                mib_size_log2: mib,
+                uniform_spacing: true,
+                log2_cols: log2_c,
+                min_log2_cols: min_c,
+                max_log2_cols: max_c,
+                log2_rows: log2_r,
+                min_log2_rows: min_r,
+                max_log2_rows: max_r,
+                cols,
+                rows,
+                col_start_sb: [0; 65],
+                row_start_sb: [0; 65],
+                max_width_sb: 64,
+                max_height_sb: 64,
             };
             let mut wb = WriteBitBuffer::new();
             write_tile_info(&mut wb, &t);
             let b = wb.bytes().to_vec();
             let mut rb = ReadBitBuffer::new(&b);
-            let (g, ctx, tsb) = read_tile_info(&mut rb, mi_cols, mi_rows, mib, min_c, max_c, min_r, max_r, 64, 64);
+            let (g, ctx, tsb) = read_tile_info(
+                &mut rb, mi_cols, mi_rows, mib, min_c, max_c, min_r, max_r, 64, 64,
+            );
             assert!(g.uniform_spacing, "uniform flag");
             assert_eq!((g.log2_cols, g.log2_rows), (log2_c, log2_r), "uniform log2");
             assert_eq!((g.cols, g.rows), (cols, rows), "uniform cols/rows");
@@ -832,22 +986,42 @@ fn read_tile_info_inverts_write() {
             col_start_sb[..cs.len()].copy_from_slice(&cs);
             row_start_sb[..rs.len()].copy_from_slice(&rs);
             let t = TileInfoHeader {
-                mi_cols, mi_rows, mib_size_log2: mib, uniform_spacing: false,
-                log2_cols: tlog2(1, cols as i32), min_log2_cols: 0, max_log2_cols: 6,
-                log2_rows: tlog2(1, rows as i32), min_log2_rows: 0, max_log2_rows: 6,
-                cols, rows, col_start_sb, row_start_sb,
-                max_width_sb: max_w, max_height_sb: max_h,
+                mi_cols,
+                mi_rows,
+                mib_size_log2: mib,
+                uniform_spacing: false,
+                log2_cols: tlog2(1, cols as i32),
+                min_log2_cols: 0,
+                max_log2_cols: 6,
+                log2_rows: tlog2(1, rows as i32),
+                min_log2_rows: 0,
+                max_log2_rows: 6,
+                cols,
+                rows,
+                col_start_sb,
+                row_start_sb,
+                max_width_sb: max_w,
+                max_height_sb: max_h,
             };
             let mut wb = WriteBitBuffer::new();
             write_tile_info(&mut wb, &t);
             let b = wb.bytes().to_vec();
             let mut rb = ReadBitBuffer::new(&b);
-            let (g, ctx, tsb) = read_tile_info(&mut rb, mi_cols, mi_rows, mib, 0, 6, 0, 6, max_w, max_h);
+            let (g, ctx, tsb) =
+                read_tile_info(&mut rb, mi_cols, mi_rows, mib, 0, 6, 0, 6, max_w, max_h);
             assert!(!g.uniform_spacing, "non-uniform flag");
-            assert_eq!((g.cols, g.rows), (cols, rows), "nonuniform cols/rows sb=({sb_cols},{sb_rows})");
+            assert_eq!(
+                (g.cols, g.rows),
+                (cols, rows),
+                "nonuniform cols/rows sb=({sb_cols},{sb_rows})"
+            );
             assert_eq!(g.col_start_sb, col_start_sb, "col_start_sb");
             assert_eq!(g.row_start_sb, row_start_sb, "row_start_sb");
-            assert_eq!((g.log2_cols, g.log2_rows), (tlog2(1, cols as i32), tlog2(1, rows as i32)), "nonuniform log2");
+            assert_eq!(
+                (g.log2_cols, g.log2_rows),
+                (tlog2(1, cols as i32), tlog2(1, rows as i32)),
+                "nonuniform log2"
+            );
             if rows * cols > 1 {
                 assert_eq!((ctx, tsb), (0, 4), "ctx/tile_size_bytes");
             }
@@ -861,19 +1035,36 @@ fn read_frame_size_with_refs_inverts_write() {
         read_frame_size_with_refs, write_frame_size_with_refs, FrameSizeHeader, FrameSizeWithRefs,
     };
     let dummy_fs = FrameSizeHeader {
-        frame_size_override: true, num_bits_width: 16, num_bits_height: 16,
-        superres_upscaled_width: 1, superres_upscaled_height: 1, enable_superres: false,
-        scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0,
+        frame_size_override: true,
+        num_bits_width: 16,
+        num_bits_height: 16,
+        superres_upscaled_width: 1,
+        superres_upscaled_height: 1,
+        enable_superres: false,
+        scale_denominator: 8,
+        scaling_active: false,
+        render_width: 0,
+        render_height: 0,
     };
     let mut rng = Rng(0x1e_f52e_c0de_01c0);
     for _ in 0..100_000 {
         let en_sr = rng.next() & 1 == 1;
-        let denom = if en_sr && rng.next() & 1 == 1 { 9 + (rng.next() % 8) as i32 } else { 8 };
+        let denom = if en_sr && rng.next() & 1 == 1 {
+            9 + (rng.next() % 8) as i32
+        } else {
+            8
+        };
         if rng.next() & 1 == 1 {
             // matched-ref path
             let fi = (rng.next() % 7) as usize;
-            let (w, h) = (1 + (rng.next() % 4096) as i32, 1 + (rng.next() % 4096) as i32);
-            let (rw, rh) = (1 + (rng.next() % 4096) as i32, 1 + (rng.next() % 4096) as i32);
+            let (w, h) = (
+                1 + (rng.next() % 4096) as i32,
+                1 + (rng.next() % 4096) as i32,
+            );
+            let (rw, rh) = (
+                1 + (rng.next() % 4096) as i32,
+                1 + (rng.next() % 4096) as i32,
+            );
             let mut rcw = [0i32; 7];
             let mut rch = [0i32; 7];
             let mut rrw = [0i32; 7];
@@ -885,11 +1076,18 @@ fn read_frame_size_with_refs_inverts_write() {
             let mut valid = [false; 7];
             valid[fi] = true;
             let fx = FrameSizeWithRefs {
-                superres_upscaled_width: w, superres_upscaled_height: h,
-                render_width: rw, render_height: rh, ref_cfg_valid: valid,
-                ref_y_crop_width: rcw, ref_y_crop_height: rch,
-                ref_render_width: rrw, ref_render_height: rrh,
-                enable_superres: en_sr, scale_denominator: denom, frame_size: dummy_fs,
+                superres_upscaled_width: w,
+                superres_upscaled_height: h,
+                render_width: rw,
+                render_height: rh,
+                ref_cfg_valid: valid,
+                ref_y_crop_width: rcw,
+                ref_y_crop_height: rch,
+                ref_render_width: rrw,
+                ref_render_height: rrh,
+                enable_superres: en_sr,
+                scale_denominator: denom,
+                frame_size: dummy_fs,
             };
             let mut wb = WriteBitBuffer::new();
             write_frame_size_with_refs(&mut wb, &fx);
@@ -899,24 +1097,44 @@ fn read_frame_size_with_refs_inverts_write() {
             assert_eq!(g, (w, h, rw, rh, denom, fi as i32), "matched ref fi={fi}");
         } else {
             // fallback path (no ref matches)
-            let (w, h) = (1 + (rng.next() % 65536) as i32, 1 + (rng.next() % 65536) as i32);
+            let (w, h) = (
+                1 + (rng.next() % 65536) as i32,
+                1 + (rng.next() % 65536) as i32,
+            );
             let scaling = rng.next() & 1 == 1;
             let (rw, rh) = if scaling {
-                (1 + (rng.next() % 65536) as i32, 1 + (rng.next() % 65536) as i32)
+                (
+                    1 + (rng.next() % 65536) as i32,
+                    1 + (rng.next() % 65536) as i32,
+                )
             } else {
                 (w, h)
             };
             let fs = FrameSizeHeader {
-                frame_size_override: true, num_bits_width: 16, num_bits_height: 16,
-                superres_upscaled_width: w, superres_upscaled_height: h, enable_superres: en_sr,
-                scale_denominator: denom, scaling_active: scaling, render_width: rw, render_height: rh,
+                frame_size_override: true,
+                num_bits_width: 16,
+                num_bits_height: 16,
+                superres_upscaled_width: w,
+                superres_upscaled_height: h,
+                enable_superres: en_sr,
+                scale_denominator: denom,
+                scaling_active: scaling,
+                render_width: rw,
+                render_height: rh,
             };
             let fx = FrameSizeWithRefs {
-                superres_upscaled_width: w, superres_upscaled_height: h,
-                render_width: rw, render_height: rh, ref_cfg_valid: [false; 7],
-                ref_y_crop_width: [0; 7], ref_y_crop_height: [0; 7],
-                ref_render_width: [0; 7], ref_render_height: [0; 7],
-                enable_superres: en_sr, scale_denominator: denom, frame_size: fs,
+                superres_upscaled_width: w,
+                superres_upscaled_height: h,
+                render_width: rw,
+                render_height: rh,
+                ref_cfg_valid: [false; 7],
+                ref_y_crop_width: [0; 7],
+                ref_y_crop_height: [0; 7],
+                ref_render_width: [0; 7],
+                ref_render_height: [0; 7],
+                enable_superres: en_sr,
+                scale_denominator: denom,
+                frame_size: fs,
             };
             let mut wb = WriteBitBuffer::new();
             write_frame_size_with_refs(&mut wb, &fx);
@@ -931,7 +1149,9 @@ fn read_frame_size_with_refs_inverts_write() {
 
 #[test]
 fn read_inter_ref_signaling_inverts_write() {
-    use aom_entropy::header::{read_inter_ref_signaling, write_inter_ref_signaling, InterRefSignaling};
+    use aom_entropy::header::{
+        read_inter_ref_signaling, write_inter_ref_signaling, InterRefSignaling,
+    };
     let mut rng = Rng(0x1e_12e5_c0de_01d0);
     for _ in 0..100_000 {
         let short = rng.next() & 1 == 1;
@@ -959,7 +1179,8 @@ fn read_inter_ref_signaling_inverts_write() {
                 let d = (rng.next() % (1u64 << delta_frame_id_length)) as i32; // [0, 2^dfidl)
                 want_delta[r] = d;
                 // set ref_frame_id[map_idx] so the encoder recomputes exactly d.
-                ref_frame_id[ref_map_idx[r] as usize] = (current_frame_id - (d + 1) + m).rem_euclid(m);
+                ref_frame_id[ref_map_idx[r] as usize] =
+                    (current_frame_id - (d + 1) + m).rem_euclid(m);
             }
         }
 
@@ -981,11 +1202,19 @@ fn read_inter_ref_signaling_inverts_write() {
         write_inter_ref_signaling(&mut wb, &s);
         let b = wb.bytes().to_vec();
         let mut rb = ReadBitBuffer::new(&b);
-        let (gshort, glst, ggld, gremap, gdelta) =
-            read_inter_ref_signaling(&mut rb, enable_order_hint, frame_id_present, delta_frame_id_length);
+        let (gshort, glst, ggld, gremap, gdelta) = read_inter_ref_signaling(
+            &mut rb,
+            enable_order_hint,
+            frame_id_present,
+            delta_frame_id_length,
+        );
         assert_eq!(gshort, short, "short flag");
         if short {
-            assert_eq!((glst, ggld), (ref_map_idx[0], ref_map_idx[3]), "short lst/gld");
+            assert_eq!(
+                (glst, ggld),
+                (ref_map_idx[0], ref_map_idx[3]),
+                "short lst/gld"
+            );
         } else {
             assert_eq!(gremap, ref_map_idx, "remapped idx");
             if frame_id_present {
@@ -1013,7 +1242,11 @@ fn read_refresh_and_film_grain_invert_write() {
             write_refresh_frame_context(&mut wb, reduced, disable, disabled);
             let b = wb.bytes().to_vec();
             let mut rb = ReadBitBuffer::new(&b);
-            assert_eq!(read_refresh_frame_context(&mut rb, reduced, disable), disabled, "refresh ctx");
+            assert_eq!(
+                read_refresh_frame_context(&mut rb, reduced, disable),
+                disabled,
+                "refresh ctx"
+            );
         }
         // film grain
         {
@@ -1022,14 +1255,36 @@ fn read_refresh_and_film_grain_invert_write() {
             let (ssx, ssy) = ((rng.next() % 2) as i32, (rng.next() % 2) as i32);
             let l8 = |rng: &mut Rng| -> i32 { (rng.next() % 256) as i32 };
             let mut fg = FilmGrainParams {
-                apply_grain: false, random_seed: 0, is_inter_frame: is_inter, update_parameters: false,
-                ref_idx: 0, num_y_points: 0, scaling_points_y: [[0; 2]; 14], monochrome: mono,
-                chroma_scaling_from_luma: false, subsampling_x: ssx, subsampling_y: ssy,
-                num_cb_points: 0, scaling_points_cb: [[0; 2]; 10], num_cr_points: 0,
-                scaling_points_cr: [[0; 2]; 10], scaling_shift: 8, ar_coeff_lag: 0, ar_coeffs_y: [0; 24],
-                ar_coeffs_cb: [0; 25], ar_coeffs_cr: [0; 25], ar_coeff_shift: 6, grain_scale_shift: 0,
-                cb_mult: 0, cb_luma_mult: 0, cb_offset: 0, cr_mult: 0, cr_luma_mult: 0, cr_offset: 0,
-                overlap_flag: false, clip_to_restricted_range: false,
+                apply_grain: false,
+                random_seed: 0,
+                is_inter_frame: is_inter,
+                update_parameters: false,
+                ref_idx: 0,
+                num_y_points: 0,
+                scaling_points_y: [[0; 2]; 14],
+                monochrome: mono,
+                chroma_scaling_from_luma: false,
+                subsampling_x: ssx,
+                subsampling_y: ssy,
+                num_cb_points: 0,
+                scaling_points_cb: [[0; 2]; 10],
+                num_cr_points: 0,
+                scaling_points_cr: [[0; 2]; 10],
+                scaling_shift: 8,
+                ar_coeff_lag: 0,
+                ar_coeffs_y: [0; 24],
+                ar_coeffs_cb: [0; 25],
+                ar_coeffs_cr: [0; 25],
+                ar_coeff_shift: 6,
+                grain_scale_shift: 0,
+                cb_mult: 0,
+                cb_luma_mult: 0,
+                cb_offset: 0,
+                cr_mult: 0,
+                cr_luma_mult: 0,
+                cr_offset: 0,
+                overlap_flag: false,
+                clip_to_restricted_range: false,
             };
             fg.apply_grain = rng.next() & 1 == 1;
             if fg.apply_grain {
@@ -1039,26 +1294,56 @@ fn read_refresh_and_film_grain_invert_write() {
                     fg.ref_idx = (rng.next() % 8) as i32;
                 } else {
                     fg.num_y_points = (rng.next() % 15) as i32;
-                    for i in 0..fg.num_y_points as usize { fg.scaling_points_y[i] = [l8(&mut rng), l8(&mut rng)]; }
-                    if !mono { fg.chroma_scaling_from_luma = rng.next() & 1 == 1; }
-                    let chroma_absent = mono || fg.chroma_scaling_from_luma || (ssx == 1 && ssy == 1 && fg.num_y_points == 0);
+                    for i in 0..fg.num_y_points as usize {
+                        fg.scaling_points_y[i] = [l8(&mut rng), l8(&mut rng)];
+                    }
+                    if !mono {
+                        fg.chroma_scaling_from_luma = rng.next() & 1 == 1;
+                    }
+                    let chroma_absent = mono
+                        || fg.chroma_scaling_from_luma
+                        || (ssx == 1 && ssy == 1 && fg.num_y_points == 0);
                     if !chroma_absent {
                         fg.num_cb_points = (rng.next() % 11) as i32;
-                        for i in 0..fg.num_cb_points as usize { fg.scaling_points_cb[i] = [l8(&mut rng), l8(&mut rng)]; }
+                        for i in 0..fg.num_cb_points as usize {
+                            fg.scaling_points_cb[i] = [l8(&mut rng), l8(&mut rng)];
+                        }
                         fg.num_cr_points = (rng.next() % 11) as i32;
-                        for i in 0..fg.num_cr_points as usize { fg.scaling_points_cr[i] = [l8(&mut rng), l8(&mut rng)]; }
+                        for i in 0..fg.num_cr_points as usize {
+                            fg.scaling_points_cr[i] = [l8(&mut rng), l8(&mut rng)];
+                        }
                     }
                     fg.scaling_shift = 8 + (rng.next() % 4) as i32;
                     fg.ar_coeff_lag = (rng.next() % 4) as i32;
                     let npl = 2 * fg.ar_coeff_lag * (fg.ar_coeff_lag + 1);
                     let npc = npl + i32::from(fg.num_y_points > 0);
-                    if fg.num_y_points != 0 { for i in 0..npl as usize { fg.ar_coeffs_y[i] = l8(&mut rng) - 128; } }
-                    if fg.num_cb_points != 0 || fg.chroma_scaling_from_luma { for i in 0..npc as usize { fg.ar_coeffs_cb[i] = l8(&mut rng) - 128; } }
-                    if fg.num_cr_points != 0 || fg.chroma_scaling_from_luma { for i in 0..npc as usize { fg.ar_coeffs_cr[i] = l8(&mut rng) - 128; } }
+                    if fg.num_y_points != 0 {
+                        for i in 0..npl as usize {
+                            fg.ar_coeffs_y[i] = l8(&mut rng) - 128;
+                        }
+                    }
+                    if fg.num_cb_points != 0 || fg.chroma_scaling_from_luma {
+                        for i in 0..npc as usize {
+                            fg.ar_coeffs_cb[i] = l8(&mut rng) - 128;
+                        }
+                    }
+                    if fg.num_cr_points != 0 || fg.chroma_scaling_from_luma {
+                        for i in 0..npc as usize {
+                            fg.ar_coeffs_cr[i] = l8(&mut rng) - 128;
+                        }
+                    }
                     fg.ar_coeff_shift = 6 + (rng.next() % 4) as i32;
                     fg.grain_scale_shift = (rng.next() % 4) as i32;
-                    if fg.num_cb_points != 0 { fg.cb_mult = l8(&mut rng); fg.cb_luma_mult = l8(&mut rng); fg.cb_offset = (rng.next() % 512) as i32; }
-                    if fg.num_cr_points != 0 { fg.cr_mult = l8(&mut rng); fg.cr_luma_mult = l8(&mut rng); fg.cr_offset = (rng.next() % 512) as i32; }
+                    if fg.num_cb_points != 0 {
+                        fg.cb_mult = l8(&mut rng);
+                        fg.cb_luma_mult = l8(&mut rng);
+                        fg.cb_offset = (rng.next() % 512) as i32;
+                    }
+                    if fg.num_cr_points != 0 {
+                        fg.cr_mult = l8(&mut rng);
+                        fg.cr_luma_mult = l8(&mut rng);
+                        fg.cr_offset = (rng.next() % 512) as i32;
+                    }
                     fg.overlap_flag = rng.next() & 1 == 1;
                     fg.clip_to_restricted_range = rng.next() & 1 == 1;
                 }
@@ -1069,22 +1354,77 @@ fn read_refresh_and_film_grain_invert_write() {
             let mut rb = ReadBitBuffer::new(&b);
             let g = read_film_grain_params(&mut rb, is_inter, mono, ssx, ssy);
             assert_eq!(
-                (g.apply_grain, g.random_seed, g.update_parameters, g.ref_idx, g.num_y_points,
-                 g.chroma_scaling_from_luma, g.num_cb_points, g.num_cr_points),
-                (fg.apply_grain, fg.random_seed, fg.update_parameters, fg.ref_idx, fg.num_y_points,
-                 fg.chroma_scaling_from_luma, fg.num_cb_points, fg.num_cr_points),
+                (
+                    g.apply_grain,
+                    g.random_seed,
+                    g.update_parameters,
+                    g.ref_idx,
+                    g.num_y_points,
+                    g.chroma_scaling_from_luma,
+                    g.num_cb_points,
+                    g.num_cr_points
+                ),
+                (
+                    fg.apply_grain,
+                    fg.random_seed,
+                    fg.update_parameters,
+                    fg.ref_idx,
+                    fg.num_y_points,
+                    fg.chroma_scaling_from_luma,
+                    fg.num_cb_points,
+                    fg.num_cr_points
+                ),
                 "film grain scalars A"
             );
             assert_eq!(
-                (g.scaling_shift, g.ar_coeff_lag, g.ar_coeff_shift, g.grain_scale_shift, g.overlap_flag, g.clip_to_restricted_range),
-                (fg.scaling_shift, fg.ar_coeff_lag, fg.ar_coeff_shift, fg.grain_scale_shift, fg.overlap_flag, fg.clip_to_restricted_range),
+                (
+                    g.scaling_shift,
+                    g.ar_coeff_lag,
+                    g.ar_coeff_shift,
+                    g.grain_scale_shift,
+                    g.overlap_flag,
+                    g.clip_to_restricted_range
+                ),
+                (
+                    fg.scaling_shift,
+                    fg.ar_coeff_lag,
+                    fg.ar_coeff_shift,
+                    fg.grain_scale_shift,
+                    fg.overlap_flag,
+                    fg.clip_to_restricted_range
+                ),
                 "film grain scalars B"
             );
             assert_eq!(g.scaling_points_y, fg.scaling_points_y, "fg pts y");
-            assert_eq!((g.scaling_points_cb, g.scaling_points_cr), (fg.scaling_points_cb, fg.scaling_points_cr), "fg pts uv");
-            assert_eq!((g.ar_coeffs_y, g.ar_coeffs_cb, g.ar_coeffs_cr), (fg.ar_coeffs_y, fg.ar_coeffs_cb, fg.ar_coeffs_cr), "fg ar coeffs");
-            assert_eq!((g.cb_mult, g.cb_luma_mult, g.cb_offset, g.cr_mult, g.cr_luma_mult, g.cr_offset),
-                       (fg.cb_mult, fg.cb_luma_mult, fg.cb_offset, fg.cr_mult, fg.cr_luma_mult, fg.cr_offset), "fg mults");
+            assert_eq!(
+                (g.scaling_points_cb, g.scaling_points_cr),
+                (fg.scaling_points_cb, fg.scaling_points_cr),
+                "fg pts uv"
+            );
+            assert_eq!(
+                (g.ar_coeffs_y, g.ar_coeffs_cb, g.ar_coeffs_cr),
+                (fg.ar_coeffs_y, fg.ar_coeffs_cb, fg.ar_coeffs_cr),
+                "fg ar coeffs"
+            );
+            assert_eq!(
+                (
+                    g.cb_mult,
+                    g.cb_luma_mult,
+                    g.cb_offset,
+                    g.cr_mult,
+                    g.cr_luma_mult,
+                    g.cr_offset
+                ),
+                (
+                    fg.cb_mult,
+                    fg.cb_luma_mult,
+                    fg.cb_offset,
+                    fg.cr_mult,
+                    fg.cr_luma_mult,
+                    fg.cr_offset
+                ),
+                "fg mults"
+            );
         }
     }
 }
@@ -1127,15 +1467,30 @@ fn read_sequence_header_inverts_write() {
             }
         }
         let s = SequenceHeaderParams {
-            num_bits_width: nbw, num_bits_height: nbh, max_frame_width: mfw, max_frame_height: mfh,
-            reduced_still_picture_hdr: reduced, frame_id_numbers_present_flag: fidp,
-            delta_frame_id_length: dfidl, frame_id_length: fidl, sb_size_128: rng.next() & 1 == 1,
-            enable_filter_intra: rng.next() & 1 == 1, enable_intra_edge_filter: rng.next() & 1 == 1,
-            enable_interintra_compound: eic, enable_masked_compound: emc, enable_warped_motion: ewm,
-            enable_dual_filter: edf, enable_order_hint: eoh, enable_dist_wtd_comp: edwc,
-            enable_ref_frame_mvs: erfm, force_screen_content_tools: fsct, force_integer_mv: fimv,
-            order_hint_bits_minus_1: ohbm1, enable_superres: rng.next() & 1 == 1,
-            enable_cdef: rng.next() & 1 == 1, enable_restoration: rng.next() & 1 == 1,
+            num_bits_width: nbw,
+            num_bits_height: nbh,
+            max_frame_width: mfw,
+            max_frame_height: mfh,
+            reduced_still_picture_hdr: reduced,
+            frame_id_numbers_present_flag: fidp,
+            delta_frame_id_length: dfidl,
+            frame_id_length: fidl,
+            sb_size_128: rng.next() & 1 == 1,
+            enable_filter_intra: rng.next() & 1 == 1,
+            enable_intra_edge_filter: rng.next() & 1 == 1,
+            enable_interintra_compound: eic,
+            enable_masked_compound: emc,
+            enable_warped_motion: ewm,
+            enable_dual_filter: edf,
+            enable_order_hint: eoh,
+            enable_dist_wtd_comp: edwc,
+            enable_ref_frame_mvs: erfm,
+            force_screen_content_tools: fsct,
+            force_integer_mv: fimv,
+            order_hint_bits_minus_1: ohbm1,
+            enable_superres: rng.next() & 1 == 1,
+            enable_cdef: rng.next() & 1 == 1,
+            enable_restoration: rng.next() & 1 == 1,
         };
         let mut wb = WriteBitBuffer::new();
         write_sequence_header(&mut wb, &s);
@@ -1143,26 +1498,71 @@ fn read_sequence_header_inverts_write() {
         let mut rb = ReadBitBuffer::new(&b);
         let g = read_sequence_header(&mut rb, reduced);
         assert_eq!(
-            (g.num_bits_width, g.num_bits_height, g.max_frame_width, g.max_frame_height,
-             g.frame_id_numbers_present_flag, g.delta_frame_id_length, g.frame_id_length, g.sb_size_128),
-            (nbw, nbh, mfw, mfh, fidp, dfidl, fidl, s.sb_size_128), "seq hdr A red={reduced}"
+            (
+                g.num_bits_width,
+                g.num_bits_height,
+                g.max_frame_width,
+                g.max_frame_height,
+                g.frame_id_numbers_present_flag,
+                g.delta_frame_id_length,
+                g.frame_id_length,
+                g.sb_size_128
+            ),
+            (nbw, nbh, mfw, mfh, fidp, dfidl, fidl, s.sb_size_128),
+            "seq hdr A red={reduced}"
         );
         assert_eq!(
-            (g.enable_filter_intra, g.enable_intra_edge_filter, g.enable_interintra_compound,
-             g.enable_masked_compound, g.enable_warped_motion, g.enable_dual_filter, g.enable_order_hint),
-            (s.enable_filter_intra, s.enable_intra_edge_filter, eic, emc, ewm, edf, eoh), "seq hdr B"
+            (
+                g.enable_filter_intra,
+                g.enable_intra_edge_filter,
+                g.enable_interintra_compound,
+                g.enable_masked_compound,
+                g.enable_warped_motion,
+                g.enable_dual_filter,
+                g.enable_order_hint
+            ),
+            (
+                s.enable_filter_intra,
+                s.enable_intra_edge_filter,
+                eic,
+                emc,
+                ewm,
+                edf,
+                eoh
+            ),
+            "seq hdr B"
         );
         assert_eq!(
-            (g.enable_dist_wtd_comp, g.enable_ref_frame_mvs, g.force_screen_content_tools,
-             g.force_integer_mv, g.order_hint_bits_minus_1, g.enable_superres, g.enable_cdef, g.enable_restoration),
-            (edwc, erfm, fsct, fimv, ohbm1, s.enable_superres, s.enable_cdef, s.enable_restoration), "seq hdr C"
+            (
+                g.enable_dist_wtd_comp,
+                g.enable_ref_frame_mvs,
+                g.force_screen_content_tools,
+                g.force_integer_mv,
+                g.order_hint_bits_minus_1,
+                g.enable_superres,
+                g.enable_cdef,
+                g.enable_restoration
+            ),
+            (
+                edwc,
+                erfm,
+                fsct,
+                fimv,
+                ohbm1,
+                s.enable_superres,
+                s.enable_cdef,
+                s.enable_restoration
+            ),
+            "seq hdr C"
         );
     }
 }
 
 #[test]
 fn read_frame_header_prefix_inverts_write() {
-    use aom_entropy::header::{read_frame_header_prefix, write_frame_header_prefix, FrameHeaderPrefix};
+    use aom_entropy::header::{
+        read_frame_header_prefix, write_frame_header_prefix, FrameHeaderPrefix,
+    };
     let mut rng = Rng(0x1e_f5e1_c0de_0200);
     for _ in 0..300_000 {
         let reduced = rng.next().is_multiple_of(8); // exercise the degenerate reduced path occasionally
@@ -1187,19 +1587,32 @@ fn read_frame_header_prefix_inverts_write() {
         }
 
         let show_existing = !reduced && rng.next().is_multiple_of(6);
-        let (mut frame_type, mut show_frame, mut showable, mut err_res) = (0i32, true, false, false);
+        let (mut frame_type, mut show_frame, mut showable, mut err_res) =
+            (0i32, true, false, false);
         let (mut efb, mut fpt, mut dfid) = (0i32, 0u32, 0i32);
         if reduced {
             // KEY/show/no-err inferred
         } else if show_existing {
             efb = (rng.next() % 8) as i32;
-            fpt = if dmi && !eqpi { (rng.next() % (1u64 << fptl)) as u32 } else { 0 };
-            dfid = if fidp { (rng.next() % (1u64 << fidlen)) as i32 } else { 0 };
+            fpt = if dmi && !eqpi {
+                (rng.next() % (1u64 << fptl)) as u32
+            } else {
+                0
+            };
+            dfid = if fidp {
+                (rng.next() % (1u64 << fidlen)) as i32
+            } else {
+                0
+            };
         } else {
             frame_type = (rng.next() % 4) as i32;
             show_frame = rng.next() & 1 == 1;
             if show_frame {
-                fpt = if dmi && !eqpi { (rng.next() % (1u64 << fptl)) as u32 } else { 0 };
+                fpt = if dmi && !eqpi {
+                    (rng.next() % (1u64 << fptl)) as u32
+                } else {
+                    0
+                };
                 showable = frame_type != 0;
             } else {
                 showable = rng.next() & 1 == 1;
@@ -1215,18 +1628,45 @@ fn read_frame_header_prefix_inverts_write() {
         let sframe = frame_type == 3;
         let intra_only = frame_type == 0 || frame_type == 2;
         let disable_cdf = rng.next() & 1 == 1;
-        let allow_sct = if force_sct == 2 { rng.next() & 1 == 1 } else { force_sct != 0 };
+        let allow_sct = if force_sct == 2 {
+            rng.next() & 1 == 1
+        } else {
+            force_sct != 0
+        };
         let cur_int_mv = if allow_sct {
-            if force_int == 2 { rng.next() & 1 == 1 } else { force_int != 0 }
+            if force_int == 2 {
+                rng.next() & 1 == 1
+            } else {
+                force_int != 0
+            }
         } else {
             false
         };
-        let (max_w, max_h) = (1 + (rng.next() % 1024) as i32, 1 + (rng.next() % 1024) as i32);
+        let (max_w, max_h) = (
+            1 + (rng.next() % 1024) as i32,
+            1 + (rng.next() % 1024) as i32,
+        );
         let want_override = if sframe { 1 } else { (rng.next() & 1) as i32 };
-        let (sup_w, sup_h) = if want_override == 1 && !sframe { (max_w + 1, max_h) } else { (max_w, max_h) };
-        let current_frame_id = if !reduced && fidp { (rng.next() % (1u64 << fidlen)) as i32 } else { 0 };
-        let order_hint = if !reduced && eoh { (rng.next() % (1u64 << (ohbm1 + 1))) as i32 } else { 0 };
-        let primary_ref = if !reduced && !err_res && !intra_only { (rng.next() % 8) as i32 } else { 7 };
+        let (sup_w, sup_h) = if want_override == 1 && !sframe {
+            (max_w + 1, max_h)
+        } else {
+            (max_w, max_h)
+        };
+        let current_frame_id = if !reduced && fidp {
+            (rng.next() % (1u64 << fidlen)) as i32
+        } else {
+            0
+        };
+        let order_hint = if !reduced && eoh {
+            (rng.next() % (1u64 << (ohbm1 + 1))) as i32
+        } else {
+            0
+        };
+        let primary_ref = if !reduced && !err_res && !intra_only {
+            (rng.next() % 8) as i32
+        } else {
+            7
+        };
         let brt_present = dmi && rng.next() & 1 == 1;
         let mut brts = [0u32; 32];
         if brt_present {
@@ -1239,8 +1679,13 @@ fn read_frame_header_prefix_inverts_write() {
                 }
             }
         }
-        let refresh_written = (frame_type == 0 && !show_frame) || frame_type == 1 || frame_type == 2;
-        let refresh = if refresh_written { (rng.next() % 256) as i32 } else { 0xff };
+        let refresh_written =
+            (frame_type == 0 && !show_frame) || frame_type == 1 || frame_type == 2;
+        let refresh = if refresh_written {
+            (rng.next() % 256) as i32
+        } else {
+            0xff
+        };
         let rfmoh_written = (!intra_only || refresh != 0xff) && err_res && eoh;
         let mut rfmoh = [0i32; 8];
         if rfmoh_written {
@@ -1250,21 +1695,43 @@ fn read_frame_header_prefix_inverts_write() {
         }
 
         let p = FrameHeaderPrefix {
-            reduced_still_picture_hdr: reduced, show_existing_frame: show_existing,
-            existing_fb_idx_to_show: efb, decoder_model_info_present_flag: dmi,
-            equal_picture_interval: eqpi, frame_presentation_time: fpt,
-            frame_presentation_time_length: fptl, frame_id_numbers_present_flag: fidp,
-            frame_id_length: fidlen, display_frame_id: dfid, frame_type, show_frame,
-            showable_frame: showable, error_resilient_mode: err_res, disable_cdf_update: disable_cdf,
-            force_screen_content_tools: force_sct, allow_screen_content_tools: allow_sct,
-            force_integer_mv: force_int, cur_frame_force_integer_mv: cur_int_mv,
-            superres_upscaled_width: sup_w, superres_upscaled_height: sup_h, max_frame_width: max_w,
-            max_frame_height: max_h, current_frame_id, enable_order_hint: eoh, order_hint,
-            order_hint_bits_minus_1: ohbm1, primary_ref_frame: primary_ref,
-            buffer_removal_time_present: brt_present, operating_points_cnt_minus_1: opcnt,
-            op_decoder_model_param_present: opdmpp, operating_point_idc: opidc,
-            temporal_layer_id: tlid, spatial_layer_id: slid, buffer_removal_times: brts,
-            buffer_removal_time_length: brtl, refresh_frame_flags: refresh,
+            reduced_still_picture_hdr: reduced,
+            show_existing_frame: show_existing,
+            existing_fb_idx_to_show: efb,
+            decoder_model_info_present_flag: dmi,
+            equal_picture_interval: eqpi,
+            frame_presentation_time: fpt,
+            frame_presentation_time_length: fptl,
+            frame_id_numbers_present_flag: fidp,
+            frame_id_length: fidlen,
+            display_frame_id: dfid,
+            frame_type,
+            show_frame,
+            showable_frame: showable,
+            error_resilient_mode: err_res,
+            disable_cdf_update: disable_cdf,
+            force_screen_content_tools: force_sct,
+            allow_screen_content_tools: allow_sct,
+            force_integer_mv: force_int,
+            cur_frame_force_integer_mv: cur_int_mv,
+            superres_upscaled_width: sup_w,
+            superres_upscaled_height: sup_h,
+            max_frame_width: max_w,
+            max_frame_height: max_h,
+            current_frame_id,
+            enable_order_hint: eoh,
+            order_hint,
+            order_hint_bits_minus_1: ohbm1,
+            primary_ref_frame: primary_ref,
+            buffer_removal_time_present: brt_present,
+            operating_points_cnt_minus_1: opcnt,
+            op_decoder_model_param_present: opdmpp,
+            operating_point_idc: opidc,
+            temporal_layer_id: tlid,
+            spatial_layer_id: slid,
+            buffer_removal_times: brts,
+            buffer_removal_time_length: brtl,
+            refresh_frame_flags: refresh,
             ref_frame_map_order_hint: rfmoh,
         };
         let mut wb = WriteBitBuffer::new();
@@ -1272,22 +1739,64 @@ fn read_frame_header_prefix_inverts_write() {
         let b = wb.bytes().to_vec();
         let mut rb = ReadBitBuffer::new(&b);
         let (g, gover, gearly) = read_frame_header_prefix(&mut rb, &p);
-        assert_eq!((gover, gearly), (wover, wearly), "override/early ft={frame_type} se={show_existing}");
+        assert_eq!(
+            (gover, gearly),
+            (wover, wearly),
+            "override/early ft={frame_type} se={show_existing}"
+        );
         assert_eq!(g.show_existing_frame, show_existing, "show_existing");
         if show_existing {
-            assert_eq!((g.existing_fb_idx_to_show, g.frame_presentation_time, g.display_frame_id), (efb, fpt, dfid), "show_existing fields");
+            assert_eq!(
+                (
+                    g.existing_fb_idx_to_show,
+                    g.frame_presentation_time,
+                    g.display_frame_id
+                ),
+                (efb, fpt, dfid),
+                "show_existing fields"
+            );
             continue;
         }
         assert_eq!(
-            (g.frame_type, g.show_frame, g.showable_frame, g.error_resilient_mode, g.frame_presentation_time),
-            (frame_type, show_frame, showable, err_res, fpt), "frame type block red={reduced}"
+            (
+                g.frame_type,
+                g.show_frame,
+                g.showable_frame,
+                g.error_resilient_mode,
+                g.frame_presentation_time
+            ),
+            (frame_type, show_frame, showable, err_res, fpt),
+            "frame type block red={reduced}"
         );
         assert_eq!(
-            (g.disable_cdf_update, g.allow_screen_content_tools, g.cur_frame_force_integer_mv, g.current_frame_id, g.order_hint, g.primary_ref_frame),
-            (disable_cdf, allow_sct, cur_int_mv, current_frame_id, order_hint, primary_ref), "tools/id block"
+            (
+                g.disable_cdf_update,
+                g.allow_screen_content_tools,
+                g.cur_frame_force_integer_mv,
+                g.current_frame_id,
+                g.order_hint,
+                g.primary_ref_frame
+            ),
+            (
+                disable_cdf,
+                allow_sct,
+                cur_int_mv,
+                current_frame_id,
+                order_hint,
+                primary_ref
+            ),
+            "tools/id block"
         );
-        assert_eq!((g.buffer_removal_time_present, g.buffer_removal_times), (brt_present, brts), "buffer removal");
-        assert_eq!((g.refresh_frame_flags, g.ref_frame_map_order_hint), (refresh, rfmoh), "refresh/order hints");
+        assert_eq!(
+            (g.buffer_removal_time_present, g.buffer_removal_times),
+            (brt_present, brts),
+            "buffer removal"
+        );
+        assert_eq!(
+            (g.refresh_frame_flags, g.ref_frame_map_order_hint),
+            (refresh, rfmoh),
+            "refresh/order hints"
+        );
     }
 }
 
@@ -1300,14 +1809,28 @@ fn read_sequence_header_obu_inverts_write() {
     let mut rng = Rng(0x1e_5e0b_c0de_0210);
     for _ in 0..100_000 {
         let profile = (rng.next() % 3) as i32;
-        let bit_depth = if profile == 2 { [8, 10, 12][(rng.next() % 3) as usize] } else { [8, 10][(rng.next() % 2) as usize] };
+        let bit_depth = if profile == 2 {
+            [8, 10, 12][(rng.next() % 3) as usize]
+        } else {
+            [8, 10][(rng.next() % 2) as usize]
+        };
         // color config (valid per profile, following read_color_config inference)
         let mono = profile != 1 && rng.next() & 1 == 1;
         let want_srgb = !mono && profile == 1 && rng.next() & 1 == 1;
-        let (ssx, ssy) = if mono { (1, 1) } else if want_srgb { (0, 0) } else if profile == 0 { (1, 1) }
-            else if profile == 1 { (0, 0) } else if bit_depth == 12 {
-                let x = (rng.next() & 1) as i32; (x, if x == 1 { (rng.next() & 1) as i32 } else { 0 })
-            } else { (1, 0) };
+        let (ssx, ssy) = if mono {
+            (1, 1)
+        } else if want_srgb {
+            (0, 0)
+        } else if profile == 0 {
+            (1, 1)
+        } else if profile == 1 {
+            (0, 0)
+        } else if bit_depth == 12 {
+            let x = (rng.next() & 1) as i32;
+            (x, if x == 1 { (rng.next() & 1) as i32 } else { 0 })
+        } else {
+            (1, 0)
+        };
         let (cp, tc, mc) = if want_srgb {
             (1, 13, 0)
         } else if rng.next() & 1 == 1 {
@@ -1324,12 +1847,24 @@ fn read_sequence_header_obu_inverts_write() {
         } else {
             (2, 2, 2)
         };
-        let chroma_pos = if !mono && !want_srgb && ssx == 1 && ssy == 1 { (rng.next() % 4) as i32 } else { 0 };
+        let chroma_pos = if !mono && !want_srgb && ssx == 1 && ssy == 1 {
+            (rng.next() % 4) as i32
+        } else {
+            0
+        };
         let sep_uv = !mono && rng.next() & 1 == 1;
         let color_config = ColorConfigParams {
-            bit_depth, profile, monochrome: mono, color_primaries: cp, transfer_characteristics: tc,
-            matrix_coefficients: mc, color_range: want_srgb || rng.next() & 1 == 1, subsampling_x: ssx,
-            subsampling_y: ssy, chroma_sample_position: chroma_pos, separate_uv_delta_q: sep_uv,
+            bit_depth,
+            profile,
+            monochrome: mono,
+            color_primaries: cp,
+            transfer_characteristics: tc,
+            matrix_coefficients: mc,
+            color_range: want_srgb || rng.next() & 1 == 1,
+            subsampling_x: ssx,
+            subsampling_y: ssy,
+            chroma_sample_position: chroma_pos,
+            separate_uv_delta_q: sep_uv,
         };
 
         let reduced = rng.next().is_multiple_of(4);
@@ -1339,22 +1874,39 @@ fn read_sequence_header_obu_inverts_write() {
         let nbh = 1 + (rng.next() % 16) as u32;
         let eoh = !reduced && rng.next() & 1 == 1;
         let seq_header = SequenceHeaderParams {
-            num_bits_width: nbw, num_bits_height: nbh,
+            num_bits_width: nbw,
+            num_bits_height: nbh,
             max_frame_width: 1 + (rng.next() % (1u64 << nbw)) as i32,
             max_frame_height: 1 + (rng.next() % (1u64 << nbh)) as i32,
-            reduced_still_picture_hdr: reduced, frame_id_numbers_present_flag: false,
-            delta_frame_id_length: 0, frame_id_length: 0, sb_size_128: rng.next() & 1 == 1,
-            enable_filter_intra: rng.next() & 1 == 1, enable_intra_edge_filter: rng.next() & 1 == 1,
+            reduced_still_picture_hdr: reduced,
+            frame_id_numbers_present_flag: false,
+            delta_frame_id_length: 0,
+            frame_id_length: 0,
+            sb_size_128: rng.next() & 1 == 1,
+            enable_filter_intra: rng.next() & 1 == 1,
+            enable_intra_edge_filter: rng.next() & 1 == 1,
             enable_interintra_compound: !reduced && rng.next() & 1 == 1,
             enable_masked_compound: !reduced && rng.next() & 1 == 1,
             enable_warped_motion: !reduced && rng.next() & 1 == 1,
-            enable_dual_filter: !reduced && rng.next() & 1 == 1, enable_order_hint: eoh,
-            enable_dist_wtd_comp: eoh && rng.next() & 1 == 1, enable_ref_frame_mvs: eoh && rng.next() & 1 == 1,
+            enable_dual_filter: !reduced && rng.next() & 1 == 1,
+            enable_order_hint: eoh,
+            enable_dist_wtd_comp: eoh && rng.next() & 1 == 1,
+            enable_ref_frame_mvs: eoh && rng.next() & 1 == 1,
             force_screen_content_tools: if reduced { 2 } else { (rng.next() % 3) as i32 },
-            force_integer_mv: 2, order_hint_bits_minus_1: if eoh { (rng.next() % 8) as i32 } else { -1 },
-            enable_superres: rng.next() & 1 == 1, enable_cdef: rng.next() & 1 == 1, enable_restoration: rng.next() & 1 == 1,
+            force_integer_mv: 2,
+            order_hint_bits_minus_1: if eoh { (rng.next() % 8) as i32 } else { -1 },
+            enable_superres: rng.next() & 1 == 1,
+            enable_cdef: rng.next() & 1 == 1,
+            enable_restoration: rng.next() & 1 == 1,
         };
-        let sh = SequenceHeaderParams { force_integer_mv: if seq_header.force_screen_content_tools > 0 { (rng.next() % 3) as i32 } else { 2 }, ..seq_header };
+        let sh = SequenceHeaderParams {
+            force_integer_mv: if seq_header.force_screen_content_tools > 0 {
+                (rng.next() % 3) as i32
+            } else {
+                2
+            },
+            ..seq_header
+        };
 
         // operating points
         let opcnt = if reduced { 0 } else { (rng.next() % 4) as i32 };
@@ -1362,25 +1914,44 @@ fn read_sequence_header_obu_inverts_write() {
         let dmi_present = ti_present && rng.next() & 1 == 1;
         let disp_present = !reduced && rng.next() & 1 == 1;
         let ti = TimingInfoHeader {
-            num_units_in_display_tick: rng.next() as u32, time_scale: rng.next() as u32,
-            equal_picture_interval: rng.next() & 1 == 1, num_ticks_per_picture: 1 + (rng.next() % (1 << 20)) as u32,
+            num_units_in_display_tick: rng.next() as u32,
+            time_scale: rng.next() as u32,
+            equal_picture_interval: rng.next() & 1 == 1,
+            num_ticks_per_picture: 1 + (rng.next() % (1 << 20)) as u32,
         };
-        let ti = if ti.equal_picture_interval { ti } else { TimingInfoHeader { num_ticks_per_picture: 1, ..ti } };
+        let ti = if ti.equal_picture_interval {
+            ti
+        } else {
+            TimingInfoHeader {
+                num_ticks_per_picture: 1,
+                ..ti
+            }
+        };
         let bdl = 1 + (rng.next() % 16) as i32;
         let dmi = DecoderModelInfo {
-            encoder_decoder_buffer_delay_length: bdl, num_units_in_decoding_tick: rng.next() as u32,
-            buffer_removal_time_length: 1 + (rng.next() % 16) as i32, frame_presentation_time_length: 1 + (rng.next() % 16) as i32,
+            encoder_decoder_buffer_delay_length: bdl,
+            num_units_in_decoding_tick: rng.next() as u32,
+            buffer_removal_time_length: 1 + (rng.next() % 16) as i32,
+            frame_presentation_time_length: 1 + (rng.next() % 16) as i32,
         };
-        let mut op_idc = [0i32; 32]; let mut sli = [0i32; 32]; let mut tier = [0i32; 32];
-        let mut op_dmpp = [false; 32]; let mut op_dispp = [false; 32];
-        let mut op_dbd = [0u32; 32]; let mut op_ebd = [0u32; 32]; let mut op_ldmf = [false; 32]; let mut op_idd = [0i32; 32];
+        let mut op_idc = [0i32; 32];
+        let mut sli = [0i32; 32];
+        let mut tier = [0i32; 32];
+        let mut op_dmpp = [false; 32];
+        let mut op_dispp = [false; 32];
+        let mut op_dbd = [0u32; 32];
+        let mut op_ebd = [0u32; 32];
+        let mut op_ldmf = [false; 32];
+        let mut op_idd = [0i32; 32];
         if reduced {
             sli[0] = (rng.next() % 32) as i32;
         } else {
             for i in 0..=opcnt as usize {
                 op_idc[i] = (rng.next() % 4096) as i32;
                 sli[i] = (rng.next() % 32) as i32;
-                if sli[i] >= 8 { tier[i] = (rng.next() & 1) as i32; }
+                if sli[i] >= 8 {
+                    tier[i] = (rng.next() & 1) as i32;
+                }
                 if dmi_present {
                     op_dmpp[i] = rng.next() & 1 == 1;
                     if op_dmpp[i] {
@@ -1391,19 +1962,35 @@ fn read_sequence_header_obu_inverts_write() {
                 }
                 if disp_present {
                     op_dispp[i] = rng.next() & 1 == 1;
-                    if op_dispp[i] { op_idd[i] = 1 + (rng.next() % 10) as i32; }
+                    if op_dispp[i] {
+                        op_idd[i] = 1 + (rng.next() % 10) as i32;
+                    }
                 }
             }
         }
 
         let obu = SequenceHeaderObu {
-            profile, still_picture, reduced_still_picture_hdr: reduced, timing_info_present: ti_present,
-            timing_info: ti, decoder_model_info_present_flag: dmi_present, decoder_model_info: dmi,
-            display_model_info_present_flag: disp_present, operating_points_cnt_minus_1: opcnt,
-            operating_point_idc: op_idc, seq_level_idx: sli, tier, op_decoder_model_param_present: op_dmpp,
-            op_display_model_param_present: op_dispp, op_decoder_buffer_delay: op_dbd,
-            op_encoder_buffer_delay: op_ebd, op_low_delay_mode_flag: op_ldmf, op_initial_display_delay: op_idd,
-            seq_header: sh, color_config, film_grain_params_present: rng.next() & 1 == 1,
+            profile,
+            still_picture,
+            reduced_still_picture_hdr: reduced,
+            timing_info_present: ti_present,
+            timing_info: ti,
+            decoder_model_info_present_flag: dmi_present,
+            decoder_model_info: dmi,
+            display_model_info_present_flag: disp_present,
+            operating_points_cnt_minus_1: opcnt,
+            operating_point_idc: op_idc,
+            seq_level_idx: sli,
+            tier,
+            op_decoder_model_param_present: op_dmpp,
+            op_display_model_param_present: op_dispp,
+            op_decoder_buffer_delay: op_dbd,
+            op_encoder_buffer_delay: op_ebd,
+            op_low_delay_mode_flag: op_ldmf,
+            op_initial_display_delay: op_idd,
+            seq_header: sh,
+            color_config,
+            film_grain_params_present: rng.next() & 1 == 1,
         };
         let mut wb = WriteBitBuffer::new();
         write_sequence_header_obu(&mut wb, &obu);
@@ -1411,17 +1998,65 @@ fn read_sequence_header_obu_inverts_write() {
         let mut rb = ReadBitBuffer::new(&b);
         let g = read_sequence_header_obu(&mut rb);
         assert_eq!(
-            (g.profile, g.still_picture, g.reduced_still_picture_hdr, g.timing_info_present,
-             g.decoder_model_info_present_flag, g.display_model_info_present_flag,
-             g.operating_points_cnt_minus_1, g.film_grain_params_present),
-            (profile, still_picture, reduced, ti_present, dmi_present, disp_present, opcnt, obu.film_grain_params_present),
+            (
+                g.profile,
+                g.still_picture,
+                g.reduced_still_picture_hdr,
+                g.timing_info_present,
+                g.decoder_model_info_present_flag,
+                g.display_model_info_present_flag,
+                g.operating_points_cnt_minus_1,
+                g.film_grain_params_present
+            ),
+            (
+                profile,
+                still_picture,
+                reduced,
+                ti_present,
+                dmi_present,
+                disp_present,
+                opcnt,
+                obu.film_grain_params_present
+            ),
             "obu top red={reduced}"
         );
-        assert_eq!((g.operating_point_idc, g.seq_level_idx, g.tier), (op_idc, sli, tier), "obu op arrays");
-        assert_eq!((g.op_decoder_model_param_present, g.op_decoder_buffer_delay, g.op_encoder_buffer_delay), (op_dmpp, op_dbd, op_ebd), "obu op dmi");
-        assert_eq!((g.op_display_model_param_present, g.op_initial_display_delay), (op_dispp, op_idd), "obu op disp");
-        assert_eq!((g.seq_header.num_bits_width, g.seq_header.enable_order_hint, g.seq_header.enable_superres), (nbw, eoh, sh.enable_superres), "obu seq_header");
-        assert_eq!((g.color_config.bit_depth, g.color_config.subsampling_x, g.color_config.subsampling_y), (bit_depth, ssx, ssy), "obu color_config");
+        assert_eq!(
+            (g.operating_point_idc, g.seq_level_idx, g.tier),
+            (op_idc, sli, tier),
+            "obu op arrays"
+        );
+        assert_eq!(
+            (
+                g.op_decoder_model_param_present,
+                g.op_decoder_buffer_delay,
+                g.op_encoder_buffer_delay
+            ),
+            (op_dmpp, op_dbd, op_ebd),
+            "obu op dmi"
+        );
+        assert_eq!(
+            (g.op_display_model_param_present, g.op_initial_display_delay),
+            (op_dispp, op_idd),
+            "obu op disp"
+        );
+        assert_eq!(
+            (
+                g.seq_header.num_bits_width,
+                g.seq_header.enable_order_hint,
+                g.seq_header.enable_superres
+            ),
+            (nbw, eoh, sh.enable_superres),
+            "obu seq_header"
+        );
+        assert_eq!(
+            (
+                g.color_config.bit_depth,
+                g.color_config.subsampling_x,
+                g.color_config.subsampling_y
+            ),
+            (bit_depth, ssx, ssy),
+            "obu color_config"
+        );
     }
 }
 
@@ -1431,23 +2066,72 @@ fn read_uncompressed_header_key_frame_roundtrips() {
         read_uncompressed_header, write_frame_header_obu, CdefHeader, ColorConfigParams,
         DeltaQParams, FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
         FrameSizeWithRefs, InterRefSignaling, LoopfilterHeader, QuantParamsHeader,
-        RestorationHeader, SegmentationHeader, TileInfoHeader, TimingInfoHeader, WarpedMotionParams,
+        RestorationHeader, SegmentationHeader, TileInfoHeader, TimingInfoHeader,
+        WarpedMotionParams,
     };
-    let _ = (TimingInfoHeader { num_units_in_display_tick: 0, time_scale: 0, equal_picture_interval: false, num_ticks_per_picture: 1 }, ColorConfigParams { bit_depth: 8, profile: 0, monochrome: false, color_primaries: 2, transfer_characteristics: 2, matrix_coefficients: 2, color_range: false, subsampling_x: 1, subsampling_y: 1, chroma_sample_position: 0, separate_uv_delta_q: false });
-    let ident = WarpedMotionParams { wmtype: 0, wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16] };
+    let _ = (
+        TimingInfoHeader {
+            num_units_in_display_tick: 0,
+            time_scale: 0,
+            equal_picture_interval: false,
+            num_ticks_per_picture: 1,
+        },
+        ColorConfigParams {
+            bit_depth: 8,
+            profile: 0,
+            monochrome: false,
+            color_primaries: 2,
+            transfer_characteristics: 2,
+            matrix_coefficients: 2,
+            color_range: false,
+            subsampling_x: 1,
+            subsampling_y: 1,
+            chroma_sample_position: 0,
+            separate_uv_delta_q: false,
+        },
+    );
+    let ident = WarpedMotionParams {
+        wmtype: 0,
+        wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16],
+    };
     let empty_prefix = |ft: i32, show: bool, allow_sct: bool| FrameHeaderPrefix {
-        reduced_still_picture_hdr: false, show_existing_frame: false, existing_fb_idx_to_show: 0,
-        decoder_model_info_present_flag: false, equal_picture_interval: false, frame_presentation_time: 0,
-        frame_presentation_time_length: 1, frame_id_numbers_present_flag: false, frame_id_length: 0,
-        display_frame_id: 0, frame_type: ft, show_frame: show, showable_frame: false,
-        error_resilient_mode: false, disable_cdf_update: false, force_screen_content_tools: 2,
-        allow_screen_content_tools: allow_sct, force_integer_mv: 2, cur_frame_force_integer_mv: false,
-        superres_upscaled_width: 256, superres_upscaled_height: 256, max_frame_width: 256,
-        max_frame_height: 256, current_frame_id: 0, enable_order_hint: false, order_hint: 0,
-        order_hint_bits_minus_1: -1, primary_ref_frame: 7, buffer_removal_time_present: false,
-        operating_points_cnt_minus_1: 0, op_decoder_model_param_present: [false; 32],
-        operating_point_idc: [0; 32], temporal_layer_id: 0, spatial_layer_id: 0,
-        buffer_removal_times: [0; 32], buffer_removal_time_length: 1, refresh_frame_flags: 0xff,
+        reduced_still_picture_hdr: false,
+        show_existing_frame: false,
+        existing_fb_idx_to_show: 0,
+        decoder_model_info_present_flag: false,
+        equal_picture_interval: false,
+        frame_presentation_time: 0,
+        frame_presentation_time_length: 1,
+        frame_id_numbers_present_flag: false,
+        frame_id_length: 0,
+        display_frame_id: 0,
+        frame_type: ft,
+        show_frame: show,
+        showable_frame: false,
+        error_resilient_mode: false,
+        disable_cdf_update: false,
+        force_screen_content_tools: 2,
+        allow_screen_content_tools: allow_sct,
+        force_integer_mv: 2,
+        cur_frame_force_integer_mv: false,
+        superres_upscaled_width: 256,
+        superres_upscaled_height: 256,
+        max_frame_width: 256,
+        max_frame_height: 256,
+        current_frame_id: 0,
+        enable_order_hint: false,
+        order_hint: 0,
+        order_hint_bits_minus_1: -1,
+        primary_ref_frame: 7,
+        buffer_removal_time_present: false,
+        operating_points_cnt_minus_1: 0,
+        op_decoder_model_param_present: [false; 32],
+        operating_point_idc: [0; 32],
+        temporal_layer_id: 0,
+        spatial_layer_id: 0,
+        buffer_removal_times: [0; 32],
+        buffer_removal_time_length: 1,
+        refresh_frame_flags: 0xff,
         ref_frame_map_order_hint: [0; 8],
     };
     let mut rng = Rng(0x1e_f5e0_c0de_0220);
@@ -1461,83 +2145,194 @@ fn read_uncompressed_header_key_frame_roundtrips() {
 
         let fh = FrameHeaderObu {
             prefix: empty_prefix(0, true, allow_sct),
-            allow_screen_content_tools: allow_sct, superres_scaled, allow_intrabc,
+            allow_screen_content_tools: allow_sct,
+            superres_scaled,
+            allow_intrabc,
             frame_size: FrameSizeHeader {
-                frame_size_override: false, num_bits_width: 16, num_bits_height: 16,
-                superres_upscaled_width: 256, superres_upscaled_height: 256, enable_superres: false,
-                scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0,
+                frame_size_override: false,
+                num_bits_width: 16,
+                num_bits_height: 16,
+                superres_upscaled_width: 256,
+                superres_upscaled_height: 256,
+                enable_superres: false,
+                scale_denominator: 8,
+                scaling_active: false,
+                render_width: 0,
+                render_height: 0,
             },
             inter_ref: InterRefSignaling {
-                enable_order_hint: false, frame_refs_short_signaling: false, ref_map_idx: [0; 7],
-                set_ref_frame_config: false, rtc_reference: [0; 7], rtc_ref_idx: [0; 7],
-                number_spatial_layers: 1, frame_id_numbers_present_flag: false, frame_id_length: 0,
-                current_frame_id: 0, ref_frame_id: [0; 8], delta_frame_id_length: 0,
+                enable_order_hint: false,
+                frame_refs_short_signaling: false,
+                ref_map_idx: [0; 7],
+                set_ref_frame_config: false,
+                rtc_reference: [0; 7],
+                rtc_ref_idx: [0; 7],
+                number_spatial_layers: 1,
+                frame_id_numbers_present_flag: false,
+                frame_id_length: 0,
+                current_frame_id: 0,
+                ref_frame_id: [0; 8],
+                delta_frame_id_length: 0,
             },
             frame_size_with_refs: FrameSizeWithRefs {
-                superres_upscaled_width: 256, superres_upscaled_height: 256, render_width: 256,
-                render_height: 256, ref_cfg_valid: [false; 7], ref_y_crop_width: [0; 7],
-                ref_y_crop_height: [0; 7], ref_render_width: [0; 7], ref_render_height: [0; 7],
-                enable_superres: false, scale_denominator: 8,
+                superres_upscaled_width: 256,
+                superres_upscaled_height: 256,
+                render_width: 256,
+                render_height: 256,
+                ref_cfg_valid: [false; 7],
+                ref_y_crop_width: [0; 7],
+                ref_y_crop_height: [0; 7],
+                ref_render_width: [0; 7],
+                ref_render_height: [0; 7],
+                enable_superres: false,
+                scale_denominator: 8,
                 frame_size: FrameSizeHeader {
-                    frame_size_override: true, num_bits_width: 16, num_bits_height: 16,
-                    superres_upscaled_width: 1, superres_upscaled_height: 1, enable_superres: false,
-                    scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0,
+                    frame_size_override: true,
+                    num_bits_width: 16,
+                    num_bits_height: 16,
+                    superres_upscaled_width: 1,
+                    superres_upscaled_height: 1,
+                    enable_superres: false,
+                    scale_denominator: 8,
+                    scaling_active: false,
+                    render_width: 0,
+                    render_height: 0,
                 },
             },
-            cur_frame_force_integer_mv: false, allow_high_precision_mv: false, interp_filter: 0,
-            switchable_motion_mode: false, might_allow_ref_frame_mvs: false, allow_ref_frame_mvs: false,
+            cur_frame_force_integer_mv: false,
+            allow_high_precision_mv: false,
+            interp_filter: 0,
+            switchable_motion_mode: false,
+            might_allow_ref_frame_mvs: false,
+            allow_ref_frame_mvs: false,
             refresh_frame_context_disabled: rng.next() & 1 == 1,
             tile_info: TileInfoHeader {
-                mi_cols: 64, mi_rows: 64, mib_size_log2: 4, uniform_spacing: true, log2_cols: 0,
-                min_log2_cols: 0, max_log2_cols: 0, log2_rows: 0, min_log2_rows: 0, max_log2_rows: 0,
-                cols: 1, rows: 1, col_start_sb: [0; 65], row_start_sb: [0; 65], max_width_sb: 64,
+                mi_cols: 64,
+                mi_rows: 64,
+                mib_size_log2: 4,
+                uniform_spacing: true,
+                log2_cols: 0,
+                min_log2_cols: 0,
+                max_log2_cols: 0,
+                log2_rows: 0,
+                min_log2_rows: 0,
+                max_log2_rows: 0,
+                cols: 1,
+                rows: 1,
+                col_start_sb: [0; 65],
+                row_start_sb: [0; 65],
+                max_width_sb: 64,
                 max_height_sb: 64,
             },
             quant: QuantParamsHeader {
-                base_qindex: base_q, y_dc_delta_q: 0, u_dc_delta_q: 0, u_ac_delta_q: 0, v_dc_delta_q: 0,
-                v_ac_delta_q: 0, using_qmatrix: false, qmatrix_level_y: 0, qmatrix_level_u: 0, qmatrix_level_v: 0,
+                base_qindex: base_q,
+                y_dc_delta_q: 0,
+                u_dc_delta_q: 0,
+                u_ac_delta_q: 0,
+                v_dc_delta_q: 0,
+                v_ac_delta_q: 0,
+                using_qmatrix: false,
+                qmatrix_level_y: 0,
+                qmatrix_level_u: 0,
+                qmatrix_level_v: 0,
             },
-            num_planes: 3, separate_uv_delta_q: false,
+            num_planes: 3,
+            separate_uv_delta_q: false,
             segmentation: SegmentationHeader {
-                enabled: false, has_primary_ref: false, update_map: false, temporal_update: false,
-                update_data: false, feature_mask: [0; 8], feature_data: [[0; 8]; 8],
+                enabled: false,
+                has_primary_ref: false,
+                update_map: false,
+                temporal_update: false,
+                update_data: false,
+                feature_mask: [0; 8],
+                feature_data: [[0; 8]; 8],
             },
             delta_q: DeltaQParams {
-                base_qindex: base_q, delta_q_present: rng.next() & 1 == 1, delta_q_res: 1,
-                allow_intrabc, delta_lf_present: false, delta_lf_res: 1, delta_lf_multi: false,
+                base_qindex: base_q,
+                delta_q_present: rng.next() & 1 == 1,
+                delta_q_res: 1,
+                allow_intrabc,
+                delta_lf_present: false,
+                delta_lf_res: 1,
+                delta_lf_multi: false,
             },
-            all_lossless: false, coded_lossless: false,
+            all_lossless: false,
+            coded_lossless: false,
             loopfilter: LoopfilterHeader {
                 // enabled=1 with no delta update: the encoder's unconditional `meaningful`
                 // bit then coincides with the decoder's gated update bit (libaom only ever
                 // emits enabled=1; enabled=0 desyncs — see read_loopfilter).
-                allow_intrabc, filter_level: [(rng.next() % 64) as i32, (rng.next() % 64) as i32],
-                filter_level_u: 0, filter_level_v: 0, sharpness_level: 0, mode_ref_delta_enabled: true,
-                mode_ref_delta_update: false, ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1], mode_deltas: [0, 0],
-                last_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1], last_mode_deltas: [0, 0],
+                allow_intrabc,
+                filter_level: [(rng.next() % 64) as i32, (rng.next() % 64) as i32],
+                filter_level_u: 0,
+                filter_level_v: 0,
+                sharpness_level: 0,
+                mode_ref_delta_enabled: true,
+                mode_ref_delta_update: false,
+                ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
+                mode_deltas: [0, 0],
+                last_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
+                last_mode_deltas: [0, 0],
             },
             cdef: CdefHeader {
-                enable_cdef: true, allow_intrabc, cdef_damping: 3 + (rng.next() % 4) as i32,
-                cdef_bits: 0, nb_cdef_strengths: 1, cdef_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0],
+                enable_cdef: true,
+                allow_intrabc,
+                cdef_damping: 3 + (rng.next() % 4) as i32,
+                cdef_bits: 0,
+                nb_cdef_strengths: 1,
+                cdef_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0],
                 cdef_uv_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0],
             },
             restoration: RestorationHeader {
-                enable_restoration: true, allow_intrabc, frame_restoration_type: [0; 3],
-                sb_size_128: false, restoration_unit_size: [256; 3], subsampling_x: 1, subsampling_y: 1,
+                enable_restoration: true,
+                allow_intrabc,
+                frame_restoration_type: [0; 3],
+                sb_size_128: false,
+                restoration_unit_size: [256; 3],
+                subsampling_x: 1,
+                subsampling_y: 1,
             },
-            tx_mode_select: rng.next() & 1 == 1, reference_mode_select: false, skip_mode_allowed: false,
-            skip_mode_flag: false, might_allow_warped_motion: false, allow_warped_motion: false,
-            reduced_tx_set_used: rng.next() & 1 == 1, global_motion: [ident; 7], ref_global_motion: [ident; 7],
+            tx_mode_select: rng.next() & 1 == 1,
+            reference_mode_select: false,
+            skip_mode_allowed: false,
+            skip_mode_flag: false,
+            might_allow_warped_motion: false,
+            allow_warped_motion: false,
+            reduced_tx_set_used: rng.next() & 1 == 1,
+            global_motion: [ident; 7],
+            ref_global_motion: [ident; 7],
             film_grain_params_present: fg_present,
             film_grain: FilmGrainParams {
-                apply_grain: fg_present && rng.next() & 1 == 1, random_seed: (rng.next() % 65536) as i32,
-                is_inter_frame: false, update_parameters: true, ref_idx: 0, num_y_points: 0,
-                scaling_points_y: [[0; 2]; 14], monochrome: false, chroma_scaling_from_luma: false,
-                subsampling_x: 1, subsampling_y: 1, num_cb_points: 0, scaling_points_cb: [[0; 2]; 10],
-                num_cr_points: 0, scaling_points_cr: [[0; 2]; 10], scaling_shift: 8, ar_coeff_lag: 0,
-                ar_coeffs_y: [0; 24], ar_coeffs_cb: [0; 25], ar_coeffs_cr: [0; 25], ar_coeff_shift: 6,
-                grain_scale_shift: 0, cb_mult: 0, cb_luma_mult: 0, cb_offset: 0, cr_mult: 0,
-                cr_luma_mult: 0, cr_offset: 0, overlap_flag: false, clip_to_restricted_range: false,
+                apply_grain: fg_present && rng.next() & 1 == 1,
+                random_seed: (rng.next() % 65536) as i32,
+                is_inter_frame: false,
+                update_parameters: true,
+                ref_idx: 0,
+                num_y_points: 0,
+                scaling_points_y: [[0; 2]; 14],
+                monochrome: false,
+                chroma_scaling_from_luma: false,
+                subsampling_x: 1,
+                subsampling_y: 1,
+                num_cb_points: 0,
+                scaling_points_cb: [[0; 2]; 10],
+                num_cr_points: 0,
+                scaling_points_cr: [[0; 2]; 10],
+                scaling_shift: 8,
+                ar_coeff_lag: 0,
+                ar_coeffs_y: [0; 24],
+                ar_coeffs_cb: [0; 25],
+                ar_coeffs_cr: [0; 25],
+                ar_coeff_shift: 6,
+                grain_scale_shift: 0,
+                cb_mult: 0,
+                cb_luma_mult: 0,
+                cb_offset: 0,
+                cr_mult: 0,
+                cr_luma_mult: 0,
+                cr_offset: 0,
+                overlap_flag: false,
+                clip_to_restricted_range: false,
             },
             large_scale: false,
         };
@@ -1547,21 +2342,44 @@ fn read_uncompressed_header_key_frame_roundtrips() {
         let mut rb = ReadBitBuffer::new(&b);
         let g = read_uncompressed_header(&mut rb, &fh);
         assert_eq!(g.allow_intrabc, allow_intrabc, "allow_intrabc");
-        assert_eq!(g.refresh_frame_context_disabled, fh.refresh_frame_context_disabled, "refresh ctx");
+        assert_eq!(
+            g.refresh_frame_context_disabled, fh.refresh_frame_context_disabled,
+            "refresh ctx"
+        );
         assert_eq!(g.quant.base_qindex, base_q, "quant base");
-        assert_eq!(g.delta_q.delta_q_present, fh.delta_q.delta_q_present, "delta_q present");
+        assert_eq!(
+            g.delta_q.delta_q_present, fh.delta_q.delta_q_present,
+            "delta_q present"
+        );
         // loopfilter/cdef are coded only when intrabc is off (they early-return otherwise).
         if !allow_intrabc {
-            assert_eq!(g.loopfilter.filter_level, fh.loopfilter.filter_level, "loopfilter level");
+            assert_eq!(
+                g.loopfilter.filter_level, fh.loopfilter.filter_level,
+                "loopfilter level"
+            );
             assert_eq!(g.cdef.cdef_damping, fh.cdef.cdef_damping, "cdef damping");
-            assert_eq!(g.cdef.cdef_strengths, fh.cdef.cdef_strengths, "cdef strengths");
+            assert_eq!(
+                g.cdef.cdef_strengths, fh.cdef.cdef_strengths,
+                "cdef strengths"
+            );
         }
         assert_eq!(g.tx_mode_select, fh.tx_mode_select, "tx_mode");
         assert_eq!(g.reduced_tx_set_used, fh.reduced_tx_set_used, "reduced_tx");
         // film grain is parsed only when present+shown; otherwise the field is untouched.
         if fg_present {
-            assert_eq!(g.film_grain.apply_grain, fh.film_grain.apply_grain, "film grain apply");
-            assert_eq!(g.film_grain.random_seed, if fh.film_grain.apply_grain { fh.film_grain.random_seed } else { 0 }, "film grain seed");
+            assert_eq!(
+                g.film_grain.apply_grain, fh.film_grain.apply_grain,
+                "film grain apply"
+            );
+            assert_eq!(
+                g.film_grain.random_seed,
+                if fh.film_grain.apply_grain {
+                    fh.film_grain.random_seed
+                } else {
+                    0
+                },
+                "film grain seed"
+            );
         }
         assert!(!rb.error, "no over-read (desync)");
     }
@@ -1570,12 +2388,15 @@ fn read_uncompressed_header_key_frame_roundtrips() {
 #[test]
 fn read_uncompressed_header_inter_frame_roundtrips() {
     use aom_entropy::header::{
-        read_uncompressed_header, write_frame_header_obu, CdefHeader, DeltaQParams, FilmGrainParams,
-        FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, FrameSizeWithRefs, InterRefSignaling,
-        LoopfilterHeader, QuantParamsHeader, RestorationHeader, SegmentationHeader, TileInfoHeader,
-        WarpedMotionParams,
+        read_uncompressed_header, write_frame_header_obu, CdefHeader, DeltaQParams,
+        FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, FrameSizeWithRefs,
+        InterRefSignaling, LoopfilterHeader, QuantParamsHeader, RestorationHeader,
+        SegmentationHeader, TileInfoHeader, WarpedMotionParams,
     };
-    let ident = WarpedMotionParams { wmtype: 0, wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16] };
+    let ident = WarpedMotionParams {
+        wmtype: 0,
+        wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16],
+    };
     let mut rng = Rng(0x1e_12e5_c0de_0230);
     for _ in 0..20_000 {
         let base_q = 1 + (rng.next() % 255) as i32;
@@ -1585,59 +2406,242 @@ fn read_uncompressed_header_inter_frame_roundtrips() {
         let might_warp = rng.next() & 1 == 1;
         let skip_allowed = rng.next() & 1 == 1;
         let mut prefix = FrameHeaderPrefix {
-            reduced_still_picture_hdr: false, show_existing_frame: false, existing_fb_idx_to_show: 0,
-            decoder_model_info_present_flag: false, equal_picture_interval: false, frame_presentation_time: 0,
-            frame_presentation_time_length: 1, frame_id_numbers_present_flag: false, frame_id_length: 0,
-            display_frame_id: 0, frame_type: 1, show_frame: true, showable_frame: true,
-            error_resilient_mode: false, disable_cdf_update: false, force_screen_content_tools: 2,
-            allow_screen_content_tools: false, force_integer_mv: 2, cur_frame_force_integer_mv: false,
-            superres_upscaled_width: 256, superres_upscaled_height: 256, max_frame_width: 256,
-            max_frame_height: 256, current_frame_id: 0, enable_order_hint: false, order_hint: 0,
-            order_hint_bits_minus_1: -1, primary_ref_frame: primary_ref, buffer_removal_time_present: false,
-            operating_points_cnt_minus_1: 0, op_decoder_model_param_present: [false; 32],
-            operating_point_idc: [0; 32], temporal_layer_id: 0, spatial_layer_id: 0,
-            buffer_removal_times: [0; 32], buffer_removal_time_length: 1, refresh_frame_flags: refresh,
+            reduced_still_picture_hdr: false,
+            show_existing_frame: false,
+            existing_fb_idx_to_show: 0,
+            decoder_model_info_present_flag: false,
+            equal_picture_interval: false,
+            frame_presentation_time: 0,
+            frame_presentation_time_length: 1,
+            frame_id_numbers_present_flag: false,
+            frame_id_length: 0,
+            display_frame_id: 0,
+            frame_type: 1,
+            show_frame: true,
+            showable_frame: true,
+            error_resilient_mode: false,
+            disable_cdf_update: false,
+            force_screen_content_tools: 2,
+            allow_screen_content_tools: false,
+            force_integer_mv: 2,
+            cur_frame_force_integer_mv: false,
+            superres_upscaled_width: 256,
+            superres_upscaled_height: 256,
+            max_frame_width: 256,
+            max_frame_height: 256,
+            current_frame_id: 0,
+            enable_order_hint: false,
+            order_hint: 0,
+            order_hint_bits_minus_1: -1,
+            primary_ref_frame: primary_ref,
+            buffer_removal_time_present: false,
+            operating_points_cnt_minus_1: 0,
+            op_decoder_model_param_present: [false; 32],
+            operating_point_idc: [0; 32],
+            temporal_layer_id: 0,
+            spatial_layer_id: 0,
+            buffer_removal_times: [0; 32],
+            buffer_removal_time_length: 1,
+            refresh_frame_flags: refresh,
             ref_frame_map_order_hint: [0; 8],
         };
         prefix.showable_frame = true; // frame_type != KEY
         let fh = FrameHeaderObu {
-            prefix, allow_screen_content_tools: false, superres_scaled: false, allow_intrabc: false,
+            prefix,
+            allow_screen_content_tools: false,
+            superres_scaled: false,
+            allow_intrabc: false,
             frame_size: FrameSizeHeader {
-                frame_size_override: false, num_bits_width: 16, num_bits_height: 16,
-                superres_upscaled_width: 256, superres_upscaled_height: 256, enable_superres: false,
-                scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0,
+                frame_size_override: false,
+                num_bits_width: 16,
+                num_bits_height: 16,
+                superres_upscaled_width: 256,
+                superres_upscaled_height: 256,
+                enable_superres: false,
+                scale_denominator: 8,
+                scaling_active: false,
+                render_width: 0,
+                render_height: 0,
             },
             inter_ref: InterRefSignaling {
-                enable_order_hint: false, frame_refs_short_signaling: false,
-                ref_map_idx: [(rng.next() % 8) as i32, (rng.next() % 8) as i32, (rng.next() % 8) as i32,
-                    (rng.next() % 8) as i32, (rng.next() % 8) as i32, (rng.next() % 8) as i32, (rng.next() % 8) as i32],
-                set_ref_frame_config: false, rtc_reference: [0; 7], rtc_ref_idx: [0; 7],
-                number_spatial_layers: 1, frame_id_numbers_present_flag: false, frame_id_length: 0,
-                current_frame_id: 0, ref_frame_id: [0; 8], delta_frame_id_length: 0,
+                enable_order_hint: false,
+                frame_refs_short_signaling: false,
+                ref_map_idx: [
+                    (rng.next() % 8) as i32,
+                    (rng.next() % 8) as i32,
+                    (rng.next() % 8) as i32,
+                    (rng.next() % 8) as i32,
+                    (rng.next() % 8) as i32,
+                    (rng.next() % 8) as i32,
+                    (rng.next() % 8) as i32,
+                ],
+                set_ref_frame_config: false,
+                rtc_reference: [0; 7],
+                rtc_ref_idx: [0; 7],
+                number_spatial_layers: 1,
+                frame_id_numbers_present_flag: false,
+                frame_id_length: 0,
+                current_frame_id: 0,
+                ref_frame_id: [0; 8],
+                delta_frame_id_length: 0,
             },
             frame_size_with_refs: FrameSizeWithRefs {
-                superres_upscaled_width: 256, superres_upscaled_height: 256, render_width: 256, render_height: 256,
-                ref_cfg_valid: [false; 7], ref_y_crop_width: [0; 7], ref_y_crop_height: [0; 7],
-                ref_render_width: [0; 7], ref_render_height: [0; 7], enable_superres: false, scale_denominator: 8,
-                frame_size: FrameSizeHeader { frame_size_override: true, num_bits_width: 16, num_bits_height: 16, superres_upscaled_width: 1, superres_upscaled_height: 1, enable_superres: false, scale_denominator: 8, scaling_active: false, render_width: 0, render_height: 0 },
+                superres_upscaled_width: 256,
+                superres_upscaled_height: 256,
+                render_width: 256,
+                render_height: 256,
+                ref_cfg_valid: [false; 7],
+                ref_y_crop_width: [0; 7],
+                ref_y_crop_height: [0; 7],
+                ref_render_width: [0; 7],
+                ref_render_height: [0; 7],
+                enable_superres: false,
+                scale_denominator: 8,
+                frame_size: FrameSizeHeader {
+                    frame_size_override: true,
+                    num_bits_width: 16,
+                    num_bits_height: 16,
+                    superres_upscaled_width: 1,
+                    superres_upscaled_height: 1,
+                    enable_superres: false,
+                    scale_denominator: 8,
+                    scaling_active: false,
+                    render_width: 0,
+                    render_height: 0,
+                },
             },
-            cur_frame_force_integer_mv: false, allow_high_precision_mv: rng.next() & 1 == 1,
-            interp_filter: (rng.next() % 5) as i32, switchable_motion_mode: rng.next() & 1 == 1,
-            might_allow_ref_frame_mvs: might_ref_mvs, allow_ref_frame_mvs: might_ref_mvs && rng.next() & 1 == 1,
+            cur_frame_force_integer_mv: false,
+            allow_high_precision_mv: rng.next() & 1 == 1,
+            interp_filter: (rng.next() % 5) as i32,
+            switchable_motion_mode: rng.next() & 1 == 1,
+            might_allow_ref_frame_mvs: might_ref_mvs,
+            allow_ref_frame_mvs: might_ref_mvs && rng.next() & 1 == 1,
             refresh_frame_context_disabled: rng.next() & 1 == 1,
-            tile_info: TileInfoHeader { mi_cols: 64, mi_rows: 64, mib_size_log2: 4, uniform_spacing: true, log2_cols: 0, min_log2_cols: 0, max_log2_cols: 0, log2_rows: 0, min_log2_rows: 0, max_log2_rows: 0, cols: 1, rows: 1, col_start_sb: [0; 65], row_start_sb: [0; 65], max_width_sb: 64, max_height_sb: 64 },
-            quant: QuantParamsHeader { base_qindex: base_q, y_dc_delta_q: 0, u_dc_delta_q: 0, u_ac_delta_q: 0, v_dc_delta_q: 0, v_ac_delta_q: 0, using_qmatrix: false, qmatrix_level_y: 0, qmatrix_level_u: 0, qmatrix_level_v: 0 },
-            num_planes: 3, separate_uv_delta_q: false,
-            segmentation: SegmentationHeader { enabled: false, has_primary_ref: primary_ref != 7, update_map: false, temporal_update: false, update_data: false, feature_mask: [0; 8], feature_data: [[0; 8]; 8] },
-            delta_q: DeltaQParams { base_qindex: base_q, delta_q_present: rng.next() & 1 == 1, delta_q_res: 1, allow_intrabc: false, delta_lf_present: false, delta_lf_res: 1, delta_lf_multi: false },
-            all_lossless: false, coded_lossless: false,
-            loopfilter: LoopfilterHeader { allow_intrabc: false, filter_level: [(rng.next() % 64) as i32, (rng.next() % 64) as i32], filter_level_u: 0, filter_level_v: 0, sharpness_level: 0, mode_ref_delta_enabled: true, mode_ref_delta_update: false, ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1], mode_deltas: [0, 0], last_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1], last_mode_deltas: [0, 0] },
-            cdef: CdefHeader { enable_cdef: true, allow_intrabc: false, cdef_damping: 3 + (rng.next() % 4) as i32, cdef_bits: 0, nb_cdef_strengths: 1, cdef_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0], cdef_uv_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0] },
-            restoration: RestorationHeader { enable_restoration: true, allow_intrabc: false, frame_restoration_type: [0; 3], sb_size_128: false, restoration_unit_size: [256; 3], subsampling_x: 1, subsampling_y: 1 },
-            tx_mode_select: rng.next() & 1 == 1, reference_mode_select: rng.next() & 1 == 1, skip_mode_allowed: skip_allowed, skip_mode_flag: skip_allowed && rng.next() & 1 == 1, might_allow_warped_motion: might_warp, allow_warped_motion: might_warp && rng.next() & 1 == 1, reduced_tx_set_used: rng.next() & 1 == 1,
-            global_motion: [ident; 7], ref_global_motion: [ident; 7],
+            tile_info: TileInfoHeader {
+                mi_cols: 64,
+                mi_rows: 64,
+                mib_size_log2: 4,
+                uniform_spacing: true,
+                log2_cols: 0,
+                min_log2_cols: 0,
+                max_log2_cols: 0,
+                log2_rows: 0,
+                min_log2_rows: 0,
+                max_log2_rows: 0,
+                cols: 1,
+                rows: 1,
+                col_start_sb: [0; 65],
+                row_start_sb: [0; 65],
+                max_width_sb: 64,
+                max_height_sb: 64,
+            },
+            quant: QuantParamsHeader {
+                base_qindex: base_q,
+                y_dc_delta_q: 0,
+                u_dc_delta_q: 0,
+                u_ac_delta_q: 0,
+                v_dc_delta_q: 0,
+                v_ac_delta_q: 0,
+                using_qmatrix: false,
+                qmatrix_level_y: 0,
+                qmatrix_level_u: 0,
+                qmatrix_level_v: 0,
+            },
+            num_planes: 3,
+            separate_uv_delta_q: false,
+            segmentation: SegmentationHeader {
+                enabled: false,
+                has_primary_ref: primary_ref != 7,
+                update_map: false,
+                temporal_update: false,
+                update_data: false,
+                feature_mask: [0; 8],
+                feature_data: [[0; 8]; 8],
+            },
+            delta_q: DeltaQParams {
+                base_qindex: base_q,
+                delta_q_present: rng.next() & 1 == 1,
+                delta_q_res: 1,
+                allow_intrabc: false,
+                delta_lf_present: false,
+                delta_lf_res: 1,
+                delta_lf_multi: false,
+            },
+            all_lossless: false,
+            coded_lossless: false,
+            loopfilter: LoopfilterHeader {
+                allow_intrabc: false,
+                filter_level: [(rng.next() % 64) as i32, (rng.next() % 64) as i32],
+                filter_level_u: 0,
+                filter_level_v: 0,
+                sharpness_level: 0,
+                mode_ref_delta_enabled: true,
+                mode_ref_delta_update: false,
+                ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
+                mode_deltas: [0, 0],
+                last_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
+                last_mode_deltas: [0, 0],
+            },
+            cdef: CdefHeader {
+                enable_cdef: true,
+                allow_intrabc: false,
+                cdef_damping: 3 + (rng.next() % 4) as i32,
+                cdef_bits: 0,
+                nb_cdef_strengths: 1,
+                cdef_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0],
+                cdef_uv_strengths: [(rng.next() % 64) as i32, 0, 0, 0, 0, 0, 0, 0],
+            },
+            restoration: RestorationHeader {
+                enable_restoration: true,
+                allow_intrabc: false,
+                frame_restoration_type: [0; 3],
+                sb_size_128: false,
+                restoration_unit_size: [256; 3],
+                subsampling_x: 1,
+                subsampling_y: 1,
+            },
+            tx_mode_select: rng.next() & 1 == 1,
+            reference_mode_select: rng.next() & 1 == 1,
+            skip_mode_allowed: skip_allowed,
+            skip_mode_flag: skip_allowed && rng.next() & 1 == 1,
+            might_allow_warped_motion: might_warp,
+            allow_warped_motion: might_warp && rng.next() & 1 == 1,
+            reduced_tx_set_used: rng.next() & 1 == 1,
+            global_motion: [ident; 7],
+            ref_global_motion: [ident; 7],
             film_grain_params_present: false,
-            film_grain: FilmGrainParams { apply_grain: false, random_seed: 0, is_inter_frame: true, update_parameters: false, ref_idx: 0, num_y_points: 0, scaling_points_y: [[0; 2]; 14], monochrome: false, chroma_scaling_from_luma: false, subsampling_x: 1, subsampling_y: 1, num_cb_points: 0, scaling_points_cb: [[0; 2]; 10], num_cr_points: 0, scaling_points_cr: [[0; 2]; 10], scaling_shift: 8, ar_coeff_lag: 0, ar_coeffs_y: [0; 24], ar_coeffs_cb: [0; 25], ar_coeffs_cr: [0; 25], ar_coeff_shift: 6, grain_scale_shift: 0, cb_mult: 0, cb_luma_mult: 0, cb_offset: 0, cr_mult: 0, cr_luma_mult: 0, cr_offset: 0, overlap_flag: false, clip_to_restricted_range: false },
+            film_grain: FilmGrainParams {
+                apply_grain: false,
+                random_seed: 0,
+                is_inter_frame: true,
+                update_parameters: false,
+                ref_idx: 0,
+                num_y_points: 0,
+                scaling_points_y: [[0; 2]; 14],
+                monochrome: false,
+                chroma_scaling_from_luma: false,
+                subsampling_x: 1,
+                subsampling_y: 1,
+                num_cb_points: 0,
+                scaling_points_cb: [[0; 2]; 10],
+                num_cr_points: 0,
+                scaling_points_cr: [[0; 2]; 10],
+                scaling_shift: 8,
+                ar_coeff_lag: 0,
+                ar_coeffs_y: [0; 24],
+                ar_coeffs_cb: [0; 25],
+                ar_coeffs_cr: [0; 25],
+                ar_coeff_shift: 6,
+                grain_scale_shift: 0,
+                cb_mult: 0,
+                cb_luma_mult: 0,
+                cb_offset: 0,
+                cr_mult: 0,
+                cr_luma_mult: 0,
+                cr_offset: 0,
+                overlap_flag: false,
+                clip_to_restricted_range: false,
+            },
             large_scale: false,
         };
         let mut wb = WriteBitBuffer::new();
@@ -1648,14 +2652,29 @@ fn read_uncompressed_header_inter_frame_roundtrips() {
         assert_eq!(g.prefix.frame_type, 1, "inter frame_type");
         assert_eq!(g.prefix.refresh_frame_flags, refresh, "refresh flags");
         assert_eq!(g.prefix.primary_ref_frame, primary_ref, "primary ref");
-        assert_eq!(g.inter_ref.ref_map_idx, fh.inter_ref.ref_map_idx, "remapped idx");
-        assert_eq!(g.allow_high_precision_mv, fh.allow_high_precision_mv, "allow_hp");
+        assert_eq!(
+            g.inter_ref.ref_map_idx, fh.inter_ref.ref_map_idx,
+            "remapped idx"
+        );
+        assert_eq!(
+            g.allow_high_precision_mv, fh.allow_high_precision_mv,
+            "allow_hp"
+        );
         assert_eq!(g.interp_filter, fh.interp_filter, "interp filter");
-        assert_eq!(g.switchable_motion_mode, fh.switchable_motion_mode, "switchable motion");
+        assert_eq!(
+            g.switchable_motion_mode, fh.switchable_motion_mode,
+            "switchable motion"
+        );
         if might_ref_mvs {
-            assert_eq!(g.allow_ref_frame_mvs, fh.allow_ref_frame_mvs, "ref frame mvs");
+            assert_eq!(
+                g.allow_ref_frame_mvs, fh.allow_ref_frame_mvs,
+                "ref frame mvs"
+            );
         }
-        assert_eq!(g.reference_mode_select, fh.reference_mode_select, "reference mode select");
+        assert_eq!(
+            g.reference_mode_select, fh.reference_mode_select,
+            "reference mode select"
+        );
         assert_eq!(g.reduced_tx_set_used, fh.reduced_tx_set_used, "reduced tx");
         assert_eq!(g.global_motion[0].wmtype, 0, "gm identity");
         assert!(!rb.error, "no over-read (inter desync)");

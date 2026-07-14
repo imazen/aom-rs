@@ -32,8 +32,12 @@ fn wb_write_sequence_identical() {
         let mut wb = WriteBitBuffer::new();
         for _ in 0..nops {
             let k = rng.range(0, 4) as i32; // 3 = add_trailing_bits
-            // signed / inv-signed literals use bits <= 31; unsigned <= 32.
-            let b = if k == 1 { rng.range(1, 33) } else { rng.range(1, 32) };
+                                            // signed / inv-signed literals use bits <= 31; unsigned <= 32.
+            let b = if k == 1 {
+                rng.range(1, 33)
+            } else {
+                rng.range(1, 32)
+            };
             // data must fit the field so both sides interpret it identically.
             let mask: u32 = if b >= 32 { u32::MAX } else { (1u32 << b) - 1 };
             let d = (rng.next() as u32) & mask;

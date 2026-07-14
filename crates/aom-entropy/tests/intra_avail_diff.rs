@@ -8,12 +8,18 @@
 use aom_entropy::partition::intra_avail;
 use aom_sys_ref as c;
 
-const MI_SIZE_WIDE: [i32; 22] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_SIZE_HIGH: [i32; 22] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
-const BLOCK_SIZE_WIDE: [i32; 22] =
-    [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLOCK_SIZE_HIGH: [i32; 22] =
-    [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const MI_SIZE_WIDE: [i32; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const MI_SIZE_HIGH: [i32; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
+const BLOCK_SIZE_WIDE: [i32; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BLOCK_SIZE_HIGH: [i32; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 fn fits(sb: usize, bsize: usize) -> bool {
     BLOCK_SIZE_WIDE[bsize] <= BLOCK_SIZE_WIDE[sb] && BLOCK_SIZE_HIGH[bsize] <= BLOCK_SIZE_HIGH[sb]
@@ -47,21 +53,54 @@ fn intra_avail_matches_c() {
                                 for &col_off in &[0i32, cmax / 2] {
                                     for &mode in &modes {
                                         let is_dr = (1..=8).contains(&mode);
-                                        let deltas: &[i32] =
-                                            if is_dr { &[-9, 0, 9] } else { &[0] };
+                                        let deltas: &[i32] = if is_dr { &[-9, 0, 9] } else { &[0] };
                                         for &ad in deltas {
                                             for &ufi in &[false, true] {
                                                 let g = intra_avail(
-                                                    sb, bsize, mi_row, mi_col, up, left,
-                                                    tile_col_end, tile_row_end, 0, tx_size, ss_x,
-                                                    ss_y, row_off, col_off, wpx, hpx, mi_cols,
-                                                    mi_rows, mode, ad, ufi,
+                                                    sb,
+                                                    bsize,
+                                                    mi_row,
+                                                    mi_col,
+                                                    up,
+                                                    left,
+                                                    tile_col_end,
+                                                    tile_row_end,
+                                                    0,
+                                                    tx_size,
+                                                    ss_x,
+                                                    ss_y,
+                                                    row_off,
+                                                    col_off,
+                                                    wpx,
+                                                    hpx,
+                                                    mi_cols,
+                                                    mi_rows,
+                                                    mode,
+                                                    ad,
+                                                    ufi,
                                                 );
                                                 let w = c::ref_intra_avail(
-                                                    sb, bsize, mi_row, mi_col, up, left,
-                                                    tile_col_end, tile_row_end, 0, tx_size, ss_x,
-                                                    ss_y, row_off, col_off, wpx, hpx, mi_cols,
-                                                    mi_rows, mode, ad, ufi,
+                                                    sb,
+                                                    bsize,
+                                                    mi_row,
+                                                    mi_col,
+                                                    up,
+                                                    left,
+                                                    tile_col_end,
+                                                    tile_row_end,
+                                                    0,
+                                                    tx_size,
+                                                    ss_x,
+                                                    ss_y,
+                                                    row_off,
+                                                    col_off,
+                                                    wpx,
+                                                    hpx,
+                                                    mi_cols,
+                                                    mi_rows,
+                                                    mode,
+                                                    ad,
+                                                    ufi,
                                                 );
                                                 assert_eq!(g, w, "intra_avail sb={sb} bsize={bsize} mi=({mi_row},{mi_col}) ss=({ss_x},{ss_y}) tx={tx_size} off=({row_off},{col_off}) mode={mode} ad={ad} ufi={ufi}");
                                                 checks += 1;

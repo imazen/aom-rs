@@ -15,7 +15,9 @@ pub fn write_obu_header(
     let obu_extension_flag = has_nonzero_operating_point_idc && is_layer_specific_obu;
     let obu_has_size_field = 1u32;
     let mut out = Vec::with_capacity(2);
-    out.push(((obu_type << 3) | ((obu_extension_flag as u32) << 2) | (obu_has_size_field << 1)) as u8);
+    out.push(
+        ((obu_type << 3) | ((obu_extension_flag as u32) << 2) | (obu_has_size_field << 1)) as u8,
+    );
     if obu_extension_flag {
         out.push(obu_extension);
     }
@@ -52,5 +54,11 @@ pub fn read_obu_header(data: &[u8]) -> Option<ObuHeader> {
     } else {
         (0, 1)
     };
-    Some(ObuHeader { obu_type, obu_extension_flag, obu_has_size_field, obu_extension, header_len })
+    Some(ObuHeader {
+        obu_type,
+        obu_extension_flag,
+        obu_has_size_field,
+        obu_extension,
+        header_len,
+    })
 }

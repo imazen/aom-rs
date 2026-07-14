@@ -79,8 +79,8 @@ pub struct LoopfilterHeader {
     pub sharpness_level: i32,
     pub mode_ref_delta_enabled: bool,
     pub mode_ref_delta_update: bool,
-    pub ref_deltas: [i8; 8],       // REF_FRAMES
-    pub mode_deltas: [i8; 2],      // MAX_MODE_LF_DELTAS
+    pub ref_deltas: [i8; 8],  // REF_FRAMES
+    pub mode_deltas: [i8; 2], // MAX_MODE_LF_DELTAS
     pub last_ref_deltas: [i8; 8],
     pub last_mode_deltas: [i8; 2],
 }
@@ -103,8 +103,16 @@ pub fn encode_loopfilter(wb: &mut WriteBitBuffer, lf: &LoopfilterHeader, num_pla
     wb.write_bit(lf.mode_ref_delta_enabled as u32);
 
     let meaningful = lf.mode_ref_delta_update
-        && (lf.ref_deltas.iter().zip(&lf.last_ref_deltas).any(|(a, b)| a != b)
-            || lf.mode_deltas.iter().zip(&lf.last_mode_deltas).any(|(a, b)| a != b));
+        && (lf
+            .ref_deltas
+            .iter()
+            .zip(&lf.last_ref_deltas)
+            .any(|(a, b)| a != b)
+            || lf
+                .mode_deltas
+                .iter()
+                .zip(&lf.last_mode_deltas)
+                .any(|(a, b)| a != b));
     wb.write_bit(meaningful as u32);
     if !meaningful {
         return;
@@ -162,12 +170,15 @@ const SEG_LVL_MAX: usize = 8;
 /// then 7 (REF_FRAME), 0 (SKIP), 0 (GLOBALMV).
 const SEG_FEATURE_DATA_MAX: [i32; SEG_LVL_MAX] = [255, 63, 63, 63, 63, 7, 0, 0];
 /// `av1_is_segfeature_signed` table: the ALT_Q + 4 ALT_LF features are signed.
-const SEG_FEATURE_SIGNED: [bool; SEG_LVL_MAX] =
-    [true, true, true, true, true, false, false, false];
+const SEG_FEATURE_SIGNED: [bool; SEG_LVL_MAX] = [true, true, true, true, true, false, false, false];
 
 /// `get_unsigned_bits` (`common.h`): `num > 0 ? get_msb(num) + 1 : 0`.
 fn get_unsigned_bits(num_values: u32) -> u32 {
-    if num_values == 0 { 0 } else { 32 - num_values.leading_zeros() }
+    if num_values == 0 {
+        0
+    } else {
+        32 - num_values.leading_zeros()
+    }
 }
 
 /// The segmentation frame-header state (`cm->seg` + `primary_ref_frame`).
@@ -240,7 +251,11 @@ pub fn write_frame_interp_filter(wb: &mut WriteBitBuffer, filter: i32) {
 
 /// `write_superres_scale`: nothing when superres is disabled; otherwise a scale
 /// flag and (when scaling) the denominator offset at `SUPERRES_SCALE_BITS`=3.
-pub fn write_superres_scale(wb: &mut WriteBitBuffer, enable_superres: bool, scale_denominator: i32) {
+pub fn write_superres_scale(
+    wb: &mut WriteBitBuffer,
+    enable_superres: bool,
+    scale_denominator: i32,
+) {
     if !enable_superres {
         return;
     }
@@ -248,13 +263,21 @@ pub fn write_superres_scale(wb: &mut WriteBitBuffer, enable_superres: bool, scal
         wb.write_bit(0);
     } else {
         wb.write_bit(1);
-        wb.write_literal(scale_denominator - SUPERRES_SCALE_DENOMINATOR_MIN, SUPERRES_SCALE_BITS);
+        wb.write_literal(
+            scale_denominator - SUPERRES_SCALE_DENOMINATOR_MIN,
+            SUPERRES_SCALE_BITS,
+        );
     }
 }
 
 /// `write_render_size`: a scaling-active flag, and (when active) render width/height
 /// minus one at 16 bits each.
-pub fn write_render_size(wb: &mut WriteBitBuffer, scaling_active: bool, render_width: i32, render_height: i32) {
+pub fn write_render_size(
+    wb: &mut WriteBitBuffer,
+    scaling_active: bool,
+    render_width: i32,
+    render_height: i32,
+) {
     wb.write_bit(scaling_active as u32);
     if scaling_active {
         wb.write_literal(render_width - 1, 16);
@@ -884,7 +907,8 @@ pub fn write_color_config(wb: &mut WriteBitBuffer, c: &ColorConfigParams) {
         wb.write_bit(c.color_range as u32);
         return;
     }
-    let is_srgb = c.color_primaries == 1 && c.transfer_characteristics == 13 && c.matrix_coefficients == 0;
+    let is_srgb =
+        c.color_primaries == 1 && c.transfer_characteristics == 13 && c.matrix_coefficients == 0;
     if !is_srgb {
         wb.write_bit(c.color_range as u32);
         if c.profile == 2 && c.bit_depth == 12 {
@@ -1292,7 +1316,11 @@ pub fn write_inter_ref_signaling(wb: &mut WriteBitBuffer, s: &InterRefSignaling)
                 && s.number_spatial_layers == 1
                 && !s.enable_order_hint
             {
-                let map_idx = if s.rtc_reference[r] != 0 { s.ref_map_idx[r] } else { first_ref_map_idx };
+                let map_idx = if s.rtc_reference[r] != 0 {
+                    s.ref_map_idx[r]
+                } else {
+                    first_ref_map_idx
+                };
                 wb.write_literal(map_idx, 3);
             } else {
                 wb.write_literal(s.ref_map_idx[r], 3);
@@ -1472,7 +1500,12 @@ pub fn write_frame_header_obu(wb: &mut WriteBitBuffer, p: &FrameHeaderObu) {
         p.reduced_tx_set_used,
     );
     if !intra_only {
-        write_global_motion(wb, &p.global_motion, &p.ref_global_motion, p.allow_high_precision_mv);
+        write_global_motion(
+            wb,
+            &p.global_motion,
+            &p.ref_global_motion,
+            p.allow_high_precision_mv,
+        );
     }
     if p.film_grain_params_present && (p.prefix.show_frame || p.prefix.showable_frame) {
         write_film_grain_params(wb, &p.film_grain);
@@ -1486,7 +1519,13 @@ pub fn write_frame_header_obu(wb: &mut WriteBitBuffer, p: &FrameHeaderObu) {
 /// when there is more than one tile (`tiles_log2 > 0`), a `tile_start_and_end_present`
 /// flag and, when set, the `tiles_log2`-bit start/end tile indices. Nothing for a single
 /// tile.
-pub fn write_tile_group_header(wb: &mut WriteBitBuffer, start_tile: i32, end_tile: i32, tiles_log2: i32, present_flag: bool) {
+pub fn write_tile_group_header(
+    wb: &mut WriteBitBuffer,
+    start_tile: i32,
+    end_tile: i32,
+    tiles_log2: i32,
+    present_flag: bool,
+) {
     if tiles_log2 == 0 {
         return;
     }
@@ -1529,7 +1568,11 @@ pub fn read_tx_mode(rb: &mut ReadBitBuffer, coded_lossless: bool) -> bool {
 /// `read_delta_q_params` — inverse of [`write_delta_q_params`]: the delta-q / delta-lf
 /// signalling (present flags + power-of-two resolutions + lf-multi), gated on
 /// `base_qindex > 0` and `allow_intrabc` exactly as the writer.
-pub fn read_delta_q_params(rb: &mut ReadBitBuffer, base_qindex: i32, allow_intrabc: bool) -> DeltaQParams {
+pub fn read_delta_q_params(
+    rb: &mut ReadBitBuffer,
+    base_qindex: i32,
+    allow_intrabc: bool,
+) -> DeltaQParams {
     let mut d = DeltaQParams {
         base_qindex,
         delta_q_present: false,
@@ -1628,7 +1671,11 @@ pub fn read_quantization(
     if using_qmatrix {
         qy = rb.read_literal(4);
         qu = rb.read_literal(4);
-        qv = if separate_uv_delta_q { rb.read_literal(4) } else { qu };
+        qv = if separate_uv_delta_q {
+            rb.read_literal(4)
+        } else {
+            qu
+        };
     }
     QuantParamsHeader {
         base_qindex,
@@ -1795,7 +1842,10 @@ pub fn read_frame_size(
     inferred_height: i32,
 ) -> FrameSizeHeader {
     let (w, h) = if frame_size_override {
-        (rb.read_literal(num_bits_width) + 1, rb.read_literal(num_bits_height) + 1)
+        (
+            rb.read_literal(num_bits_width) + 1,
+            rb.read_literal(num_bits_height) + 1,
+        )
     } else {
         (inferred_width, inferred_height)
     };
@@ -1835,7 +1885,11 @@ fn read_bitdepth(rb: &mut ReadBitBuffer, profile: i32) -> i32 {
 /// `profile` comes from the sequence-header parse.
 pub fn read_color_config(rb: &mut ReadBitBuffer, profile: i32) -> ColorConfigParams {
     let bit_depth = read_bitdepth(rb, profile);
-    let monochrome = if profile != 1 { rb.read_bit() != 0 } else { false };
+    let monochrome = if profile != 1 {
+        rb.read_bit() != 0
+    } else {
+        false
+    };
     let (cp, tc, mc) = if rb.read_bit() != 0 {
         (rb.read_literal(8), rb.read_literal(8), rb.read_literal(8))
     } else {
@@ -1873,7 +1927,11 @@ pub fn read_color_config(rb: &mut ReadBitBuffer, profile: i32) -> ColorConfigPar
             c.subsampling_y = 0;
         } else if bit_depth == 12 {
             c.subsampling_x = rb.read_bit() as i32;
-            c.subsampling_y = if c.subsampling_x != 0 { rb.read_bit() as i32 } else { 0 };
+            c.subsampling_y = if c.subsampling_x != 0 {
+                rb.read_bit() as i32
+            } else {
+                0
+            };
         } else {
             c.subsampling_x = 1;
             c.subsampling_y = 0;
@@ -1896,11 +1954,28 @@ pub fn read_frame_header_trailing_flags(
     skip_mode_allowed: bool,
     might_allow_warped_motion: bool,
 ) -> (bool, bool, bool, bool) {
-    let reference_mode_select = if !intra_only { rb.read_bit() != 0 } else { false };
-    let skip_mode_flag = if skip_mode_allowed { rb.read_bit() != 0 } else { false };
-    let allow_warped_motion = if might_allow_warped_motion { rb.read_bit() != 0 } else { false };
+    let reference_mode_select = if !intra_only {
+        rb.read_bit() != 0
+    } else {
+        false
+    };
+    let skip_mode_flag = if skip_mode_allowed {
+        rb.read_bit() != 0
+    } else {
+        false
+    };
+    let allow_warped_motion = if might_allow_warped_motion {
+        rb.read_bit() != 0
+    } else {
+        false
+    };
     let reduced_tx_set_used = rb.read_bit() != 0;
-    (reference_mode_select, skip_mode_flag, allow_warped_motion, reduced_tx_set_used)
+    (
+        reference_mode_select,
+        skip_mode_flag,
+        allow_warped_motion,
+        reduced_tx_set_used,
+    )
 }
 
 /// `read_restoration_mode` — inverse of [`encode_restoration_mode`]: the per-plane
@@ -1918,7 +1993,12 @@ pub fn read_restoration_mode(
     num_planes: usize,
 ) -> RestorationHeader {
     // lr_type -> RESTORE_*; matches remap_lr_type = {NONE, SWITCHABLE, WIENER, SGRPROJ}.
-    const REMAP: [u8; 4] = [RESTORE_NONE, RESTORE_SWITCHABLE, RESTORE_WIENER, RESTORE_SGRPROJ];
+    const REMAP: [u8; 4] = [
+        RESTORE_NONE,
+        RESTORE_SWITCHABLE,
+        RESTORE_WIENER,
+        RESTORE_SGRPROJ,
+    ];
     let mut r = RestorationHeader {
         enable_restoration,
         allow_intrabc,
@@ -1990,7 +2070,10 @@ pub fn read_global_motion_params(
         AFFINE
     };
     // identity default (wmmat[2]=wmmat[5]=1<<WARPEDMODEL_PREC_BITS=1<<16).
-    let mut wm = WarpedMotionParams { wmtype: ty, wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16] };
+    let mut wm = WarpedMotionParams {
+        wmtype: ty,
+        wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16],
+    };
     if ty == IDENTITY {
         return wm;
     }
@@ -1999,30 +2082,41 @@ pub fn read_global_motion_params(
     let one_alpha = 1 << GM_ALPHA_PREC_BITS;
     if ty >= ROTZOOM {
         let r2 = (ref_params.wmmat[2] >> GM_ALPHA_PREC_DIFF) - one_alpha;
-        wm.wmmat[2] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r2 as i16) as i32 + one_alpha) << GM_ALPHA_PREC_DIFF;
+        wm.wmmat[2] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r2 as i16) as i32
+            + one_alpha)
+            << GM_ALPHA_PREC_DIFF;
         let r3 = ref_params.wmmat[3] >> GM_ALPHA_PREC_DIFF;
-        wm.wmmat[3] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r3 as i16) as i32) << GM_ALPHA_PREC_DIFF;
+        wm.wmmat[3] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r3 as i16) as i32)
+            << GM_ALPHA_PREC_DIFF;
     }
     if ty >= AFFINE {
         let r4 = ref_params.wmmat[4] >> GM_ALPHA_PREC_DIFF;
-        wm.wmmat[4] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r4 as i16) as i32) << GM_ALPHA_PREC_DIFF;
+        wm.wmmat[4] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r4 as i16) as i32)
+            << GM_ALPHA_PREC_DIFF;
         let r5 = (ref_params.wmmat[5] >> GM_ALPHA_PREC_DIFF) - one_alpha;
-        wm.wmmat[5] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r5 as i16) as i32 + one_alpha) << GM_ALPHA_PREC_DIFF;
+        wm.wmmat[5] = (rb.read_signed_primitive_refsubexpfin(alpha_n, k, r5 as i16) as i32
+            + one_alpha)
+            << GM_ALPHA_PREC_DIFF;
     } else if ty == ROTZOOM {
         wm.wmmat[4] = -wm.wmmat[3];
         wm.wmmat[5] = wm.wmmat[2];
     }
     if ty >= TRANSLATION {
         let (trans_bits, trans_prec_diff) = if ty == TRANSLATION {
-            (GM_ABS_TRANS_ONLY_BITS - !allow_hp as u32, GM_TRANS_ONLY_PREC_DIFF + !allow_hp as u32)
+            (
+                GM_ABS_TRANS_ONLY_BITS - !allow_hp as u32,
+                GM_TRANS_ONLY_PREC_DIFF + !allow_hp as u32,
+            )
         } else {
             (GM_ABS_TRANS_BITS, GM_TRANS_PREC_DIFF)
         };
         let trans_n = ((1i32 << trans_bits) + 1) as u16;
         let r0 = ref_params.wmmat[0] >> trans_prec_diff;
-        wm.wmmat[0] = (rb.read_signed_primitive_refsubexpfin(trans_n, k, r0 as i16) as i32) << trans_prec_diff;
+        wm.wmmat[0] = (rb.read_signed_primitive_refsubexpfin(trans_n, k, r0 as i16) as i32)
+            << trans_prec_diff;
         let r1 = ref_params.wmmat[1] >> trans_prec_diff;
-        wm.wmmat[1] = (rb.read_signed_primitive_refsubexpfin(trans_n, k, r1 as i16) as i32) << trans_prec_diff;
+        wm.wmmat[1] = (rb.read_signed_primitive_refsubexpfin(trans_n, k, r1 as i16) as i32)
+            << trans_prec_diff;
     }
     wm
 }
@@ -2044,8 +2138,17 @@ pub fn read_timing_info_header(rb: &mut ReadBitBuffer) -> TimingInfoHeader {
     let num_units_in_display_tick = rb.read_unsigned_literal(32);
     let time_scale = rb.read_unsigned_literal(32);
     let equal_picture_interval = rb.read_bit() != 0;
-    let num_ticks_per_picture = if equal_picture_interval { rb.read_uvlc() + 1 } else { 1 };
-    TimingInfoHeader { num_units_in_display_tick, time_scale, equal_picture_interval, num_ticks_per_picture }
+    let num_ticks_per_picture = if equal_picture_interval {
+        rb.read_uvlc() + 1
+    } else {
+        1
+    };
+    TimingInfoHeader {
+        num_units_in_display_tick,
+        time_scale,
+        equal_picture_interval,
+        num_ticks_per_picture,
+    }
 }
 
 /// `read_decoder_model_info` — inverse of [`write_decoder_model_info`]: the buffer-delay
@@ -2192,8 +2295,16 @@ pub fn read_tile_info(
     max_height_sb: i32,
 ) -> (TileInfoHeader, i32, i32) {
     let t = read_tile_info_max_tile(
-        rb, mi_cols, mi_rows, mib_size_log2, min_log2_cols, max_log2_cols, min_log2_rows,
-        max_log2_rows, max_width_sb, max_height_sb,
+        rb,
+        mi_cols,
+        mi_rows,
+        mib_size_log2,
+        min_log2_cols,
+        max_log2_cols,
+        min_log2_rows,
+        max_log2_rows,
+        max_width_sb,
+        max_height_sb,
     );
     let (mut ctx_update_id, mut tile_size_bytes) = (0, 1);
     if t.rows * t.cols > 1 {
@@ -2240,13 +2351,28 @@ pub fn read_frame_size_with_refs(
             found,
         )
     } else {
-        let fs = read_frame_size(rb, true, num_bits_width, num_bits_height, enable_superres, 0, 0);
+        let fs = read_frame_size(
+            rb,
+            true,
+            num_bits_width,
+            num_bits_height,
+            enable_superres,
+            0,
+            0,
+        );
         let (rw, rh) = if fs.scaling_active {
             (fs.render_width, fs.render_height)
         } else {
             (fs.superres_upscaled_width, fs.superres_upscaled_height)
         };
-        (fs.superres_upscaled_width, fs.superres_upscaled_height, rw, rh, fs.scale_denominator, -1)
+        (
+            fs.superres_upscaled_width,
+            fs.superres_upscaled_height,
+            rw,
+            rh,
+            fs.scale_denominator,
+            -1,
+        )
     }
 }
 
@@ -2279,7 +2405,13 @@ pub fn read_inter_ref_signaling(
             delta_frame_id_minus_1[r] = rb.read_literal(delta_frame_id_length);
         }
     }
-    (frame_refs_short_signaling, lst_ref, gld_ref, remapped_ref_idx, delta_frame_id_minus_1)
+    (
+        frame_refs_short_signaling,
+        lst_ref,
+        gld_ref,
+        remapped_ref_idx,
+        delta_frame_id_minus_1,
+    )
 }
 
 /// `read_refresh_frame_context` — inverse of [`write_refresh_frame_context`]: the
@@ -2347,7 +2479,11 @@ pub fn read_film_grain_params(
         return p;
     }
     p.random_seed = rb.read_literal(16);
-    p.update_parameters = if is_inter_frame { rb.read_bit() != 0 } else { true };
+    p.update_parameters = if is_inter_frame {
+        rb.read_bit() != 0
+    } else {
+        true
+    };
     if !p.update_parameters {
         p.ref_idx = rb.read_literal(3);
         return p;
@@ -2414,7 +2550,10 @@ pub fn read_film_grain_params(
 /// is a "choose" bit then, if not chosen, the explicit value; a reduced-still-picture
 /// header omits the compound/order-hint/force block (inferred defaults). `reduced_still_
 /// picture_hdr` comes from the sequence-header OBU parse.
-pub fn read_sequence_header(rb: &mut ReadBitBuffer, reduced_still_picture_hdr: bool) -> SequenceHeaderParams {
+pub fn read_sequence_header(
+    rb: &mut ReadBitBuffer,
+    reduced_still_picture_hdr: bool,
+) -> SequenceHeaderParams {
     let num_bits_width = rb.read_literal(4) as u32 + 1;
     let num_bits_height = rb.read_literal(4) as u32 + 1;
     let max_frame_width = rb.read_literal(num_bits_width) + 1;
@@ -2469,9 +2608,17 @@ pub fn read_sequence_header(rb: &mut ReadBitBuffer, reduced_still_picture_hdr: b
             s.enable_dist_wtd_comp = rb.read_bit() != 0;
             s.enable_ref_frame_mvs = rb.read_bit() != 0;
         }
-        s.force_screen_content_tools = if rb.read_bit() != 0 { 2 } else { rb.read_literal(1) };
+        s.force_screen_content_tools = if rb.read_bit() != 0 {
+            2
+        } else {
+            rb.read_literal(1)
+        };
         if s.force_screen_content_tools > 0 {
-            s.force_integer_mv = if rb.read_bit() != 0 { 2 } else { rb.read_literal(1) };
+            s.force_integer_mv = if rb.read_bit() != 0 {
+                2
+            } else {
+                rb.read_literal(1)
+            };
         }
         if s.enable_order_hint {
             s.order_hint_bits_minus_1 = rb.read_literal(3);
@@ -2517,7 +2664,8 @@ pub fn read_frame_header_prefix(
         if p.show_existing_frame {
             p.existing_fb_idx_to_show = rb.read_literal(3);
             if cfg.decoder_model_info_present_flag && !cfg.equal_picture_interval {
-                p.frame_presentation_time = rb.read_unsigned_literal(cfg.frame_presentation_time_length);
+                p.frame_presentation_time =
+                    rb.read_unsigned_literal(cfg.frame_presentation_time_length);
             }
             if cfg.frame_id_numbers_present_flag {
                 p.display_frame_id = rb.read_literal(cfg.frame_id_length);
@@ -2528,7 +2676,8 @@ pub fn read_frame_header_prefix(
         p.show_frame = rb.read_bit() != 0;
         if p.show_frame {
             if cfg.decoder_model_info_present_flag && !cfg.equal_picture_interval {
-                p.frame_presentation_time = rb.read_unsigned_literal(cfg.frame_presentation_time_length);
+                p.frame_presentation_time =
+                    rb.read_unsigned_literal(cfg.frame_presentation_time_length);
             }
             p.showable_frame = p.frame_type != 0;
         } else {
@@ -2594,7 +2743,10 @@ pub fn read_frame_header_prefix(
     if (p.frame_type == 0 && !p.show_frame) || p.frame_type == 1 || p.frame_type == 2 {
         p.refresh_frame_flags = rb.read_literal(8);
     }
-    if (!intra_only || p.refresh_frame_flags != 0xff) && p.error_resilient_mode && cfg.enable_order_hint {
+    if (!intra_only || p.refresh_frame_flags != 0xff)
+        && p.error_resilient_mode
+        && cfg.enable_order_hint
+    {
         for oh in p.ref_frame_map_order_hint.iter_mut() {
             *oh = rb.read_literal((cfg.order_hint_bits_minus_1 + 1) as u32);
         }
@@ -2735,15 +2887,21 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
 
     if intra_only {
         p.frame_size = read_frame_size(
-            rb, override_flag != 0, fs_in.num_bits_width, fs_in.num_bits_height,
-            fs_in.enable_superres, fs_in.superres_upscaled_width, fs_in.superres_upscaled_height,
+            rb,
+            override_flag != 0,
+            fs_in.num_bits_width,
+            fs_in.num_bits_height,
+            fs_in.enable_superres,
+            fs_in.superres_upscaled_width,
+            fs_in.superres_upscaled_height,
         );
-        p.allow_intrabc = p.prefix.allow_screen_content_tools
-            && !cfg.superres_scaled
-            && rb.read_bit() != 0;
+        p.allow_intrabc =
+            p.prefix.allow_screen_content_tools && !cfg.superres_scaled && rb.read_bit() != 0;
     } else {
         let (short, lst, gld, remap, delta) = read_inter_ref_signaling(
-            rb, p.prefix.enable_order_hint, cfg.inter_ref.frame_id_numbers_present_flag,
+            rb,
+            p.prefix.enable_order_hint,
+            cfg.inter_ref.frame_id_numbers_present_flag,
             cfg.inter_ref.delta_frame_id_length,
         );
         p.inter_ref.frame_refs_short_signaling = short;
@@ -2756,8 +2914,14 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
         if !p.prefix.error_resilient_mode && override_flag != 0 {
             let w = &cfg.frame_size_with_refs;
             let (fw, fh, rw, rh, denom, _found) = read_frame_size_with_refs(
-                rb, &w.ref_y_crop_width, &w.ref_y_crop_height, &w.ref_render_width,
-                &w.ref_render_height, fs_in.enable_superres, fs_in.num_bits_width, fs_in.num_bits_height,
+                rb,
+                &w.ref_y_crop_width,
+                &w.ref_y_crop_height,
+                &w.ref_render_width,
+                &w.ref_render_height,
+                fs_in.enable_superres,
+                fs_in.num_bits_width,
+                fs_in.num_bits_height,
             );
             p.frame_size.superres_upscaled_width = fw;
             p.frame_size.superres_upscaled_height = fh;
@@ -2766,8 +2930,13 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
             p.frame_size.scale_denominator = denom;
         } else {
             p.frame_size = read_frame_size(
-                rb, override_flag != 0, fs_in.num_bits_width, fs_in.num_bits_height,
-                fs_in.enable_superres, fs_in.superres_upscaled_width, fs_in.superres_upscaled_height,
+                rb,
+                override_flag != 0,
+                fs_in.num_bits_width,
+                fs_in.num_bits_height,
+                fs_in.enable_superres,
+                fs_in.superres_upscaled_width,
+                fs_in.superres_upscaled_height,
             );
         }
         if !cfg.cur_frame_force_integer_mv {
@@ -2781,12 +2950,22 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
     }
 
     p.refresh_frame_context_disabled = read_refresh_frame_context(
-        rb, p.prefix.reduced_still_picture_hdr, p.prefix.disable_cdf_update,
+        rb,
+        p.prefix.reduced_still_picture_hdr,
+        p.prefix.disable_cdf_update,
     );
     let ti = &cfg.tile_info;
     let (tile_info, _ctx, _tsb) = read_tile_info(
-        rb, ti.mi_cols, ti.mi_rows, ti.mib_size_log2, ti.min_log2_cols, ti.max_log2_cols,
-        ti.min_log2_rows, ti.max_log2_rows, ti.max_width_sb, ti.max_height_sb,
+        rb,
+        ti.mi_cols,
+        ti.mi_rows,
+        ti.mib_size_log2,
+        ti.min_log2_cols,
+        ti.max_log2_cols,
+        ti.min_log2_rows,
+        ti.max_log2_rows,
+        ti.max_width_sb,
+        ti.max_height_sb,
     );
     p.tile_info = tile_info;
     p.quant = read_quantization(rb, cfg.num_planes, cfg.separate_uv_delta_q);
@@ -2796,19 +2975,30 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
     if !cfg.all_lossless {
         if !cfg.coded_lossless {
             p.loopfilter = read_loopfilter(
-                rb, p.allow_intrabc, cfg.num_planes, cfg.loopfilter.last_ref_deltas,
+                rb,
+                p.allow_intrabc,
+                cfg.num_planes,
+                cfg.loopfilter.last_ref_deltas,
                 cfg.loopfilter.last_mode_deltas,
             );
             p.cdef = read_cdef_header(rb, cfg.cdef.enable_cdef, p.allow_intrabc, cfg.num_planes);
         }
         p.restoration = read_restoration_mode(
-            rb, cfg.restoration.enable_restoration, p.allow_intrabc, cfg.restoration.sb_size_128,
-            cfg.restoration.subsampling_x, cfg.restoration.subsampling_y, cfg.num_planes,
+            rb,
+            cfg.restoration.enable_restoration,
+            p.allow_intrabc,
+            cfg.restoration.sb_size_128,
+            cfg.restoration.subsampling_x,
+            cfg.restoration.subsampling_y,
+            cfg.num_planes,
         );
     }
     p.tx_mode_select = read_tx_mode(rb, cfg.coded_lossless);
     let (rms, smf, awm, rts) = read_frame_header_trailing_flags(
-        rb, intra_only, cfg.skip_mode_allowed, cfg.might_allow_warped_motion,
+        rb,
+        intra_only,
+        cfg.skip_mode_allowed,
+        cfg.might_allow_warped_motion,
     );
     p.reference_mode_select = rms;
     p.skip_mode_flag = smf;
@@ -2819,7 +3009,10 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
     }
     if cfg.film_grain_params_present && (p.prefix.show_frame || p.prefix.showable_frame) {
         p.film_grain = read_film_grain_params(
-            rb, ft == 1 || sframe, cfg.film_grain.monochrome, cfg.film_grain.subsampling_x,
+            rb,
+            ft == 1 || sframe,
+            cfg.film_grain.monochrome,
+            cfg.film_grain.subsampling_x,
             cfg.film_grain.subsampling_y,
         );
     }
