@@ -10118,3 +10118,58 @@ pub fn ref_set_entropy_contexts(
     };
     assert!(r >= 0, "shim_set_entropy_contexts alloc failed");
 }
+
+// ---- rect-partition-stage facades (rd_shim.c; encoder track) ---------------
+
+unsafe extern "C" {
+    fn shim_get_plane_block_size(bsize: i32, ss_x: i32, ss_y: i32) -> i32;
+    fn shim_log_sub_block_var(
+        src: *const u16,
+        off: i32,
+        stride: i32,
+        bsize: i32,
+        mb_to_right_edge: i32,
+        mb_to_bottom_edge: i32,
+        bd: i32,
+        out_min: *mut f64,
+        out_max: *mut f64,
+    ) -> i32;
+}
+
+/// The REAL `get_plane_block_size` (blockd.h over `av1_ss_size_lookup`);
+/// 255 = `BLOCK_INVALID` (the `partition_rect_allowed` chroma guard).
+pub fn ref_get_plane_block_size(bsize: usize, ss_x: usize, ss_y: usize) -> usize {
+    (unsafe { shim_get_plane_block_size(bsize as i32, ss_x as i32, ss_y as i32) } & 0xff) as usize
+}
+
+/// `log_sub_block_var` (partition_search.c:5572 — transcribed static loop
+/// over the REAL `av1_calc_normalized_variance` + real variance4x4 kernels +
+/// libm log1p): `(log1p(min var/16), log1p(max var/16))` across the block's
+/// 4x4 source sub-blocks. Feeds the per-node ALLINTRA variance arm
+/// (:5791-5827).
+pub fn ref_log_sub_block_var(
+    src: &[u16],
+    off: usize,
+    stride: usize,
+    bsize: usize,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    bd: u8,
+) -> (f64, f64) {
+    let (mut mn, mut mx) = (0f64, 0f64);
+    let r = unsafe {
+        shim_log_sub_block_var(
+            src.as_ptr(),
+            off as i32,
+            stride as i32,
+            bsize as i32,
+            mb_to_right_edge,
+            mb_to_bottom_edge,
+            i32::from(bd),
+            &mut mn,
+            &mut mx,
+        )
+    };
+    assert!(r >= 0, "shim_log_sub_block_var alloc failed");
+    (mn, mx)
+}

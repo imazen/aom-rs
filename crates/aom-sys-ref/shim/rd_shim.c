@@ -1294,3 +1294,73 @@ int shim_set_entropy_contexts(int8_t *above, int8_t *left, int plane,
   return 0;
 }
 
+
+/* ---- rect-partition-stage facades (encoder track) ----------------------
+ *
+ * (1) shim_get_plane_block_size: the REAL get_plane_block_size (blockd.h
+ *     static inline over av1_ss_size_lookup) — the
+ *     `partition_rect_allowed` chroma-validity guard input
+ *     (init_partition_search_state_params, partition_search.c:3390-3399).
+ * (2) shim_log_sub_block_var: log_sub_block_var (partition_search.c:5572)
+ *     — a STATIC fn, transcribed loop over the REAL EXPORTED
+ *     av1_calc_normalized_variance (intra_mode_search.c:107) with the real
+ *     aom_[highbd_<bd>_]variance4x4_c kernels (the fn_ptr[BLOCK_4X4].vf
+ *     resolution by stream depth) and libm log1p. Feeds the per-node
+ *     ALLINTRA variance arm (partition_search.c:5791-5827). */
+
+int shim_get_plane_block_size(int bsize, int ss_x, int ss_y) {
+  return (int)get_plane_block_size((BLOCK_SIZE)bsize, ss_x, ss_y);
+}
+
+typedef unsigned int (*shim_variance_fn_t)(const uint8_t *a, int a_stride,
+                                           const uint8_t *b, int b_stride,
+                                           unsigned int *sse);
+int av1_calc_normalized_variance(shim_variance_fn_t vf,
+                                 const uint8_t *const buf, const int stride,
+                                 const int is_hbd);
+
+int shim_log_sub_block_var(const uint16_t *src, int off, int stride, int bsize,
+                           int mb_to_right_edge, int mb_to_bottom_edge, int bd,
+                           double *out_min, double *out_max) {
+  const int right_overflow =
+      (mb_to_right_edge < 0) ? ((-mb_to_right_edge) >> 3) : 0;
+  const int bottom_overflow =
+      (mb_to_bottom_edge < 0) ? ((-mb_to_bottom_edge) >> 3) : 0;
+  const int bw = MI_SIZE * mi_size_wide[bsize] - right_overflow;
+  const int bh = MI_SIZE * mi_size_high[bsize] - bottom_overflow;
+  const int is_hbd = bd > 8;
+
+  uint8_t *src8 = NULL;
+  if (!is_hbd) {
+    /* The production 8-bit encoder reads u8 planes; marshal the block. */
+    src8 = (uint8_t *)calloc((size_t)bh * stride, 1);
+    if (!src8) return -1;
+    for (int i = 0; i < bh; i++)
+      for (int j = 0; j < bw; j++)
+        src8[i * stride + j] = (uint8_t)src[off + i * stride + j];
+  }
+
+  double min_var_4x4 = (double)INT_MAX;
+  double max_var_4x4 = 0.0;
+  for (int i = 0; i < bh; i += MI_SIZE) {
+    for (int j = 0; j < bw; j += MI_SIZE) {
+      int var;
+      if (is_hbd) {
+        shim_variance_fn_t vf = (bd == 12)  ? aom_highbd_12_variance4x4_c
+                                : (bd == 10) ? aom_highbd_10_variance4x4_c
+                                             : aom_highbd_8_variance4x4_c;
+        var = av1_calc_normalized_variance(
+            vf, CONVERT_TO_BYTEPTR(src + off + i * stride + j), stride, 1);
+      } else {
+        var = av1_calc_normalized_variance(
+            aom_variance4x4_c, src8 + i * stride + j, stride, 0);
+      }
+      min_var_4x4 = AOMMIN(min_var_4x4, var);
+      max_var_4x4 = AOMMAX(max_var_4x4, var);
+    }
+  }
+  free(src8);
+  *out_min = log1p(min_var_4x4 / 16.0);
+  *out_max = log1p(max_var_4x4 / 16.0);
+  return 0;
+}
