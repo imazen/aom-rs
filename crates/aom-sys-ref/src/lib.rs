@@ -2150,6 +2150,40 @@ extern "C" {
         dst: *mut u8, stride: isize, bw: i32, bh: i32, above: *const u8, left: *const u8,
         upsample_left: i32, dx: i32, dy: i32,
     );
+    pub fn av1_highbd_dr_prediction_z1_c(
+        dst: *mut u16, stride: isize, bw: i32, bh: i32, above: *const u16, left: *const u16,
+        upsample_above: i32, dx: i32, dy: i32, bd: i32,
+    );
+    pub fn av1_highbd_dr_prediction_z2_c(
+        dst: *mut u16, stride: isize, bw: i32, bh: i32, above: *const u16, left: *const u16,
+        upsample_above: i32, upsample_left: i32, dx: i32, dy: i32, bd: i32,
+    );
+    pub fn av1_highbd_dr_prediction_z3_c(
+        dst: *mut u16, stride: isize, bw: i32, bh: i32, above: *const u16, left: *const u16,
+        upsample_left: i32, dx: i32, dy: i32, bd: i32,
+    );
+}
+
+/// Reference highbd directional predictor. `above`/`left` are padded `u16`
+/// buffers; the C pointer is taken at offset `pad`. Returns the `bw*bh` block
+/// (row stride `bw`).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_highbd_dr_pred(
+    kind: u8, bw: usize, bh: usize, above: &[u16], left: &[u16], pad: usize,
+    up_above: i32, up_left: i32, dx: i32, dy: i32, bd: i32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; bw * bh];
+    let ap = unsafe { above.as_ptr().add(pad) };
+    let lp = unsafe { left.as_ptr().add(pad) };
+    unsafe {
+        match kind {
+            1 => av1_highbd_dr_prediction_z1_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_above, dx, dy, bd),
+            2 => av1_highbd_dr_prediction_z2_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_above, up_left, dx, dy, bd),
+            3 => av1_highbd_dr_prediction_z3_c(dst.as_mut_ptr(), bw as isize, bw as i32, bh as i32, ap, lp, up_left, dx, dy, bd),
+            _ => unreachable!(),
+        }
+    }
+    dst
 }
 
 /// Reference directional predictor. `above`/`left` are padded buffers; the C
