@@ -42,19 +42,21 @@ use aom_decode::{
     ANGLE_STEP, BLOCK_8X8, BLOCK_64X64, BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, DecodedBlockKf,
     KfTileConfig, MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH, MI_SIZE_WIDE, PARTITION_HORZ,
     PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, TX_SIZE_HIGH, TX_SIZE_HIGH_UNIT, TX_SIZE_WIDE,
-    TX_SIZE_WIDE_UNIT, decode_tile_kf, intra_ext_tx_cdf, max_block_units,
+    TX_SIZE_WIDE_UNIT, UV_CFL_PRED, decode_tile_kf, intra_ext_tx_cdf, is_chroma_reference,
+    max_block_units, max_block_units_ss, max_uv_txsize, scale_chroma_bsize, uv_tx_type,
 };
 use aom_encode::{QuantKind, QuantParams, xform_quant};
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::partition::{
-    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, TXFM_CTX_INIT, TxMode,
-    bsize_to_max_depth, bsize_to_tx_size_cat, depth_to_tx_size, filter_intra_allowed,
-    get_partition_subsize, get_tx_size_context, get_uv_mode, intra_avail, is_cfl_allowed,
+    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, TXFM_CTX_INIT, TxMode, bsize_to_max_depth,
+    bsize_to_tx_size_cat, depth_to_tx_size, filter_intra_allowed, get_partition_subsize,
+    get_plane_block_size, get_tx_size_context, get_uv_mode, intra_avail, is_cfl_allowed,
     is_directional_mode, partition_cdf_length, partition_plane_context, set_txfm_ctxs,
     tx_size_from_tx_mode, tx_size_to_depth, update_ext_partition_context, use_angle_delta,
     write_mb_modes_kf_fc, write_partition, write_selected_tx_size,
 };
+use aom_intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_intra::predict_intra_high;
 use aom_txb::{CDF_ARENA_LEN, ext_tx_set_type, get_txb_ctx, write_coeffs_txb_full};
 
@@ -245,10 +247,22 @@ fn assert_fc_eq(e: &KfFrameContext, d: &KfFrameContext, what: &str) {
     assert_eq!(e.skip, d.skip, "{what}: skip cdf");
     assert_eq!(e.seg_spatial, d.seg_spatial, "{what}: seg_spatial cdf");
     assert_eq!(e.partition, d.partition, "{what}: partition arena");
-    assert_eq!(e.palette_y_mode, d.palette_y_mode, "{what}: palette_y_mode cdf");
-    assert_eq!(e.palette_uv_mode, d.palette_uv_mode, "{what}: palette_uv_mode cdf");
-    assert_eq!(e.palette_y_size, d.palette_y_size, "{what}: palette_y_size cdf");
-    assert_eq!(e.palette_uv_size, d.palette_uv_size, "{what}: palette_uv_size cdf");
+    assert_eq!(
+        e.palette_y_mode, d.palette_y_mode,
+        "{what}: palette_y_mode cdf"
+    );
+    assert_eq!(
+        e.palette_uv_mode, d.palette_uv_mode,
+        "{what}: palette_uv_mode cdf"
+    );
+    assert_eq!(
+        e.palette_y_size, d.palette_y_size,
+        "{what}: palette_y_size cdf"
+    );
+    assert_eq!(
+        e.palette_uv_size, d.palette_uv_size,
+        "{what}: palette_uv_size cdf"
+    );
     assert_eq!(e.filter_intra, d.filter_intra, "{what}: filter_intra cdf");
     assert_eq!(
         e.filter_intra_mode, d.filter_intra_mode,
@@ -302,6 +316,23 @@ struct Coverage {
     ext7_signaled: usize,
     dct_only_txbs: usize,
     edge_clipped_txb_blocks: usize,
+    // Chroma reconstruction accounting: CfL blocks that actually PREDICT
+    // (chroma-reference, UV_CFL_PRED) per subsampling; non-CfL UV predictions;
+    // sub-8x8 shared-chroma reference blocks (a 1-mi dimension on a subsampled
+    // axis); joint-sign + alpha-index diversity among predicting CfL blocks;
+    // chroma coefficient eobs; and non-DCT chroma transform types.
+    cfl_predicted_420: usize,
+    cfl_predicted_444: usize,
+    cfl_predicted_422: usize,
+    uv_non_cfl_blocks: usize,
+    shared_chroma_blocks: usize,
+    cfl_js_seen: [bool; 8],
+    /// 256-entry bitset over observed `cfl_alpha_idx` values.
+    cfl_alpha_idx_seen: [u64; 4],
+    uv_eob_pos: usize,
+    uv_eob_zero: usize,
+    uv_non_dct_txbs: usize,
+    uv_angle_nonzero: usize,
     // TX_MODE_SELECT accounting (from the DECODER's output): which of the 19
     // tx sizes were actually decoded, how many blocks decoded a non-max depth,
     // and how many blocks ran a real multi-txb grid (>1 txb).
@@ -327,10 +358,15 @@ struct Coverage {
 struct Mirror<'a> {
     cfg: &'a KfTileConfig,
     src: &'a [u16],
+    src_u: &'a [u16],
+    src_v: &'a [u16],
     recon: Vec<u16>,
     stride: usize,
-    above_e: Vec<i8>,
-    left_e: [i8; 32],
+    recon_u: Vec<u16>,
+    recon_v: Vec<u16>,
+    stride_uv: usize,
+    above_e: [Vec<i8>; 3],
+    left_e: [[i8; 32]; 3],
     above_p: Vec<i8>,
     left_p: [i8; 32],
     /// Txfm-context byte arrays (`above_txfm_context`/`left_txfm_context`),
@@ -340,11 +376,20 @@ struct Mirror<'a> {
     /// Per-mi mode-info grid — the encoder's own `xd->above_mbmi/left_mbmi`
     /// source for every context selection (mirrors the decoder's grid).
     mi: Vec<MiNbrKf>,
+    /// Per-mi uv-mode grid (chroma edge-filter-type neighbours).
+    mi_uv: Vec<i8>,
+    /// The mirror's own CfL store, fed from ITS reconstruction feedback.
+    cfl: CflCtx,
     st: KfBlockState,
     quant: [i16; 2],
     quant_shift: [i16; 2],
     round: [i16; 2],
     zbin: [i16; 2],
+    /// Per-chroma-plane B-quant parameter rows derived from `dequant_uv`.
+    quant_uv: [[i16; 2]; 2],
+    quant_shift_uv: [[i16; 2]; 2],
+    round_uv: [[i16; 2]; 2],
+    zbin_uv: [[i16; 2]; 2],
     sb_cdef_strength: i32,
     sb_cdef_done: bool,
     tree: Vec<i8>,
@@ -352,10 +397,42 @@ struct Mirror<'a> {
 }
 
 impl<'a> Mirror<'a> {
-    fn new(cfg: &'a KfTileConfig, src: &'a [u16], stride: usize, recon_init: u16) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cfg: &'a KfTileConfig,
+        src: &'a [u16],
+        src_u: &'a [u16],
+        src_v: &'a [u16],
+        stride: usize,
+        recon_init: u16,
+    ) -> Self {
         let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;
         let (q0, s0) = invert_quant(cfg.dequant[0] as i32);
         let (q1, s1) = invert_quant(cfg.dequant[1] as i32);
+        let mut quant_uv = [[0i16; 2]; 2];
+        let mut quant_shift_uv = [[0i16; 2]; 2];
+        let mut round_uv = [[0i16; 2]; 2];
+        let mut zbin_uv = [[0i16; 2]; 2];
+        for p in 0..2 {
+            for i in 0..2 {
+                let d = cfg.dequant_uv[p][i];
+                let (q, s) = invert_quant(d as i32);
+                quant_uv[p][i] = q;
+                quant_shift_uv[p][i] = s;
+                round_uv[p][i] = d / 8 + 1;
+                zbin_uv[p][i] = d / 2 + 1;
+            }
+        }
+        let stride_uv = if cfg.monochrome {
+            0
+        } else {
+            stride >> cfg.subsampling_x
+        };
+        let uv_len = if cfg.monochrome {
+            0
+        } else {
+            stride_uv * ((aligned_rows * 4) >> cfg.subsampling_y)
+        };
         let st = KfBlockState {
             segid_preskip: false,
             seg_enabled: false,
@@ -394,10 +471,19 @@ impl<'a> Mirror<'a> {
         Mirror {
             cfg,
             src,
+            src_u,
+            src_v,
             recon: vec![recon_init; stride * aligned_rows * 4],
             stride,
-            above_e: vec![0; stride / 4],
-            left_e: [0; 32],
+            recon_u: vec![recon_init; uv_len],
+            recon_v: vec![recon_init; uv_len],
+            stride_uv,
+            above_e: [
+                vec![0; stride / 4],
+                vec![0; stride / 4],
+                vec![0; stride / 4],
+            ],
+            left_e: [[0; 32]; 3],
             above_p: vec![0; stride / 4],
             left_p: [0; 32],
             above_t: vec![TXFM_CTX_INIT; stride / 4],
@@ -409,11 +495,17 @@ impl<'a> Mirror<'a> {
                 };
                 (cfg.mi_rows * cfg.mi_cols) as usize
             ],
+            mi_uv: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
+            cfl: CflCtx::new(cfg.subsampling_x as i32, cfg.subsampling_y as i32),
             st,
             quant: [q0, q1],
             quant_shift: [s0, s1],
             round: [cfg.dequant[0] / 8 + 1, cfg.dequant[1] / 8 + 1],
             zbin: [cfg.dequant[0] / 2 + 1, cfg.dequant[1] / 2 + 1],
+            quant_uv,
+            quant_shift_uv,
+            round_uv,
+            zbin_uv,
             sb_cdef_strength: 0,
             sb_cdef_done: false,
             tree: Vec::new(),
@@ -433,9 +525,10 @@ impl<'a> Mirror<'a> {
     #[allow(clippy::too_many_arguments)]
     fn set_entropy_ctx(
         &mut self,
+        plane: usize,
         cul: i8,
-        mi_row: i32,
-        mi_col: i32,
+        a_base: usize,
+        l_base: usize,
         blk_row: usize,
         blk_col: usize,
         txw: usize,
@@ -445,21 +538,21 @@ impl<'a> Mirror<'a> {
         mb_to_right_edge: i32,
         mb_to_bottom_edge: i32,
     ) {
-        let a0 = mi_col as usize + blk_col;
+        let a0 = a_base + blk_col;
         if cul != 0 && mb_to_right_edge < 0 {
-            let n = txw.min(blocks_wide - blk_col);
-            self.above_e[a0..a0 + n].fill(cul);
-            self.above_e[a0 + n..a0 + txw].fill(0);
+            let n = txw.min(blocks_wide.saturating_sub(blk_col));
+            self.above_e[plane][a0..a0 + n].fill(cul);
+            self.above_e[plane][a0 + n..a0 + txw].fill(0);
         } else {
-            self.above_e[a0..a0 + txw].fill(cul);
+            self.above_e[plane][a0..a0 + txw].fill(cul);
         }
-        let l0 = (mi_row & 31) as usize + blk_row;
+        let l0 = l_base + blk_row;
         if cul != 0 && mb_to_bottom_edge < 0 {
-            let n = txh.min(blocks_high - blk_row);
-            self.left_e[l0..l0 + n].fill(cul);
-            self.left_e[l0 + n..l0 + txh].fill(0);
+            let n = txh.min(blocks_high.saturating_sub(blk_row));
+            self.left_e[plane][l0..l0 + n].fill(cul);
+            self.left_e[plane][l0 + n..l0 + txh].fill(0);
         } else {
-            self.left_e[l0..l0 + txh].fill(cul);
+            self.left_e[plane][l0..l0 + txh].fill(cul);
         }
     }
 
@@ -479,7 +572,9 @@ impl<'a> Mirror<'a> {
         let cfg = self.cfg;
         let up_available = mi_row > 0;
         let left_available = mi_col > 0;
-        let cfl_allowed = !cfg.monochrome && is_cfl_allowed(bsize, false, 0, 0);
+        let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
+        let chroma_ref = is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
+        let cfl_allowed = !cfg.monochrome && is_cfl_allowed(bsize, false, ss_x, ss_y);
         let (above, left) = self.neighbours(mi_row, mi_col);
 
         // --- choose the block's mode info ---
@@ -489,7 +584,9 @@ impl<'a> Mirror<'a> {
         } else {
             0
         };
-        let (uv_mode, cfl_idx, js, angle_uv) = if !cfg.monochrome {
+        // UV fields exist only on chroma-reference blocks (the decoder's
+        // read_kf_tail else-branch reports zeros for the rest).
+        let (uv_mode, cfl_idx, js, angle_uv) = if !cfg.monochrome && chroma_ref {
             let n = if cfl_allowed { 14 } else { 13 };
             let uv = (rng.next() % n) as i32;
             let (idx, sign) = if uv == 13 {
@@ -561,6 +658,7 @@ impl<'a> Mirror<'a> {
         self.st.mi_row = mi_row;
         self.st.mi_col = mi_col;
         self.st.bsize = bsize;
+        self.st.is_chroma_ref = chroma_ref;
         self.st.cfl_allowed = cfl_allowed;
         self.st.mb_to_top_edge = -(mi_row * 32);
         self.st.has_above = up_available;
@@ -633,12 +731,38 @@ impl<'a> Mirror<'a> {
             false,
         );
 
-        // --- skip blocks reset their entropy-context footprint ---
+        // The chroma-side geometry (shared-chroma group origin + context bases),
+        // mirroring the decoder.
+        let adj_row = if ss_y != 0 && (mi_row & 1) != 0 && MI_SIZE_HIGH[bsize] == 1 {
+            mi_row - 1
+        } else {
+            mi_row
+        };
+        let adj_col = if ss_x != 0 && (mi_col & 1) != 0 && MI_SIZE_WIDE[bsize] == 1 {
+            mi_col - 1
+        } else {
+            mi_col
+        };
+        let uv_a_base = (adj_col >> ss_x) as usize;
+        let uv_l_base = ((adj_row & 31) >> ss_y) as usize;
+
+        // --- skip blocks reset their entropy-context footprint (all planes) ---
         if skip != 0 {
             let a0 = mi_col as usize;
-            self.above_e[a0..a0 + bw].fill(0);
+            self.above_e[0][a0..a0 + bw].fill(0);
             let l0 = (mi_row & 31) as usize;
-            self.left_e[l0..l0 + bh].fill(0);
+            self.left_e[0][l0..l0 + bh].fill(0);
+            if !cfg.monochrome && chroma_ref {
+                let plane_bsize = get_plane_block_size(bsize, ss_x, ss_y);
+                let (uw, uh) = (
+                    MI_SIZE_WIDE[plane_bsize] as usize,
+                    MI_SIZE_HIGH[plane_bsize] as usize,
+                );
+                for plane in 1..=2 {
+                    self.above_e[plane][uv_a_base..uv_a_base + uw].fill(0);
+                    self.left_e[plane][uv_l_base..uv_l_base + uh].fill(0);
+                }
+            }
         }
 
         // --- per-txb: predict -> residual -> quantize -> write -> reconstruct ---
@@ -654,8 +778,7 @@ impl<'a> Mirror<'a> {
             cov.edge_clipped_txb_blocks += 1;
         }
         // get_filt_type from the same neighbours the mode contexts used.
-        let is_smooth =
-            |m: Option<MiNbrKf>| m.is_some_and(|n| (9..=11).contains(&n.y_mode));
+        let is_smooth = |m: Option<MiNbrKf>| m.is_some_and(|n| (9..=11).contains(&n.y_mode));
         let filt_type = (is_smooth(above) || is_smooth(left)) as i32;
         let signal_gate = cfg.base_qindex_gt0 && skip == 0;
         let set_type = ext_tx_set_type(tx_size, false, cfg.reduced_tx_set);
@@ -761,8 +884,13 @@ impl<'a> Mirror<'a> {
                     }
                     let a0 = mi_col as usize + blk_col;
                     let l0 = (mi_row & 31) as usize + blk_row;
-                    let (tsc, dsc) =
-                        get_txb_ctx(bsize, tx_size, 0, &self.above_e[a0..], &self.left_e[l0..]);
+                    let (tsc, dsc) = get_txb_ctx(
+                        bsize,
+                        tx_size,
+                        0,
+                        &self.above_e[0][a0..],
+                        &self.left_e[0][l0..],
+                    );
                     let r = xform_quant(&residual, tx_size, tx_type, QuantKind::B, &qp, false);
                     let ext = intra_ext_tx_cdf(
                         &mut cdfs.ext_tx_1ddct,
@@ -793,9 +921,10 @@ impl<'a> Mirror<'a> {
                         signal_gate,
                     );
                     self.set_entropy_ctx(
+                        0,
                         r.txb_entropy_ctx as i8,
-                        mi_row,
-                        mi_col,
+                        mi_col as usize,
+                        (mi_row & 31) as usize,
                         blk_row,
                         blk_col,
                         txw,
@@ -826,9 +955,275 @@ impl<'a> Mirror<'a> {
                 } else {
                     txbs.push((0, 0));
                 }
+                // CfL luma store from the MIRROR's reconstruction feedback
+                // (store_cfl_required; skip blocks store their prediction).
+                if !cfg.monochrome && (!chroma_ref || uv_mode == UV_CFL_PRED) {
+                    let block_off = (mi_row * 4) as usize * self.stride + (mi_col * 4) as usize;
+                    cfl_store_tx(
+                        &mut self.cfl,
+                        &self.recon,
+                        block_off,
+                        self.stride,
+                        blk_row as i32,
+                        blk_col as i32,
+                        tx_size,
+                        bsize,
+                        mi_row,
+                        mi_col,
+                    );
+                }
                 blk_col += txw;
             }
             blk_row += txh;
+        }
+
+        // --- chroma planes: predict (+CfL) -> residual -> quantize -> write ->
+        // reconstruct, mirroring the decoder's plane loop exactly ---
+        let mut txbs_uv = Vec::new();
+        if !cfg.monochrome && chroma_ref {
+            let plane_bsize = get_plane_block_size(bsize, ss_x, ss_y);
+            assert_ne!(plane_bsize, 255, "mirror produced an invalid chroma bsize");
+            let uv_tx = max_uv_txsize(bsize, ss_x, ss_y);
+            let (uv_txw, uv_txh) = (TX_SIZE_WIDE_UNIT[uv_tx], TX_SIZE_HIGH_UNIT[uv_tx]);
+            let (uv_txwpx, uv_txhpx) = (TX_SIZE_WIDE[uv_tx], TX_SIZE_HIGH[uv_tx]);
+            let unit_width = ((max_blocks_wide as i32 + ss_x as i32) >> ss_x) as usize;
+            let unit_height = ((max_blocks_high as i32 + ss_y as i32) >> ss_y) as usize;
+            let blocks_wide_uv =
+                max_block_units_ss(BLOCK_SIZE_WIDE[plane_bsize], mb_to_right_edge, ss_x);
+            let blocks_high_uv =
+                max_block_units_ss(BLOCK_SIZE_HIGH[plane_bsize], mb_to_bottom_edge, ss_y);
+            let wpx = ((MI_SIZE_WIDE[bsize] * 4) >> ss_x).max(4);
+            let hpx = ((MI_SIZE_HIGH[bsize] * 4) >> ss_y).max(4);
+            let bsize_uv = scale_chroma_bsize(bsize, ss_x, ss_y);
+            let up_uv = adj_row > 0;
+            let left_uv = adj_col > 0;
+            let cols = cfg.mi_cols;
+            let base_row = mi_row - (mi_row & ss_y as i32);
+            let base_col = mi_col - (mi_col & ss_x as i32);
+            let uv_smooth = |m: i8| (9..=11).contains(&m);
+            let ab_sm = up_uv
+                && uv_smooth(self.mi_uv[((base_row - 1) * cols + base_col + ss_x as i32) as usize]);
+            let le_sm = left_uv
+                && uv_smooth(self.mi_uv[((base_row + ss_y as i32) * cols + base_col - 1) as usize]);
+            let filt_type_uv = (ab_sm || le_sm) as i32;
+            let uv_org = ((adj_row * 4) >> ss_y) as usize * self.stride_uv
+                + ((adj_col * 4) >> ss_x) as usize;
+            let tt_uv = uv_tx_type(uv_mode, uv_tx, cfg.reduced_tx_set);
+            let mode_uv = get_uv_mode(uv_mode as usize) as usize;
+            let mut scratch_uv = vec![0u16; uv_txwpx * uv_txhpx];
+            let mut residual_uv = vec![0i16; uv_txwpx * uv_txhpx];
+            let mut no_ext: [u16; 0] = [];
+
+            // coverage
+            if uv_mode == UV_CFL_PRED {
+                match (ss_x, ss_y) {
+                    (1, 1) => cov.cfl_predicted_420 += 1,
+                    (1, 0) => cov.cfl_predicted_422 += 1,
+                    _ => cov.cfl_predicted_444 += 1,
+                }
+                cov.cfl_js_seen[js as usize] = true;
+                cov.cfl_alpha_idx_seen[(cfl_idx >> 6) as usize] |= 1u64 << (cfl_idx & 63);
+            } else {
+                cov.uv_non_cfl_blocks += 1;
+            }
+            if (ss_x != 0 && MI_SIZE_WIDE[bsize] == 1) || (ss_y != 0 && MI_SIZE_HIGH[bsize] == 1) {
+                cov.shared_chroma_blocks += 1;
+            }
+            if angle_uv != 0 {
+                cov.uv_angle_nonzero += 1;
+            }
+            if tt_uv != 0 {
+                cov.uv_non_dct_txbs += 1;
+            }
+
+            for plane in 1..=2usize {
+                let dequant_p = cfg.dequant_uv[plane - 1];
+                let quant = self.quant_uv[plane - 1];
+                let quant_shift = self.quant_shift_uv[plane - 1];
+                let round = self.round_uv[plane - 1];
+                let zbin = self.zbin_uv[plane - 1];
+                let qp_uv = QuantParams {
+                    zbin: &zbin,
+                    round: &round,
+                    quant: &quant,
+                    quant_shift: &quant_shift,
+                    dequant: &dequant_p,
+                    qm: None,
+                    iqm: None,
+                    bd: cfg.bd as u8,
+                };
+                let src_uv = if plane == 1 { self.src_u } else { self.src_v };
+                let mut blk_row = 0usize;
+                while blk_row < unit_height {
+                    let mut blk_col = 0usize;
+                    while blk_col < unit_width {
+                        // (1) predict from the mirror's own chroma recon (+CfL
+                        // AC from the mirror's own luma store).
+                        let (n_top, n_tr, n_left, n_bl) = intra_avail(
+                            BLOCK_64X64,
+                            bsize_uv,
+                            adj_row,
+                            adj_col,
+                            up_uv,
+                            left_uv,
+                            cfg.mi_cols,
+                            cfg.mi_rows,
+                            partition,
+                            uv_tx,
+                            ss_x as i32,
+                            ss_y as i32,
+                            blk_row as i32,
+                            blk_col as i32,
+                            wpx,
+                            hpx,
+                            cfg.mi_cols,
+                            cfg.mi_rows,
+                            mode_uv,
+                            angle_uv * ANGLE_STEP,
+                            false,
+                        );
+                        let off_uv = uv_org + (blk_row * 4) * self.stride_uv + blk_col * 4;
+                        {
+                            let plane_recon = if plane == 1 {
+                                &self.recon_u
+                            } else {
+                                &self.recon_v
+                            };
+                            predict_intra_high(
+                                plane_recon,
+                                off_uv,
+                                self.stride_uv,
+                                &mut scratch_uv,
+                                uv_txwpx,
+                                mode_uv,
+                                angle_uv * ANGLE_STEP,
+                                false,
+                                0,
+                                cfg.disable_edge_filter,
+                                filt_type_uv,
+                                uv_tx,
+                                usize::try_from(n_top).expect("n_top_px"),
+                                n_tr,
+                                usize::try_from(n_left).expect("n_left_px"),
+                                n_bl,
+                                cfg.bd,
+                            );
+                        }
+                        if uv_mode == UV_CFL_PRED {
+                            cfl_predict_block(
+                                &mut self.cfl,
+                                &mut scratch_uv,
+                                0,
+                                uv_txwpx,
+                                uv_tx,
+                                plane,
+                                cfl_idx,
+                                js,
+                                cfg.bd,
+                            );
+                        }
+                        {
+                            let plane_recon = if plane == 1 {
+                                &mut self.recon_u
+                            } else {
+                                &mut self.recon_v
+                            };
+                            for r in 0..uv_txhpx {
+                                let d = off_uv + r * self.stride_uv;
+                                plane_recon[d..d + uv_txwpx]
+                                    .copy_from_slice(&scratch_uv[r * uv_txwpx..(r + 1) * uv_txwpx]);
+                            }
+                        }
+
+                        if skip == 0 {
+                            // (2) residual -> quantize -> write (plane_type 1:
+                            // no tx_type symbol) -> entropy contexts.
+                            for r in 0..uv_txhpx {
+                                let s = off_uv + r * self.stride_uv;
+                                for c in 0..uv_txwpx {
+                                    residual_uv[r * uv_txwpx + c] =
+                                        src_uv[s + c] as i16 - scratch_uv[r * uv_txwpx + c] as i16;
+                                }
+                            }
+                            let (tsc, dsc) = get_txb_ctx(
+                                plane_bsize,
+                                uv_tx,
+                                plane,
+                                &self.above_e[plane][uv_a_base + blk_col..],
+                                &self.left_e[plane][uv_l_base + blk_row..],
+                            );
+                            let r = xform_quant(
+                                &residual_uv,
+                                uv_tx,
+                                tt_uv,
+                                QuantKind::B,
+                                &qp_uv,
+                                false,
+                            );
+                            write_coeffs_txb_full(
+                                enc,
+                                &mut cdfs.coeff,
+                                &mut no_ext,
+                                &r.qcoeff,
+                                r.eob as usize,
+                                uv_tx,
+                                tt_uv,
+                                1,
+                                tsc as usize,
+                                dsc as usize,
+                                true,
+                                false,
+                                cfg.reduced_tx_set,
+                                false,
+                                0,
+                                0,
+                                false,
+                            );
+                            self.set_entropy_ctx(
+                                plane,
+                                r.txb_entropy_ctx as i8,
+                                uv_a_base,
+                                uv_l_base,
+                                blk_row,
+                                blk_col,
+                                uv_txw,
+                                uv_txh,
+                                blocks_wide_uv,
+                                blocks_high_uv,
+                                mb_to_right_edge,
+                                mb_to_bottom_edge,
+                            );
+                            // (3) reconstruct through the same path.
+                            if r.eob > 0 {
+                                cov.uv_eob_pos += 1;
+                                let plane_recon = if plane == 1 {
+                                    &mut self.recon_u
+                                } else {
+                                    &mut self.recon_v
+                                };
+                                aom_encode::reconstruct_txb(
+                                    &mut plane_recon[off_uv..],
+                                    self.stride_uv,
+                                    uv_tx,
+                                    tt_uv,
+                                    &r.qcoeff,
+                                    dequant_p,
+                                    None,
+                                    cfg.bd,
+                                );
+                                txbs_uv.push((r.eob as usize, tt_uv));
+                            } else {
+                                cov.uv_eob_zero += 1;
+                                txbs_uv.push((0, 0));
+                            }
+                        } else {
+                            txbs_uv.push((0, 0));
+                        }
+                        blk_col += uv_txw;
+                    }
+                    blk_row += uv_txh;
+                }
+            }
         }
 
         // mode-info grid stamp (frame-cropped), for later blocks' context
@@ -841,6 +1236,7 @@ impl<'a> Mirror<'a> {
                 y_mode,
                 skip_txfm: skip,
             });
+            self.mi_uv[base..base + x_mis as usize].fill(uv_mode as i8);
         }
 
         let mut expected_info = info;
@@ -853,12 +1249,39 @@ impl<'a> Mirror<'a> {
             info: expected_info,
             tx_size,
             txbs,
+            txbs_uv,
         });
+    }
+
+    /// Is this partition conformant for the frame subsampling? A partition is
+    /// illegal when a leaf block size it produces has no valid chroma plane
+    /// size (`av1_ss_size_lookup` = BLOCK_INVALID) — the C decoder rejects
+    /// the 8x8-and-larger cases as corrupt and relies on conformance for the
+    /// sub-8x8 ones (e.g. no 4xN chroma-reference blocks in 4:2:2). SPLIT
+    /// only recurses into square nodes (always valid).
+    fn partition_legal(&self, bsize: usize, p: usize) -> bool {
+        if self.cfg.monochrome || (self.cfg.subsampling_x == 0 && self.cfg.subsampling_y == 0) {
+            return true;
+        }
+        if p == PARTITION_SPLIT {
+            return true;
+        }
+        let (ss_x, ss_y) = (self.cfg.subsampling_x, self.cfg.subsampling_y);
+        let subsize = get_partition_subsize(bsize, p as i32) as usize;
+        let bsize2 = get_partition_subsize(bsize, PARTITION_SPLIT as i32) as usize;
+        let leaves: &[usize] = match p {
+            4..=7 => &[subsize, bsize2], // HORZ/VERT_A/B mix both sizes
+            _ => &[subsize],
+        };
+        leaves
+            .iter()
+            .all(|&b| get_plane_block_size(b, ss_x, ss_y) != 255)
     }
 
     /// Choose a legal partition for the node (mirrors the C decoder's edge rules:
     /// forced NONE below 8x8, HORZ/SPLIT at a bottom edge, VERT/SPLIT at a right
-    /// edge, forced SPLIT off both, the full set in frame).
+    /// edge, forced SPLIT off both, the full set in frame), filtered to the
+    /// subsampling-conformant set.
     fn choose_partition(
         &self,
         rng: &mut Rng,
@@ -871,15 +1294,34 @@ impl<'a> Mirror<'a> {
         }
         match (has_rows, has_cols) {
             (false, false) => PARTITION_SPLIT,
-            (false, true) => [PARTITION_HORZ, PARTITION_SPLIT][(rng.next() & 1) as usize],
-            (true, false) => [PARTITION_VERT, PARTITION_SPLIT][(rng.next() & 1) as usize],
+            (false, true) => {
+                let p = [PARTITION_HORZ, PARTITION_SPLIT][(rng.next() & 1) as usize];
+                if self.partition_legal(bsize, p) {
+                    p
+                } else {
+                    PARTITION_SPLIT
+                }
+            }
+            (true, false) => {
+                let p = [PARTITION_VERT, PARTITION_SPLIT][(rng.next() & 1) as usize];
+                if self.partition_legal(bsize, p) {
+                    p
+                } else {
+                    PARTITION_SPLIT
+                }
+            }
             (true, true) => {
                 let n = partition_cdf_length(bsize);
                 // bias splits a little so the sweep reaches small blocks
                 if bsize > BLOCK_8X8 && rng.next() % 100 < 30 {
                     PARTITION_SPLIT
                 } else {
-                    (rng.next() % n as u64) as usize
+                    loop {
+                        let p = (rng.next() % n as u64) as usize;
+                        if self.partition_legal(bsize, p) {
+                            break p;
+                        }
+                    }
                 }
             }
         }
@@ -1013,7 +1455,7 @@ impl<'a> Mirror<'a> {
     ) {
         let mut mi_row = 0;
         while mi_row < self.cfg.mi_rows {
-            self.left_e = [0; 32];
+            self.left_e = [[0; 32]; 3];
             self.left_p = [0; 32];
             self.left_t = [TXFM_CTX_INIT; 32];
             let mut mi_col = 0;
@@ -1041,6 +1483,8 @@ struct SweepCase {
     mi_cols: i32,
     bd: i32,
     monochrome: bool,
+    ss_x: usize,
+    ss_y: usize,
     cdef_bits: u32,
     disable_edge_filter: bool,
     enable_filter_intra: bool,
@@ -1052,11 +1496,18 @@ struct SweepCase {
 fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     let mut rng = Rng(seed);
     let dequant = [rng.range(4, 800) as i16, rng.range(4, 800) as i16];
+    // Distinct U/V dequants so a plane swap or shared-dequant bug hard-fails.
+    let dequant_uv = [
+        [rng.range(4, 800) as i16, rng.range(4, 800) as i16],
+        [rng.range(4, 800) as i16, rng.range(4, 800) as i16],
+    ];
     let cfg = KfTileConfig {
         mi_rows: case.mi_rows,
         mi_cols: case.mi_cols,
         bd: case.bd,
         monochrome: case.monochrome,
+        subsampling_x: case.ss_x,
+        subsampling_y: case.ss_y,
         cdef_bits: case.cdef_bits,
         disable_edge_filter: case.disable_edge_filter,
         enable_filter_intra: case.enable_filter_intra,
@@ -1064,16 +1515,27 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         reduced_tx_set: case.reduced_tx_set,
         base_qindex_gt0: case.base_qindex_gt0,
         dequant,
+        dequant_uv,
     };
     let aligned_cols = (cfg.mi_cols as usize).div_ceil(16) * 16;
     let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;
     let stride = aligned_cols * 4;
+    let stride_uv = stride >> cfg.subsampling_x;
+    let uv_rows = (aligned_rows * 4) >> cfg.subsampling_y;
     let mask = (1u64 << cfg.bd) - 1;
     let mut src: Vec<u16> = (0..stride * aligned_rows * 4)
         .map(|_| (rng.next() & mask) as u16)
         .collect();
-    // Carve some flat 64x64 regions: blocks there predict near-perfectly, so the
-    // quantizer produces genuine all-zero txbs (the txb_skip=1 decode path).
+    let uv_len = if cfg.monochrome {
+        0
+    } else {
+        stride_uv * uv_rows
+    };
+    let mut src_u: Vec<u16> = (0..uv_len).map(|_| (rng.next() & mask) as u16).collect();
+    let mut src_v: Vec<u16> = (0..uv_len).map(|_| (rng.next() & mask) as u16).collect();
+    // Carve some flat 64x64 regions (all planes): blocks there predict
+    // near-perfectly, so the quantizer produces genuine all-zero txbs (the
+    // txb_skip=1 decode path, luma and chroma).
     for sbr in 0..aligned_rows / 16 {
         for sbc in 0..aligned_cols / 16 {
             if rng.next().is_multiple_of(3) {
@@ -1082,6 +1544,16 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
                     let base = (sbr * 64 + r) * stride + sbc * 64;
                     src[base..base + 64].fill(v);
                 }
+                if !cfg.monochrome {
+                    let (cw, ch) = (64 >> cfg.subsampling_x, 64 >> cfg.subsampling_y);
+                    let vu = (rng.next() & mask) as u16;
+                    let vv = (rng.next() & mask) as u16;
+                    for r in 0..ch {
+                        let base = (sbr * ch + r) * stride_uv + sbc * cw;
+                        src_u[base..base + cw].fill(vu);
+                        src_v[base..base + cw].fill(vv);
+                    }
+                }
             }
         }
     }
@@ -1089,22 +1561,25 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
 
     // encode (mirror), recon initialised to 0
     let mut enc_cdfs = cdfs0.clone();
-    let mut mirror = Mirror::new(&cfg, &src, stride, 0);
+    let mut mirror = Mirror::new(&cfg, &src, &src_u, &src_v, stride, 0);
     let mut enc = OdEcEnc::new();
     mirror.encode_tile(&mut enc, &mut enc_cdfs, &mut rng, cov);
     let bytes = enc.done().to_vec();
 
-    // decode, recon initialised to the max pixel value (divergent on purpose)
+    // decode, recon initialised to the max pixel value (divergent on purpose,
+    // chroma planes included)
     let mut dec_cdfs = cdfs0.clone();
     let mut dec = OdEcDec::new(&bytes);
     let got = decode_tile_kf(&mut dec, &cfg, &mut dec_cdfs, mask as u16);
 
     let what = format!(
-        "case mi={}x{} bd={} mono={} cdef={} fi={} reduced={} gate={} tx={:?} seed={seed:#x}",
+        "case mi={}x{} bd={} mono={} ss={}{} cdef={} fi={} reduced={} gate={} tx={:?} seed={seed:#x}",
         case.mi_rows,
         case.mi_cols,
         case.bd,
         case.monochrome,
+        case.ss_x,
+        case.ss_y,
         case.cdef_bits,
         case.enable_filter_intra,
         case.reduced_tx_set,
@@ -1117,7 +1592,7 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     for (i, (g, w)) in got.blocks.iter().zip(&mirror.blocks).enumerate() {
         assert_eq!(g, w, "{what}: block {i}");
     }
-    // (b) byte-identical reconstruction over the frame crop
+    // (b) byte-identical reconstruction over the frame crop, all planes
     assert_eq!(got.stride, stride, "{what}: stride");
     for row in 0..got.height {
         assert_eq!(
@@ -1125,6 +1600,30 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
             mirror.recon[row * stride..row * stride + got.width],
             "{what}: recon row {row}"
         );
+    }
+    if !cfg.monochrome {
+        assert_eq!(got.stride_uv, stride_uv, "{what}: uv stride");
+        assert_eq!(
+            got.width_uv,
+            (cfg.mi_cols as usize * 4) >> cfg.subsampling_x
+        );
+        assert_eq!(
+            got.height_uv,
+            (cfg.mi_rows as usize * 4) >> cfg.subsampling_y
+        );
+        for row in 0..got.height_uv {
+            let s = row * stride_uv;
+            assert_eq!(
+                got.recon_u[s..s + got.width_uv],
+                mirror.recon_u[s..s + got.width_uv],
+                "{what}: recon U row {row}"
+            );
+            assert_eq!(
+                got.recon_v[s..s + got.width_uv],
+                mirror.recon_v[s..s + got.width_uv],
+                "{what}: recon V row {row}"
+            );
+        }
     }
     // (c) every CDF in lockstep — the whole frame context
     assert_fc_eq(&enc_cdfs, &dec_cdfs, &what);
@@ -1139,7 +1638,12 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
     {
         *flag |= new != old;
     }
-    for ((flag, new), old) in cov.skip_ctxs.iter_mut().zip(&dec_cdfs.skip).zip(&cdfs0.skip) {
+    for ((flag, new), old) in cov
+        .skip_ctxs
+        .iter_mut()
+        .zip(&dec_cdfs.skip)
+        .zip(&cdfs0.skip)
+    {
         *flag |= new != old;
     }
     for ((flag, new), old) in cov
@@ -1224,6 +1728,8 @@ fn kf_luma_tile_roundtrips() {
             mi_cols: 0,
             bd: 8,
             monochrome: true,
+            ss_x: 0,
+            ss_y: 0,
             cdef_bits: 2,
             disable_edge_filter: false,
             enable_filter_intra: true,
@@ -1236,6 +1742,8 @@ fn kf_luma_tile_roundtrips() {
             mi_cols: 0,
             bd: 8,
             monochrome: false,
+            ss_x: 0,
+            ss_y: 0,
             cdef_bits: 0,
             disable_edge_filter: false,
             enable_filter_intra: true,
@@ -1248,6 +1756,8 @@ fn kf_luma_tile_roundtrips() {
             mi_cols: 0,
             bd: 10,
             monochrome: true,
+            ss_x: 0,
+            ss_y: 0,
             cdef_bits: 3,
             disable_edge_filter: true,
             enable_filter_intra: false,
@@ -1260,6 +1770,8 @@ fn kf_luma_tile_roundtrips() {
             mi_cols: 0,
             bd: 8,
             monochrome: true,
+            ss_x: 0,
+            ss_y: 0,
             cdef_bits: 1,
             disable_edge_filter: false,
             enable_filter_intra: true,
@@ -1272,6 +1784,8 @@ fn kf_luma_tile_roundtrips() {
             mi_cols: 0,
             bd: 8,
             monochrome: true,
+            ss_x: 0,
+            ss_y: 0,
             cdef_bits: 0,
             disable_edge_filter: false,
             enable_filter_intra: true,
@@ -1284,7 +1798,55 @@ fn kf_luma_tile_roundtrips() {
             mi_cols: 0,
             bd: 12,
             monochrome: false,
+            ss_x: 0,
+            ss_y: 0,
             cdef_bits: 2,
+            disable_edge_filter: false,
+            enable_filter_intra: true,
+            reduced_tx_set: false,
+            base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
+        },
+        // 4:2:0 — shared sub-8x8 chroma rules + 420 CfL subsampling.
+        SweepCase {
+            mi_rows: 0,
+            mi_cols: 0,
+            bd: 8,
+            monochrome: false,
+            ss_x: 1,
+            ss_y: 1,
+            cdef_bits: 1,
+            disable_edge_filter: false,
+            enable_filter_intra: true,
+            reduced_tx_set: false,
+            base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
+        },
+        // 4:2:0 high bit depth + reduced tx set (chroma tx-type demotion).
+        SweepCase {
+            mi_rows: 0,
+            mi_cols: 0,
+            bd: 10,
+            monochrome: false,
+            ss_x: 1,
+            ss_y: 1,
+            cdef_bits: 2,
+            disable_edge_filter: false,
+            enable_filter_intra: true,
+            reduced_tx_set: true,
+            base_qindex_gt0: true,
+            tx_mode: TxMode::Largest,
+        },
+        // 4:2:2 — horizontal-only subsampling (tall shapes are non-conformant
+        // for it and filtered out of the mirror's partition choices).
+        SweepCase {
+            mi_rows: 0,
+            mi_cols: 0,
+            bd: 8,
+            monochrome: false,
+            ss_x: 1,
+            ss_y: 0,
+            cdef_bits: 0,
             disable_edge_filter: false,
             enable_filter_intra: true,
             reduced_tx_set: false,
@@ -1353,6 +1915,45 @@ fn kf_luma_tile_roundtrips() {
         "no frame-edge-clipped blocks"
     );
 
+    // Chroma reconstruction coverage: CfL must actually predict in every
+    // subsampling, with varied joint signs and alpha indices; non-CfL UV modes
+    // and the sub-8x8 shared-chroma path must be exercised; chroma coefficients
+    // must hit both the coded and the all-zero paths, non-DCT chroma transform
+    // types, and non-zero UV angle deltas.
+    let js_n = cov.cfl_js_seen.iter().filter(|&&x| x).count();
+    let alpha_n: u32 = cov.cfl_alpha_idx_seen.iter().map(|w| w.count_ones()).sum();
+    eprintln!(
+        "chroma: cfl 420 {} / 422 {} / 444 {}, non-cfl uv {}, shared sub-8x8 {}, \
+         js {js_n}/8, alpha idx {alpha_n}/256, uv eob (pos {}, zero {}), \
+         uv non-DCT {}, uv angle!=0 {}",
+        cov.cfl_predicted_420,
+        cov.cfl_predicted_422,
+        cov.cfl_predicted_444,
+        cov.uv_non_cfl_blocks,
+        cov.shared_chroma_blocks,
+        cov.uv_eob_pos,
+        cov.uv_eob_zero,
+        cov.uv_non_dct_txbs,
+        cov.uv_angle_nonzero,
+    );
+    assert!(cov.cfl_predicted_420 > 0, "no CfL predictions at 4:2:0");
+    assert!(cov.cfl_predicted_422 > 0, "no CfL predictions at 4:2:2");
+    assert!(cov.cfl_predicted_444 > 0, "no CfL predictions at 4:4:4");
+    assert!(cov.uv_non_cfl_blocks > 0, "no non-CfL UV predictions");
+    assert!(
+        cov.shared_chroma_blocks > 0,
+        "no sub-8x8 shared-chroma reference blocks"
+    );
+    assert!(js_n == 8, "cfl joint-sign diversity too low: {js_n}/8");
+    assert!(
+        alpha_n >= 32,
+        "cfl alpha-index diversity too low: {alpha_n}/256"
+    );
+    assert!(cov.uv_eob_pos > 0, "no coded chroma txbs");
+    assert!(cov.uv_eob_zero > 0, "no all-zero chroma txbs");
+    assert!(cov.uv_non_dct_txbs > 0, "no non-DCT chroma transform types");
+    assert!(cov.uv_angle_nonzero > 0, "no non-zero UV angle deltas");
+
     // FRAME_CONTEXT selection diversity: the per-context arrays must have been
     // exercised across many DISTINCT instances — a regression back to one
     // shared CDF per symbol collapses these counts to 1.
@@ -1369,11 +1970,20 @@ fn kf_luma_tile_roundtrips() {
     );
     assert!(kf_y_n >= 20, "kf_y context diversity too low: {kf_y_n}/25");
     assert!(skip_n == 3, "skip context diversity too low: {skip_n}/3");
-    assert!(angle_n == 8, "angle_delta instance diversity too low: {angle_n}/8");
+    assert!(
+        angle_n == 8,
+        "angle_delta instance diversity too low: {angle_n}/8"
+    );
     assert!(uv_n >= 18, "uv_mode instance diversity too low: {uv_n}/26");
     assert!(fi_n >= 4, "filter_intra bsize diversity too low: {fi_n}/22");
-    assert!(ext7_n >= 10, "ext-tx 7-symbol cell diversity too low: {ext7_n}/52");
-    assert!(ext5_n >= 10, "ext-tx 5-symbol cell diversity too low: {ext5_n}/52");
+    assert!(
+        ext7_n >= 10,
+        "ext-tx 7-symbol cell diversity too low: {ext7_n}/52"
+    );
+    assert!(
+        ext5_n >= 10,
+        "ext-tx 5-symbol cell diversity too low: {ext5_n}/52"
+    );
 
     // TX_MODE_SELECT: the sweep must have decoded genuinely varied tx sizes,
     // exercised the within-block multi-txb interleave, and adapted the

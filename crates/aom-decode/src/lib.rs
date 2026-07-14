@@ -26,10 +26,21 @@
 //! # Scope (honest limits of this cut)
 //!
 //! - **KEY frame, intra only.** No inter path, no motion compensation.
-//! - **Plane 0 (luma) reconstruction only.** With `monochrome = true` this is
-//!   the complete frame reconstruction for a real AV1 configuration; with
-//!   `monochrome = false` (4:4:4) the chroma *mode-info symbols* are decoded but
-//!   chroma planes are not reconstructed (CfL prediction is not ported).
+//! - **All three planes reconstructed.** `monochrome = true` decodes luma only
+//!   (a complete real configuration); otherwise the U/V planes are fully
+//!   reconstructed at 4:4:4, 4:2:2, or 4:2:0 ([`KfTileConfig::subsampling_x`]/
+//!   [`KfTileConfig::subsampling_y`]): per-block `is_chroma_reference` (sub-8x8
+//!   blocks share one chroma block, coded on the group's bottom-right member,
+//!   covering the merged area from the parity-adjusted plane origin), the
+//!   whole-block chroma transform (`av1_get_max_uv_txsize`), chroma
+//!   coefficients on the per-plane entropy-context arrays, UV intra prediction
+//!   (`get_uv_mode`, chroma availability/`scale_chroma_bsize` geometry, the
+//!   chroma-neighbour edge-filter type), and chroma-from-luma: reconstructed
+//!   luma is stored per txb ([`aom_intra::cfl::cfl_store_tx`],
+//!   `store_cfl_required` — non-reference members always store), and
+//!   `UV_CFL_PRED` blocks add the alpha-scaled zero-mean AC on the DC
+//!   prediction ([`aom_intra::cfl::cfl_predict_block`]). Chroma transform
+//!   types are not coded (mode-implied, ext-tx-set demoted).
 //! - **Frame tx mode ([`KfTileConfig::tx_mode`])**: `TX_MODE_LARGEST` (per-block
 //!   `tx_size = max_txsize_rect_lookup[bsize]`, no tx-size bits) **and**
 //!   `TX_MODE_SELECT` — the per-block tx-size depth symbol on
@@ -82,12 +93,13 @@
 use aom_encode::reconstruct_txb;
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::partition::{
-    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, TXFM_CTX_INIT, TxMode,
-    bsize_to_max_depth, bsize_to_tx_size_cat, depth_to_tx_size, get_partition_subsize,
-    get_tx_size_context, intra_avail, is_cfl_allowed, partition_cdf_length,
+    KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, TXFM_CTX_INIT, TxMode, bsize_to_max_depth,
+    bsize_to_tx_size_cat, depth_to_tx_size, get_partition_subsize, get_plane_block_size,
+    get_tx_size_context, get_uv_mode, intra_avail, is_cfl_allowed, partition_cdf_length,
     partition_plane_context, read_mb_modes_kf_fc, read_partition, read_selected_tx_size,
     set_txfm_ctxs, tx_size_from_tx_mode, update_ext_partition_context,
 };
+use aom_intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_intra::predict_intra_high;
 use aom_txb::{
     ext_tx_derive, get_txb_ctx, read_coeffs_txb_full, txb_entropy_context, txb_high, txb_wide,
@@ -147,11 +159,124 @@ pub const PARTITION_VERT_4: usize = 9;
 pub const DC_PRED: i32 = 0;
 const SMOOTH_PRED: i32 = 9;
 const SMOOTH_H_PRED: i32 = 11;
+/// `UV_CFL_PRED` (enums.h): the chroma-from-luma UV mode.
+pub const UV_CFL_PRED: i32 = 13;
 /// `ANGLE_STEP`: coded angle deltas scale by 3 degrees.
 pub const ANGLE_STEP: i32 = 3;
 
 /// Superblock size fixed at 64x64 in this cut: 16 mi per SB side.
 const SB_MI: i32 = 16;
+
+// ---- chroma spec helpers (av1_common_int.h / blockd.h / reconintra.c) ------------
+
+/// `is_chroma_reference` (av1_common_int.h): does this block carry the chroma
+/// information for its (possibly shared) chroma area? With subsampling, blocks
+/// with an odd mi count on that axis are chroma-referenced only at odd mi
+/// positions (the bottom/right member of the group codes the merged chroma).
+pub fn is_chroma_reference(
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    ss_x: usize,
+    ss_y: usize,
+) -> bool {
+    let bw = MI_SIZE_WIDE[bsize];
+    let bh = MI_SIZE_HIGH[bsize];
+    ((mi_row & 0x01) != 0 || (bh & 0x01) == 0 || ss_y == 0)
+        && ((mi_col & 0x01) != 0 || (bw & 0x01) == 0 || ss_x == 0)
+}
+
+/// `av1_get_adjusted_tx_size` (blockd.h): 64-wide/high transforms clamp to 32
+/// on that axis for chroma (and other adjusted-size users).
+pub fn adjusted_tx_size(tx_size: usize) -> usize {
+    match tx_size {
+        4 | 11 | 12 => 3, // TX_64X64 / TX_32X64 / TX_64X32 -> TX_32X32
+        18 => 10,         // TX_64X16 -> TX_32X16
+        17 => 9,          // TX_16X64 -> TX_16X32
+        t => t,
+    }
+}
+
+/// `av1_get_max_uv_txsize` (blockd.h): the chroma transform size — the largest
+/// rectangular transform of the chroma plane block size, 64-clamped. This is
+/// the whole-block chroma `tx_size` (`av1_get_tx_size(plane > 0)`, lossless off).
+pub fn max_uv_txsize(bsize: usize, ss_x: usize, ss_y: usize) -> usize {
+    let plane_bsize = get_plane_block_size(bsize, ss_x, ss_y);
+    debug_assert_ne!(plane_bsize, 255, "invalid chroma block size");
+    adjusted_tx_size(MAX_TXSIZE_RECT_LOOKUP[plane_bsize])
+}
+
+/// `scale_chroma_bsize` (reconintra.c): the block size the chroma availability
+/// logic (`has_top_right`/`has_bottom_left`) sees — sub-8x8 dimensions on a
+/// subsampled axis are promoted to the shared-chroma group's size.
+pub fn scale_chroma_bsize(bsize: usize, ss_x: usize, ss_y: usize) -> usize {
+    const BLOCK_4X4: usize = 0;
+    const BLOCK_4X8: usize = 1;
+    const BLOCK_8X4: usize = 2;
+    const BLOCK_8X16: usize = 4;
+    const BLOCK_16X8: usize = 5;
+    const BLOCK_4X16: usize = 16;
+    const BLOCK_16X4: usize = 17;
+    match bsize {
+        BLOCK_4X4 => match (ss_x, ss_y) {
+            (1, 1) => BLOCK_8X8,
+            (1, 0) => BLOCK_8X4,
+            (0, 1) => BLOCK_4X8,
+            _ => bsize,
+        },
+        BLOCK_4X8 => match (ss_x, ss_y) {
+            (1, _) => BLOCK_8X8,
+            _ => bsize,
+        },
+        BLOCK_8X4 => match (ss_x, ss_y) {
+            (_, 1) => BLOCK_8X8,
+            _ => bsize,
+        },
+        BLOCK_4X16 => match (ss_x, ss_y) {
+            (1, _) => BLOCK_8X16,
+            _ => bsize,
+        },
+        BLOCK_16X4 => match (ss_x, ss_y) {
+            (_, 1) => BLOCK_16X8,
+            _ => bsize,
+        },
+        _ => bsize,
+    }
+}
+
+/// `_intra_mode_to_tx_type[INTRA_MODES]` (blockd.h): the transform type an intra
+/// prediction mode implies for chroma (UV transform types are not coded).
+const INTRA_MODE_TO_TX_TYPE: [usize; 13] = [0, 1, 2, 0, 3, 1, 2, 2, 1, 3, 1, 2, 3];
+
+/// `av1_get_tx_type` (blockd.h), intra UV: the mode-implied type, demoted to
+/// DCT_DCT when the block's ext-tx set does not carry it.
+pub fn uv_tx_type(uv_mode: i32, uv_tx_size: usize, reduced_tx_set: bool) -> usize {
+    let t = INTRA_MODE_TO_TX_TYPE[get_uv_mode(uv_mode as usize) as usize];
+    if ext_tx_derive(uv_tx_size, false, reduced_tx_set, t, false, 0, 0).used == 1 {
+        t
+    } else {
+        0
+    }
+}
+
+/// `ROUND_POWER_OF_TWO`.
+#[inline]
+fn round_power_of_two(value: i32, n: usize) -> i32 {
+    (value + ((1 << n) >> 1)) >> n
+}
+
+/// `max_block_wide` / `max_block_high` (blockd.h) for an arbitrary plane: the
+/// plane block's in-frame extent in the plane's 4px units — the plane block
+/// size reduced by the (negative, luma-eighth-pel) frame-edge distance scaled
+/// by the plane subsampling.
+pub fn max_block_units_ss(plane_px: i32, mb_to_edge: i32, ss: usize) -> usize {
+    let px = if mb_to_edge < 0 {
+        plane_px + (mb_to_edge >> (3 + ss))
+    } else {
+        plane_px
+    };
+    (px >> 2) as usize
+}
 
 // ---- configuration -------------------------------------------------------------
 
@@ -166,10 +291,17 @@ pub struct KfTileConfig {
     /// Bit depth (8/10/12); pixels are u16 at every depth.
     pub bd: i32,
     /// `seq_params->monochrome`: when true no UV symbols exist and the luma
-    /// reconstruction is the complete frame. When false the driver models
-    /// 4:4:4 (`is_chroma_ref` always true) and decodes UV mode-info symbols
-    /// without reconstructing chroma.
+    /// reconstruction is the complete frame. When false the U/V planes are
+    /// fully reconstructed (mode-info symbols, chroma coefficients, intra +
+    /// CfL prediction) at the configured subsampling.
     pub monochrome: bool,
+    /// `seq_params->subsampling_x` / `subsampling_y` (only meaningful when
+    /// `!monochrome`): (0,0) = 4:4:4, (1,0) = 4:2:2, (1,1) = 4:2:0. A
+    /// subsampled axis requires an even mi count (the C `set_mb_mi` aligns
+    /// frame mi dimensions to 8 pixels, so shared-chroma groups never straddle
+    /// the frame edge).
+    pub subsampling_x: usize,
+    pub subsampling_y: usize,
     /// `cdef_info.cdef_bits` (0..=3): per-64x64 CDEF strength literal width.
     pub cdef_bits: u32,
     /// `!seq_params->enable_intra_edge_filter`.
@@ -188,6 +320,9 @@ pub struct KfTileConfig {
     pub base_qindex_gt0: bool,
     /// Frame-constant `[dc, ac]` dequant steps (`seg_dequant_QTX[0]`, flat/no QM).
     pub dequant: [i16; 2],
+    /// Frame-constant `[dc, ac]` chroma dequant steps: `[0]` = U
+    /// (`u_dequant_QTX`), `[1]` = V (`v_dequant_QTX`).
+    pub dequant_uv: [[i16; 2]; 2],
 }
 
 // The tile's CDF state is libaom's FRAME_CONTEXT itself —
@@ -200,7 +335,9 @@ pub struct KfTileConfig {
 
 /// One decoded leaf block: its position/size, the partition type that created it,
 /// the decoded mode info, and the per-txb `(eob, tx_type)` in raster order
-/// (plane 0; skip blocks record `(0, 0)` per txb).
+/// (plane 0; skip blocks record `(0, 0)` per txb). `txbs_uv` holds the chroma
+/// txbs (plane 1's in raster order, then plane 2's) for chroma-reference
+/// blocks — empty for monochrome / non-chroma-reference blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodedBlockKf {
     pub mi_row: i32,
@@ -210,18 +347,25 @@ pub struct DecodedBlockKf {
     pub info: MbModeInfoKf,
     pub tx_size: usize,
     pub txbs: Vec<(usize, usize)>,
+    pub txbs_uv: Vec<(usize, usize)>,
 }
 
-/// A decoded KEY-frame luma tile: the reconstruction plane (superblock-aligned;
-/// the frame crop is `width x height` pixels at the top-left), the pre-order
-/// partition sequence (every visited node, including uncoded forced partitions),
-/// and the per-leaf decode records.
+/// A decoded KEY-frame tile: the reconstruction planes (superblock-aligned;
+/// the frame crop is `width x height` luma pixels / `width_uv x height_uv`
+/// chroma pixels at the top-left), the pre-order partition sequence (every
+/// visited node, including uncoded forced partitions), and the per-leaf decode
+/// records. The chroma planes are empty for monochrome.
 #[derive(Clone, Debug)]
 pub struct KfTileDecode {
     pub recon: Vec<u16>,
     pub stride: usize,
     pub width: usize,
     pub height: usize,
+    pub recon_u: Vec<u16>,
+    pub recon_v: Vec<u16>,
+    pub stride_uv: usize,
+    pub width_uv: usize,
+    pub height_uv: usize,
     pub tree: Vec<i8>,
     pub blocks: Vec<DecodedBlockKf>,
 }
@@ -280,11 +424,18 @@ struct TileKf<'c> {
     /// Luma reconstruction plane, SB-aligned, `stride` = aligned width in px.
     recon: Vec<u16>,
     stride: usize,
-    /// Plane-0 coefficient entropy contexts: above spans the aligned tile width
-    /// (one i8 per mi col, zeroed once per tile); left is the one-SB-tall rolling
-    /// column, zeroed at each SB row, indexed by `mi_row & 31`.
-    above_e: Vec<i8>,
-    left_e: [i8; 32],
+    /// Chroma reconstruction planes (`stride_uv = stride >> ss_x`); empty when
+    /// monochrome.
+    recon_u: Vec<u16>,
+    recon_v: Vec<u16>,
+    stride_uv: usize,
+    /// Per-plane coefficient entropy contexts (`xd->above_entropy_context[plane]`
+    /// / `xd->left_entropy_context[plane]`): above spans the aligned tile width
+    /// (one i8 per mi col, zeroed once per tile; chroma planes index it at
+    /// `adjusted_mi_col >> ss_x`); left is the one-SB-tall rolling column,
+    /// zeroed at each SB row, indexed by `(mi_row & 31) >> ss_y`.
+    above_e: [Vec<i8>; 3],
+    left_e: [[i8; 32]; 3],
     /// Partition contexts with the same lifetimes/indexing.
     above_p: Vec<i8>,
     left_p: [i8; 32],
@@ -301,6 +452,16 @@ struct TileKf<'c> {
     /// `get_filt_type` (edge-filter type 1 when a neighbour's y mode is
     /// SMOOTH/SMOOTH_V/SMOOTH_H).
     mi: Vec<MiNbrKf>,
+    /// Per-mi UV-mode grid (same frame-cropped stamps): what the chroma
+    /// `get_filt_type` reads through `xd->chroma_above_mbmi` /
+    /// `xd->chroma_left_mbmi` (`is_smooth(mbmi, plane > 0)` checks the
+    /// neighbour's uv_mode). Non-chroma-reference blocks stamp `UV_DC_PRED`
+    /// (the C `read_intra_frame_mode_info` else-branch), but the chroma
+    /// neighbour pointers only ever land on chroma-reference cells.
+    mi_uv: Vec<i8>,
+    /// The CfL luma store (one per tile, like `xd->cfl`): sub-8x8 members of a
+    /// shared-chroma group accumulate into it across blocks.
+    cfl: CflCtx,
     st: KfBlockState,
     tree: Vec<i8>,
     blocks: Vec<DecodedBlockKf>,
@@ -310,9 +471,29 @@ impl<'c> TileKf<'c> {
     fn new(cfg: &'c KfTileConfig, recon_init: u16) -> Self {
         assert!(cfg.mi_rows > 0 && cfg.mi_cols > 0, "empty frame");
         assert!(matches!(cfg.bd, 8 | 10 | 12), "bd must be 8/10/12");
+        let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
+        assert!(
+            ss_x < 2 && ss_y < 2 && (ss_x, ss_y) != (0, 1),
+            "(0,1) is 4:4:0 — not an AV1 config"
+        );
+        if !cfg.monochrome {
+            // C set_mb_mi aligns frame mi dims to 8 px, so a subsampled axis is
+            // always even — shared-chroma groups never straddle the frame edge.
+            assert!(
+                (ss_x == 0 || (cfg.mi_cols as usize).is_multiple_of(2))
+                    && (ss_y == 0 || (cfg.mi_rows as usize).is_multiple_of(2)),
+                "subsampled axes require even mi dimensions"
+            );
+        }
         let aligned_mi_cols = (cfg.mi_cols as usize).div_ceil(SB_MI as usize) * SB_MI as usize;
         let aligned_mi_rows = (cfg.mi_rows as usize).div_ceil(SB_MI as usize) * SB_MI as usize;
         let stride = aligned_mi_cols * 4;
+        let stride_uv = if cfg.monochrome { 0 } else { stride >> ss_x };
+        let uv_len = if cfg.monochrome {
+            0
+        } else {
+            stride_uv * ((aligned_mi_rows * 4) >> ss_y)
+        };
         let st = KfBlockState {
             segid_preskip: false,
             seg_enabled: false,
@@ -354,8 +535,15 @@ impl<'c> TileKf<'c> {
             cfg,
             recon: vec![recon_init; stride * aligned_mi_rows * 4],
             stride,
-            above_e: vec![0; aligned_mi_cols],
-            left_e: [0; 32],
+            recon_u: vec![recon_init; uv_len],
+            recon_v: vec![recon_init; uv_len],
+            stride_uv,
+            above_e: [
+                vec![0; aligned_mi_cols],
+                vec![0; aligned_mi_cols],
+                vec![0; aligned_mi_cols],
+            ],
+            left_e: [[0; 32]; 3],
             above_p: vec![0; aligned_mi_cols],
             left_p: [0; 32],
             above_t: vec![TXFM_CTX_INIT; aligned_mi_cols],
@@ -367,6 +555,8 @@ impl<'c> TileKf<'c> {
                 };
                 (cfg.mi_rows * cfg.mi_cols) as usize
             ],
+            mi_uv: vec![0; (cfg.mi_rows * cfg.mi_cols) as usize],
+            cfl: CflCtx::new(ss_x as i32, ss_y as i32),
             st,
             tree: Vec::new(),
             blocks: Vec::new(),
@@ -394,15 +584,20 @@ impl<'c> TileKf<'c> {
         }
     }
 
-    /// `av1_set_entropy_contexts` (av1/common/blockd.c), plane 0: fill the txb's
-    /// above/left context footprint with its cul level, zeroing the beyond-frame
-    /// part when a non-zero fill crosses the frame edge.
+    /// `av1_set_entropy_contexts` (av1/common/blockd.c): fill the txb's
+    /// above/left context footprint (of `plane`, from the plane's context base
+    /// indices) with its cul level, zeroing the beyond-frame part when a
+    /// non-zero fill crosses the frame edge. `blocks_wide`/`blocks_high` are
+    /// the plane block's in-frame extent (`max_block_wide/high(xd,
+    /// plane_bsize, plane)`); the edge distances are the block's luma
+    /// eighth-pel values.
     #[allow(clippy::too_many_arguments)]
     fn set_entropy_ctx(
         &mut self,
+        plane: usize,
         cul: i8,
-        mi_row: i32,
-        mi_col: i32,
+        a_base: usize,
+        l_base: usize,
         blk_row: usize,
         blk_col: usize,
         txw: usize,
@@ -412,21 +607,21 @@ impl<'c> TileKf<'c> {
         mb_to_right_edge: i32,
         mb_to_bottom_edge: i32,
     ) {
-        let a0 = mi_col as usize + blk_col;
+        let a0 = a_base + blk_col;
         if cul != 0 && mb_to_right_edge < 0 {
-            let n = txw.min(blocks_wide - blk_col);
-            self.above_e[a0..a0 + n].fill(cul);
-            self.above_e[a0 + n..a0 + txw].fill(0);
+            let n = txw.min(blocks_wide.saturating_sub(blk_col));
+            self.above_e[plane][a0..a0 + n].fill(cul);
+            self.above_e[plane][a0 + n..a0 + txw].fill(0);
         } else {
-            self.above_e[a0..a0 + txw].fill(cul);
+            self.above_e[plane][a0..a0 + txw].fill(cul);
         }
-        let l0 = (mi_row & 31) as usize + blk_row;
+        let l0 = l_base + blk_row;
         if cul != 0 && mb_to_bottom_edge < 0 {
-            let n = txh.min(blocks_high - blk_row);
-            self.left_e[l0..l0 + n].fill(cul);
-            self.left_e[l0 + n..l0 + txh].fill(0);
+            let n = txh.min(blocks_high.saturating_sub(blk_row));
+            self.left_e[plane][l0..l0 + n].fill(cul);
+            self.left_e[plane][l0 + n..l0 + txh].fill(0);
         } else {
-            self.left_e[l0..l0 + txh].fill(cul);
+            self.left_e[plane][l0..l0 + txh].fill(cul);
         }
     }
 
@@ -444,7 +639,21 @@ impl<'c> TileKf<'c> {
         let cfg = self.cfg;
         let up_available = mi_row > 0;
         let left_available = mi_col > 0;
-        let cfl_allowed = !cfg.monochrome && is_cfl_allowed(bsize, false, 0, 0);
+        let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
+        // xd->is_chroma_ref (set_mi_row_col): does this block carry the (merged)
+        // chroma information? Gates the UV mode-info symbols and the chroma
+        // plane loop. The C decode_mbmi_block also rejects >=8x8 blocks whose
+        // chroma plane size is invalid ("Invalid block size", e.g. tall shapes
+        // in 4:2:2) — asserted here (the roundtrip never produces them).
+        let chroma_ref = is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
+        if !cfg.monochrome && bsize >= BLOCK_8X8 && (ss_x != 0 || ss_y != 0) {
+            assert_ne!(
+                get_plane_block_size(bsize, ss_x, ss_y),
+                255,
+                "invalid chroma block size (non-conformant partition for this subsampling)"
+            );
+        }
+        let cfl_allowed = !cfg.monochrome && is_cfl_allowed(bsize, false, ss_x, ss_y);
         let (above, left) = self.neighbours(mi_row, mi_col);
 
         // --- decode_mbmi_block: the KEY-frame mode info, every symbol's CDF
@@ -452,6 +661,7 @@ impl<'c> TileKf<'c> {
         self.st.mi_row = mi_row;
         self.st.mi_col = mi_col;
         self.st.bsize = bsize;
+        self.st.is_chroma_ref = chroma_ref;
         self.st.cfl_allowed = cfl_allowed;
         self.st.mb_to_top_edge = -(mi_row * 32);
         self.st.has_above = up_available;
@@ -513,12 +723,43 @@ impl<'c> TileKf<'c> {
             false,
         );
 
-        // --- parse_decode_block tail: skip blocks reset their entropy context ---
+        // The chroma-side geometry (used by the skip reset, the chroma txb
+        // loop, and CfL): the plane origin is the shared-chroma group's — a
+        // sub-8x8 dimension at an odd mi position on a subsampled axis shifts
+        // back one mi (setup_pred_plane / set_entropy_context adjustment).
+        let adj_row = if ss_y != 0 && (mi_row & 1) != 0 && MI_SIZE_HIGH[bsize] == 1 {
+            mi_row - 1
+        } else {
+            mi_row
+        };
+        let adj_col = if ss_x != 0 && (mi_col & 1) != 0 && MI_SIZE_WIDE[bsize] == 1 {
+            mi_col - 1
+        } else {
+            mi_col
+        };
+        let uv_a_base = (adj_col >> ss_x) as usize;
+        let uv_l_base = ((adj_row & 31) >> ss_y) as usize;
+
+        // --- parse_decode_block tail: skip blocks reset their entropy context
+        // (av1_reset_entropy_context: plane 0 always; chroma planes when this
+        // block is the chroma reference, over the chroma plane-bsize footprint
+        // from the adjusted context bases) ---
         if info.skip != 0 {
             let a0 = mi_col as usize;
-            self.above_e[a0..a0 + bw].fill(0);
+            self.above_e[0][a0..a0 + bw].fill(0);
             let l0 = (mi_row & 31) as usize;
-            self.left_e[l0..l0 + bh].fill(0);
+            self.left_e[0][l0..l0 + bh].fill(0);
+            if !cfg.monochrome && chroma_ref {
+                let plane_bsize = get_plane_block_size(bsize, ss_x, ss_y);
+                let (uw, uh) = (
+                    MI_SIZE_WIDE[plane_bsize] as usize,
+                    MI_SIZE_HIGH[plane_bsize] as usize,
+                );
+                for plane in 1..=2 {
+                    self.above_e[plane][uv_a_base..uv_a_base + uw].fill(0);
+                    self.left_e[plane][uv_l_base..uv_l_base + uh].fill(0);
+                }
+            }
         }
 
         // --- decode_token_recon_block (intra): per-txb read -> predict -> recon ---
@@ -551,8 +792,13 @@ impl<'c> TileKf<'c> {
                 let (eob, tx_type) = if info.skip == 0 {
                     let a0 = mi_col as usize + blk_col;
                     let l0 = (mi_row & 31) as usize + blk_row;
-                    let (tsc, dsc) =
-                        get_txb_ctx(bsize, tx_size, 0, &self.above_e[a0..], &self.left_e[l0..]);
+                    let (tsc, dsc) = get_txb_ctx(
+                        bsize,
+                        tx_size,
+                        0,
+                        &self.above_e[0][a0..],
+                        &self.left_e[0][l0..],
+                    );
                     let ext = intra_ext_tx_cdf(
                         &mut cdfs.ext_tx_1ddct,
                         &mut cdfs.ext_tx_dtt4,
@@ -579,9 +825,10 @@ impl<'c> TileKf<'c> {
                     );
                     let cul = txb_entropy_context(&tcoeff, tx_size, tt, eob) as i8;
                     self.set_entropy_ctx(
+                        0,
                         cul,
-                        mi_row,
-                        mi_col,
+                        mi_col as usize,
+                        (mi_row & 31) as usize,
                         blk_row,
                         blk_col,
                         txw,
@@ -660,10 +907,233 @@ impl<'c> TileKf<'c> {
                         cfg.bd,
                     );
                 }
+                // (4) CfL luma store (predict_and_reconstruct_intra_block tail,
+                // store_cfl_required): non-chroma-reference blocks always store
+                // (a later group member may pick CfL); the chroma-reference
+                // block stores only when it actually uses CfL. Runs for skip
+                // blocks too (their reconstruction is the prediction).
+                if !cfg.monochrome && (!chroma_ref || info.uv_mode == UV_CFL_PRED) {
+                    let block_off = (mi_row * 4) as usize * self.stride + (mi_col * 4) as usize;
+                    cfl_store_tx(
+                        &mut self.cfl,
+                        &self.recon,
+                        block_off,
+                        self.stride,
+                        blk_row as i32,
+                        blk_col as i32,
+                        tx_size,
+                        bsize,
+                        mi_row,
+                        mi_col,
+                    );
+                }
                 txbs.push((eob, tx_type));
                 blk_col += txw;
             }
             blk_row += txh;
+        }
+
+        // --- decode_token_recon_block, planes 1..2: the chroma txb loop of the
+        // (single, <=64x64) 64x64 chunk — runs after ALL of plane 0, so the
+        // block's own luma is already in the CfL store. Only the
+        // chroma-reference block of a shared group decodes chroma, covering
+        // the merged area from the adjusted plane origin. ---
+        let mut txbs_uv = Vec::new();
+        if !cfg.monochrome && chroma_ref {
+            let plane_bsize = get_plane_block_size(bsize, ss_x, ss_y);
+            assert_ne!(plane_bsize, 255, "invalid chroma block size");
+            let uv_tx = max_uv_txsize(bsize, ss_x, ss_y);
+            let (uv_txw, uv_txh) = (TX_SIZE_WIDE_UNIT[uv_tx], TX_SIZE_HIGH_UNIT[uv_tx]);
+            let (uv_txwpx, uv_txhpx) = (TX_SIZE_WIDE[uv_tx], TX_SIZE_HIGH[uv_tx]);
+            // unit_width/height: the luma extent, ceil-scaled to chroma units.
+            let unit_width = round_power_of_two(max_blocks_wide as i32, ss_x) as usize;
+            let unit_height = round_power_of_two(max_blocks_high as i32, ss_y) as usize;
+            // av1_set_entropy_contexts' frame-edge clip uses the CHROMA plane
+            // block's in-frame extent.
+            let blocks_wide_uv =
+                max_block_units_ss(BLOCK_SIZE_WIDE[plane_bsize], mb_to_right_edge, ss_x);
+            let blocks_high_uv =
+                max_block_units_ss(BLOCK_SIZE_HIGH[plane_bsize], mb_to_bottom_edge, ss_y);
+            // Prediction geometry: pd->width/height (chroma px, min 4), the
+            // scaled block size the has_top_right/bottom_left walk sees, and
+            // the chroma availability (equal to group-origin availability).
+            let wpx = ((MI_SIZE_WIDE[bsize] * 4) >> ss_x).max(4);
+            let hpx = ((MI_SIZE_HIGH[bsize] * 4) >> ss_y).max(4);
+            let bsize_uv = scale_chroma_bsize(bsize, ss_x, ss_y);
+            let up_uv = adj_row > 0;
+            let left_uv = adj_col > 0;
+            // get_filt_type(xd, plane > 0): smoothness of the chroma
+            // above/left neighbours — the bottom-right-most mi of the
+            // neighbouring chroma region (set_mi_row_col's chroma_above_mbmi /
+            // chroma_left_mbmi), read from the uv-mode grid.
+            let cols = cfg.mi_cols;
+            let base_row = mi_row - (mi_row & ss_y as i32);
+            let base_col = mi_col - (mi_col & ss_x as i32);
+            let uv_smooth = |m: i8| (9..=11).contains(&m);
+            let ab_sm = up_uv
+                && uv_smooth(self.mi_uv[((base_row - 1) * cols + base_col + ss_x as i32) as usize]);
+            let le_sm = left_uv
+                && uv_smooth(self.mi_uv[((base_row + ss_y as i32) * cols + base_col - 1) as usize]);
+            let filt_type_uv = (ab_sm || le_sm) as i32;
+            // The block origin in the chroma planes.
+            let uv_org = ((adj_row * 4) >> ss_y) as usize * self.stride_uv
+                + ((adj_col * 4) >> ss_x) as usize;
+            // Chroma transform types are not coded: the UV intra mode implies
+            // the type, demoted to DCT_DCT outside the block's ext-tx set
+            // (av1_get_tx_type, PLANE_TYPE_UV intra).
+            let tt_uv = uv_tx_type(info.uv_mode, uv_tx, cfg.reduced_tx_set);
+            let mode_uv = get_uv_mode(info.uv_mode as usize) as usize;
+            let uv_area = txb_wide(uv_tx) * txb_high(uv_tx);
+            let mut tcoeff_uv = vec![0i32; uv_area];
+            let mut scratch_uv = vec![0u16; uv_txwpx * uv_txhpx];
+            let mut no_ext: [u16; 0] = [];
+
+            for plane in 1..=2usize {
+                let mut blk_row = 0usize;
+                while blk_row < unit_height {
+                    let mut blk_col = 0usize;
+                    while blk_col < unit_width {
+                        // (1) chroma coefficients (read_coeffs_tx_intra_block).
+                        let eob = if info.skip == 0 {
+                            let (tsc, dsc) = get_txb_ctx(
+                                plane_bsize,
+                                uv_tx,
+                                plane,
+                                &self.above_e[plane][uv_a_base + blk_col..],
+                                &self.left_e[plane][uv_l_base + blk_row..],
+                            );
+                            let (eob, _tt) = read_coeffs_txb_full(
+                                dec,
+                                &mut cdfs.coeff,
+                                &mut no_ext, // plane_type 1: no tx_type symbol
+                                &mut tcoeff_uv,
+                                uv_tx,
+                                1,
+                                tsc as usize,
+                                dsc as usize,
+                                true,
+                                false,
+                                cfg.reduced_tx_set,
+                                false,
+                                tt_uv,
+                            );
+                            let cul = txb_entropy_context(&tcoeff_uv, uv_tx, tt_uv, eob) as i8;
+                            self.set_entropy_ctx(
+                                plane,
+                                cul,
+                                uv_a_base,
+                                uv_l_base,
+                                blk_row,
+                                blk_col,
+                                uv_txw,
+                                uv_txh,
+                                blocks_wide_uv,
+                                blocks_high_uv,
+                                mb_to_right_edge,
+                                mb_to_bottom_edge,
+                            );
+                            eob
+                        } else {
+                            0
+                        };
+
+                        // (2) chroma intra prediction (av1_predict_intra_block_facade):
+                        // ordinary intra with mode = get_uv_mode(uv_mode) — DC for
+                        // CfL — then the CfL AC contribution on top.
+                        let (n_top, n_tr, n_left, n_bl) = intra_avail(
+                            BLOCK_64X64,
+                            bsize_uv,
+                            adj_row,
+                            adj_col,
+                            up_uv,
+                            left_uv,
+                            cfg.mi_cols,
+                            cfg.mi_rows,
+                            partition,
+                            uv_tx,
+                            ss_x as i32,
+                            ss_y as i32,
+                            blk_row as i32,
+                            blk_col as i32,
+                            wpx,
+                            hpx,
+                            cfg.mi_cols,
+                            cfg.mi_rows,
+                            mode_uv,
+                            info.angle_delta_uv * ANGLE_STEP,
+                            false,
+                        );
+                        let off_uv = uv_org + (blk_row * 4) * self.stride_uv + blk_col * 4;
+                        {
+                            let plane_recon = if plane == 1 {
+                                &self.recon_u
+                            } else {
+                                &self.recon_v
+                            };
+                            predict_intra_high(
+                                plane_recon,
+                                off_uv,
+                                self.stride_uv,
+                                &mut scratch_uv,
+                                uv_txwpx,
+                                mode_uv,
+                                info.angle_delta_uv * ANGLE_STEP,
+                                false,
+                                0,
+                                cfg.disable_edge_filter,
+                                filt_type_uv,
+                                uv_tx,
+                                usize::try_from(n_top).expect("n_top_px must be non-negative"),
+                                n_tr,
+                                usize::try_from(n_left).expect("n_left_px must be non-negative"),
+                                n_bl,
+                                cfg.bd,
+                            );
+                        }
+                        if info.uv_mode == UV_CFL_PRED {
+                            cfl_predict_block(
+                                &mut self.cfl,
+                                &mut scratch_uv,
+                                0,
+                                uv_txwpx,
+                                uv_tx,
+                                plane,
+                                info.cfl_alpha_idx,
+                                info.cfl_joint_sign,
+                                cfg.bd,
+                            );
+                        }
+                        {
+                            let plane_recon = if plane == 1 {
+                                &mut self.recon_u
+                            } else {
+                                &mut self.recon_v
+                            };
+                            for r in 0..uv_txhpx {
+                                let d = off_uv + r * self.stride_uv;
+                                plane_recon[d..d + uv_txwpx]
+                                    .copy_from_slice(&scratch_uv[r * uv_txwpx..(r + 1) * uv_txwpx]);
+                            }
+                            // (3) dequant + inverse transform + add.
+                            if info.skip == 0 && eob > 0 {
+                                reconstruct_txb(
+                                    &mut plane_recon[off_uv..],
+                                    self.stride_uv,
+                                    uv_tx,
+                                    tt_uv,
+                                    &tcoeff_uv,
+                                    cfg.dequant_uv[plane - 1],
+                                    None,
+                                    cfg.bd,
+                                );
+                            }
+                        }
+                        txbs_uv.push(if eob > 0 { (eob, tt_uv) } else { (0, 0) });
+                        blk_col += uv_txw;
+                    }
+                    blk_row += uv_txh;
+                }
+            }
         }
 
         self.stamp_mi(
@@ -675,6 +1145,16 @@ impl<'c> TileKf<'c> {
                 skip_txfm: info.skip,
             },
         );
+        // The uv-mode grid stamp: non-chroma-reference blocks carry UV_DC_PRED
+        // (read_intra_frame_mode_info's else-branch), which the tail returns.
+        {
+            let x_mis = MI_SIZE_WIDE[bsize].min(cfg.mi_cols - mi_col);
+            let y_mis = MI_SIZE_HIGH[bsize].min(cfg.mi_rows - mi_row);
+            for r in 0..y_mis {
+                let base = ((mi_row + r) * cfg.mi_cols + mi_col) as usize;
+                self.mi_uv[base..base + x_mis as usize].fill(info.uv_mode as i8);
+            }
+        }
         self.blocks.push(DecodedBlockKf {
             mi_row,
             mi_col,
@@ -683,6 +1163,7 @@ impl<'c> TileKf<'c> {
             info,
             tx_size,
             txbs,
+            txbs_uv,
         });
     }
 
@@ -820,7 +1301,7 @@ pub fn decode_tile_kf(
     let mut t = TileKf::new(cfg, recon_init);
     let mut mi_row = 0;
     while mi_row < cfg.mi_rows {
-        t.left_e = [0; 32]; // av1_zero_left_context per SB row
+        t.left_e = [[0; 32]; 3]; // av1_zero_left_context per SB row (all planes)
         t.left_p = [0; 32];
         t.left_t = [TXFM_CTX_INIT; 32]; // ..incl the left txfm-context bytes
         let mut mi_col = 0;
@@ -835,6 +1316,19 @@ pub fn decode_tile_kf(
         stride: t.stride,
         width: cfg.mi_cols as usize * 4,
         height: cfg.mi_rows as usize * 4,
+        recon_u: t.recon_u,
+        recon_v: t.recon_v,
+        stride_uv: t.stride_uv,
+        width_uv: if cfg.monochrome {
+            0
+        } else {
+            (cfg.mi_cols as usize * 4) >> cfg.subsampling_x
+        },
+        height_uv: if cfg.monochrome {
+            0
+        } else {
+            (cfg.mi_rows as usize * 4) >> cfg.subsampling_y
+        },
         tree: t.tree,
         blocks: t.blocks,
     }
