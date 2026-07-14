@@ -7762,6 +7762,47 @@ extern "C" {
         v: *mut u16,
         info_out: *mut i32,
     ) -> i32;
+    fn shim_lr_units_roundtrip(
+        units: *const i32,
+        n: i32,
+        out: *mut u8,
+        out_cap: i64,
+        readback: *mut i32,
+        cdf_out: *mut u16,
+    ) -> i64;
+}
+
+/// Words per unit in [`ref_lr_units_roundtrip`] packing:
+/// `[plane, frame_rtype, unit_rtype, v0, v1, v2, h0, h1, h2, ep, xqd0, xqd1]`.
+pub const LRU_WORDS: usize = 12;
+
+/// Write a sequence of restoration-unit parameter sets with the REAL C
+/// arithmetic writer (transcribed encoder `loop_restoration_write_sb_coeffs`
+/// control flow over the EXPORTED `aom_write_primitive_refsubexpfin` +
+/// `aom_write_symbol` on the REAL default LR CDFs), then read them back with
+/// the REAL C reader (transcribed decoder control flow over the EXPORTED
+/// `aom_read_primitive_refsubexpfin` + `aom_read_symbol`). Returns
+/// `(bitstream, readback_units, final_cdfs)` where `final_cdfs` is
+/// `switchable[4] ++ wiener[3] ++ sgrproj[3]` after reader adaptation.
+pub fn ref_lr_units_roundtrip(units: &[i32]) -> (Vec<u8>, Vec<i32>, [u16; 10]) {
+    assert!(units.len().is_multiple_of(LRU_WORDS));
+    let n = units.len() / LRU_WORDS;
+    let mut out = vec![0u8; 1 << 20];
+    let mut readback = vec![0i32; units.len()];
+    let mut cdfs = [0u16; 10];
+    let len = unsafe {
+        shim_lr_units_roundtrip(
+            units.as_ptr(),
+            n as i32,
+            out.as_mut_ptr(),
+            out.len() as i64,
+            readback.as_mut_ptr(),
+            cdfs.as_mut_ptr(),
+        )
+    };
+    assert!(len > 0, "shim_lr_units_roundtrip failed ({len})");
+    out.truncate(len as usize);
+    (out, readback, cdfs)
 }
 
 /// Reference `get_tx_size_context` (pred_common.h) over a constructed
@@ -7876,7 +7917,7 @@ pub fn ref_scale_chroma_bsize(bsize: usize, ss_x: i32, ss_y: i32) -> usize {
 
 /// Flat u16 length of the default-KF-FRAME_CONTEXT dump (see dec_shim.c for
 /// the field order; the coefficient arena is the trailing 4045).
-pub const DUMP_KF_FC_LEN: usize = 6421;
+pub const DUMP_KF_FC_LEN: usize = 6431;
 
 /// Dump the REAL `av1_setup_past_independence` default KF FRAME_CONTEXT for a
 /// `base_qindex` as a flat u16 buffer mirroring `KfFrameContext`'s field order.

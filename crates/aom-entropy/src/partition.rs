@@ -5505,6 +5505,13 @@ pub struct KfFrameContext {
     /// filter-intra block, else the Y mode.
     pub ext_tx_1ddct: [[[u16; 8]; INTRA_MODES]; EXT_TX_SIZES],
     pub ext_tx_dtt4: [[[u16; 6]; INTRA_MODES]; EXT_TX_SIZES],
+    /// `switchable_restore_cdf` (3 symbols) — per-restoration-unit type in a
+    /// `RESTORE_SWITCHABLE` frame (`loop_restoration_read_sb_coeffs`).
+    pub switchable_restore: [u16; 4],
+    /// `wiener_restore_cdf` / `sgrproj_restore_cdf` (2 symbols) — the per-unit
+    /// on/off gates in `RESTORE_WIENER` / `RESTORE_SGRPROJ` frames.
+    pub wiener_restore: [u16; 3],
+    pub sgrproj_restore: [u16; 3],
     /// The coefficient-CDF region (`txb_skip`/`eob*`/`dc_sign`/`coeff_base*`/
     /// `coeff_br`) as aom-txb's flat arena; its per-symbol context selection
     /// happens inside the coefficient reader/writer.
@@ -5542,6 +5549,9 @@ impl KfFrameContext {
             tx_size: [[[0; 4]; TX_SIZE_CONTEXTS]; MAX_TX_CATS],
             ext_tx_1ddct: [[[0; 8]; INTRA_MODES]; EXT_TX_SIZES],
             ext_tx_dtt4: [[[0; 6]; INTRA_MODES]; EXT_TX_SIZES],
+            switchable_restore: [0; 4],
+            wiener_restore: [0; 3],
+            sgrproj_restore: [0; 3],
             coeff: vec![0; coeff_len],
         }
     }
@@ -5579,6 +5589,9 @@ impl KfFrameContext {
             tx_size: d::DEFAULT_TX_SIZE,
             ext_tx_1ddct: d::DEFAULT_EXT_TX_1DDCT,
             ext_tx_dtt4: d::DEFAULT_EXT_TX_DTT4,
+            switchable_restore: d::DEFAULT_SWITCHABLE_RESTORE,
+            wiener_restore: d::DEFAULT_WIENER_RESTORE,
+            sgrproj_restore: d::DEFAULT_SGRPROJ_RESTORE,
             coeff: d::DEFAULT_COEFF_ARENA[coeff_cdf_q_ctx(base_qindex)].to_vec(),
         }
     }

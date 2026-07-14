@@ -10,6 +10,7 @@ pub mod default_cdfs;
 pub mod enc;
 pub mod header;
 pub mod leb128;
+pub mod lr;
 pub mod obu;
 pub mod partition;
 pub mod rb;

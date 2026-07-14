@@ -446,6 +446,13 @@ pub const DEFAULT_EXT_TX_1DDCT: [[[u16; 8]; 13]; 4] = [
 ];
 
 /// `default_intra_ext_tx_cdf[2]` (EXT_TX_SET_DTT4_IDTX, 5-symbol) sliced to 6 slots.
+/// `default_switchable_restore_cdf` = AOM_CDF3(9413, 22581) (entropymode.c).
+pub const DEFAULT_SWITCHABLE_RESTORE: [u16; 4] = [23355, 10187, 0, 0];
+/// `default_wiener_restore_cdf` = AOM_CDF2(11570) (entropymode.c).
+pub const DEFAULT_WIENER_RESTORE: [u16; 3] = [21198, 0, 0];
+/// `default_sgrproj_restore_cdf` = AOM_CDF2(16855) (entropymode.c).
+pub const DEFAULT_SGRPROJ_RESTORE: [u16; 3] = [15913, 0, 0];
+
 pub const DEFAULT_EXT_TX_DTT4: [[[u16; 6]; 13]; 4] = [
     [
         [26214, 19661, 13107, 6554, 0, 0],

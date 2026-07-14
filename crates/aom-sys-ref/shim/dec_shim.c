@@ -18,7 +18,7 @@
  *     *default_frame_context; large_scale=0 skips the buffer-pool arm)), then
  *     memcpy the KF-path FRAME_CONTEXT fields to a flat u16 layout mirroring
  *     aom-entropy's KfFrameContext field order (coeff arena LAST, in aom-txb's
- *     CdfArena region layout). Total DUMP_KF_FC_LEN = 6421 u16.
+ *     CdfArena region layout). Total DUMP_KF_FC_LEN = 6431 u16.
  *
  *  3. shim_encode_av1_kf / shim_decode_av1_kf — the REAL public codec API
  *     (aom_codec_av1_cx / aom_codec_av1_dx): produce a production KEY-frame
@@ -198,7 +198,7 @@ int shim_scale_chroma_bsize(int bsize, int ss_x, int ss_y) {
 /* Flat u16 layout — MUST mirror aom-entropy KfFrameContext field order.
  * Mode fields first (exact-sized: ext-tx instances sliced to nsym+1 leading
  * slots), then the aom-txb coefficient arena (4045). */
-#define DUMP_KF_FC_LEN 6421
+#define DUMP_KF_FC_LEN 6431
 
 static uint16_t *dump_nmv_comp(const nmv_component *c, uint16_t *p) {
   /* aom-entropy 69-u16 nmv_component packing:
@@ -278,6 +278,9 @@ int shim_dump_default_kf_fc(int base_qindex, uint16_t *out) {
       memcpy(p, fc->intra_ext_tx_cdf[2][sz][m], 6 * sizeof(uint16_t));
       p += 6; /* 312 total */
     }
+  CP(fc->switchable_restore_cdf); /* [4]        4 */
+  CP(fc->wiener_restore_cdf);     /* [3]        3 */
+  CP(fc->sgrproj_restore_cdf);    /* [3]        3 */
 
   /* Coefficient arena (aom-txb CdfArena layout, 4045 u16). */
   uint16_t *cf = p;
@@ -843,4 +846,349 @@ int shim_cdef_frame(uint16_t *y, int y_stride, uint16_t *u, uint16_t *v,
   free(grid);
   free(cells);
   return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. Loop-restoration oracles                                         */
+/*                                                                     */
+/* (a) shim_lr_units_roundtrip — RU-params syntax: writes a sequence   */
+/*     of restoration-unit parameter sets with the REAL arithmetic     */
+/*     writer primitives (aom_write_symbol over the REAL default LR    */
+/*     CDFs + EXPORTED aom_write_primitive_refsubexpfin), mirroring    */
+/*     the encoder's loop_restoration_write_sb_coeffs, then reads them */
+/*     back with the REAL reader primitives mirroring the decoder's    */
+/*     loop_restoration_read_sb_coeffs. Returns the bitstream, the     */
+/*     read-back values and the reader's final adapted CDFs.           */
+/* (b) shim_wiener_convolve / shim_apply_sgr — the REAL exported       */
+/*     kernel _c functions over caller-padded buffers (bd==8 runs the  */
+/*     lowbd u8 kernels on converted copies — the production path for  */
+/*     8-bit streams; bd>8 the highbd kernels via CONVERT_TO_BYTEPTR). */
+/* (c) shim_lr_corners_in_sb — REAL av1_loop_restoration_corners_in_sb */
+/*     over a minimal AV1_COMMON.                                      */
+/* (d) shim_lr_filter_frame — the REAL whole-frame application:        */
+/*     av1_loop_restoration_save_boundary_lines (before/after-CDEF     */
+/*     passes over TWO frame states, exactly the decoder's ordering)   */
+/*     + av1_loop_restoration_filter_frame over real bordered YV12     */
+/*     buffers, real av1_alloc_restoration_struct/_buffers geometry.   */
+/*     NEEDS ref_init() (RTCD: wiener/sgr kernels are fn pointers).    */
+/* ------------------------------------------------------------------ */
+
+#include "aom_dsp/bitwriter.h"
+#include "aom_dsp/bitreader.h"
+#include "aom_dsp/binary_codes_writer.h"
+#include "aom_dsp/binary_codes_reader.h"
+#include "aom_scale/yv12config.h"
+#include "av1/common/restoration.h"
+
+/* Unit intent/result packing, 10 i32 per unit:
+ * [0]=plane [1]=frame_rtype [2]=unit_rtype
+ * [3..6)=wiener v0,v1,v2  [6..9)=h0,h1,h2 -- wait 3 v + 3 h = [3..9)
+ * [9]=ep  -- and xqd packed after: see LRU_* below. 12 i32 per unit. */
+#define LRU_WORDS 12
+#define LRU_PLANE 0
+#define LRU_FRTYPE 1
+#define LRU_RTYPE 2
+#define LRU_V0 3 /* v0 v1 v2 h0 h1 h2 = 3..9 */
+#define LRU_EP 9
+#define LRU_XQD0 10
+#define LRU_XQD1 11
+
+static void lr_fill_wiener(WienerInfo *wi, const int32_t *u) {
+  memset(wi, 0, sizeof(*wi));
+  for (int d = 0; d < 2; d++) {
+    int16_t *f = d == 0 ? wi->vfilter : wi->hfilter;
+    const int32_t *t = u + LRU_V0 + 3 * d;
+    f[0] = (int16_t)t[0];
+    f[1] = (int16_t)t[1];
+    f[2] = (int16_t)t[2];
+    f[3] = (int16_t)(-2 * (t[0] + t[1] + t[2]));
+    f[4] = (int16_t)t[2];
+    f[5] = (int16_t)t[1];
+    f[6] = (int16_t)t[0];
+  }
+}
+
+/* Transcribed write_wiener_filter (encoder/bitstream.c) over the REAL
+ * exported aom_write_primitive_refsubexpfin. */
+static void lr_write_wiener(int wiener_win, const WienerInfo *wi,
+                            WienerInfo *ref, aom_writer *wb) {
+  if (wiener_win == WIENER_WIN)
+    aom_write_primitive_refsubexpfin(
+        wb, WIENER_FILT_TAP0_MAXV - WIENER_FILT_TAP0_MINV + 1,
+        WIENER_FILT_TAP0_SUBEXP_K, ref->vfilter[0] - WIENER_FILT_TAP0_MINV,
+        wi->vfilter[0] - WIENER_FILT_TAP0_MINV);
+  aom_write_primitive_refsubexpfin(
+      wb, WIENER_FILT_TAP1_MAXV - WIENER_FILT_TAP1_MINV + 1,
+      WIENER_FILT_TAP1_SUBEXP_K, ref->vfilter[1] - WIENER_FILT_TAP1_MINV,
+      wi->vfilter[1] - WIENER_FILT_TAP1_MINV);
+  aom_write_primitive_refsubexpfin(
+      wb, WIENER_FILT_TAP2_MAXV - WIENER_FILT_TAP2_MINV + 1,
+      WIENER_FILT_TAP2_SUBEXP_K, ref->vfilter[2] - WIENER_FILT_TAP2_MINV,
+      wi->vfilter[2] - WIENER_FILT_TAP2_MINV);
+  if (wiener_win == WIENER_WIN)
+    aom_write_primitive_refsubexpfin(
+        wb, WIENER_FILT_TAP0_MAXV - WIENER_FILT_TAP0_MINV + 1,
+        WIENER_FILT_TAP0_SUBEXP_K, ref->hfilter[0] - WIENER_FILT_TAP0_MINV,
+        wi->hfilter[0] - WIENER_FILT_TAP0_MINV);
+  aom_write_primitive_refsubexpfin(
+      wb, WIENER_FILT_TAP1_MAXV - WIENER_FILT_TAP1_MINV + 1,
+      WIENER_FILT_TAP1_SUBEXP_K, ref->hfilter[1] - WIENER_FILT_TAP1_MINV,
+      wi->hfilter[1] - WIENER_FILT_TAP1_MINV);
+  aom_write_primitive_refsubexpfin(
+      wb, WIENER_FILT_TAP2_MAXV - WIENER_FILT_TAP2_MINV + 1,
+      WIENER_FILT_TAP2_SUBEXP_K, ref->hfilter[2] - WIENER_FILT_TAP2_MINV,
+      wi->hfilter[2] - WIENER_FILT_TAP2_MINV);
+  *ref = *wi;
+}
+
+/* Transcribed write_sgrproj_filter (encoder/bitstream.c). */
+static void lr_write_sgrproj(const SgrprojInfo *si, SgrprojInfo *ref,
+                             aom_writer *wb) {
+  aom_write_literal(wb, si->ep, SGRPROJ_PARAMS_BITS);
+  const sgr_params_type *params = &av1_sgr_params[si->ep];
+  if (params->r[0] == 0) {
+    aom_write_primitive_refsubexpfin(
+        wb, SGRPROJ_PRJ_MAX1 - SGRPROJ_PRJ_MIN1 + 1, SGRPROJ_PRJ_SUBEXP_K,
+        ref->xqd[1] - SGRPROJ_PRJ_MIN1, si->xqd[1] - SGRPROJ_PRJ_MIN1);
+  } else if (params->r[1] == 0) {
+    aom_write_primitive_refsubexpfin(
+        wb, SGRPROJ_PRJ_MAX0 - SGRPROJ_PRJ_MIN0 + 1, SGRPROJ_PRJ_SUBEXP_K,
+        ref->xqd[0] - SGRPROJ_PRJ_MIN0, si->xqd[0] - SGRPROJ_PRJ_MIN0);
+  } else {
+    aom_write_primitive_refsubexpfin(
+        wb, SGRPROJ_PRJ_MAX0 - SGRPROJ_PRJ_MIN0 + 1, SGRPROJ_PRJ_SUBEXP_K,
+        ref->xqd[0] - SGRPROJ_PRJ_MIN0, si->xqd[0] - SGRPROJ_PRJ_MIN0);
+    aom_write_primitive_refsubexpfin(
+        wb, SGRPROJ_PRJ_MAX1 - SGRPROJ_PRJ_MIN1 + 1, SGRPROJ_PRJ_SUBEXP_K,
+        ref->xqd[1] - SGRPROJ_PRJ_MIN1, si->xqd[1] - SGRPROJ_PRJ_MIN1);
+  }
+  *ref = *si;
+}
+
+/* Transcribed read_wiener_filter (decoder/decodeframe.c) over the REAL
+ * exported aom_read_primitive_refsubexpfin. */
+static void lr_read_wiener(int wiener_win, WienerInfo *wi, WienerInfo *ref,
+                           aom_reader *rb) {
+  memset(wi->vfilter, 0, sizeof(wi->vfilter));
+  memset(wi->hfilter, 0, sizeof(wi->hfilter));
+  if (wiener_win == WIENER_WIN)
+    wi->vfilter[0] = wi->vfilter[WIENER_WIN - 1] =
+        aom_read_primitive_refsubexpfin(
+            rb, WIENER_FILT_TAP0_MAXV - WIENER_FILT_TAP0_MINV + 1,
+            WIENER_FILT_TAP0_SUBEXP_K,
+            ref->vfilter[0] - WIENER_FILT_TAP0_MINV, NULL) +
+        WIENER_FILT_TAP0_MINV;
+  else
+    wi->vfilter[0] = wi->vfilter[WIENER_WIN - 1] = 0;
+  wi->vfilter[1] = wi->vfilter[WIENER_WIN - 2] =
+      aom_read_primitive_refsubexpfin(
+          rb, WIENER_FILT_TAP1_MAXV - WIENER_FILT_TAP1_MINV + 1,
+          WIENER_FILT_TAP1_SUBEXP_K, ref->vfilter[1] - WIENER_FILT_TAP1_MINV,
+          NULL) +
+      WIENER_FILT_TAP1_MINV;
+  wi->vfilter[2] = wi->vfilter[WIENER_WIN - 3] =
+      aom_read_primitive_refsubexpfin(
+          rb, WIENER_FILT_TAP2_MAXV - WIENER_FILT_TAP2_MINV + 1,
+          WIENER_FILT_TAP2_SUBEXP_K, ref->vfilter[2] - WIENER_FILT_TAP2_MINV,
+          NULL) +
+      WIENER_FILT_TAP2_MINV;
+  wi->vfilter[WIENER_HALFWIN] =
+      -2 * (wi->vfilter[0] + wi->vfilter[1] + wi->vfilter[2]);
+  if (wiener_win == WIENER_WIN)
+    wi->hfilter[0] = wi->hfilter[WIENER_WIN - 1] =
+        aom_read_primitive_refsubexpfin(
+            rb, WIENER_FILT_TAP0_MAXV - WIENER_FILT_TAP0_MINV + 1,
+            WIENER_FILT_TAP0_SUBEXP_K,
+            ref->hfilter[0] - WIENER_FILT_TAP0_MINV, NULL) +
+        WIENER_FILT_TAP0_MINV;
+  else
+    wi->hfilter[0] = wi->hfilter[WIENER_WIN - 1] = 0;
+  wi->hfilter[1] = wi->hfilter[WIENER_WIN - 2] =
+      aom_read_primitive_refsubexpfin(
+          rb, WIENER_FILT_TAP1_MAXV - WIENER_FILT_TAP1_MINV + 1,
+          WIENER_FILT_TAP1_SUBEXP_K, ref->hfilter[1] - WIENER_FILT_TAP1_MINV,
+          NULL) +
+      WIENER_FILT_TAP1_MINV;
+  wi->hfilter[2] = wi->hfilter[WIENER_WIN - 3] =
+      aom_read_primitive_refsubexpfin(
+          rb, WIENER_FILT_TAP2_MAXV - WIENER_FILT_TAP2_MINV + 1,
+          WIENER_FILT_TAP2_SUBEXP_K, ref->hfilter[2] - WIENER_FILT_TAP2_MINV,
+          NULL) +
+      WIENER_FILT_TAP2_MINV;
+  wi->hfilter[WIENER_HALFWIN] =
+      -2 * (wi->hfilter[0] + wi->hfilter[1] + wi->hfilter[2]);
+  *ref = *wi;
+}
+
+/* Transcribed read_sgrproj_filter (decoder/decodeframe.c). */
+static void lr_read_sgrproj(SgrprojInfo *si, SgrprojInfo *ref, aom_reader *rb) {
+  si->ep = aom_read_literal(rb, SGRPROJ_PARAMS_BITS, NULL);
+  const sgr_params_type *params = &av1_sgr_params[si->ep];
+  if (params->r[0] == 0) {
+    si->xqd[0] = 0;
+    si->xqd[1] = aom_read_primitive_refsubexpfin(
+                     rb, SGRPROJ_PRJ_MAX1 - SGRPROJ_PRJ_MIN1 + 1,
+                     SGRPROJ_PRJ_SUBEXP_K, ref->xqd[1] - SGRPROJ_PRJ_MIN1,
+                     NULL) +
+                 SGRPROJ_PRJ_MIN1;
+  } else if (params->r[1] == 0) {
+    si->xqd[0] = aom_read_primitive_refsubexpfin(
+                     rb, SGRPROJ_PRJ_MAX0 - SGRPROJ_PRJ_MIN0 + 1,
+                     SGRPROJ_PRJ_SUBEXP_K, ref->xqd[0] - SGRPROJ_PRJ_MIN0,
+                     NULL) +
+                 SGRPROJ_PRJ_MIN0;
+    si->xqd[1] = clamp((1 << SGRPROJ_PRJ_BITS) - si->xqd[0], SGRPROJ_PRJ_MIN1,
+                       SGRPROJ_PRJ_MAX1);
+  } else {
+    si->xqd[0] = aom_read_primitive_refsubexpfin(
+                     rb, SGRPROJ_PRJ_MAX0 - SGRPROJ_PRJ_MIN0 + 1,
+                     SGRPROJ_PRJ_SUBEXP_K, ref->xqd[0] - SGRPROJ_PRJ_MIN0,
+                     NULL) +
+                 SGRPROJ_PRJ_MIN0;
+    si->xqd[1] = aom_read_primitive_refsubexpfin(
+                     rb, SGRPROJ_PRJ_MAX1 - SGRPROJ_PRJ_MIN1 + 1,
+                     SGRPROJ_PRJ_SUBEXP_K, ref->xqd[1] - SGRPROJ_PRJ_MIN1,
+                     NULL) +
+                 SGRPROJ_PRJ_MIN1;
+  }
+  *ref = *si;
+}
+
+/* Write units[n] (LRU_WORDS i32 each) with the REAL writer over the REAL
+ * default LR CDFs, read them back with the REAL reader, return the stream
+ * (out/out_cap), the read-back unit params (readback, LRU_WORDS each) and
+ * the reader's final CDFs: sw[4], wn[3], sg[3]. Returns stream length or <0. */
+long shim_lr_units_roundtrip(const int32_t *units, int n, uint8_t *out,
+                             long out_cap, int32_t *readback,
+                             uint16_t *cdf_out /*[10]*/) {
+  /* REAL default CDFs via av1_setup_past_independence (section 2 pattern). */
+  AV1_COMMON *cm = (AV1_COMMON *)calloc(1, sizeof(AV1_COMMON));
+  FRAME_CONTEXT *fc = (FRAME_CONTEXT *)calloc(1, sizeof(FRAME_CONTEXT));
+  FRAME_CONTEXT *dfc = (FRAME_CONTEXT *)calloc(1, sizeof(FRAME_CONTEXT));
+  RefCntBuffer *rcb = (RefCntBuffer *)calloc(1, sizeof(RefCntBuffer));
+  if (!cm || !fc || !dfc || !rcb) return -1;
+  cm->fc = fc;
+  cm->default_frame_context = dfc;
+  cm->cur_frame = rcb;
+  av1_setup_past_independence(cm);
+
+  uint8_t *buf = (uint8_t *)malloc(1 << 20);
+  if (!buf) return -1;
+  aom_writer w;
+  memset(&w, 0, sizeof(w));
+  w.allow_update_cdf = 1;
+  aom_start_encode(&w, buf);
+
+  WienerInfo wref[3];
+  SgrprojInfo sref[3];
+  for (int p = 0; p < 3; p++) {
+    set_default_wiener(&wref[p]);
+    set_default_sgrproj(&sref[p]);
+  }
+  /* Writer-side CDF copies (adapt in lockstep with the reader). */
+  aom_cdf_prob wsw[4], wwn[3], wsg[3];
+  memcpy(wsw, fc->switchable_restore_cdf, sizeof(wsw));
+  memcpy(wwn, fc->wiener_restore_cdf, sizeof(wwn));
+  memcpy(wsg, fc->sgrproj_restore_cdf, sizeof(wsg));
+
+  for (int i = 0; i < n; i++) {
+    const int32_t *u = units + (long)i * LRU_WORDS;
+    const int plane = u[LRU_PLANE];
+    const int frt = u[LRU_FRTYPE];
+    const int rt = u[LRU_RTYPE];
+    const int win = plane > 0 ? WIENER_WIN_CHROMA : WIENER_WIN;
+    WienerInfo wi;
+    SgrprojInfo si;
+    lr_fill_wiener(&wi, u);
+    si.ep = u[LRU_EP];
+    si.xqd[0] = u[LRU_XQD0];
+    si.xqd[1] = u[LRU_XQD1];
+    if (frt == RESTORE_SWITCHABLE) {
+      aom_write_symbol(&w, rt, wsw, RESTORE_SWITCHABLE_TYPES);
+      if (rt == RESTORE_WIENER)
+        lr_write_wiener(win, &wi, &wref[plane], &w);
+      else if (rt == RESTORE_SGRPROJ)
+        lr_write_sgrproj(&si, &sref[plane], &w);
+    } else if (frt == RESTORE_WIENER) {
+      aom_write_symbol(&w, rt != RESTORE_NONE, wwn, 2);
+      if (rt != RESTORE_NONE) lr_write_wiener(win, &wi, &wref[plane], &w);
+    } else {
+      aom_write_symbol(&w, rt != RESTORE_NONE, wsg, 2);
+      if (rt != RESTORE_NONE) lr_write_sgrproj(&si, &sref[plane], &w);
+    }
+  }
+  if (aom_stop_encode(&w) < 0) return -2;
+  long len = w.pos;
+  if (len > out_cap) return -3;
+  memcpy(out, buf, len);
+
+  /* Read back with the REAL reader + fresh refs + fresh default CDFs. */
+  aom_reader r;
+  memset(&r, 0, sizeof(r));
+  if (aom_reader_init(&r, buf, len)) return -4;
+  r.allow_update_cdf = 1;
+  for (int p = 0; p < 3; p++) {
+    set_default_wiener(&wref[p]);
+    set_default_sgrproj(&sref[p]);
+  }
+  aom_cdf_prob rsw[4], rwn[3], rsg[3];
+  memcpy(rsw, fc->switchable_restore_cdf, sizeof(rsw));
+  memcpy(rwn, fc->wiener_restore_cdf, sizeof(rwn));
+  memcpy(rsg, fc->sgrproj_restore_cdf, sizeof(rsg));
+
+  for (int i = 0; i < n; i++) {
+    const int32_t *u = units + (long)i * LRU_WORDS;
+    int32_t *o = readback + (long)i * LRU_WORDS;
+    const int plane = u[LRU_PLANE];
+    const int frt = u[LRU_FRTYPE];
+    const int win = plane > 0 ? WIENER_WIN_CHROMA : WIENER_WIN;
+    memset(o, 0, LRU_WORDS * sizeof(int32_t));
+    o[LRU_PLANE] = plane;
+    o[LRU_FRTYPE] = frt;
+    int rt = RESTORE_NONE;
+    WienerInfo wi;
+    SgrprojInfo si;
+    memset(&wi, 0, sizeof(wi));
+    memset(&si, 0, sizeof(si));
+    if (frt == RESTORE_SWITCHABLE) {
+      rt = aom_read_symbol(&r, rsw, RESTORE_SWITCHABLE_TYPES, NULL);
+      if (rt == RESTORE_WIENER)
+        lr_read_wiener(win, &wi, &wref[plane], &r);
+      else if (rt == RESTORE_SGRPROJ)
+        lr_read_sgrproj(&si, &sref[plane], &r);
+    } else if (frt == RESTORE_WIENER) {
+      if (aom_read_symbol(&r, rwn, 2, NULL)) {
+        rt = RESTORE_WIENER;
+        lr_read_wiener(win, &wi, &wref[plane], &r);
+      }
+    } else {
+      if (aom_read_symbol(&r, rsg, 2, NULL)) {
+        rt = RESTORE_SGRPROJ;
+        lr_read_sgrproj(&si, &sref[plane], &r);
+      }
+    }
+    o[LRU_RTYPE] = rt;
+    if (rt == RESTORE_WIENER) {
+      o[LRU_V0 + 0] = wi.vfilter[0];
+      o[LRU_V0 + 1] = wi.vfilter[1];
+      o[LRU_V0 + 2] = wi.vfilter[2];
+      o[LRU_V0 + 3] = wi.hfilter[0];
+      o[LRU_V0 + 4] = wi.hfilter[1];
+      o[LRU_V0 + 5] = wi.hfilter[2];
+    } else if (rt == RESTORE_SGRPROJ) {
+      o[LRU_EP] = si.ep;
+      o[LRU_XQD0] = si.xqd[0];
+      o[LRU_XQD1] = si.xqd[1];
+    }
+  }
+  memcpy(cdf_out + 0, rsw, sizeof(rsw));
+  memcpy(cdf_out + 4, rwn, sizeof(rwn));
+  memcpy(cdf_out + 7, rsg, sizeof(rsg));
+
+  free(buf);
+  free(rcb);
+  free(dfc);
+  free(fc);
+  free(cm);
+  return len;
 }

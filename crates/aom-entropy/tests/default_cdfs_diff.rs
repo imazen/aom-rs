@@ -79,12 +79,15 @@ fn flatten(fc: &KfFrameContext) -> Vec<u16> {
             v.extend_from_slice(b);
         }
     }
+    v.extend_from_slice(&fc.switchable_restore);
+    v.extend_from_slice(&fc.wiener_restore);
+    v.extend_from_slice(&fc.sgrproj_restore);
     v.extend_from_slice(&fc.coeff);
     v
 }
 
 /// Field names by dump offset, for failure localization.
-const FIELDS: [(&str, usize); 25] = [
+const FIELDS: [(&str, usize); 28] = [
     ("kf_y", 350),
     ("uv_mode", 390),
     ("angle_delta", 64),
@@ -109,6 +112,9 @@ const FIELDS: [(&str, usize); 25] = [
     ("tx_size", 48),
     ("ext_tx_1ddct", 416),
     ("ext_tx_dtt4", 312),
+    ("switchable_restore", 4),
+    ("wiener_restore", 3),
+    ("sgrproj_restore", 3),
     ("coeff", 4045),
 ];
 
