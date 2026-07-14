@@ -450,9 +450,7 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
         max_partition_size: 15,
         min_partition_size: 0,
         enable_1to4_partitions: true,
-        // TEMP false while the AB port lands -- flip once wired (see
-        // encoder_gate_e2e_byte_match.rs's matching TEMP comment).
-        enable_ab_partitions: false,
+        enable_ab_partitions: true,
     };
     let pack_cfg = aom_encode::pack::PackCfg {
         enable_filter_intra: s.enable_filter_intra,

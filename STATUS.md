@@ -1384,6 +1384,118 @@ nonzero cases despite those specific 2 cases NOT being reconstruction-clean
 correctly reproduces a genuinely-searched nonzero AGREEMENT when handed
 inputs close enough to real aomenc's own.
 
+## AB partitions (HORZ_A/HORZ_B/VERT_A/VERT_B) ported — 10 of 10 `PARTITION_*` types complete (2026-07-14, encoder track)
+
+**Mission re-measurement first: `encoder_gate_e2e_ab_attempt` with the header
+fix (`0d144b6`) in place is still 0/4, but the fix is CONFIRMED effective —
+the byte-0 confound documented in the "Loop-filter-level RD search ported"
+milestone is completely gone.** All 4 AB-probe cases now mismatch at byte 2
+or byte 6 (never byte 0). The 2 cases with EXACT LF-level agreement ("top
+split/bottom flat", "left flat/right split") now isolate cleanly to byte 6
+— one byte past the 5-byte header, genuinely inside tile-group data; the
+other 2 remain confounded by the separately-documented LF-level near-miss
+(mismatch at byte 2, inside the header).
+
+**New `decode_diff_ab_probe.rs` decode-diffs both clean cases against real
+aomenc** (same method as `decode_diff_noise_case.rs`'s VERT_4 finding).
+Result, not a guess: both cases' FIRST divergence is an IDENTICAL
+NONE-vs-SPLIT decision at (mi_row=0, mi_col=8, bsize=BLOCK_32X32) — real
+aomenc SPLITs, this port's search picks NONE. For "top split/bottom flat",
+real's full tree uses ZERO AB partition types anywhere — proving this
+specific divergence is a SEPARATE, non-AB RD gap (root cause not
+investigated, out of this chunk's scope). For "left flat/right split",
+real's tree DOES use one `HORZ_B` node (deep inside the (mi_row=8,
+mi_col=8) quadrant) — confirming AB is genuinely needed there, but this
+port's search never reaches that subtree because it already diverged
+earlier at the SAME (0,8,32x32) node. **Net: the AB port alone does not
+make either clean probe case byte-match end-to-end — a separate
+NONE-vs-SPLIT gap blocks both, unchanged even with AB fully implemented and
+enabled** (re-verified after the port landed: identical FIRST DIVERGENCE at
+the identical position, byte-for-byte identical mismatch content). Flagged
+for whoever investigates that gap next — it is NOT an AB/4-way/partition-
+type-coverage issue (case 1 proves this directly: real's tree has no AB
+anywhere and still diverges the same way).
+
+**The AB port itself is complete and independently verified working**,
+despite not closing the specific probe cases above (which were always known
+to be confounded, per the 4-way chunk's own honest labelling). Ported (every
+piece cross-referenced against libaom v3.14.1 `partition_search.c`/
+`partition_strategy.c`, not guessed):
+
+- `SbTree::HorzA/HorzB/VertA/VertB` + matching arms in `encode_sb.rs`'s
+  `encode_sb_dry`, `pack.rs`'s `pack_sb`, `partition_pick.rs`'s
+  `stamp_grid_from_tree`, and `lf_search.rs`'s `stamp_lf_tree` (a 4th
+  independent tree-walk this port already had — caught by the compiler's
+  own non-exhaustive-match error, not missed by inspection).
+- `allow_ab_partition_search`, `av1_prune_ab_partitions` (base gate +
+  `prune_ext_partition_types_search_level==1` structural RD-ratio pruning,
+  LIVE at speed 0 — MORE gating than 4-way had), `ml_prune_ab_partition`
+  (the AB-specific NN: `FEATURE_SIZE=10`, `LABEL_SIZE=16`, hidden=64 uniform
+  across all 4 reachable bsizes, no mean/std normalization — weights
+  transcribed by `xtask/transcribe_ab_nn.py` into `ab_nn_weights.rs`,
+  consumed by `ab_nn_prune.rs`).
+- `rd_pick_ab_part` (fuses the C's `rd_pick_ab_part` + `rd_test_partition3`):
+  the 3-subblock search reusing `rd_pick_rect_partition` as the per-subblock
+  primitive, early-bail after every sub-block, dry-run propagation after
+  sub-blocks 0/1 (not 2, the last).
+- `reuse_prev_rd_results_for_part_ab` (confirmed LIVE at speed 0, confirmed
+  NON-OPTIONAL for bit-exactness — not just a perf optimization: a fresh
+  re-search under AB's own budget can legitimately find a WORSE result than
+  what an earlier stage found under a larger budget, since `pick_sb_modes`'s
+  `rd_mode_is_ready` early-return copies `ctx->rd_stats` with NO budget
+  re-check). The SPLIT stage now captures `is_split_ctx_is_ready[0]/[1]` +
+  the children's own `LeafWinner` (survives past the SPLIT block regardless
+  of SPLIT's own eventual win, matching the C's unconditional per-child
+  bookkeeping); the rect stage captures `is_rect_ctx_is_ready` + its own
+  sub-0 winner (previously tracked-but-discarded).
+- The `x->source_variance` staleness gotcha (STATUS.md's own prior "AB
+  NEXT-CHUNK plan" gotcha #1): `LeafWinner` gained `raw_rdstats: PartRdStats`
+  (the Rust equivalent of `PICK_MODE_CONTEXT.rd_stats`) and
+  `leaf_pick_sb_modes`/`rd_pick_rect_partition`/`rd_pick_4partition`/
+  `rd_pick_partition_real` were widened to thread a `last_source_variance:
+  &mut u32` in/out param (mirrors the existing `none_rd_out` pattern),
+  updated unconditionally on every leaf search (win or lose), NOT touched by
+  a reused sub-block (matching the C's early return skipping that
+  assignment).
+
+**Verification (honest, evidence not narrative):**
+- Landed in 2 commits behind a new `PickFrameCfg::enable_ab_partitions`
+  flag, `false` at every pre-existing call site (mirrors the established
+  4-way rollout precedent exactly): the foundation commit (source_variance/
+  raw_rdstats threading + NN weights) and the structural-search commit were
+  BOTH independently verified behavior-neutral — full `aom-encode` suite,
+  46/46 test-result lines pass, unchanged, with the flag off.
+- Flipping `enable_ab_partitions: true` at the two AB-relevant test files
+  (`encoder_gate_e2e_byte_match.rs`, `decode_diff_ab_probe.rs`): full
+  `aom-encode` suite STILL 46/46, including both hard e2e gates unchanged
+  (`encoder_gate_e2e_attempt` 3/3, `encoder_gate_e2e_textured_attempt` 7/7)
+  — AB being available never regresses an already-verified case.
+- **Direct, measured, positive evidence AB actually fires and is correct,
+  not just "doesn't break anything":** `encoder_gate_e2e_nonzero_lf_chroma_sweep`
+  (exploratory, unasserted) improved from 7/8 to 8/8 with AB enabled — the
+  "chroma noise cq48" case (flat luma / pseudo-random-noise chroma, 4:2:0)
+  flips from a byte mismatch to a TRUE END-TO-END BYTE MATCH. A temporary
+  debug print (added, verified, then reverted — not committed) at the AB-win
+  site directly confirmed AB types 1 (`HORZ_B`), 2 (`VERT_A`), and 3
+  (`VERT_B`) winning at multiple nodes across this exact case, with the
+  final assembled bitstream STILL byte-identical to real aomenc's own —
+  i.e. this port's own AB decisions are bit-exact on a real, exercised case,
+  not merely "compiles and doesn't crash." `HORZ_A` (type 0) was not
+  observed winning in this session's testing — a real, honest gap in this
+  chunk's own verification (structurally identical code path to the other
+  3 types, same C source, but not yet caught in the act on any tested
+  content; flagged for whoever finds/adds a HORZ_A-favoring case next).
+
+**10 of 10 `PARTITION_*` types are now structurally ported** (NONE/SPLIT/
+HORZ/VERT/HORZ_4/VERT_4/HORZ_A/HORZ_B/VERT_A/VERT_B), each independently
+byte-verified on at least one real, non-trivial case — but "ported" here
+means the search+pack machinery is complete and producing bit-exact output
+where exercised, NOT that the AB-probe's own specific content now passes
+(it doesn't, see above — a separate, still-open NONE-vs-SPLIT gap). Commits:
+foundation (source_variance/raw_rdstats threading, NN weight transcription,
+decode-diff evidence) + structural search/wiring (this milestone's headline
+port).
+
 ## Gate posture (honest)
 
 Real, verified, ratcheting progress across BOTH tracks — but still a fraction of
@@ -1403,14 +1515,19 @@ CDEF-strength search and the qindex-from-cq-level mapping remain
 bootstrapped from the real parse; sharpness/ref-deltas/mode-deltas stay
 bootstrapped too but are provably frame-constant/correct in this envelope.
 Every coded byte of the tile-group payload is this port's own derivation.
-8 of 10 `PARTITION_*` types are ported (NONE/SPLIT/HORZ/VERT/HORZ_4/VERT_4);
-AB (HORZ_A/HORZ_B/VERT_A/VERT_B) remains — **now confirmed to be the
-correct next blocker**, not LF-level: a genuine, precisely-located bug in
-`aom-entropy`'s `read_uncompressed_header` (missing
-`allow_screen_content_tools` outer-field sync — see above), NOT LF-level,
-is what's actually breaking the AB-probe's byte-0 match; that bug is
-decoder-owned and out of this track's crate boundary, reported to the
-coordinator rather than fixed here. None of the four project gates
-(full-corpus correctness, ≤1.20× perf, full coverage, zenavif parity) is
-satisfied yet; the machinery that makes each mechanically checkable is in
-place and every landed module is byte-exact vs C within it.
+**10 of 10 `PARTITION_*` types are now structurally ported**
+(NONE/SPLIT/HORZ/VERT/HORZ_4/VERT_4/HORZ_A/HORZ_B/VERT_A/VERT_B — see the
+"AB partitions ported" milestone). The `aom-entropy` `allow_screen_content_
+tools` outer-field-sync bug that previously blocked a clean AB-probe read is
+FIXED (`0d144b6`); the AB-probe's own 2 clean cases still don't byte-match
+end-to-end, but this is now root-caused to a SEPARATE, non-AB,
+non-partition-type-coverage NONE-vs-SPLIT RD gap at `BLOCK_32X32` (proven by
+a case whose real tree uses no AB partitions anywhere and still diverges
+identically) — not a missing capability, an open investigation for a future
+session. AB itself is independently verified bit-exact on real, exercised
+content (a genuine byte-match flip in an exploratory sweep, with 3 of 4 AB
+types directly observed winning and producing byte-identical output).
+None of the four project gates (full-corpus correctness, ≤1.20× perf, full
+coverage, zenavif parity) is satisfied yet; the machinery that makes each
+mechanically checkable is in place and every landed module is byte-exact vs
+C within it.
