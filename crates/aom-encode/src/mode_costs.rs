@@ -237,3 +237,60 @@ pub fn intra_mode_info_cost_y(
     }
     total_rate
 }
+
+// ---------------------------------------------------------------------------
+// tx-size signaling cost (ModeCosts.tx_size_cost + tx_search.h tx_size_cost)
+// ---------------------------------------------------------------------------
+
+/// `MAX_TX_CATS` (blockd.h) x `TX_SIZE_CONTEXTS` (enums.h) x
+/// `MAX_TX_DEPTH + 1` — the tx-size depth signaling costs
+/// (`mode_costs->tx_size_cost`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxSizeCosts(pub [[[i32; 3]; 3]; 4]);
+
+impl TxSizeCosts {
+    /// All-zero table, filled by [`fill_tx_size_costs`].
+    pub fn zeroed() -> Self {
+        TxSizeCosts([[[0; 3]; 3]; 4])
+    }
+}
+
+/// The tx-size slice of `av1_fill_mode_rates` (rd.c 175-178):
+/// `av1_cost_tokens_from_cdf(tx_size_cost[cat][ctx], tx_size_cdf[cat][ctx])`.
+/// `tx_size_cdf` is flat `[MAX_TX_CATS=4][TX_SIZE_CONTEXTS=3][4]` (row padding
+/// 4; category 0 has 2 symbols, the rest 3 — the CDF terminator decides).
+pub fn fill_tx_size_costs(out: &mut TxSizeCosts, tx_size_cdf: &[u16]) {
+    assert_eq!(tx_size_cdf.len(), 4 * 3 * 4);
+    for cat in 0..4 {
+        for ctx in 0..3 {
+            let row = &tx_size_cdf[(cat * 3 + ctx) * 4..(cat * 3 + ctx) * 4 + 4];
+            aom_txb::cost_tokens_from_cdf(&mut out.0[cat][ctx], row, None);
+        }
+    }
+}
+
+/// `block_signals_txsize` (blockd.h): every block above 4x4 codes its tx size.
+#[inline]
+pub fn block_signals_txsize(bsize: usize) -> bool {
+    bsize > 0 // BLOCK_4X4
+}
+
+/// `tx_size_cost` (av1/encoder/tx_search.h): the tx-size signaling rate for a
+/// block — `tx_size_cost[bsize_to_tx_size_cat(bsize)][ctx][tx_size_to_depth]`
+/// under `TX_MODE_SELECT` on signaling blocks, else 0. `tx_size_ctx` is
+/// `get_tx_size_context(xd)` (the neighbour facade, supplied by the caller —
+/// same deferral as the aom-entropy tx-size writer).
+pub fn tx_size_cost(
+    costs: &TxSizeCosts,
+    tx_mode_is_select: bool,
+    bsize: usize,
+    tx_size: usize,
+    tx_size_ctx: usize,
+) -> i32 {
+    if !tx_mode_is_select || !block_signals_txsize(bsize) {
+        return 0;
+    }
+    let cat = aom_entropy::partition::bsize_to_tx_size_cat(bsize) as usize;
+    let depth = aom_entropy::partition::tx_size_to_depth(tx_size, bsize) as usize;
+    costs.0[cat][tx_size_ctx][depth]
+}

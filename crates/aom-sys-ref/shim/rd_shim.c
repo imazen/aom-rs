@@ -690,3 +690,29 @@ int64_t shim_pixel_diff_dist(const int16_t *src_diff, int n_diff,
   free(x);
   return sse;
 }
+
+/* ---- tx-size signaling cost -------------------------------------------------
+ * shim_fill_tx_size_costs: the tx-size slice of av1_fill_mode_rates (rd.c
+ * 175-178) over the REAL exported av1_cost_tokens_from_cdf.
+ * shim_tx_size_cost: transcribes tx_size_cost (tx_search.h) over the REAL
+ * header statics bsize_to_tx_size_cat / tx_size_to_depth /
+ * block_signals_txsize; the get_tx_size_context neighbour facade is the
+ * caller's (tx_size_ctx param), mirroring the Rust deferral. */
+void shim_fill_tx_size_costs(const uint16_t *tx_size_cdf /*[4][3][4]*/,
+                             int *out /*[4][3][3]*/) {
+  for (int cat = 0; cat < MAX_TX_CATS; ++cat) {
+    for (int ctx = 0; ctx < TX_SIZE_CONTEXTS; ++ctx) {
+      av1_cost_tokens_from_cdf(out + (cat * TX_SIZE_CONTEXTS + ctx) * 3,
+                               tx_size_cdf + (cat * TX_SIZE_CONTEXTS + ctx) * 4,
+                               NULL);
+    }
+  }
+}
+
+int shim_tx_size_cost(const int *costs /*[4][3][3]*/, int tx_mode_is_select,
+                      int bsize, int tx_size, int tx_size_ctx) {
+  if (!tx_mode_is_select || !block_signals_txsize((BLOCK_SIZE)bsize)) return 0;
+  const int32_t tx_size_cat = bsize_to_tx_size_cat((BLOCK_SIZE)bsize);
+  const int depth = tx_size_to_depth((TX_SIZE)tx_size, (BLOCK_SIZE)bsize);
+  return costs[(tx_size_cat * TX_SIZE_CONTEXTS + tx_size_ctx) * 3 + depth];
+}

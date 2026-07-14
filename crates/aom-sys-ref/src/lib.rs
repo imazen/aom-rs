@@ -3853,3 +3853,43 @@ pub fn ref_pixel_diff_dist(
     assert!(sse >= 0, "shim_pixel_diff_dist allocation failed");
     (sse, mse)
 }
+
+// ---------------------------------------------------------------------------
+// tx-size signaling cost (rd_shim.c)
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" {
+    fn shim_fill_tx_size_costs(tx_size_cdf: *const u16, out: *mut i32);
+    fn shim_tx_size_cost(
+        costs: *const i32,
+        tx_mode_is_select: i32,
+        bsize: i32,
+        tx_size: i32,
+        tx_size_ctx: i32,
+    ) -> i32;
+}
+
+/// Reference tx-size cost fill (transcription of the rd.c slice over the REAL
+/// `av1_cost_tokens_from_cdf`). `tx_size_cdf` flat `[4][3][4]`; returns flat
+/// `[4][3][3]`.
+pub fn ref_fill_tx_size_costs(tx_size_cdf: &[u16]) -> Vec<i32> {
+    assert_eq!(tx_size_cdf.len(), 4 * 3 * 4);
+    let mut out = vec![0i32; 4 * 3 * 3];
+    unsafe { shim_fill_tx_size_costs(tx_size_cdf.as_ptr(), out.as_mut_ptr()) };
+    out
+}
+
+/// Reference `tx_size_cost` (tx_search.h; transcription over the REAL
+/// `bsize_to_tx_size_cat` / `tx_size_to_depth` / `block_signals_txsize`).
+pub fn ref_tx_size_cost(
+    costs: &[i32],
+    tx_mode_is_select: bool,
+    bsize: i32,
+    tx_size: i32,
+    tx_size_ctx: i32,
+) -> i32 {
+    assert_eq!(costs.len(), 4 * 3 * 3);
+    unsafe {
+        shim_tx_size_cost(costs.as_ptr(), tx_mode_is_select as i32, bsize, tx_size, tx_size_ctx)
+    }
+}
