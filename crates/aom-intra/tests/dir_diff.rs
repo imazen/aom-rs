@@ -30,7 +30,7 @@ fn edges(rng: &mut Rng, bw: usize, bh: usize) -> Vec<u8> {
 
 #[test]
 fn dr_predictors_byte_identical() {
-    let mut rng = Rng(0x_a11ce_0dd_1234);
+    let mut rng = Rng(0xa11c_e0dd_1234);
     let mut checks = 0u64;
     for &(bw, bh) in SIZES.iter() {
         for up in 0..2i32 {

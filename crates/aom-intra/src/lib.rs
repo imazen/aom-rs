@@ -7,6 +7,7 @@
 
 
 #![forbid(unsafe_code)]
+pub mod cfl;
 pub mod dir;
 pub mod edge;
 mod weights;
