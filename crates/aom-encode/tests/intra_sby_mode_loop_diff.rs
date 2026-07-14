@@ -59,7 +59,9 @@ fn c_gate_visits(mode: usize, luma_delta_angle: i32, bsize: usize, skip_mask: &[
 
 #[allow(clippy::type_complexity)]
 struct CLoopOut {
-    best: Option<(usize, i32, usize, Vec<(usize, u16, u8)>, i32, i32, i64, i64)>,
+    /// (mode, delta, tx_size, winners, rate, rate_tokenonly, dist, rd,
+    ///  use_filter_intra, filter_intra_mode)
+    best: Option<(usize, i32, usize, Vec<(usize, u16, u8)>, i32, i32, i64, i64, bool, usize)>,
     rd_table: [[i64; 9]; 13],
     /// Candidates whose ALLINTRA factor was != 1.0 (coverage signal).
     factor_fired: usize,
@@ -84,6 +86,7 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
     let mut nobeat_cases = 0usize;
     let mut prune_survivor_variety = std::collections::HashSet::new();
     let mut factor_fired_total = 0usize;
+    let mut fi_winners = 0usize;
     let mut hog_masked_cases = 0usize;
 
     for (ci, &(bsize, sb_size, mi_row, mi_col)) in cases.iter().enumerate() {
@@ -372,6 +375,11 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                     assert_eq!(g.dist, cb.6, "dist {m}");
                     assert!(!g.skippable, "intra non-skip {m}");
                     assert_eq!(g.best_rd, cb.7, "best_rd {m}");
+                    assert_eq!(g.use_filter_intra, cb.8, "use_filter_intra {m}");
+                    assert_eq!(g.filter_intra_mode, cb.9, "filter_intra_mode {m}");
+                    if g.use_filter_intra {
+                        fi_winners += 1;
+                    }
                     beat_cases += 1;
                     prune_survivor_variety.insert(g.mode);
                 }
@@ -389,6 +397,7 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
     assert!(prune_survivor_variety.len() > 3, "winner variety: {prune_survivor_variety:?}");
     assert!(factor_fired_total > 20, "variance-factor != 1.0 candidates: {factor_fired_total}");
     assert!(hog_masked_cases > 4, "real-HOG masked cases: {hog_masked_cases}");
+    assert!(fi_winners > 4, "filter-intra winners: {fi_winners}");
 }
 
 /// The mode-info CDF set + the dual fill (Rust tables + the C reference
@@ -477,7 +486,9 @@ fn c_mode_loop(
     let bmode_costs = &c_costs.y_mode[(actx * 5 + lctx) * 13..(actx * 5 + lctx) * 13 + 13];
 
     let mut best_rd = best_rd_in;
-    let mut best: Option<(usize, i32, usize, Vec<(usize, u16, u8)>, i32, i32, i64, i64)> = None;
+    #[allow(clippy::type_complexity)]
+    let mut best: Option<(usize, i32, usize, Vec<(usize, u16, u8)>, i32, i32, i64, i64, bool, usize)> =
+        None;
     let mut best_model_rd = i64::MAX;
     let mut top_model = [i64::MAX; TOP_INTRA_MODEL_COUNT];
     let mut rd_table = [[i64::MAX; 9]; 13];
@@ -504,6 +515,8 @@ fn c_mode_loop(
             (mi_row, mi_col, ref_off, src_off, stride),
             mode,
             delta,
+            false,
+            0,
             bd,
         );
         let idx = c::ref_get_model_rd_index_for_pruning(
@@ -533,6 +546,8 @@ fn c_mode_loop(
                 src,
                 mode,
                 delta,
+                false,
+                0,
                 false,
                 reduced,
                 bd,
@@ -595,7 +610,110 @@ fn c_mode_loop(
         // store_winner_mode_stats: MULTI_WINNER_MODE_OFF no-op.
         if this_rd < best_rd {
             best_rd = this_rd;
-            best = Some((mode, delta, tx_size, winners, this_rate, rate_tokenonly, dist, this_rd));
+            best = Some((
+                mode, delta, tx_size, winners, this_rate, rate_tokenonly, dist, this_rd,
+                false, 0,
+            ));
+        }
+    }
+
+    // rd_pick_filter_intra_sby (intra_mode_search.c:1672 + 231): runs when a
+    // Y mode beat best_rd_in and filter-intra is allowed on this bsize (all
+    // harness bsizes are <= 32x32; enable_filter_intra on). mbmi carries the
+    // STALE angle_delta of loop index 60 (set_y_mode_and_delta_angle mutates
+    // before the gates) — mirrored via the last (mode, delta) pair.
+    let stale_delta = c::ref_set_y_mode_and_delta_angle(60, false).1;
+    if best.is_some() {
+        let best_mode_so_far = best.as_ref().map_or(0, |b| b.0);
+        let _ = best_mode_so_far; // prune_filter_intra_level = 0: no level-1 gate
+        for fim in 0..5usize {
+            // model_intra_yrd_and_prune: the model walk (fi prediction) +
+            // the INTEGER prune on the SHARED best_model_rd.
+            let this_model_rd = c_intra_model_rd(
+                bsize,
+                model_tx,
+                recon_c,
+                src,
+                (mi_row, mi_col, ref_off, src_off, stride),
+                0, // DC_PRED
+                stale_delta,
+                true,
+                fim,
+                bd,
+            );
+            if best_model_rd != i64::MAX
+                && this_model_rd > best_model_rd + (best_model_rd >> 2)
+            {
+                continue;
+            } else if this_model_rd < best_model_rd {
+                best_model_rd = this_model_rd;
+            }
+            let Some((tx_size, _rd_pick, rate_tok_raw, dist, _sse, winners)) =
+                c_pick_uniform_tx_size_type_yrd(
+                    bsize,
+                    (mi_row, mi_col, ref_off, src_off, stride),
+                    recon_c,
+                    src,
+                    0,
+                    stale_delta,
+                    true,
+                    fim,
+                    false,
+                    reduced,
+                    bd,
+                    plane_rows_c,
+                    dequant,
+                    above_ctx,
+                    left_ctx,
+                    rdmult,
+                    best_rd,
+                    coeff_tbls,
+                    ttc_tables,
+                    skip_costs,
+                    skip_ctx,
+                    ts_flat,
+                    tx_size_ctx,
+                    source_variance,
+                )
+            else {
+                continue;
+            };
+            // NOTE: no tx-size-cost subtraction in the filter-intra path —
+            // *rate_tokenonly takes the raw tx-search rate.
+            let mode_info_rate = c::ref_intra_mode_info_cost_y(
+                c_costs,
+                bmode_costs[0], // DC_PRED
+                0,
+                bsize as i32,
+                0,
+                true,
+                fim as i32,
+                false,
+                false,
+                0,
+                0,
+                true,
+                false,
+            );
+            let this_rate = rate_tok_raw + mode_info_rate;
+            let mut this_rd = c::ref_rdcost(rdmult, this_rate, dist);
+            if allintra && this_rd != i64::MAX {
+                let factor = c::ref_intra_rd_variance_factor(
+                    0, src, src_off, stride, recon_c, ref_off, stride, bsize, sb_size,
+                    mi_row, mi_col, 1 << 12, 1 << 12, bd, cvar, clog,
+                );
+                if factor != 1.0 {
+                    factor_fired += 1;
+                }
+                this_rd = (this_rd as f64 * factor) as i64;
+            }
+            if this_rd < best_rd {
+                best_rd = this_rd;
+                best = Some((
+                    0, stale_delta, tx_size, winners, this_rate, rate_tok_raw, dist,
+                    this_rd, true, fim,
+                ));
+            }
         }
     }
     CLoopOut { best, rd_table, factor_fired }

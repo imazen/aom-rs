@@ -522,10 +522,10 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
             let mut best_c: Option<(usize, i64, i32, i64, i64, Vec<(usize, u16, u8)>)> = None;
             if lossless {
                 let (rd, res) = c_uniform_txfm_yrd(
-                    bsize, 0, geometry, &mut recon_c, &src, mode, angle_delta, lossless,
-                    reduced, bd, plane_rows_c, dequant, &above_ctx, &left_ctx, rdmult,
-                    ref_best_rd, coeff_tbls, ttc_tables, &skip_costs, skip_ctx, &ts_flat,
-                    tx_size_ctx,
+                    bsize, 0, geometry, &mut recon_c, &src, mode, angle_delta, false, 0,
+                    lossless, reduced, bd, plane_rows_c, dequant, &above_ctx, &left_ctx,
+                    rdmult, ref_best_rd, coeff_tbls, ttc_tables, &skip_costs, skip_ctx,
+                    &ts_flat, tx_size_ctx,
                 );
                 if let Some((rate, dist, sse, w)) = res {
                     best_c = Some((0, rd, rate, dist, sse, w));
@@ -540,10 +540,10 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                 let mut depth = init_depth;
                 while depth <= 2 {
                     let (rd, res) = c_uniform_txfm_yrd(
-                        bsize, tx, geometry, &mut recon_c, &src, mode, angle_delta, false,
-                        reduced, bd, plane_rows_c, dequant, &above_ctx, &left_ctx, rdmult,
-                        ref_best_rd, coeff_tbls, ttc_tables, &skip_costs, skip_ctx, &ts_flat,
-                        tx_size_ctx,
+                        bsize, tx, geometry, &mut recon_c, &src, mode, angle_delta, false, 0,
+                        false, reduced, bd, plane_rows_c, dequant, &above_ctx, &left_ctx,
+                        rdmult, ref_best_rd, coeff_tbls, ttc_tables, &skip_costs, skip_ctx,
+                        &ts_flat, tx_size_ctx,
                     );
                     rd_arr[depth as usize] = rd;
                     if rd < best_rd_c {

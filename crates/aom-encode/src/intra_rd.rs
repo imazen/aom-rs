@@ -812,6 +812,10 @@ pub struct IntraSbyBest {
     pub skippable: bool,
     /// The winning (post-variance-factor) rd — the C return value.
     pub best_rd: i64,
+    /// `best_mbmi.filter_intra_mode_info`: set when the post-loop
+    /// filter-intra search wins (mode is DC_PRED then).
+    pub use_filter_intra: bool,
+    pub filter_intra_mode: usize,
 }
 
 /// The search outcome: the winner (`None` = no candidate beat `best_rd_in`,
@@ -884,6 +888,12 @@ pub fn rd_pick_intra_sby_mode_y(
             mode_idx,
             cfg.gates.prune_luma_odd_delta_angles_in_intra,
         );
+        // The C mutates mbmi BEFORE the gate chain (set_y_mode_and_delta_angle
+        // writes mode/angle, then the gates `continue`) — so the post-loop
+        // stale mbmi carries index 60's (D67, +3) values into the
+        // filter-intra tail. Mirror by setting env first.
+        env.mode = mode;
+        env.angle_delta = luma_delta_angle;
         if !cfg.gates.visits(mode, luma_delta_angle, bsize) {
             continue;
         }
@@ -896,9 +906,6 @@ pub fn rd_pick_intra_sby_mode_y(
         ) {
             continue;
         }
-
-        env.mode = mode;
-        env.angle_delta = luma_delta_angle;
 
         // Model estimate + prune (the prediction walk mutates recon).
         let this_model_rd = intra_model_rd_y(env, recon, model_tx_size);
@@ -1007,9 +1014,203 @@ pub fn rd_pick_intra_sby_mode_y(
                 dist: this_distortion,
                 skippable: choice.stats.skip_txfm,
                 best_rd: this_rd,
+                use_filter_intra: false,
+                filter_intra_mode: 0,
             });
         }
     }
 
+    // Palette search (av1_rd_pick_palette_intra_sby, try_palette): NOT
+    // composed — out of scope (gated on allow_screen_content_tools).
+
+    // Filter-intra search: LIVE at speed 0 (intra_mode_search.c:1672 —
+    // beat_best_rd && av1_filter_intra_allowed_bsize; the seq-level flag and
+    // the mode-info cost gate share the enable_filter_intra tool flag).
+    if best.is_some() && filter_intra_allowed_bsize(cfg.enable_filter_intra, bsize) {
+        let best_mode_so_far = best.as_ref().map_or(0, |b| b.mode);
+        let mode_cost_dc = bmode_costs[0];
+        if let Some(fi) = rd_pick_filter_intra_sby_y(
+            env,
+            recon,
+            cfg,
+            var_cache,
+            mode_cost_dc,
+            best_mode_so_far,
+            &mut best_rd,
+            &mut best_model_rd,
+        ) {
+            best = Some(fi);
+        }
+    }
+
     IntraSbyOutcome { best, intra_modes_rd_cost }
+}
+
+// ---------------------------------------------------------------------------
+// rd_pick_filter_intra_sby (intra_mode_search.c:231) — the filter-intra
+// search that follows the Y mode loop (LIVE at speed 0:
+// prune_filter_intra_level = 0 and filter-intra allowed up to 32x32).
+// ---------------------------------------------------------------------------
+
+/// `FILTER_INTRA_MODES` (enums.h).
+pub const FILTER_INTRA_MODES: usize = 5;
+
+/// `av1_derived_filter_intra_mode_used_flag[INTRA_MODES]`
+/// (intra_mode_search.c): the `prune_filter_intra_level == 1` per-mode gate —
+/// FILTER_DC always + the filter mode matching the best-so-far Y mode.
+pub const AV1_DERIVED_FILTER_INTRA_MODE_USED_FLAG: [u8; INTRA_MODES] =
+    [0x01, 0x03, 0x05, 0x01, 0x01, 0x01, 0x09, 0x01, 0x01, 0x01, 0x01, 0x01, 0x11];
+
+/// `av1_filter_intra_allowed_bsize` (reconintra.h): the sequence-level
+/// enable flag AND both block dims <= 32.
+pub fn filter_intra_allowed_bsize(enable_filter_intra_seq: bool, bsize: usize) -> bool {
+    const BLK_W: [usize; 22] =
+        [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
+    const BLK_H: [usize; 22] =
+        [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+    enable_filter_intra_seq && BLK_W[bsize] <= 32 && BLK_H[bsize] <= 32
+}
+
+/// `model_intra_yrd_and_prune` (intra_mode_search_utils.h): the filter-intra
+/// loop's model gate — [`crate::tx_search::intra_model_rd_y`] at
+/// `min(TX_32X32, max_txsize_lookup[bsize])` (the prediction walk mutates
+/// `recon`, same as the Y loop's model calls), pruned by INTEGER arithmetic
+/// against the SHARED `best_model_rd` accumulator (threaded from the Y mode
+/// loop): prune when `this > best + (best >> 2)`, else lower `best`.
+pub fn model_intra_yrd_and_prune(
+    env: &TxfmYrdEnv,
+    recon: &mut [u16],
+    best_model_rd: &mut i64,
+) -> bool {
+    let tx_size = MAX_TXSIZE_LOOKUP[env.bsize].min(3);
+    let this_model_rd = intra_model_rd_y(env, recon, tx_size);
+    if *best_model_rd != i64::MAX && this_model_rd > *best_model_rd + (*best_model_rd >> 2) {
+        return true;
+    } else if this_model_rd < *best_model_rd {
+        *best_model_rd = this_model_rd;
+    }
+    false
+}
+
+/// `rd_pick_filter_intra_sby` (intra_mode_search.c:231): loop the 5
+/// filter-intra variants of DC_PRED — per mode `model_intra_yrd_and_prune`
+/// (shared `best_model_rd`) -> `av1_pick_uniform_tx_size_type_yrd` with the
+/// RUNNING `best_rd` -> `this_rate = stats.rate + intra_mode_info_cost_y`
+/// (NOTE: `*rate_tokenonly` takes the RAW tx-search rate — no tx-size-cost
+/// subtraction here, unlike the Y loop) -> RDCOST -> [ALLINTRA variance
+/// factor] -> strict `<` best tracking. `mbmi->angle_delta` is deliberately
+/// NOT reset (the C leaves the Y loop's last value; DC/filter-intra
+/// prediction ignores it) — `env.angle_delta` is left as-is likewise.
+///
+/// Speed-0 gates mirrored: `prune_filter_intra_level == 2` -> no search;
+/// `== 1` -> only modes in
+/// [`AV1_DERIVED_FILTER_INTRA_MODE_USED_FLAG`]`[best_mode_so_far]`;
+/// `use_mb_mode_cache` modelled off. Returns the winner (updating `best_rd`)
+/// or `None` (the C's `filter_intra_selected_flag == 0`).
+#[allow(clippy::too_many_arguments)]
+pub fn rd_pick_filter_intra_sby_y(
+    env: &mut TxfmYrdEnv,
+    recon: &mut [u16],
+    cfg: &IntraSbySearchCfg,
+    var_cache: &mut [Block4x4VarInfo],
+    mode_cost_dc: i32,
+    best_mode_so_far: usize,
+    best_rd: &mut i64,
+    best_model_rd: &mut i64,
+) -> Option<IntraSbyBest> {
+    if cfg.gates.prune_filter_intra_level == 2 {
+        return None;
+    }
+    let bsize = env.bsize;
+    env.mode = 0; // DC_PRED
+    env.use_filter_intra = true;
+
+    let mut selected: Option<IntraSbyBest> = None;
+    for fi_mode in 0..FILTER_INTRA_MODES {
+        if cfg.gates.prune_filter_intra_level == 1
+            && (AV1_DERIVED_FILTER_INTRA_MODE_USED_FLAG[best_mode_so_far] & (1 << fi_mode)) == 0
+        {
+            continue;
+        }
+        env.filter_intra_mode = fi_mode;
+
+        if model_intra_yrd_and_prune(env, recon, best_model_rd) {
+            continue;
+        }
+        let Some(choice) = pick_uniform_tx_size_type_yrd_intra(
+            env,
+            recon,
+            *best_rd,
+            cfg.pol,
+            cfg.source_variance,
+            cfg.enable_tx64,
+            cfg.enable_rect_tx,
+        ) else {
+            continue; // rate == INT_MAX
+        };
+
+        let (above_ctx, left_ctx) = get_y_mode_ctx(cfg.above_mode, cfg.left_mode);
+        debug_assert_eq!(
+            mode_cost_dc,
+            cfg.mode_costs.y_mode_costs[above_ctx][left_ctx][0],
+            "mode_cost is bmode_costs[DC_PRED]",
+        );
+        let this_rate = choice.stats.rate
+            + intra_mode_info_cost_y(
+                cfg.mode_costs,
+                mode_cost_dc,
+                0, // DC_PRED
+                bsize,
+                0, // angle rate: DC is non-directional (delta not costed)
+                true,
+                fi_mode,
+                false,
+                cfg.try_palette,
+                cfg.palette_bsize_ctx,
+                cfg.palette_mode_ctx,
+                cfg.enable_filter_intra,
+                cfg.allow_intrabc,
+            );
+        let mut this_rd = rd::rdcost(env.rdmult, this_rate, choice.stats.dist);
+        if cfg.allintra && this_rd != i64::MAX {
+            let factor = intra_rd_variance_factor(
+                cfg.speed,
+                &VarFactorInputs {
+                    src: env.src,
+                    src_off: env.src_off,
+                    src_stride: env.src_stride,
+                    recon,
+                    ref_off: env.ref_off,
+                    ref_stride: env.ref_stride,
+                    bsize,
+                    sb_size: env.sb_size,
+                    mi_row: env.mi_row,
+                    mi_col: env.mi_col,
+                    mb_to_right_edge: cfg.mb_to_right_edge,
+                    mb_to_bottom_edge: cfg.mb_to_bottom_edge,
+                    bd: env.bd,
+                },
+                var_cache,
+            );
+            this_rd = apply_variance_factor(this_rd, factor);
+        }
+        // store_winner_mode_stats: hard no-op at speed 0.
+        if this_rd < *best_rd {
+            *best_rd = this_rd;
+            selected = Some(IntraSbyBest {
+                mode: 0,
+                angle_delta: env.angle_delta,
+                tx_size: choice.best_tx_size,
+                winners: choice.winners,
+                rate: this_rate,
+                rate_tokenonly: choice.stats.rate,
+                dist: choice.stats.dist,
+                skippable: choice.stats.skip_txfm,
+                best_rd: this_rd,
+                use_filter_intra: true,
+                filter_intra_mode: fi_mode,
+            });
+        }
+    }
+    selected
 }

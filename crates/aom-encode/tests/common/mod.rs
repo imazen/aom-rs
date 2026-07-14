@@ -278,6 +278,8 @@ pub fn c_uniform_txfm_yrd(
     src: &[u16],
     mode: usize,
     angle_delta: i32,
+    use_fi: bool,
+    fi_mode: usize,
     lossless: bool,
     reduced: bool,
     bd: u8,
@@ -322,12 +324,12 @@ pub fn c_uniform_txfm_yrd(
             let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
                 12, bsize, mi_row, mi_col, true, true, 1 << 16, 1 << 16, 0, tx_size, 0, 0,
                 blk_row as i32, blk_col as i32, bw as i32, bh as i32, 512, 512, mode,
-                angle_delta * 3, false,
+                angle_delta * 3, use_fi,
             );
             let txb_off = ref_off + (blk_row * stride + blk_col) * 4;
             let pred = c::ref_hbd_predict_intra(
-                recon_c, txb_off, stride, mode, angle_delta * 3, false, 0, false, 0, tx_size,
-                txw, txh, n_top, n_tr, n_left, n_bl, bd as i32,
+                recon_c, txb_off, stride, mode, angle_delta * 3, use_fi, fi_mode, false, 0,
+                tx_size, txw, txh, n_top, n_tr, n_left, n_bl, bd as i32,
             );
             for r in 0..txh {
                 recon_c[txb_off + r * stride..txb_off + r * stride + txw]
@@ -339,9 +341,10 @@ pub fn c_uniform_txfm_yrd(
                 txh, txw, &mut residual, txw, &src[src_txb_off..], stride, &pred, txw,
             );
             let (wtype, weob, wrate, wdist, wsse, wctx, wdqc, _wrd) = c_search_tx_type(
-                &residual, &pred, src, src_txb_off, stride, tx_size, mode, false, 0, lossless,
-                reduced, bd, plane_rows_c, dequant, &t_above[blk_col..], &t_left[blk_row..],
-                bsize, rdmult, ref_best_rd - current_rd, coeff_tbls, ttc_tables,
+                &residual, &pred, src, src_txb_off, stride, tx_size, mode, use_fi, fi_mode,
+                lossless, reduced, bd, plane_rows_c, dequant, &t_above[blk_col..],
+                &t_left[blk_row..], bsize, rdmult, ref_best_rd - current_rd, coeff_tbls,
+                ttc_tables,
             );
             if weob > 0 {
                 let mut tight = pred.clone();
@@ -388,6 +391,8 @@ pub fn c_intra_model_rd(
     geometry: (i32, i32, usize, usize, usize), // mi_row, mi_col, ref_off, src_off, stride
     mode: usize,
     angle_delta: i32,
+    use_fi: bool,
+    fi_mode: usize,
     bd: u8,
 ) -> i64 {
     let (mi_row, mi_col, ref_off, src_off, stride) = geometry;
@@ -419,7 +424,7 @@ pub fn c_intra_model_rd(
                 512,
                 mode,
                 angle_delta * 3,
-                false,
+                use_fi,
             );
             let txb_off = ref_off + (blk_row * stride + blk_col) * 4;
             let pred = c::ref_hbd_predict_intra(
@@ -428,8 +433,8 @@ pub fn c_intra_model_rd(
                 stride,
                 mode,
                 angle_delta * 3,
-                false,
-                0,
+                use_fi,
+                fi_mode,
                 false,
                 0,
                 tx_size,
@@ -483,6 +488,8 @@ pub fn c_pick_uniform_tx_size_type_yrd(
     src: &[u16],
     mode: usize,
     angle_delta: i32,
+    use_fi: bool,
+    fi_mode: usize,
     lossless: bool,
     reduced: bool,
     bd: u8,
@@ -511,9 +518,9 @@ pub fn c_pick_uniform_tx_size_type_yrd(
 
     if lossless {
         let (rd, res) = c_uniform_txfm_yrd(
-            bsize, 0, geometry, recon_c, src, mode, angle_delta, lossless, reduced, bd,
-            plane_rows_c, dequant, above_ctx, left_ctx, rdmult, ref_best_rd, coeff_tbls,
-            ttc_tables, skip_costs, skip_ctx, ts_flat, tx_size_ctx,
+            bsize, 0, geometry, recon_c, src, mode, angle_delta, use_fi, fi_mode, lossless,
+            reduced, bd, plane_rows_c, dequant, above_ctx, left_ctx, rdmult, ref_best_rd,
+            coeff_tbls, ttc_tables, skip_costs, skip_ctx, ts_flat, tx_size_ctx,
         );
         return res.map(|(rate, dist, sse, w)| (0, rd, rate, dist, sse, w));
     }
@@ -527,9 +534,9 @@ pub fn c_pick_uniform_tx_size_type_yrd(
     let mut depth = init_depth;
     while depth <= 2 {
         let (rd, res) = c_uniform_txfm_yrd(
-            bsize, tx, geometry, recon_c, src, mode, angle_delta, false, reduced, bd,
-            plane_rows_c, dequant, above_ctx, left_ctx, rdmult, ref_best_rd, coeff_tbls,
-            ttc_tables, skip_costs, skip_ctx, ts_flat, tx_size_ctx,
+            bsize, tx, geometry, recon_c, src, mode, angle_delta, use_fi, fi_mode, false,
+            reduced, bd, plane_rows_c, dequant, above_ctx, left_ctx, rdmult, ref_best_rd,
+            coeff_tbls, ttc_tables, skip_costs, skip_ctx, ts_flat, tx_size_ctx,
         );
         rd_arr[depth as usize] = rd;
         if rd < best_rd_c {

@@ -149,6 +149,8 @@ fn intra_model_rd_matches_c_chain() {
                 (mi_row, mi_col, ref_off, src_off, STRIDE),
                 mode,
                 angle_delta,
+                false,
+                0,
                 bd,
             );
 
