@@ -11027,3 +11027,79 @@ pub fn ref_dump_default_inter_ext_tx(base_qindex: i32) -> Vec<u16> {
     assert_eq!(rc, 0, "shim_dump_default_inter_ext_tx failed ({rc})");
     out
 }
+
+// ---------------------------------------------------------------------------
+// dec_shim.c (append-only addition): shim_add_film_grain — the REAL exported
+// av1_add_film_grain (av1/decoder/grain_synthesis.c) as the film-grain
+// synthesis oracle. Everything above is UNCHANGED.
+// ---------------------------------------------------------------------------
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_add_film_grain(
+        blob: *const i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        mc_identity: i32,
+        d_w: i32,
+        d_h: i32,
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        out_y: *mut u16,
+        out_u: *mut u16,
+        out_v: *mut u16,
+    ) -> i32;
+}
+
+/// Number of `i32` in a packed film-grain params blob (see `shim_add_film_grain`
+/// / `fill_grain_params` in dec_shim.c for the field order).
+pub const FILM_GRAIN_BLOB_LEN: usize = 160;
+
+/// Reference film-grain synthesis via the REAL exported `av1_add_film_grain`
+/// (`av1/decoder/grain_synthesis.c`). `blob` is the packed `aom_film_grain_t`
+/// (`FILM_GRAIN_BLOB_LEN` ints; layout mirrors dec_shim.c `fill_grain_params`).
+/// Planes are `u16` row-major tight; `mono` -> empty chroma (only Y grained).
+/// Returns the grained `(y, u, v)`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_add_film_grain(
+    blob: &[i32],
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    mc_identity: bool,
+    d_w: usize,
+    d_h: usize,
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
+    assert_eq!(blob.len(), FILM_GRAIN_BLOB_LEN, "grain blob length");
+    let cw = if mono { 0 } else { (d_w + ss_x as usize) >> ss_x };
+    let ch = if mono { 0 } else { (d_h + ss_y as usize) >> ss_y };
+    let mut out_y = vec![0u16; d_w * d_h];
+    let mut out_u = vec![0u16; cw * ch];
+    let mut out_v = vec![0u16; cw * ch];
+    let rc = unsafe {
+        shim_add_film_grain(
+            blob.as_ptr(),
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            mc_identity as i32,
+            d_w as i32,
+            d_h as i32,
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            out_y.as_mut_ptr(),
+            out_u.as_mut_ptr(),
+            out_v.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc, 0, "shim_add_film_grain failed ({rc})");
+    (out_y, out_u, out_v)
+}

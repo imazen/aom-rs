@@ -2042,3 +2042,132 @@ void shim_highbd_iwht4x4_add(const int32_t *input, uint16_t *dest, int stride,
   else
     av1_highbd_iwht4x4_1_add_c(input, dest8, stride, bd);
 }
+
+/* ---- film-grain synthesis oracle (append-only) ---------------------- */
+#include "aom_dsp/grain_params.h"
+#include "av1/decoder/grain_synthesis.h"
+
+/* Fill an aom_film_grain_t from a flat int32 blob. The layout is documented in
+ * (and produced by) aom-sys-ref's ref_add_film_grain wrapper; the two MUST
+ * agree, and the differential test verifies the whole layout end-to-end (a
+ * misread shows up as a pixel mismatch). apply_grain/update_parameters forced
+ * on (this oracle always synthesizes). */
+static void fill_grain_params(aom_film_grain_t *p, const int32_t *b) {
+  memset(p, 0, sizeof(*p));
+  int k = 0;
+  p->apply_grain = 1;
+  p->update_parameters = 1;
+  p->num_y_points = b[k++];
+  for (int i = 0; i < 14; i++) {
+    p->scaling_points_y[i][0] = b[k++];
+    p->scaling_points_y[i][1] = b[k++];
+  }
+  p->num_cb_points = b[k++];
+  for (int i = 0; i < 10; i++) {
+    p->scaling_points_cb[i][0] = b[k++];
+    p->scaling_points_cb[i][1] = b[k++];
+  }
+  p->num_cr_points = b[k++];
+  for (int i = 0; i < 10; i++) {
+    p->scaling_points_cr[i][0] = b[k++];
+    p->scaling_points_cr[i][1] = b[k++];
+  }
+  p->scaling_shift = b[k++];
+  p->ar_coeff_lag = b[k++];
+  for (int i = 0; i < 24; i++) p->ar_coeffs_y[i] = b[k++];
+  for (int i = 0; i < 25; i++) p->ar_coeffs_cb[i] = b[k++];
+  for (int i = 0; i < 25; i++) p->ar_coeffs_cr[i] = b[k++];
+  p->ar_coeff_shift = b[k++];
+  p->cb_mult = b[k++];
+  p->cb_luma_mult = b[k++];
+  p->cb_offset = b[k++];
+  p->cr_mult = b[k++];
+  p->cr_luma_mult = b[k++];
+  p->cr_offset = b[k++];
+  p->overlap_flag = b[k++];
+  p->clip_to_restricted_range = b[k++];
+  p->bit_depth = (unsigned int)b[k++];
+  p->chroma_scaling_from_luma = b[k++];
+  p->grain_scale_shift = b[k++];
+  p->random_seed = (uint16_t)b[k++];
+}
+
+/* Apply film grain via the REAL exported av1_add_film_grain over an image built
+ * from the (cropped) reconstruction planes. Inputs are u16 row-major tight
+ * (d_w x d_h luma, cw x ch chroma with cw=(d_w+ss_x)>>ss_x). mono uses
+ * AOM_IMG_FMT_I420 (grain synthesis's monochrome treatment; only Y is output).
+ * mc_identity selects the chroma clip range under clip_to_restricted_range.
+ * Writes grained planes to out_*. Returns 0 on success. */
+int shim_add_film_grain(const int32_t *blob, int bd, int mono, int ss_x,
+                        int ss_y, int mc_identity, int d_w, int d_h,
+                        const uint16_t *y, const uint16_t *u, const uint16_t *v,
+                        uint16_t *out_y, uint16_t *out_u, uint16_t *out_v) {
+  aom_film_grain_t params;
+  fill_grain_params(&params, blob);
+
+  aom_img_fmt_t fmt;
+  if (mono || (ss_x == 1 && ss_y == 1))
+    fmt = AOM_IMG_FMT_I420;
+  else if (ss_x == 1)
+    fmt = AOM_IMG_FMT_I422;
+  else
+    fmt = AOM_IMG_FMT_I444;
+  if (bd > 8) fmt |= AOM_IMG_FMT_HIGHBITDEPTH;
+
+  aom_image_t *src = aom_img_alloc(NULL, fmt, d_w, d_h, 32);
+  aom_image_t *dst = aom_img_alloc(NULL, fmt, d_w, d_h, 32);
+  if (!src || !dst) {
+    if (src) aom_img_free(src);
+    if (dst) aom_img_free(dst);
+    return -1;
+  }
+  src->monochrome = mono;
+  src->bit_depth = bd;
+  dst->monochrome = mono;
+  dst->bit_depth = bd;
+  src->mc = mc_identity ? AOM_CICP_MC_IDENTITY : AOM_CICP_MC_UNSPECIFIED;
+
+  const int cw = mono ? 0 : (d_w + ss_x) >> ss_x;
+  const int ch = mono ? 0 : (d_h + ss_y) >> ss_y;
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    const uint16_t *s = plane == 0 ? y : (plane == 1 ? u : v);
+    const int pw = plane == 0 ? d_w : cw;
+    const int ph = plane == 0 ? d_h : ch;
+    for (int r = 0; r < ph; r++) {
+      if (bd > 8) {
+        uint16_t *row =
+            (uint16_t *)(src->planes[plane] + (size_t)r * src->stride[plane]);
+        for (int c = 0; c < pw; c++) row[c] = s[(size_t)r * pw + c];
+      } else {
+        uint8_t *row = src->planes[plane] + (size_t)r * src->stride[plane];
+        for (int c = 0; c < pw; c++) row[c] = (uint8_t)s[(size_t)r * pw + c];
+      }
+    }
+  }
+
+  int rc = av1_add_film_grain(&params, src, dst);
+  if (rc != 0) {
+    aom_img_free(src);
+    aom_img_free(dst);
+    return rc;
+  }
+
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    uint16_t *o = plane == 0 ? out_y : (plane == 1 ? out_u : out_v);
+    const int pw = plane == 0 ? d_w : cw;
+    const int ph = plane == 0 ? d_h : ch;
+    for (int r = 0; r < ph; r++) {
+      if (bd > 8) {
+        const uint16_t *row =
+            (const uint16_t *)(dst->planes[plane] + (size_t)r * dst->stride[plane]);
+        for (int c = 0; c < pw; c++) o[(size_t)r * pw + c] = row[c];
+      } else {
+        const uint8_t *row = dst->planes[plane] + (size_t)r * dst->stride[plane];
+        for (int c = 0; c < pw; c++) o[(size_t)r * pw + c] = row[c];
+      }
+    }
+  }
+  aom_img_free(src);
+  aom_img_free(dst);
+  return 0;
+}
