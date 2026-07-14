@@ -856,3 +856,330 @@ pub fn c_txfm_uvrd(
     }
     Some((rate as i32, dist, sse, winners_u, winners_v))
 }
+
+// ---------------------------------------------------------------------------
+// CfL alpha search C-side chain (intra_mode_search.c 586-848 transcription
+// over REAL pieces: ref_hbd_predict_intra dc + REAL av1_cfl_predict_block +
+// the plane-aware search chain + ref_fwd_txfm2d/ref_satd fast model).
+// ---------------------------------------------------------------------------
+
+pub const CFL_MAGS_SIZE: usize = 33;
+pub const CFL_INDEX_ZERO: i32 = 16;
+
+pub fn c_cfl_idx_to_sign_and_alpha(cfl_idx: i32) -> (i32, i32) {
+    let lin = cfl_idx - CFL_INDEX_ZERO;
+    if lin == 0 {
+        (0, 0)
+    } else {
+        (if lin > 0 { 2 } else { 1 }, lin.abs() - 1)
+    }
+}
+
+/// C-side RD_STATS for the joint scan.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CRdStats {
+    pub rate: i32,
+    pub dist: i64,
+    pub sse: i64,
+    pub skip: bool,
+    pub zero_rate: i32,
+    pub rdcost: i64,
+}
+
+impl CRdStats {
+    pub fn invalid() -> Self {
+        CRdStats {
+            rate: i32::MAX,
+            dist: i64::MAX,
+            sse: i64::MAX,
+            skip: false,
+            zero_rate: 0,
+            rdcost: i64::MAX,
+        }
+    }
+    pub fn merge(&mut self, o: &CRdStats) {
+        if self.rate == i32::MAX || o.rate == i32::MAX {
+            *self = CRdStats::invalid();
+            return;
+        }
+        self.rate = (i64::from(self.rate) + i64::from(o.rate)).min(i64::from(i32::MAX)) as i32;
+        if self.zero_rate == 0 {
+            self.zero_rate = o.zero_rate;
+        }
+        self.dist += o.dist;
+        if self.sse < i64::MAX && o.sse < i64::MAX {
+            self.sse += o.sse;
+        }
+        self.skip &= o.skip;
+    }
+    pub fn rd_cost_update(&mut self, rdmult: i32) {
+        if self.rate < i32::MAX && self.dist < i64::MAX && self.rdcost < i64::MAX {
+            self.rdcost = c::ref_rdcost(rdmult, self.rate, self.dist);
+        } else {
+            *self = CRdStats::invalid();
+        }
+    }
+}
+
+/// C-side CfL prediction for one txb (facade CfL arm): dc pred (cache-aware)
+/// + REAL av1_cfl_predict_block, into the recon plane.
+#[allow(clippy::too_many_arguments)]
+fn c_predict_cfl_txb(
+    env: &CUvEnv,
+    recon: &mut [u16],
+    plane: usize,
+    st: &mut c::RefCflState,
+    cache: &mut CDcCache,
+    alpha_idx: i32,
+    joint_sign: i32,
+    tx_size: usize,
+    txb_off: usize,
+) {
+    let (txw, txh) = (TX_W[tx_size], TX_H[tx_size]);
+    let wpx = ((MI_W[env.bsize] * 4) >> env.ss_x).max(4) as i32;
+    let hpx = ((MI_H[env.bsize] * 4) >> env.ss_y).max(4) as i32;
+    let pred_plane = plane - 1;
+    if !(cache.use_cache && cache.cached[pred_plane]) {
+        let (n_top, n_tr, n_left, n_bl) = c::ref_intra_avail(
+            12, env.bsize, env.mi_row, env.mi_col, true, true, 1 << 16, 1 << 16, 0, tx_size,
+            env.ss_x as i32, env.ss_y as i32, 0, 0, wpx, hpx, 512, 512, 0, 0, false,
+        );
+        let pred = c::ref_hbd_predict_intra(
+            recon, txb_off, env.stride, 0, 0, false, 0, false, 0, tx_size, txw, txh, n_top,
+            n_tr, n_left, n_bl, env.bd as i32,
+        );
+        for r in 0..txh {
+            recon[txb_off + r * env.stride..txb_off + r * env.stride + txw]
+                .copy_from_slice(&pred[r * txw..r * txw + txw]);
+        }
+        if cache.use_cache {
+            cache.row[pred_plane][..txw].copy_from_slice(&recon[txb_off..txb_off + txw]);
+            cache.cached[pred_plane] = true;
+        }
+    } else {
+        for r in 0..txh {
+            recon[txb_off + r * env.stride..txb_off + r * env.stride + txw]
+                .copy_from_slice(&cache.row[pred_plane][..txw]);
+        }
+    }
+    c::ref_cfl_predict_block(
+        st, recon, txb_off, env.stride, tx_size, plane, alpha_idx, joint_sign, env.bsize,
+        env.lossless, env.ss_x as i32, env.ss_y as i32, env.bd,
+    );
+}
+
+/// C-side `intra_model_rd` (chroma, use_hadamard=0): per model txb CfL
+/// predict -> subtract -> real DCT_DCT forward -> ref_satd.
+#[allow(clippy::too_many_arguments)]
+pub fn c_intra_model_rd_uv(
+    env: &CUvEnv,
+    recon: &mut [u16],
+    plane: usize,
+    st: &mut c::RefCflState,
+    cache: &mut CDcCache,
+    alpha_idx: i32,
+    joint_sign: i32,
+    tx_size: usize,
+) -> i64 {
+    let plane_bsize = aom_entropy::partition::get_plane_block_size(env.bsize, env.ss_x, env.ss_y);
+    let (txw, txh) = (TX_W[tx_size], TX_H[tx_size]);
+    let (txwu, txhu) = (txw >> 2, txh >> 2);
+    let n = txw * txh;
+    let pi = plane - 1;
+    let src: &[u16] = if plane == 1 { env.src_u } else { env.src_v };
+    let mut satd_cost: i64 = 0;
+    for blk_row in (0..MI_H[plane_bsize]).step_by(txhu) {
+        for blk_col in (0..MI_W[plane_bsize]).step_by(txwu) {
+            let txb_off = env.ref_off[pi] + (blk_row * env.stride + blk_col) * 4;
+            c_predict_cfl_txb(env, recon, plane, st, cache, alpha_idx, joint_sign, tx_size, txb_off);
+            let mut pred = vec![0u16; n];
+            for r in 0..txh {
+                pred[r * txw..r * txw + txw].copy_from_slice(
+                    &recon[txb_off + r * env.stride..txb_off + r * env.stride + txw],
+                );
+            }
+            let src_txb_off = env.src_off[pi] + (blk_row * env.stride + blk_col) * 4;
+            let mut residual = vec![0i16; n];
+            c::ref_highbd_subtract_block(
+                txh, txw, &mut residual, txw, &src[src_txb_off..], env.stride, &pred, txw,
+            );
+            let coeff = c::ref_fwd_txfm2d(tx_size, &residual, txw, 0);
+            satd_cost += i64::from(c::ref_satd(&coeff[..n]));
+        }
+    }
+    satd_cost
+}
+
+/// C-side `cfl_compute_rd`: fast = the SATD model; full = the CfL UV walk
+/// (budget-free) + av1_rd_cost_update.
+#[allow(clippy::too_many_arguments)]
+pub fn c_cfl_compute_rd(
+    env: &CUvEnv,
+    recon: &mut [u16],
+    plane: usize,
+    st: &mut c::RefCflState,
+    cache: &mut CDcCache,
+    tx_size: usize,
+    cfl_idx: i32,
+    fast_mode: bool,
+) -> (i64, Option<CRdStats>) {
+    let pred_plane = plane - 1;
+    let (cfl_sign, cfl_alpha) = c_cfl_idx_to_sign_and_alpha(cfl_idx);
+    let dummy_sign = 1; // CFL_SIGN_NEG
+    let joint_sign = if pred_plane == 0 {
+        cfl_sign * 3 + dummy_sign - 1
+    } else {
+        dummy_sign * 3 + cfl_sign - 1
+    };
+    let alpha_idx = (cfl_alpha << 4) + cfl_alpha;
+    if fast_mode {
+        let cost =
+            c_intra_model_rd_uv(env, recon, plane, st, cache, alpha_idx, joint_sign, tx_size);
+        (cost, None)
+    } else {
+        let (rate, dist, sse, _w) = c_txfm_rd_in_plane_uv(
+            env,
+            recon,
+            plane,
+            13, // UV_CFL_PRED
+            0,
+            Some((st, cache, alpha_idx, joint_sign)),
+            tx_size,
+            i64::MAX,
+            0,
+        )
+        .expect("budget-free C walk is valid");
+        let mut s = CRdStats { rate, dist, sse, skip: false, zero_rate: 0, rdcost: 0 };
+        // Walk merges intra txbs as non-skip; init skip=1 AND per-txb 0 -> 0.
+        s.rd_cost_update(env.rdmult);
+        (s.rdcost, Some(s))
+    }
+}
+
+/// C-side `cfl_pick_plane_parameter` + `cfl_pick_plane_rd` + the joint scan
+/// of `cfl_rd_pick_alpha`. Returns
+/// `Some((alpha_idx, joint_sign, stats))` or `None`.
+#[allow(clippy::too_many_arguments)]
+pub fn c_cfl_rd_pick_alpha(
+    env: &CUvEnv,
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    st: &mut c::RefCflState,
+    tx_size: usize,
+    ref_best_rd: i64,
+    cfl_search_range: usize,
+    cfl_costs: &[i32], // [8][2][16] flat (ref_fill_cfl_costs)
+    uv_mode_cost: i32,
+) -> Option<(u8, i8, CRdStats)> {
+    let mut cache = CDcCache::cleared();
+    cache.use_cache = true;
+
+    let pick_parameter = |env: &CUvEnv,
+                          recon: &mut [u16],
+                          plane: usize,
+                          st: &mut c::RefCflState,
+                          cache: &mut CDcCache|
+     -> i32 {
+        if cfl_search_range == CFL_MAGS_SIZE {
+            return CFL_INDEX_ZERO;
+        }
+        let mut est = CFL_INDEX_ZERO;
+        let (mut best_cost, _) =
+            c_cfl_compute_rd(env, recon, plane, st, cache, tx_size, CFL_INDEX_ZERO, true);
+        for dir in [1i32, -1] {
+            for i in 1..CFL_MAGS_SIZE as i32 {
+                let idx = CFL_INDEX_ZERO + dir * i;
+                if !(0..CFL_MAGS_SIZE as i32).contains(&idx) {
+                    break;
+                }
+                let (cost, _) = c_cfl_compute_rd(env, recon, plane, st, cache, tx_size, idx, true);
+                if cost < best_cost {
+                    best_cost = cost;
+                    est = idx;
+                } else {
+                    break;
+                }
+            }
+        }
+        est
+    };
+    let est_u = pick_parameter(env, recon_u, 1, st, &mut cache);
+    let est_v = pick_parameter(env, recon_v, 2, st, &mut cache);
+
+    if cfl_search_range == 1 {
+        if est_u == CFL_INDEX_ZERO && est_v == CFL_INDEX_ZERO {
+            return None;
+        }
+        let (su, au) = c_cfl_idx_to_sign_and_alpha(est_u);
+        let (sv, av) = c_cfl_idx_to_sign_and_alpha(est_v);
+        let js = su * 3 + sv - 1;
+        let rate_overhead = cfl_costs[(js as usize * 2) * 16 + au as usize]
+            + cfl_costs[(js as usize * 2 + 1) * 16 + av as usize]
+            + uv_mode_cost;
+        if c::ref_rdcost(env.rdmult, rate_overhead, 0) > ref_best_rd {
+            return None;
+        }
+    }
+
+    let pick_rd = |env: &CUvEnv,
+                   recon: &mut [u16],
+                   plane: usize,
+                   st: &mut c::RefCflState,
+                   cache: &mut CDcCache,
+                   est: i32|
+     -> Vec<CRdStats> {
+        let mut arr = vec![CRdStats::invalid(); CFL_MAGS_SIZE];
+        let (_, s) = c_cfl_compute_rd(env, recon, plane, st, cache, tx_size, est, false);
+        arr[est as usize] = s.unwrap();
+        if cfl_search_range == 1 {
+            return arr;
+        }
+        for dir in [1i32, -1] {
+            for i in 1..cfl_search_range as i32 {
+                let idx = est + dir * i;
+                if !(0..CFL_MAGS_SIZE as i32).contains(&idx) {
+                    break;
+                }
+                let (_, s) = c_cfl_compute_rd(env, recon, plane, st, cache, tx_size, idx, false);
+                arr[idx as usize] = s.unwrap();
+            }
+        }
+        arr
+    };
+    let arr_u = pick_rd(env, recon_u, 1, st, &mut cache, est_u);
+    let arr_v = pick_rd(env, recon_v, 2, st, &mut cache, est_v);
+
+    let mut best: Option<(u8, i8, CRdStats)> = None;
+    let mut best_rdcost = i64::MAX;
+    for (ui, ue) in arr_u.iter().enumerate() {
+        if ue.rate == i32::MAX {
+            continue;
+        }
+        let (su, au) = c_cfl_idx_to_sign_and_alpha(ui as i32);
+        for (vi, ve) in arr_v.iter().enumerate() {
+            if ve.rate == i32::MAX {
+                continue;
+            }
+            let (sv, av) = c_cfl_idx_to_sign_and_alpha(vi as i32);
+            if su == 0 && sv == 0 {
+                continue;
+            }
+            let js = su * 3 + sv - 1;
+            let mut rd_stats = *ue;
+            rd_stats.merge(ve);
+            if rd_stats.rate != i32::MAX {
+                rd_stats.rate += cfl_costs[(js as usize * 2) * 16 + au as usize];
+                rd_stats.rate += cfl_costs[(js as usize * 2 + 1) * 16 + av as usize];
+            }
+            rd_stats.rd_cost_update(env.rdmult);
+            if rd_stats.rdcost < best_rdcost {
+                best_rdcost = rd_stats.rdcost;
+                best = Some((((au << 4) + av) as u8, js as i8, rd_stats));
+            }
+        }
+    }
+    match best {
+        Some(b) if b.2.rdcost < ref_best_rd => Some(b),
+        _ => None,
+    }
+}

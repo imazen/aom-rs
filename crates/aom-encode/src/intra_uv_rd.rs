@@ -580,3 +580,409 @@ pub fn txfm_uvrd(
     }
     Some((stats, winners_u, winners_v))
 }
+
+// ---------------------------------------------------------------------------
+// CfL alpha search (intra_mode_search.c 586-848): cfl_compute_rd (fast SATD
+// model / full per-plane RD) -> cfl_pick_plane_parameter (hill climb) ->
+// cfl_pick_plane_rd (full RD around the estimate) -> cfl_rd_pick_alpha (the
+// joint U x V sign/alpha combination scan).
+// ---------------------------------------------------------------------------
+
+/// `CFL_MAGS_SIZE` (enums.h): `(2 << CFL_ALPHABET_SIZE_LOG2) + 1` = 33 signed
+/// alpha magnitudes (-16..=+16 around [`CFL_INDEX_ZERO`]).
+pub const CFL_MAGS_SIZE: usize = 33;
+/// `CFL_INDEX_ZERO` (enums.h): `CFL_ALPHABET_SIZE` = 16.
+pub const CFL_INDEX_ZERO: i32 = 16;
+const CFL_SIGN_ZERO: i32 = 0;
+const CFL_SIGN_NEG: i32 = 1;
+const CFL_SIGN_POS: i32 = 2;
+const CFL_SIGNS: i32 = 3;
+
+/// `cfl_idx_to_sign_and_alpha` (intra_mode_search.c:589): linear index
+/// (0..33) -> (sign, coded alpha magnitude).
+pub fn cfl_idx_to_sign_and_alpha(cfl_idx: i32) -> (i32, i32) {
+    let cfl_linear_idx = cfl_idx - CFL_INDEX_ZERO;
+    if cfl_linear_idx == 0 {
+        (CFL_SIGN_ZERO, 0)
+    } else {
+        let sign = if cfl_linear_idx > 0 { CFL_SIGN_POS } else { CFL_SIGN_NEG };
+        (sign, cfl_linear_idx.abs() - 1)
+    }
+}
+
+/// `PLANE_SIGN_TO_JOINT_SIGN(plane, a, b)` (intra_mode_search.c:586):
+/// `pred_plane` is `CFL_PRED_U`(0) / `CFL_PRED_V`(1).
+pub fn plane_sign_to_joint_sign(pred_plane: usize, a: i32, b: i32) -> i32 {
+    if pred_plane == 0 {
+        a * CFL_SIGNS + b - 1
+    } else {
+        b * CFL_SIGNS + a - 1
+    }
+}
+
+/// `RD_STATS` as the CfL joint scan uses it (rd.h): the full merge /
+/// invalidate / rd-update semantics, including the `rdcost` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CflRdStats {
+    pub rate: i32,
+    pub dist: i64,
+    pub sse: i64,
+    pub skip_txfm: bool,
+    pub zero_rate: i32,
+    pub rdcost: i64,
+}
+
+impl CflRdStats {
+    /// `av1_invalid_rd_stats`.
+    pub fn invalid() -> Self {
+        CflRdStats {
+            rate: i32::MAX,
+            dist: i64::MAX,
+            sse: i64::MAX,
+            skip_txfm: false,
+            zero_rate: 0,
+            rdcost: i64::MAX,
+        }
+    }
+    /// `av1_merge_rd_stats` (rd.h:156): rate saturates (invalid propagates as
+    /// full invalidation), dist adds, sse adds under `INT64_MAX` guards,
+    /// skip ANDs.
+    pub fn merge(&mut self, o: &CflRdStats) {
+        if self.rate == i32::MAX || o.rate == i32::MAX {
+            *self = CflRdStats::invalid();
+            return;
+        }
+        self.rate = (i64::from(self.rate) + i64::from(o.rate)).min(i64::from(i32::MAX)) as i32;
+        if self.zero_rate == 0 {
+            self.zero_rate = o.zero_rate;
+        }
+        self.dist += o.dist;
+        if self.sse < i64::MAX && o.sse < i64::MAX {
+            self.sse += o.sse;
+        }
+        self.skip_txfm &= o.skip_txfm;
+    }
+    /// `av1_rd_cost_update` (rd.h:201).
+    pub fn rd_cost_update(&mut self, rdmult: i32) {
+        if self.rate < i32::MAX && self.dist < i64::MAX && self.rdcost < i64::MAX {
+            self.rdcost = rdcost(rdmult, self.rate, self.dist);
+        } else {
+            *self = CflRdStats::invalid();
+        }
+    }
+}
+
+/// `intra_model_rd` (intra_mode_search_utils.h:622) for a CHROMA plane with
+/// `use_hadamard == 0` — the CfL fast-mode model: per model-txb predict INTO
+/// the recon plane (the CfL DC+AC facade path) -> subtract ->
+/// `av1_quick_txfm` (a real DCT_DCT forward transform) -> `aom_satd`,
+/// accumulated i64.
+#[allow(clippy::too_many_arguments)]
+pub fn intra_model_rd_uv(
+    env: &UvRdEnv,
+    recon: &mut [u16],
+    plane: usize,
+    cfl: &mut CflPredict,
+    tx_size: usize,
+) -> i64 {
+    let plane_bsize = get_plane_block_size(env.bsize, env.ss_x, env.ss_y);
+    let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
+    let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
+    let max_blocks_wide = MI_W[plane_bsize];
+    let max_blocks_high = MI_H[plane_bsize];
+    let pi = plane - 1;
+    let src = env.src(plane);
+    let n = txw * txh;
+
+    let mut satd_cost: i64 = 0;
+    let mut blk_row = 0usize;
+    while blk_row < max_blocks_high {
+        let mut blk_col = 0usize;
+        while blk_col < max_blocks_wide {
+            let txb_off = env.ref_off[pi] + (blk_row * env.ref_stride + blk_col) * 4;
+            predict_uv_txb(
+                env,
+                recon,
+                plane,
+                UV_CFL_PRED,
+                0,
+                Some(cfl),
+                tx_size,
+                blk_row,
+                blk_col,
+                txb_off,
+            );
+            let mut pred = vec![0u16; n];
+            for r in 0..txh {
+                pred[r * txw..r * txw + txw].copy_from_slice(
+                    &recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw],
+                );
+            }
+            let src_txb_off = env.src_off[pi] + (blk_row * env.src_stride + blk_col) * 4;
+            let mut residual = vec![0i16; n];
+            aom_dist::highbd_subtract_block(
+                txh,
+                txw,
+                &mut residual,
+                txw,
+                &src[src_txb_off..],
+                env.src_stride,
+                &pred,
+                txw,
+            );
+            // av1_quick_txfm(use_hadamard=0): DCT_DCT forward transform.
+            let mut coeff = vec![0i32; n];
+            aom_transform::txfm2d::av1_fwd_txfm2d(&residual, &mut coeff, txw, 0, tx_size);
+            satd_cost += i64::from(aom_dist::hadamard::satd(&coeff[..n]));
+            blk_col += txw_unit;
+        }
+        blk_row += txh_unit;
+    }
+    satd_cost
+}
+
+/// `cfl_compute_rd` (intra_mode_search.c:601): evaluate one CfL alpha index
+/// on one plane — fast mode = the SATD model ([`intra_model_rd_uv`]); full
+/// mode = `av1_txfm_rd_in_plane` (budget-free) + `av1_rd_cost_update`.
+/// The evaluated plane's `(sign, alpha)` derive from `cfl_idx`; the other
+/// plane's sign is the dummy `CFL_SIGN_NEG`; both alpha nibbles are set to
+/// the evaluated alpha (`(alpha << 4) + alpha`).
+/// Returns `(cfl_cost, Option<full-RD stats>)`.
+#[allow(clippy::too_many_arguments)]
+pub fn cfl_compute_rd(
+    env: &UvRdEnv,
+    recon: &mut [u16],
+    plane: usize,
+    ctx: &mut CflCtx,
+    cache: &mut CflDcCache,
+    tx_size: usize,
+    cfl_idx: i32,
+    fast_mode: bool,
+    pol: &TxTypeSearchPolicy,
+) -> (i64, Option<CflRdStats>) {
+    let pred_plane = plane - 1;
+    let (cfl_sign, cfl_alpha) = cfl_idx_to_sign_and_alpha(cfl_idx);
+    let dummy_sign = CFL_SIGN_NEG;
+    let joint_sign = plane_sign_to_joint_sign(pred_plane, cfl_sign, dummy_sign);
+    let alpha_idx = (cfl_alpha << 4) + cfl_alpha; // CFL_ALPHABET_SIZE_LOG2
+    let mut cflp = CflPredict { ctx, cache, alpha_idx, joint_sign };
+
+    if fast_mode {
+        let cost = intra_model_rd_uv(env, recon, plane, &mut cflp, tx_size);
+        (cost, None)
+    } else {
+        let Some((stats, _winners)) = txfm_rd_in_plane_uv(
+            env,
+            recon,
+            plane,
+            UV_CFL_PRED,
+            0,
+            Some(&mut cflp),
+            tx_size,
+            i64::MAX, // cfl_compute_rd passes INT64_MAX — no early exit
+            0,
+            pol,
+        ) else {
+            unreachable!("budget-free UV walk is always valid");
+        };
+        let mut s = CflRdStats {
+            rate: stats.rate,
+            dist: stats.dist,
+            sse: stats.sse,
+            skip_txfm: stats.skip_txfm,
+            zero_rate: 0,
+            rdcost: 0,
+        };
+        s.rd_cost_update(env.rdmult);
+        (s.rdcost, Some(s))
+    }
+}
+
+/// `cfl_pick_plane_parameter` (intra_mode_search.c:640): the fast-SATD hill
+/// climb around `CFL_INDEX_ZERO` (each direction walks while strictly
+/// improving). `cfl_search_range == CFL_MAGS_SIZE` (exhaustive full-RD mode)
+/// short-circuits to `CFL_INDEX_ZERO`.
+#[allow(clippy::too_many_arguments)]
+pub fn cfl_pick_plane_parameter(
+    env: &UvRdEnv,
+    recon: &mut [u16],
+    plane: usize,
+    ctx: &mut CflCtx,
+    cache: &mut CflDcCache,
+    tx_size: usize,
+    cfl_search_range: usize,
+    pol: &TxTypeSearchPolicy,
+) -> i32 {
+    debug_assert!((1..=CFL_MAGS_SIZE).contains(&cfl_search_range));
+    if cfl_search_range == CFL_MAGS_SIZE {
+        return CFL_INDEX_ZERO;
+    }
+    let mut est_best_cfl_idx = CFL_INDEX_ZERO;
+    let start_cfl_idx = CFL_INDEX_ZERO;
+    let (mut best_cfl_cost, _) =
+        cfl_compute_rd(env, recon, plane, ctx, cache, tx_size, start_cfl_idx, true, pol);
+    for dir in [1i32, -1] {
+        for i in 1..CFL_MAGS_SIZE as i32 {
+            let cfl_idx = start_cfl_idx + dir * i;
+            if !(0..CFL_MAGS_SIZE as i32).contains(&cfl_idx) {
+                break;
+            }
+            let (cfl_cost, _) =
+                cfl_compute_rd(env, recon, plane, ctx, cache, tx_size, cfl_idx, true, pol);
+            if cfl_cost < best_cfl_cost {
+                best_cfl_cost = cfl_cost;
+                est_best_cfl_idx = cfl_idx;
+            } else {
+                break;
+            }
+        }
+    }
+    est_best_cfl_idx
+}
+
+/// `cfl_pick_plane_rd` (intra_mode_search.c:683): full-RD evaluation of the
+/// estimated best alpha and its `cfl_search_range - 1` neighbours in each
+/// direction (all other entries stay invalid).
+#[allow(clippy::too_many_arguments)]
+pub fn cfl_pick_plane_rd(
+    env: &UvRdEnv,
+    recon: &mut [u16],
+    plane: usize,
+    ctx: &mut CflCtx,
+    cache: &mut CflDcCache,
+    tx_size: usize,
+    cfl_search_range: usize,
+    est_best_cfl_idx: i32,
+    pol: &TxTypeSearchPolicy,
+) -> [CflRdStats; CFL_MAGS_SIZE] {
+    debug_assert!((1..=CFL_MAGS_SIZE).contains(&cfl_search_range));
+    let mut arr = [CflRdStats::invalid(); CFL_MAGS_SIZE];
+    let start_cfl_idx = est_best_cfl_idx;
+    let (_, s) =
+        cfl_compute_rd(env, recon, plane, ctx, cache, tx_size, start_cfl_idx, false, pol);
+    arr[start_cfl_idx as usize] = s.expect("full mode returns stats");
+    if cfl_search_range == 1 {
+        return arr;
+    }
+    for dir in [1i32, -1] {
+        for i in 1..cfl_search_range as i32 {
+            let cfl_idx = start_cfl_idx + dir * i;
+            if !(0..CFL_MAGS_SIZE as i32).contains(&cfl_idx) {
+                break;
+            }
+            let (_, s) =
+                cfl_compute_rd(env, recon, plane, ctx, cache, tx_size, cfl_idx, false, pol);
+            arr[cfl_idx as usize] = s.expect("full mode returns stats");
+        }
+    }
+    arr
+}
+
+/// The winning CfL parameters of [`cfl_rd_pick_alpha`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CflAlphaResult {
+    pub stats: CflRdStats,
+    /// `mbmi->cfl_alpha_idx` — `(alpha_u << 4) + alpha_v`.
+    pub alpha_idx: u8,
+    /// `mbmi->cfl_alpha_signs` — the joint sign.
+    pub joint_sign: i8,
+}
+
+/// `cfl_rd_pick_alpha` (intra_mode_search.c:745): the CfL mode evaluation —
+/// per-plane fast hill climbs (DC-prediction cache enabled), the
+/// `cfl_search_range == 1` invalid/overhead early-outs, per-plane full-RD
+/// arrays, then the joint U x V scan (skipping invalid entries and the
+/// ZERO/ZERO sign combination) with the CfL signaling rate folded in, strict
+/// `<` on `rdcost`. `None` = the C's `return 0` (invalid parameters).
+///
+/// `uv_mode_cost` is `intra_uv_mode_cost[cfl_allowed][mbmi->mode][UV_CFL_PRED]`
+/// (the `cfl_search_range == 1` overhead gate reads it).
+#[allow(clippy::too_many_arguments)]
+pub fn cfl_rd_pick_alpha(
+    env: &UvRdEnv,
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    ctx: &mut CflCtx,
+    tx_size: usize,
+    ref_best_rd: i64,
+    cfl_search_range: usize,
+    cfl_costs: &crate::mode_costs::CflCosts,
+    uv_mode_cost: i32,
+    pol: &TxTypeSearchPolicy,
+) -> Option<CflAlphaResult> {
+    debug_assert!((1..=CFL_MAGS_SIZE).contains(&cfl_search_range));
+    let mut cache = CflDcCache::cleared();
+    // "enable the caching of dc pred data" — xd->cfl.use_dc_pred_cache = true.
+    cache.use_cache = true;
+
+    let est_best_cfl_idx_u = cfl_pick_plane_parameter(
+        env, recon_u, 1, ctx, &mut cache, tx_size, cfl_search_range, pol,
+    );
+    let est_best_cfl_idx_v = cfl_pick_plane_parameter(
+        env, recon_v, 2, ctx, &mut cache, tx_size, cfl_search_range, pol,
+    );
+
+    if cfl_search_range == 1 {
+        // For cfl_search_range=1: CfL index 0 on both planes = invalid mode.
+        if est_best_cfl_idx_u == CFL_INDEX_ZERO && est_best_cfl_idx_v == CFL_INDEX_ZERO {
+            return None; // clear_cfl_dc_pred_cache_flags + return 0
+        }
+        let (cfl_sign_u, cfl_alpha_u) = cfl_idx_to_sign_and_alpha(est_best_cfl_idx_u);
+        let (cfl_sign_v, cfl_alpha_v) = cfl_idx_to_sign_and_alpha(est_best_cfl_idx_v);
+        let joint_sign = cfl_sign_u * CFL_SIGNS + cfl_sign_v - 1;
+        let rate_overhead = cfl_costs.0[joint_sign as usize][0][cfl_alpha_u as usize]
+            + cfl_costs.0[joint_sign as usize][1][cfl_alpha_v as usize]
+            + uv_mode_cost;
+        if rdcost(env.rdmult, rate_overhead, 0) > ref_best_rd {
+            return None;
+        }
+    }
+
+    let cfl_rd_arr_u = cfl_pick_plane_rd(
+        env, recon_u, 1, ctx, &mut cache, tx_size, cfl_search_range, est_best_cfl_idx_u, pol,
+    );
+    let cfl_rd_arr_v = cfl_pick_plane_rd(
+        env, recon_v, 2, ctx, &mut cache, tx_size, cfl_search_range, est_best_cfl_idx_v, pol,
+    );
+    // clear_cfl_dc_pred_cache_flags(&xd->cfl): the cache scope ends here (the
+    // joint scan below re-evaluates nothing).
+
+    let mut best: Option<CflAlphaResult> = None;
+    let mut best_rdcost = i64::MAX; // av1_invalid_rd_stats(best_rd_stats)
+    for (ui, u_entry) in cfl_rd_arr_u.iter().enumerate() {
+        if u_entry.rate == i32::MAX {
+            continue;
+        }
+        let (cfl_sign_u, cfl_alpha_u) = cfl_idx_to_sign_and_alpha(ui as i32);
+        for (vi, v_entry) in cfl_rd_arr_v.iter().enumerate() {
+            if v_entry.rate == i32::MAX {
+                continue;
+            }
+            let (cfl_sign_v, cfl_alpha_v) = cfl_idx_to_sign_and_alpha(vi as i32);
+            if cfl_sign_u == CFL_SIGN_ZERO && cfl_sign_v == CFL_SIGN_ZERO {
+                continue; // not a valid CfL parameter combination
+            }
+            let joint_sign = cfl_sign_u * CFL_SIGNS + cfl_sign_v - 1;
+            let mut rd_stats = *u_entry;
+            rd_stats.merge(v_entry);
+            if rd_stats.rate != i32::MAX {
+                rd_stats.rate += cfl_costs.0[joint_sign as usize][0][cfl_alpha_u as usize];
+                rd_stats.rate += cfl_costs.0[joint_sign as usize][1][cfl_alpha_v as usize];
+            }
+            rd_stats.rd_cost_update(env.rdmult);
+            if rd_stats.rdcost < best_rdcost {
+                best_rdcost = rd_stats.rdcost;
+                best = Some(CflAlphaResult {
+                    stats: rd_stats,
+                    alpha_idx: ((cfl_alpha_u << 4) + cfl_alpha_v) as u8,
+                    joint_sign: joint_sign as i8,
+                });
+            }
+        }
+    }
+    match best {
+        Some(b) if b.stats.rdcost < ref_best_rd => Some(b),
+        // rdcost >= ref_best_rd: invalid stats + invalid parameters.
+        _ => None,
+    }
+}
