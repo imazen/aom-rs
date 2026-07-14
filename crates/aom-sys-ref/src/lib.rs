@@ -10378,3 +10378,157 @@ unsafe extern "C" {
 pub fn ref_filter_intra_allowed_bsize(enable_filter_intra: bool, bsize: usize) -> bool {
     unsafe { shim_filter_intra_allowed_bsize_x(enable_filter_intra as i32, bsize as i32) != 0 }
 }
+
+// dec_shim.c section 4 (append-only addition): palette colour-index map oracles —
+// av1_get_palette_color_index_context is EXPORTED (directly bound, no facade needed);
+// shim_get_block_dimensions facades the static-inline av1_get_block_dimensions;
+// shim_decode_palette_tokens facades the REAL exported av1_decode_palette_tokens
+// end-to-end over a real aom_reader byte stream.
+unsafe extern "C" {
+    fn av1_get_palette_color_index_context(
+        color_map: *const u8,
+        stride: i32,
+        r: i32,
+        c: i32,
+        palette_size: i32,
+        color_order: *mut u8,
+        color_idx: *mut i32,
+    ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_get_block_dimensions(
+        bsize: i32,
+        plane: i32,
+        ss_x: i32,
+        ss_y: i32,
+        mb_to_right_edge: i32,
+        mb_to_bottom_edge: i32,
+        width: *mut i32,
+        height: *mut i32,
+        rows: *mut i32,
+        cols: *mut i32,
+    );
+    #[allow(clippy::too_many_arguments)]
+    fn shim_decode_palette_tokens(
+        data: *const u8,
+        len: usize,
+        plane: i32,
+        bsize: i32,
+        n_colors: i32,
+        ss_x: i32,
+        ss_y: i32,
+        mb_to_right_edge: i32,
+        mb_to_bottom_edge: i32,
+        map_cdf_in: *const u16,
+        map_cdf_out: *mut u16,
+        color_map_out: *mut u8,
+    ) -> i32;
+}
+
+/// `MAX_PALETTE_BLOCK_WIDTH` / `MAX_PALETTE_BLOCK_HEIGHT` (`av1/common/blockd.h`): the
+/// colour-index map's fixed stride/height (64x64, the largest palette-allowed block).
+pub const REF_MAX_PALETTE_BLOCK_WIDTH: usize = 64;
+pub const REF_MAX_PALETTE_BLOCK_HEIGHT: usize = 64;
+/// `PALETTE_SIZES * PALETTE_COLOR_INDEX_CONTEXTS * CDF_SIZE(PALETTE_COLORS)` = `7*5*9`:
+/// one plane's full colour-index CDF array, flattened.
+pub const REF_PALETTE_MAP_CDF_LEN: usize = 7 * 5 * 9;
+
+/// The REAL exported `av1_get_palette_color_index_context` (`av1/common/entropymode.c`):
+/// the colour-index map token context at `(r, c)`. Returns `(color_order, color_idx,
+/// color_ctx)` — see `aom_entropy::partition::get_palette_color_index_context`, which
+/// this is the oracle for.
+pub fn ref_get_palette_color_index_context(
+    color_map: &[u8],
+    stride: usize,
+    r: usize,
+    c: usize,
+    palette_size: i32,
+) -> ([u8; 8], i32, i32) {
+    let mut color_order = [0u8; 8];
+    let mut color_idx = 0i32;
+    let ctx = unsafe {
+        av1_get_palette_color_index_context(
+            color_map.as_ptr(),
+            stride as i32,
+            r as i32,
+            c as i32,
+            palette_size,
+            color_order.as_mut_ptr(),
+            &mut color_idx,
+        )
+    };
+    (color_order, color_idx, ctx)
+}
+
+/// The REAL `av1_get_block_dimensions` (`av1/common/blockd.h`, static inline facade):
+/// `(width, height, rows, cols)` — see `aom_entropy::partition::get_block_dimensions`.
+pub fn ref_get_block_dimensions(
+    bsize: usize,
+    plane: usize,
+    ss_x: usize,
+    ss_y: usize,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+) -> (usize, usize, usize, usize) {
+    let (mut width, mut height, mut rows, mut cols) = (0i32, 0i32, 0i32, 0i32);
+    unsafe {
+        shim_get_block_dimensions(
+            bsize as i32,
+            plane as i32,
+            ss_x as i32,
+            ss_y as i32,
+            mb_to_right_edge,
+            mb_to_bottom_edge,
+            &mut width,
+            &mut height,
+            &mut rows,
+            &mut cols,
+        )
+    };
+    (
+        width as usize,
+        height as usize,
+        rows as usize,
+        cols as usize,
+    )
+}
+
+/// The REAL exported `av1_decode_palette_tokens` (`av1/decoder/detokenize.c`), driven
+/// end-to-end over a real `aom_reader` byte stream via a minimal MACROBLOCKD facade —
+/// see `aom_entropy::partition::decode_color_map_tokens`, which this is the oracle for.
+/// `map_cdf_in` is `REF_PALETTE_MAP_CDF_LEN` u16 (the plane's full colour-index CDF
+/// array); returns `(color_map [REF_MAX_PALETTE_BLOCK_WIDTH * REF_MAX_PALETTE_BLOCK_HEIGHT],
+/// map_cdf_out [REF_PALETTE_MAP_CDF_LEN])`. Panics on a non-zero shim rc.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_decode_palette_tokens(
+    data: &[u8],
+    plane: usize,
+    bsize: usize,
+    n_colors: i32,
+    ss_x: usize,
+    ss_y: usize,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    map_cdf_in: &[u16],
+) -> (Vec<u8>, Vec<u16>) {
+    assert_eq!(map_cdf_in.len(), REF_PALETTE_MAP_CDF_LEN);
+    let mut color_map = vec![0u8; REF_MAX_PALETTE_BLOCK_WIDTH * REF_MAX_PALETTE_BLOCK_HEIGHT];
+    let mut map_cdf_out = vec![0u16; REF_PALETTE_MAP_CDF_LEN];
+    let rc = unsafe {
+        shim_decode_palette_tokens(
+            data.as_ptr(),
+            data.len(),
+            plane as i32,
+            bsize as i32,
+            n_colors,
+            ss_x as i32,
+            ss_y as i32,
+            mb_to_right_edge,
+            mb_to_bottom_edge,
+            map_cdf_in.as_ptr(),
+            map_cdf_out.as_mut_ptr(),
+            color_map.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc, 0, "shim_decode_palette_tokens failed ({rc})");
+    (color_map, map_cdf_out)
+}

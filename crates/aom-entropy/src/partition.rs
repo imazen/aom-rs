@@ -3574,6 +3574,44 @@ pub fn pack_map_tokens(
     }
 }
 
+/// The write-side mirror of [`decode_color_map_tokens`]: code a KNOWN
+/// `plane_width * plane_height` colour map (`color_map_true`, values `< n`, raster
+/// order — the caller's `rows`/`cols` region is the only part ever read) in the same
+/// wavefront order, computing each position's `(color_order, color_idx)` from the
+/// SAME [`get_palette_color_index_context`] the decoder uses. Not part of the encoder's
+/// production path (the real encoder's palette map comes out of its own RDO map-search,
+/// not yet ported); this exists to produce genuine bitstreams for testing
+/// [`decode_color_map_tokens`] against the real C decoder — this pairing is exactly
+/// [`pack_map_tokens`]/[`read_map_tokens`]'s relationship, just with the context
+/// computed incrementally instead of taking a precomputed `color_ctxs` array.
+pub fn encode_color_map_tokens(
+    enc: &mut OdEcEnc,
+    n: i32,
+    plane_width: usize,
+    color_map_true: &[u8],
+    rows: usize,
+    cols: usize,
+    map_cdf: &mut [[u16; 9]; 5],
+) {
+    debug_assert!(rows >= 1 && cols >= 1);
+    write_uniform_arith(enc, n, color_map_true[0] as i32);
+    for i in 1..(rows + cols - 1) {
+        let j_max = i.min(cols - 1);
+        let j_min = (i + 1).saturating_sub(rows);
+        let mut j = j_max;
+        loop {
+            let r = i - j;
+            let (_order, color_idx, color_ctx) =
+                get_palette_color_index_context(color_map_true, plane_width, r, j, n);
+            write_symbol(enc, color_idx, &mut map_cdf[color_ctx], n as usize);
+            if j == j_min {
+                break;
+            }
+            j -= 1;
+        }
+    }
+}
+
 use crate::cdf::read_symbol;
 use crate::dec::OdEcDec;
 
@@ -4023,6 +4061,206 @@ pub fn read_map_tokens(
     for i in 1..out.len() {
         out[i] = read_symbol(dec, &mut map_cdf[color_ctxs[i]], n as usize);
     }
+}
+
+/// `NUM_PALETTE_NEIGHBORS` (`entropymode.h`): left, top-left, top.
+const NUM_PALETTE_NEIGHBORS: usize = 3;
+
+/// `av1_palette_color_index_context_lookup[MAX_COLOR_CONTEXT_HASH + 1]` (`entropymode.c`):
+/// the neighbour-score hash (1..=8) mapped to one of `PALETTE_COLOR_INDEX_CONTEXTS` (5).
+/// Hash 0 and the even values 3/4 never occur (the three neighbour weights 2/1/2 cannot
+/// sum to them) — `-1` marks those unreachable slots, matching the C table exactly.
+const PALETTE_COLOR_INDEX_CONTEXT_LOOKUP: [i32; 9] = [-1, -1, 0, -1, -1, 4, 3, 2, 1];
+
+/// `av1_get_palette_color_index_context` (`av1/common/entropymode.c`): the colour-index
+/// map token's context at already-decoded position `(r, c)` (`r > 0 || c > 0`) — a
+/// weighted vote over the left/top-left/top neighbour colour indices (weights 2/1/2),
+/// hashed through [`PALETTE_COLOR_INDEX_CONTEXT_LOOKUP`]. Also returns `color_order` (the
+/// neighbour-score-sorted permutation of colour indices the symbol is coded against —
+/// [`decode_color_map_tokens`] maps the decoded symbol back through it) and `color_idx`
+/// (the map's actual colour at `(r, c)` expressed in that permutation — unused by decode,
+/// kept for the encode-side RDO this also serves in C).
+#[allow(clippy::needless_range_loop)] // `j` is used as an index (max_idx), not just a value
+pub fn get_palette_color_index_context(
+    color_map: &[u8],
+    stride: usize,
+    r: usize,
+    c: usize,
+    palette_size: i32,
+) -> ([u8; PALETTE_MAX_SIZE], i32, usize) {
+    debug_assert!(palette_size as usize <= PALETTE_MAX_SIZE);
+    debug_assert!(r > 0 || c > 0);
+    let color_neighbors: [i32; NUM_PALETTE_NEIGHBORS] = [
+        if c >= 1 {
+            color_map[r * stride + c - 1] as i32
+        } else {
+            -1
+        },
+        if c >= 1 && r >= 1 {
+            color_map[(r - 1) * stride + c - 1] as i32
+        } else {
+            -1
+        },
+        if r >= 1 {
+            color_map[(r - 1) * stride + c] as i32
+        } else {
+            -1
+        },
+    ];
+    let mut scores = [0i32; PALETTE_MAX_SIZE];
+    const WEIGHTS: [i32; NUM_PALETTE_NEIGHBORS] = [2, 1, 2];
+    for i in 0..NUM_PALETTE_NEIGHBORS {
+        if color_neighbors[i] >= 0 {
+            scores[color_neighbors[i] as usize] += WEIGHTS[i];
+        }
+    }
+    let mut color_order: [u8; PALETTE_MAX_SIZE] = [0, 1, 2, 3, 4, 5, 6, 7];
+    let mut inverse_color_order: [u8; PALETTE_MAX_SIZE] = [0, 1, 2, 3, 4, 5, 6, 7];
+    // Selection-sort the top NUM_PALETTE_NEIGHBORS score slots (descending) —
+    // mirrors the C bubble-insert exactly (order of ties matters: stable on
+    // the original index).
+    for i in 0..NUM_PALETTE_NEIGHBORS {
+        let mut max = scores[i];
+        let mut max_idx = i;
+        for j in (i + 1)..palette_size as usize {
+            if scores[j] > max {
+                max = scores[j];
+                max_idx = j;
+            }
+        }
+        if max_idx != i {
+            let max_score = scores[max_idx];
+            let max_color_order = color_order[max_idx];
+            let mut k = max_idx;
+            while k > i {
+                scores[k] = scores[k - 1];
+                color_order[k] = color_order[k - 1];
+                inverse_color_order[color_order[k] as usize] = k as u8;
+                k -= 1;
+            }
+            scores[i] = max_score;
+            color_order[i] = max_color_order;
+            inverse_color_order[color_order[i] as usize] = i as u8;
+        }
+    }
+    let color_idx = inverse_color_order[color_map[r * stride + c] as usize] as i32;
+    let mut hash = 0i32;
+    const HASH_MULTIPLIERS: [i32; NUM_PALETTE_NEIGHBORS] = [1, 2, 2];
+    for i in 0..NUM_PALETTE_NEIGHBORS {
+        hash += scores[i] * HASH_MULTIPLIERS[i];
+    }
+    debug_assert!(hash > 0 && (hash as usize) < PALETTE_COLOR_INDEX_CONTEXT_LOOKUP.len());
+    let ctx = PALETTE_COLOR_INDEX_CONTEXT_LOOKUP[hash as usize];
+    debug_assert!(ctx >= 0);
+    (color_order, color_idx, ctx as usize)
+}
+
+/// `decode_color_map_tokens` (`av1/decoder/detokenize.c`): the full colour-index map for
+/// one plane, `plane_width * plane_height` raster order. Position `(0,0)` is a uniform
+/// symbol; every other IN-BOUNDS position (`rows * cols` total) is visited in wavefront
+/// (anti-diagonal) order — required because [`get_palette_color_index_context`]'s
+/// left/top-left/top neighbours must already be decoded, and wavefront order guarantees
+/// that (every cell's neighbours sit on strictly earlier diagonals). The frame-edge tail
+/// (`rows..plane_height`, `cols..plane_width`, when the block is clipped) copies the last
+/// decoded row/column — [`get_block_dimensions`] is what makes `rows`/`cols` smaller than
+/// `plane_width`/`plane_height` in the first place. `map_cdf` is the caller's
+/// `[n - PALETTE_MIN_SIZE]`-selected `[PALETTE_COLOR_INDEX_CONTEXTS][CDF_SIZE(PALETTE_COLORS)]`
+/// slice (adapts in place, like every other symbol CDF in this module).
+pub fn decode_color_map_tokens(
+    dec: &mut OdEcDec,
+    n: i32,
+    plane_width: usize,
+    plane_height: usize,
+    rows: usize,
+    cols: usize,
+    map_cdf: &mut [[u16; 9]; 5],
+) -> Vec<u8> {
+    let mut color_map = vec![0u8; plane_width * plane_height];
+    debug_assert!(rows >= 1 && cols >= 1);
+    color_map[0] = read_uniform_arith(dec, n) as u8;
+    for i in 1..(rows + cols - 1) {
+        let j_max = i.min(cols - 1);
+        let j_min = (i + 1).saturating_sub(rows);
+        let mut j = j_max;
+        loop {
+            let r = i - j;
+            let (color_order, _idx, color_ctx) =
+                get_palette_color_index_context(&color_map, plane_width, r, j, n);
+            let color_idx = read_symbol(dec, &mut map_cdf[color_ctx], n as usize);
+            color_map[r * plane_width + j] = color_order[color_idx as usize];
+            if j == j_min {
+                break;
+            }
+            j -= 1;
+        }
+    }
+    // Copy last column to extra columns.
+    if cols < plane_width {
+        for i in 0..rows {
+            let v = color_map[i * plane_width + cols - 1];
+            for c in cols..plane_width {
+                color_map[i * plane_width + c] = v;
+            }
+        }
+    }
+    // Copy last row to extra rows.
+    for i in rows..plane_height {
+        let src = (rows - 1) * plane_width;
+        let (head, tail) = color_map.split_at_mut(i * plane_width);
+        tail[..plane_width].copy_from_slice(&head[src..src + plane_width]);
+    }
+    color_map
+}
+
+/// `av1_get_block_dimensions` (`av1/common/blockd.h`): a block's plane-`plane` pixel
+/// dimensions — `width`/`height` (the FULL, frame-edge-unclipped plane block size; the
+/// palette colour-index map's stride/height, matching `pd->width`/`pd->height`) and
+/// `rows`/`cols` (the plane block's IN-FRAME extent — smaller than `width`/`height` when
+/// the block is clipped by the frame's right/bottom edge; [`decode_color_map_tokens`]'s
+/// wavefront bound). `mb_to_right_edge`/`mb_to_bottom_edge` are the block's luma
+/// eighth-pel distances to the frame edge (>= 0 when fully in-frame, matching this
+/// driver's existing `mb_to_right_edge`/`mb_to_bottom_edge` locals). Luma (`plane == 0`)
+/// never subsamples. Chroma sub-8x8 groups (`plane_block_width`/`height < 4`) pad by 2 on
+/// that axis — the merged chroma-reference area always covers >= 4px either way.
+pub fn get_block_dimensions(
+    bsize: usize,
+    plane: usize,
+    ss_x: usize,
+    ss_y: usize,
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+) -> (usize, usize, usize, usize) {
+    let block_height = BLOCK_SIZE_HIGH[bsize];
+    let block_width = BLOCK_SIZE_WIDE[bsize];
+    let block_rows = if mb_to_bottom_edge >= 0 {
+        block_height
+    } else {
+        (mb_to_bottom_edge >> 3) + block_height
+    };
+    let block_cols = if mb_to_right_edge >= 0 {
+        block_width
+    } else {
+        (mb_to_right_edge >> 3) + block_width
+    };
+    let (ssx, ssy) = if plane == 0 {
+        (0, 0)
+    } else {
+        (ss_x as i32, ss_y as i32)
+    };
+    let plane_block_width = block_width >> ssx;
+    let plane_block_height = block_height >> ssy;
+    let is_chroma_sub8_x = i32::from(plane > 0 && plane_block_width < 4);
+    let is_chroma_sub8_y = i32::from(plane > 0 && plane_block_height < 4);
+    let width = plane_block_width + 2 * is_chroma_sub8_x;
+    let height = plane_block_height + 2 * is_chroma_sub8_y;
+    let rows = (block_rows >> ssy) + 2 * is_chroma_sub8_y;
+    let cols = (block_cols >> ssx) + 2 * is_chroma_sub8_x;
+    (
+        width as usize,
+        height as usize,
+        rows as usize,
+        cols as usize,
+    )
 }
 
 /// `read_delta_palette_colors` — inverse of [`delta_encode_palette_colors`]

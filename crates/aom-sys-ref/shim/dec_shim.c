@@ -1637,3 +1637,93 @@ int shim_lr_filter_frame(uint16_t *y, uint16_t *u, uint16_t *v,
   free(cm);
   return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* 4. Palette colour-index map — REAL av1_decode_palette_tokens facade */
+/* ------------------------------------------------------------------ */
+
+#include "av1/decoder/detokenize.h"
+
+/* av1_get_palette_color_index_context (av1/common/entropymode.c) is EXPORTED and
+ * directly bound from Rust (no facade needed) — declared in aom-sys-ref/src/lib.rs. */
+
+/* av1_get_block_dimensions facade (av1/common/blockd.h, static inline): a minimal
+ * MACROBLOCKD carrying only the fields the real function reads
+ * (mb_to_right_edge/mb_to_bottom_edge, plane[plane].subsampling_x/y). */
+void shim_get_block_dimensions(int bsize, int plane, int ss_x, int ss_y,
+                               int mb_to_right_edge, int mb_to_bottom_edge, int *width,
+                               int *height, int *rows, int *cols) {
+  MACROBLOCKD xd;
+  memset(&xd, 0, sizeof(xd));
+  xd.mb_to_right_edge = mb_to_right_edge;
+  xd.mb_to_bottom_edge = mb_to_bottom_edge;
+  xd.plane[plane].subsampling_x = plane == 0 ? 0 : ss_x;
+  xd.plane[plane].subsampling_y = plane == 0 ? 0 : ss_y;
+  av1_get_block_dimensions((BLOCK_SIZE)bsize, plane, &xd, width, height, rows, cols);
+}
+
+/* av1_decode_palette_tokens facade (av1/decoder/detokenize.c, exported): decode ONE
+ * plane's colour-index map from a REAL aom_reader byte stream, driving the REAL
+ * function end-to-end (av1_get_block_dimensions -> the wavefront loop ->
+ * av1_get_palette_color_index_context) — so both av1_get_block_dimensions and the
+ * token decode itself are cross-checked against Rust, not just transcribed. A minimal
+ * MACROBLOCKD + MB_MODE_INFO + FRAME_CONTEXT stand in for the fields the call chain
+ * reads (mirrors the shim_lr_units_roundtrip aom_reader setup above). `map_cdf_in` /
+ * `map_cdf_out` are the PALETTE_SIZES x PALETTE_COLOR_INDEX_CONTEXTS x
+ * CDF_SIZE(PALETTE_COLORS) CDF array (the plane's tile_ctx instance; `_out` is
+ * post-adaptation). `color_map_out` (>= MAX_PALETTE_BLOCK_WIDTH*MAX_PALETTE_BLOCK_HEIGHT
+ * bytes) is the decoded map, MAX_PALETTE_BLOCK_WIDTH-strided. Returns 0 on success. */
+int shim_decode_palette_tokens(const uint8_t *data, size_t len, int plane, int bsize,
+                               int n_colors, int ss_x, int ss_y, int mb_to_right_edge,
+                               int mb_to_bottom_edge, const uint16_t *map_cdf_in,
+                               uint16_t *map_cdf_out, uint8_t *color_map_out) {
+  MACROBLOCKD xd;
+  MB_MODE_INFO mi;
+  MB_MODE_INFO *mi_ptr = &mi;
+  FRAME_CONTEXT fc;
+  memset(&xd, 0, sizeof(xd));
+  memset(&mi, 0, sizeof(mi));
+  memset(&fc, 0, sizeof(fc));
+  mi.bsize = (BLOCK_SIZE)bsize;
+  mi.palette_mode_info.palette_size[plane] = n_colors;
+  xd.mi = &mi_ptr;
+  xd.plane[0].subsampling_x = 0;
+  xd.plane[0].subsampling_y = 0;
+  xd.plane[1].subsampling_x = ss_x;
+  xd.plane[1].subsampling_y = ss_y;
+  xd.mb_to_right_edge = mb_to_right_edge;
+  xd.mb_to_bottom_edge = mb_to_bottom_edge;
+
+  uint8_t *map_buf =
+      (uint8_t *)calloc((size_t)MAX_PALETTE_BLOCK_WIDTH * MAX_PALETTE_BLOCK_HEIGHT, 1);
+  if (!map_buf) return 1;
+  xd.plane[plane].color_index_map = map_buf;
+  xd.color_index_map_offset[plane] = 0;
+
+  const size_t cdf_bytes = (size_t)PALETTE_SIZES * PALETTE_COLOR_INDEX_CONTEXTS *
+                           CDF_SIZE(PALETTE_COLORS) * sizeof(uint16_t);
+  if (plane == 0) {
+    memcpy(fc.palette_y_color_index_cdf, map_cdf_in, cdf_bytes);
+  } else {
+    memcpy(fc.palette_uv_color_index_cdf, map_cdf_in, cdf_bytes);
+  }
+  xd.tile_ctx = &fc;
+
+  aom_reader r;
+  memset(&r, 0, sizeof(r));
+  if (aom_reader_init(&r, data, len)) {
+    free(map_buf);
+    return 2;
+  }
+  r.allow_update_cdf = 1;
+
+  av1_decode_palette_tokens(&xd, plane, &r);
+
+  memcpy(color_map_out, map_buf,
+         (size_t)MAX_PALETTE_BLOCK_WIDTH * MAX_PALETTE_BLOCK_HEIGHT);
+  memcpy(map_cdf_out,
+         plane == 0 ? fc.palette_y_color_index_cdf : fc.palette_uv_color_index_cdf,
+         cdf_bytes);
+  free(map_buf);
+  return 0;
+}

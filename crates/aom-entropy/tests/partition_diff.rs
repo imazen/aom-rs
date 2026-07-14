@@ -7586,3 +7586,213 @@ fn spatial_seg_pred_matches_c() {
         }
     }
 }
+
+// ---- palette colour-index map (decoder track): colour-index context,
+//      av1_get_block_dimensions, and the full wavefront token decode ----
+
+/// `get_palette_color_index_context` == the REAL `av1_get_palette_color_index_context`
+/// (`av1/common/entropymode.c`, exported — bound directly, no facade), over random
+/// colour maps / positions / palette sizes.
+#[test]
+fn get_palette_color_index_context_matches_c() {
+    use aom_entropy::partition::get_palette_color_index_context;
+    let mut rng = Rng(0x5061_6c65_7474_6521); // "Palette!"
+    let mut n_tested = 0;
+    while n_tested < 500_000 {
+        let n = 2 + (rng.next() % 7) as i32; // PALETTE_MIN_SIZE..=PALETTE_MAX_SIZE
+        let h = 1 + (rng.next() % 16) as usize;
+        let w = 1 + (rng.next() % 16) as usize;
+        let stride = w;
+        let mut map = vec![0u8; h * stride];
+        for v in map.iter_mut() {
+            *v = (rng.next() % n as u64) as u8;
+        }
+        let r = (rng.next() as usize) % h;
+        let c_pos = (rng.next() as usize) % w;
+        if r == 0 && c_pos == 0 {
+            continue; // av1_get_palette_color_index_context requires r>0||c>0
+        }
+        n_tested += 1;
+        let (order_rs, idx_rs, ctx_rs) = get_palette_color_index_context(&map, stride, r, c_pos, n);
+        let (order_c, idx_c, ctx_c) =
+            c::ref_get_palette_color_index_context(&map, stride, r, c_pos, n);
+        assert_eq!(
+            ctx_rs as i32, ctx_c,
+            "ctx n={n} r={r} c={c_pos} w={w} h={h}"
+        );
+        assert_eq!(idx_rs, idx_c, "color_idx n={n} r={r} c={c_pos} w={w} h={h}");
+        assert_eq!(
+            &order_rs[..n as usize],
+            &order_c[..n as usize],
+            "color_order n={n} r={r} c={c_pos} w={w} h={h}"
+        );
+    }
+}
+
+/// `get_block_dimensions` == the REAL `av1_get_block_dimensions` (`av1/common/blockd.h`,
+/// static-inline facade), over every bsize x plane{0,1} x subsampling x every
+/// MI-granular frame-edge clip amount on both axes (0 = unclipped through the largest
+/// clip that leaves >= 1 MI unit visible, matching how this decoder's driver only ever
+/// places a block with at least its origin MI cell in-frame).
+#[test]
+fn get_block_dimensions_matches_c() {
+    use aom_entropy::partition::get_block_dimensions;
+    const BLOCK_SIZE_WIDE: [i32; 22] = [
+        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+    ];
+    const BLOCK_SIZE_HIGH: [i32; 22] = [
+        4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+    ];
+    for bsize in 0usize..22 {
+        let (bw, bh) = (BLOCK_SIZE_WIDE[bsize], BLOCK_SIZE_HIGH[bsize]);
+        for plane in 0usize..2 {
+            let ss_list: &[(usize, usize)] = if plane == 0 {
+                &[(0, 0)]
+            } else {
+                &[(0, 0), (1, 0), (0, 1), (1, 1)]
+            };
+            for &(ss_x, ss_y) in ss_list {
+                let mut clip_w = 0;
+                while clip_w <= bw - 4 {
+                    let mut clip_h = 0;
+                    while clip_h <= bh - 4 {
+                        let mre = -(clip_w * 8);
+                        let mbe = -(clip_h * 8);
+                        let got = get_block_dimensions(bsize, plane, ss_x, ss_y, mre, mbe);
+                        let want = c::ref_get_block_dimensions(bsize, plane, ss_x, ss_y, mre, mbe);
+                        assert_eq!(
+                            got, want,
+                            "bsize={bsize} plane={plane} ss=({ss_x},{ss_y}) clip_w={clip_w} clip_h={clip_h}"
+                        );
+                        clip_h += 4;
+                    }
+                    clip_w += 4;
+                }
+            }
+        }
+    }
+}
+
+/// `decode_color_map_tokens` == the REAL `av1_decode_palette_tokens` (driven end-to-end
+/// via the `shim_decode_palette_tokens` facade over a real `aom_reader`): a random
+/// ground-truth colour map, coded with [`encode_color_map_tokens`] (the write-side
+/// mirror added alongside the decoder, itself built on [`pack_map_tokens`]'s
+/// already-C-validated `write_symbol`/`write_uniform_arith` primitives), decoded by
+/// BOTH Rust and the real C decoder from the SAME bytes + SAME starting CDF, and
+/// cross-checked byte-for-byte — plus a round-trip check that both recover the
+/// original map in the `rows x cols` region. Sweeps bsize x plane{0,1} x subsampling x
+/// frame-edge clip x palette size, so both the wavefront order AND the frame-edge
+/// tail-copy are exercised.
+#[test]
+fn decode_color_map_tokens_matches_c() {
+    use aom_entropy::dec::OdEcDec;
+    use aom_entropy::enc::OdEcEnc;
+    use aom_entropy::partition::{
+        decode_color_map_tokens, encode_color_map_tokens, get_block_dimensions,
+    };
+    const BLOCK_SIZE_WIDE: [i32; 22] = [
+        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+    ];
+    const BLOCK_SIZE_HIGH: [i32; 22] = [
+        4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+    ];
+    let mut rng = Rng(0xC0DE_5A17_5A17_C0DE);
+    let mut iter = 0u32;
+    while iter < 6_000u32 {
+        let bsize = (rng.next() % 22) as usize;
+        // MAX_PALETTE_BLOCK_WIDTH/HEIGHT = 64: av1_allow_palette's own bound, and
+        // what both the real libaom color_index_map buffer AND shim_decode_palette_
+        // tokens' oracle buffer are sized to. BLOCK_64X128/128X64/128X128 (indices
+        // 13/14/15) exceed it on one axis — never a real palette block; skip.
+        if BLOCK_SIZE_WIDE[bsize] > 64 || BLOCK_SIZE_HIGH[bsize] > 64 {
+            continue;
+        }
+        iter += 1;
+        let plane = (rng.next() % 2) as usize;
+        let (ss_x, ss_y) = if plane == 0 {
+            (0usize, 0usize)
+        } else {
+            ((rng.next() % 2) as usize, (rng.next() % 2) as usize)
+        };
+        let (bw, bh) = (BLOCK_SIZE_WIDE[bsize], BLOCK_SIZE_HIGH[bsize]);
+        let clip_w = if bw > 4 {
+            4 * ((rng.next() % (bw / 4) as u64) as i32)
+        } else {
+            0
+        };
+        let clip_h = if bh > 4 {
+            4 * ((rng.next() % (bh / 4) as u64) as i32)
+        } else {
+            0
+        };
+        let mre = -(clip_w * 8);
+        let mbe = -(clip_h * 8);
+        let (plane_width, plane_height, rows, cols) =
+            get_block_dimensions(bsize, plane, ss_x, ss_y, mre, mbe);
+        let n = 2 + (rng.next() % 7) as i32; // 2..=8
+
+        // Ground-truth map: only the `rows x cols` region is ever read by encode,
+        // but fill the whole plane_width x plane_height buffer for a well-formed input.
+        let mut truth = vec![0u8; plane_width * plane_height];
+        for v in truth.iter_mut() {
+            *v = (rng.next() % n as u64) as u8;
+        }
+
+        // One shared random starting CDF (5 contexts, n-symbol) for encode + both decodes.
+        let mut seed_cdf = [[0u16; 9]; 5];
+        for row in seed_cdf.iter_mut() {
+            mk_ns_cdf(&mut rng, n as usize, row);
+        }
+
+        let mut enc = OdEcEnc::new();
+        let mut enc_cdf = seed_cdf;
+        encode_color_map_tokens(&mut enc, n, plane_width, &truth, rows, cols, &mut enc_cdf);
+        let bytes = enc.done().to_vec();
+
+        let mut dec = OdEcDec::new(&bytes);
+        let mut rs_cdf = seed_cdf;
+        let rust_map = decode_color_map_tokens(
+            &mut dec,
+            n,
+            plane_width,
+            plane_height,
+            rows,
+            cols,
+            &mut rs_cdf,
+        );
+
+        let mut cdf_flat = [0u16; 7 * 5 * 9];
+        let slice_off = (n as usize - 2) * 5 * 9;
+        for ctx in 0..5 {
+            for j in 0..9 {
+                cdf_flat[slice_off + ctx * 9 + j] = seed_cdf[ctx][j];
+            }
+        }
+        let (c_map, c_cdf_flat) =
+            c::ref_decode_palette_tokens(&bytes, plane, bsize, n, ss_x, ss_y, mre, mbe, &cdf_flat);
+
+        // Byte-for-byte cross-check: Rust decode vs the REAL C decoder, same bytes.
+        assert_eq!(
+            rust_map,
+            c_map[..plane_width * plane_height],
+            "iter={iter} bsize={bsize} plane={plane} ss=({ss_x},{ss_y}) n={n} pw={plane_width} ph={plane_height} rows={rows} cols={cols}"
+        );
+        let rs_cdf_flat: Vec<u16> = (0..5).flat_map(|ctx| rs_cdf[ctx].to_vec()).collect();
+        let c_cdf_slice = &c_cdf_flat[slice_off..slice_off + 45];
+        assert_eq!(
+            rs_cdf_flat, c_cdf_slice,
+            "iter={iter} adapted map_cdf bsize={bsize} plane={plane} n={n}"
+        );
+
+        // Round-trip: the decoded `rows x cols` region matches the original truth.
+        for r in 0..rows {
+            for cc in 0..cols {
+                assert_eq!(
+                    rust_map[r * plane_width + cc],
+                    truth[r * plane_width + cc],
+                    "iter={iter} roundtrip mismatch r={r} c={cc} bsize={bsize} plane={plane} n={n}"
+                );
+            }
+        }
+    }
+}
