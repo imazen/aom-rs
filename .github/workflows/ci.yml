@@ -6,10 +6,10 @@ on:
   pull_request:
     branches: [main]
 
-# During rapid multi-agent pushes, only keep the newest run per ref alive.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+# No cancel-in-progress: during a multi-agent wave every commit is a real
+# correctness change we want independently verified, so let each run complete
+# rather than cancelling on the next push. Concurrent hosted-runner jobs are
+# fine; per-commit CI signal is worth the minutes for a conformance project.
 
 env:
   # Pinned libaom oracle commit (see reference/BUILD_CONFIG.md). Bump the cache
