@@ -1416,6 +1416,14 @@ for whoever investigates that gap next — it is NOT an AB/4-way/partition-
 type-coverage issue (case 1 proves this directly: real's tree has no AB
 anywhere and still diverges the same way).
 
+**[SUPERSEDED 2026-07-14 — see "(0,8,32x32) NONE-vs-SPLIT was a palette-flag
+write desync, NOT an RD gap — FIXED" below. The budget-propagation lead in this
+paragraph was a RED HERRING: the search always picked SPLIT correctly at
+(0,8,32x32); NONE failing there is FINE (real uses SPLIT too). The apparent
+"(0,8) reads NONE" came from the decode-diff decoding a DESYNCED bitstream —
+`pack.rs` omitted a palette-usage flag — not from any RD/budget decision.
+Kept below as a record of the (incorrect) lead so nobody re-derives it.]**
+
 A bounded (temporary, reverted, not committed) instrumentation pass at
 `rd_pick_partition_real`'s NONE/SPLIT win checks (`partition_pick.rs`,
 around the `if this_rdc.rdcost < best_rdc.rdcost` / `if reached_last_index
@@ -1513,6 +1521,68 @@ where exercised, NOT that the AB-probe's own specific content now passes
 foundation (source_variance/raw_rdstats threading, NN weight transcription,
 decode-diff evidence) + structural search/wiring (this milestone's headline
 port).
+
+## (0,8,32x32) NONE-vs-SPLIT was a palette-flag write desync, NOT an RD gap — FIXED (2026-07-14, encoder track)
+
+**Root cause (corrects the AB milestone's budget-propagation lead above).** The
+AB-probe's identical "(mi_row=0, mi_col=8, BLOCK_32X32) real=SPLIT / ours=NONE"
+divergence was never an RDO-parity bug. This port's partition SEARCH always
+picked SPLIT at that node — matching real. The mismatch was a WRITE→DECODE
+desync inside our own pack path, and the decode-diff (which decodes the port's
+own bytes to recover its tree) was misreading a corrupted downstream node.
+
+Mechanism: `pack.rs` hardcoded `KfBlockState::allow_palette = false`. But
+`av1_allow_palette(cm->features.allow_screen_content_tools, bsize)` (blockd.h)
+is TRUE for every DC-predicted block in `[BLOCK_8X8, 64x64]` when screen-content
+tools are on — and the checkerboard AB-probe content turns
+`allow_screen_content_tools` ON in the real frame header (`usage=2`,
+allintra + the SCT content heuristic). The decoder (`aom-decode`'s
+`decode_block`: `st.allow_palette = av1_allow_palette(...)`) reads a
+palette-usage flag UNCONDITIONALLY for those blocks. With `allow_palette=false`
+the pack never emitted that symbol, so the arithmetic coder desynced starting at
+the very first (0,0) 32x32 leaf. The decoded tree collapsed (search picked 25
+nodes; the desynced decode recovered only 5), and the decode-diff then
+misattributed (0,8) as NONE. NONE legitimately failing at (0,8,32x32) in the
+search (the reverted instrumentation's `rate==INT_MAX` observation) was a
+correct, harmless outcome — SPLIT is what wins there — not the bug.
+
+**Fix (entirely within `aom-encode`, no decoder/entropy changes — commit
+`5e3e5c7`):**
+- Thread `allow_screen_content_tools` into `PackCfg` (must equal the real frame
+  header's value); real-stream harnesses pass the parsed header field.
+- `pack_leaf` sets `kfs.allow_palette = allow_palette(cfg.allow_screen_content_
+  tools, bsize)` — the SAME per-block gate the decoder applies. This envelope
+  never uses palette, so `write_mb_modes_kf_fc` still emits the no-palette
+  symbol, but the symbol is now WRITTEN where the decoder expects to read it.
+
+**Permanent regression** (`decode_diff_ab_probe.rs`, both LF-clean cases): the
+test now ASSERTS that the port's packed bytes decode back to exactly the
+partition tree its OWN search chose (`sbtree_seq(search) == replay_tree(decoded)`;
+the two walks are structural twins by construction). Pre-fix this FAILED
+(search len 25 vs decoded len 5); post-fix both cases match exactly (25==25,
+33==33), and the (0,8,32x32) node reads SPLIT in port-search, decoded, AND real.
+
+**Verification (evidence, not narrative):** full `cargo test -p aom-encode
+--all-targets` green (exit 0, zero failures/panics); both hard e2e gates
+unchanged (`encoder_gate_e2e_attempt` 3/3, `encoder_gate_e2e_textured_attempt`
+7/7; `encoder_gate_e2e_ab_attempt` + both `nonzero_lf` sweeps all ok). Commits
+verified on `origin/main`: `2237b9b` (style: cargo fmt), `5e3e5c7` (the fix).
+
+**Honest remaining gap — the AB-probe is NOT a full port-vs-real tree match
+yet.** With the desync gone, the trees agree with real down to ~node 10, then
+diverge at DEEP small-block nodes:
+- "top split/bottom flat": first divergence (2,12,BLOCK_8X8) — real=NONE,
+  ours=HORZ.
+- "left flat/right split": first divergence (8,12,BLOCK_16X16) — real=SPLIT,
+  ours=HORZ.
+
+Both are genuine deep RD-parity differences (the port over-selects HORZ at
+small blocks), NOT desyncs — the bytes round-trip perfectly, the port's search
+simply makes a different (valid) partition choice than real's RDO. This is the
+real, still-open RD gap; it is tracked diagnostic-only in the same test (the
+`FIRST DIVERGENCE` print, unasserted) and is a separate, harder investigation.
+The HORZ over-selection being the shared shape across both cases is the lead to
+start from.
 
 ## Gate posture (honest)
 
