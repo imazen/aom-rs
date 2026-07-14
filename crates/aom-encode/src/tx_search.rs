@@ -1145,3 +1145,136 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
         enable_rect_tx,
     )
 }
+
+// ---------------------------------------------------------------------------
+// intra_model_rd (intra_mode_search_utils.h) — the Hadamard-SATD model cost
+// that feeds prune_intra_y_mode in the av1_rd_pick_intra_sby_mode loop.
+// ---------------------------------------------------------------------------
+
+/// `wht_fwd_txfm` / `highbd_wht_fwd_txfm` (hybrid_fwd_txfm.c) + `aom_satd`:
+/// the Walsh-Hadamard transform of one model txb's residual, then the sum of
+/// absolute coefficients. Buffer-depth dispatch mirrors `av1_quick_txfm` with
+/// `use_hadamard = 1`: 8-bit buffers use the lowbd `aom_hadamard_NxN` kernels
+/// for every size; highbd buffers (`bd > 8`) use lowbd `aom_hadamard_4x4` at
+/// TX_4X4 (its output fits 15 bits) and `aom_highbd_hadamard_NxN` above.
+fn wht_satd(residual: &[i16], stride: usize, tx_size: usize, bd: u8) -> i32 {
+    use aom_dist::hadamard::{
+        hadamard_4x4, hadamard_8x8, hadamard_16x16, hadamard_32x32, highbd_hadamard_8x8,
+        highbd_hadamard_16x16, highbd_hadamard_32x32, satd,
+    };
+    match (bd > 8, tx_size) {
+        (_, 0) => satd(&hadamard_4x4(residual, stride)),
+        (false, 1) => satd(&hadamard_8x8(residual, stride)),
+        (false, 2) => satd(&hadamard_16x16(residual, stride)),
+        (false, 3) => satd(&hadamard_32x32(residual, stride)),
+        (true, 1) => satd(&highbd_hadamard_8x8(residual, stride)),
+        (true, 2) => satd(&highbd_hadamard_16x16(residual, stride)),
+        (true, 3) => satd(&highbd_hadamard_32x32(residual, stride)),
+        _ => unreachable!("model tx size is TX_4X4..TX_32X32 (square)"),
+    }
+}
+
+/// `intra_model_rd` (intra_mode_search_utils.h) for luma (`plane == 0`) with
+/// `use_hadamard == 1` — the mode-loop call site (intra_mode_search.c:1602).
+/// Per model-txb raster walk: `av1_predict_intra_block_facade` (the prediction
+/// is written INTO the recon plane, so later txbs predict from earlier txbs'
+/// *predictions* — no reconstruction happens here) -> `av1_subtract_block` ->
+/// `av1_quick_txfm(use_hadamard=1)` -> `aom_satd`, accumulated into i64.
+///
+/// `tx_size` is the caller's `AOMMIN(TX_32X32, max_txsize_lookup[bsize])`
+/// (always square). The recon-plane prediction writes are load-bearing
+/// caller-visible state: the C facade writes into `pd->dst` in place, and the
+/// bytes it leaves behind are what the *next* candidate's walks read wherever
+/// edge availability reaches not-yet-overwritten pixels. Interior blocks
+/// (`max_block_wide/high` unclipped), matching [`txfm_rd_in_plane_intra`].
+///
+/// The `env` quantizer/cost fields are unused here — only geometry, the
+/// candidate mode fields, and `bd` are read.
+pub fn intra_model_rd_y(env: &TxfmYrdEnv, recon: &mut [u16], tx_size: usize) -> i64 {
+    assert!(tx_size <= 3, "model tx size is square TX_4X4..TX_32X32");
+    let bsize = env.bsize;
+    let (bw, bh) = (BLK_W_B[bsize], BLK_H_B[bsize]);
+    let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
+    // stepr/stepc = tx_size_high/wide_unit; max_blocks_* in 4x4 units.
+    let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
+    let max_blocks_wide = MI_SIZE_WIDE_B[bsize];
+    let max_blocks_high = MI_SIZE_HIGH_B[bsize];
+
+    let mut satd_cost: i64 = 0;
+    let mut blk_row = 0usize;
+    while blk_row < max_blocks_high {
+        let mut blk_col = 0usize;
+        while blk_col < max_blocks_wide {
+            // av1_predict_intra_block_facade: predict INTO the recon plane.
+            let (n_top, n_topright, n_left, n_bottomleft) = intra_avail(
+                env.sb_size,
+                bsize,
+                env.mi_row,
+                env.mi_col,
+                env.up_available,
+                env.left_available,
+                env.tile_col_end,
+                env.tile_row_end,
+                env.partition,
+                tx_size,
+                0,
+                0,
+                blk_row as i32,
+                blk_col as i32,
+                bw as i32,
+                bh as i32,
+                env.mi_cols,
+                env.mi_rows,
+                env.mode,
+                env.angle_delta * 3, // ANGLE_STEP
+                env.use_filter_intra,
+            );
+            let txb_off = env.ref_off + (blk_row * env.ref_stride + blk_col) * 4;
+            let mut pred = vec![0u16; txw * txh];
+            predict_intra_high(
+                recon,
+                txb_off,
+                env.ref_stride,
+                &mut pred,
+                txw,
+                env.mode,
+                env.angle_delta * 3,
+                env.use_filter_intra,
+                env.filter_intra_mode,
+                env.disable_edge_filter,
+                env.filter_type,
+                tx_size,
+                n_top as usize,
+                n_topright,
+                n_left as usize,
+                n_bottomleft,
+                env.bd as i32,
+            );
+            for r in 0..txh {
+                recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]
+                    .copy_from_slice(&pred[r * txw..r * txw + txw]);
+            }
+
+            // av1_subtract_block into a tight txw-stride buffer (the C stores
+            // at block_size_wide[plane_bsize] stride and reads it back with
+            // the same stride — values per (r, c) identical).
+            let src_txb_off = env.src_off + (blk_row * env.src_stride + blk_col) * 4;
+            let mut residual = vec![0i16; txw * txh];
+            highbd_subtract_block(
+                txh,
+                txw,
+                &mut residual,
+                txw,
+                &env.src[src_txb_off..],
+                env.src_stride,
+                &pred,
+                txw,
+            );
+
+            satd_cost += i64::from(wht_satd(&residual, txw, tx_size, env.bd));
+            blk_col += txw_unit;
+        }
+        blk_row += txh_unit;
+    }
+    satd_cost
+}
