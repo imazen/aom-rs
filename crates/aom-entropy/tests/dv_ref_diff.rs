@@ -73,7 +73,7 @@ fn random_grid(rng: &mut Rng) -> Vec<RefDvNbr> {
             // ported+verified anyway).
             cell.bsize = bsize;
             cell.ref_frame0 = rng.range(1, 8) as i8; // LAST_FRAME..ALTREF_FRAME
-            cell.ref_frame1 = if rng.next() % 2 == 0 {
+            cell.ref_frame1 = if rng.next().is_multiple_of(2) {
                 -1
             } else {
                 rng.range(1, 8) as i8
@@ -153,7 +153,7 @@ fn random_case(rng: &mut Rng) -> Case {
     let mi_row = rng.range(24, 64) as i32;
     let mi_col = rng.range(24, 64) as i32;
     let own_partition = rng.range(0, 10) as usize;
-    let mib_size = if rng.next() % 2 == 0 { 16 } else { 32 };
+    let mib_size = if rng.next().is_multiple_of(2) { 16 } else { 32 };
 
     let frame_mi_rows = rng.range((mi_row + height_mi) as i64, (DIM as i64) + 1) as i32;
     let frame_mi_cols = rng.range((mi_col + width_mi) as i64, (DIM as i64) + 1) as i32;
@@ -190,7 +190,11 @@ fn random_case(rng: &mut Rng) -> Case {
     }
 }
 
-fn run_one(case: Case, grid: &[RefDvNbr]) -> ((i32, i32, i32, i32), (i32, i32, i32, i32)) {
+/// The DV reference-MV quad `find_dv_ref_mvs` returns:
+/// `(nearest_row, nearest_col, near_row, near_col)` in 1/8-pel units.
+type DvRefMvs = (i32, i32, i32, i32);
+
+fn run_one(case: Case, grid: &[RefDvNbr]) -> (DvRefMvs, DvRefMvs) {
     let up_available = case.mi_row > case.tile.mi_row_start;
     let left_available = case.mi_col > case.tile.mi_col_start;
 
@@ -256,7 +260,7 @@ fn find_dv_ref_mvs_matches_c() {
 fn find_ref_dv_matches_c() {
     let mut rng = Rng(0x5eed_f14d_2ef0_0001);
     for _ in 0..50_000 {
-        let mib_size = if rng.next() % 2 == 0 { 16 } else { 32 };
+        let mib_size = if rng.next().is_multiple_of(2) { 16 } else { 32 };
         let mi_row = rng.range(0, 512) as i32;
         let tile_mi_row_start = rng.range(0, (mi_row + 1).max(1) as i64) as i32;
 
@@ -280,9 +284,9 @@ fn is_dv_valid_matches_c() {
         let tile_mi_row_end = rng.range((mi_row + 1) as i64, 300) as i32;
         let tile_mi_col_start = rng.range(0, (mi_col + 1) as i64) as i32;
         let tile_mi_col_end = rng.range((mi_col + 1) as i64, 300) as i32;
-        let mib_size_log2 = if rng.next() % 2 == 0 { 4 } else { 5 };
-        let is_chroma_ref = rng.next() % 2 == 0;
-        let num_planes = if rng.next() % 3 == 0 { 1 } else { 3 };
+        let mib_size_log2 = if rng.next().is_multiple_of(2) { 4 } else { 5 };
+        let is_chroma_ref = rng.next().is_multiple_of(2);
+        let num_planes = if rng.next().is_multiple_of(3) { 1 } else { 3 };
         let ss_x = (rng.next() % 2) as i32;
         let ss_y = (rng.next() % 2) as i32;
         // DVs: mostly plausible small multiples of 8, occasionally
@@ -389,7 +393,7 @@ fn assign_and_validate_dv_matches_composed_c() {
             // (multiples of 8, per `read_mv_component`'s structural
             // guarantee — see `assign_and_validate_dv`'s doc), occasionally
             // wild to exercise the `is_mv_valid` bound.
-            let (diff_row, diff_col) = if rng.next() % 5 == 0 {
+            let (diff_row, diff_col) = if rng.next().is_multiple_of(5) {
                 (
                     rng.range(-40_000, 40_000) as i32,
                     rng.range(-40_000, 40_000) as i32,
@@ -402,8 +406,8 @@ fn assign_and_validate_dv_matches_composed_c() {
             };
 
             let mib_size_log2 = if case.mib_size == 32 { 5 } else { 4 };
-            let is_chroma_ref = rng.next() % 2 == 0;
-            let num_planes = if rng.next() % 3 == 0 { 1 } else { 3 };
+            let is_chroma_ref = rng.next().is_multiple_of(2);
+            let num_planes = if rng.next().is_multiple_of(3) { 1 } else { 3 };
             let ss_x = (rng.next() % 2) as i32;
             let ss_y = (rng.next() % 2) as i32;
 
