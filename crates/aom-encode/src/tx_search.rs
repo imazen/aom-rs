@@ -331,8 +331,10 @@ use aom_txb::{cost_coeffs_txb, get_tx_type_cost, CoeffCostTables, TxTypeCosts};
 pub const TX_SIZE_2D_TBL: [i64; 19] =
     [16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024];
 
-const TXS_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TXS_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+pub(crate) const TXS_W: [usize; 19] =
+    [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
+pub(crate) const TXS_H: [usize; 19] =
+    [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
 
 /// `ROUND_POWER_OF_TWO` for i64.
 #[inline]
@@ -820,13 +822,13 @@ impl RdStats {
     }
 }
 
-const MI_SIZE_WIDE_B: [usize; 22] =
+pub(crate) const MI_SIZE_WIDE_B: [usize; 22] =
     [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16];
-const MI_SIZE_HIGH_B: [usize; 22] =
+pub(crate) const MI_SIZE_HIGH_B: [usize; 22] =
     [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4];
-const BLK_W_B: [usize; 22] =
+pub(crate) const BLK_W_B: [usize; 22] =
     [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLK_H_B: [usize; 22] =
+pub(crate) const BLK_H_B: [usize; 22] =
     [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
 
 /// The frame/block environment of one luma coding block's tx search — the

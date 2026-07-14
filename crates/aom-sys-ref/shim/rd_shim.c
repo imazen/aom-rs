@@ -1149,3 +1149,50 @@ void shim_cfl_predict_block(uint16_t *recon_q3 /* [1024] */,
   free(mbmi);
   free(cb);
 }
+
+/* ---- winner re-encode (av1_encode_intra_block_plane) LUMA map oracles -----
+ * (1) shim_get_tx_type_y: the REAL av1_get_tx_type (blockd.h:1283 static
+ *     inline, pristine C recompiled in this TU) for PLANE_TYPE_Y on an intra
+ *     block over a calloc'd MACROBLOCKD stub. Marshals lossless + the
+ *     RDO-time BLOCK-LOCAL tx_type_map (xd->tx_type_map /
+ *     xd->tx_type_map_stride = mi_size_wide[bsize],
+ *     partition_search.c:895-896). The in-set assert on the returned type is
+ *     LIVE in this -O2-without-NDEBUG build — callers must keep map origin
+ *     cells in-set for (tx_size, reduced_tx_set), the real encoder invariant.
+ * (2) shim_update_txk_array: the REAL update_txk_array (blockd.h:1260 static
+ *     inline) over the same stub — the eob==0 DCT_DCT reset write
+ *     (encodemb.c:770-779) incl. the 64-side 16x16-unit fill. */
+int shim_get_tx_type_y(int lossless, int tx_size, int reduced_tx_set_used,
+                       const uint8_t *tx_type_map, int map_stride, int blk_row,
+                       int blk_col) {
+  MACROBLOCKD *xd = (MACROBLOCKD *)calloc(1, sizeof(MACROBLOCKD));
+  MB_MODE_INFO *mbmi = (MB_MODE_INFO *)calloc(1, sizeof(MB_MODE_INFO));
+  if (!xd || !mbmi) {
+    free(xd);
+    free(mbmi);
+    return -1;
+  }
+  MB_MODE_INFO *mi_ptr = mbmi;
+  xd->mi = &mi_ptr;
+  mbmi->ref_frame[0] = INTRA_FRAME;
+  mbmi->segment_id = 0;
+  xd->lossless[0] = lossless;
+  xd->tx_type_map = (uint8_t *)tx_type_map; /* Y arm reads only */
+  xd->tx_type_map_stride = map_stride;
+  const TX_TYPE t = av1_get_tx_type(xd, PLANE_TYPE_Y, blk_row, blk_col,
+                                    (TX_SIZE)tx_size, reduced_tx_set_used);
+  free(xd);
+  free(mbmi);
+  return (int)t;
+}
+
+int shim_update_txk_array(uint8_t *tx_type_map, int map_stride, int blk_row,
+                          int blk_col, int tx_size, int tx_type) {
+  MACROBLOCKD *xd = (MACROBLOCKD *)calloc(1, sizeof(MACROBLOCKD));
+  if (!xd) return -1;
+  xd->tx_type_map = tx_type_map;
+  xd->tx_type_map_stride = map_stride;
+  update_txk_array(xd, blk_row, blk_col, (TX_SIZE)tx_size, (TX_TYPE)tx_type);
+  free(xd);
+  return 0;
+}
