@@ -5,8 +5,25 @@ use aom_intra::dir::{get_dx, get_dy, z1, z2, z3, EdgeRef};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 19] = [
-    (4, 4), (8, 8), (16, 16), (32, 32), (64, 64), (4, 8), (8, 4), (8, 16), (16, 8),
-    (16, 32), (32, 16), (32, 64), (64, 32), (4, 16), (16, 4), (8, 32), (32, 8), (16, 64), (64, 16),
+    (4, 4),
+    (8, 8),
+    (16, 16),
+    (32, 32),
+    (64, 64),
+    (4, 8),
+    (8, 4),
+    (8, 16),
+    (16, 8),
+    (16, 32),
+    (32, 16),
+    (32, 64),
+    (64, 32),
+    (4, 16),
+    (16, 4),
+    (8, 32),
+    (32, 8),
+    (16, 64),
+    (64, 16),
 ];
 
 struct Rng(u64);
@@ -75,9 +92,23 @@ fn dr_predictors_byte_identical() {
                     let above = edges(&mut rng, bw, bh);
                     let left = edges(&mut rng, bw, bh);
                     let mut got = vec![0u8; bw * bh];
-                    z2(&mut got, bw, bw, bh, &EdgeRef::new(&above, PAD), &EdgeRef::new(&left, PAD), up_a, up_l, dx, dy);
+                    z2(
+                        &mut got,
+                        bw,
+                        bw,
+                        bh,
+                        &EdgeRef::new(&above, PAD),
+                        &EdgeRef::new(&left, PAD),
+                        up_a,
+                        up_l,
+                        dx,
+                        dy,
+                    );
                     let want = c::ref_dr_pred(2, bw, bh, &above, &left, PAD, up_a, up_l, dx, dy);
-                    assert_eq!(got, want, "z2 divergence {bw}x{bh} up_a={up_a} up_l={up_l} angle={angle}");
+                    assert_eq!(
+                        got, want,
+                        "z2 divergence {bw}x{bh} up_a={up_a} up_l={up_l} angle={angle}"
+                    );
                     checks += 1;
                 }
             }

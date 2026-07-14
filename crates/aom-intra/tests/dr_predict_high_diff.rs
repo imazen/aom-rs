@@ -8,8 +8,12 @@ use aom_intra::dir::{get_dx, get_dy};
 use aom_intra::dr_predict_high;
 use aom_sys_ref as c;
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 const PAD: usize = 16;
 
 struct Rng(u64);
@@ -56,13 +60,18 @@ fn dr_predict_high_matches_c() {
                     if !valid_angle(angle) {
                         continue;
                     }
-                    let above: Vec<u16> = (0..n).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
-                    let left: Vec<u16> = (0..n).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+                    let above: Vec<u16> =
+                        (0..n).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+                    let left: Vec<u16> =
+                        (0..n).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
 
                     let mut got = vec![0u16; txw * txh];
-                    dr_predict_high(&mut got, txw, tx_size, &above, &left, PAD, up, up, angle, bd);
-                    let want =
-                        c::ref_hbd_dr_predict(tx_size, txw, txh, &above, &left, PAD, up, up, angle, bd);
+                    dr_predict_high(
+                        &mut got, txw, tx_size, &above, &left, PAD, up, up, angle, bd,
+                    );
+                    let want = c::ref_hbd_dr_predict(
+                        tx_size, txw, txh, &above, &left, PAD, up, up, angle, bd,
+                    );
 
                     assert_eq!(
                         got, want,
@@ -76,6 +85,9 @@ fn dr_predict_high_matches_c() {
             }
         }
     }
-    assert!(saw_v && saw_h && saw_z2, "test missed a dispatch zone (V/H/z2)");
+    assert!(
+        saw_v && saw_h && saw_z2,
+        "test missed a dispatch zone (V/H/z2)"
+    );
     assert!(checks > 5000, "expected many checks, got {checks}");
 }

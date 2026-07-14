@@ -8,8 +8,12 @@
 use aom_intra::predict_intra_high;
 use aom_sys_ref as c;
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 struct Rng(u64);
 impl Rng {
@@ -30,16 +34,39 @@ const COL0: usize = 4;
 
 #[allow(clippy::too_many_arguments)]
 fn check(
-    recon: &[u16], tx_size: usize, mode: usize, delta: i32, use_fi: bool, fi_mode: usize,
-    disable: bool, filt: i32, combo: (i32, i32, i32, i32), bd: i32,
+    recon: &[u16],
+    tx_size: usize,
+    mode: usize,
+    delta: i32,
+    use_fi: bool,
+    fi_mode: usize,
+    disable: bool,
+    filt: i32,
+    combo: (i32, i32, i32, i32),
+    bd: i32,
 ) {
     let (txw, txh) = (TX_W[tx_size], TX_H[tx_size]);
     let ref_off = ROW0 * STRIDE + COL0;
     let (nt, ntr, nl, nbl) = combo;
     let mut got = vec![0u16; txw * txh];
     predict_intra_high(
-        recon, ref_off, STRIDE, &mut got, txw, mode, delta, use_fi, fi_mode, disable, filt, tx_size,
-        nt as usize, ntr, nl as usize, nbl, bd,
+        recon,
+        ref_off,
+        STRIDE,
+        &mut got,
+        txw,
+        mode,
+        delta,
+        use_fi,
+        fi_mode,
+        disable,
+        filt,
+        tx_size,
+        nt as usize,
+        ntr,
+        nl as usize,
+        nbl,
+        bd,
     );
     let want = c::ref_hbd_predict_intra(
         recon, ref_off, STRIDE, mode, delta, use_fi, fi_mode, disable, filt, tx_size, txw, txh, nt,
@@ -55,20 +82,25 @@ fn check(
 fn predict_intra_matches_c() {
     let mut rng = Rng(0x9ec7_00d1_5a7c_4000);
     for &bd in &[8i32, 10, 12] {
-        let recon: Vec<u16> = (0..STRIDE * ROWS).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+        let recon: Vec<u16> = (0..STRIDE * ROWS)
+            .map(|_| (rng.next() % (1u64 << bd)) as u16)
+            .collect();
         for tx_size in 0..19usize {
             let (tw, th) = (TX_W[tx_size] as i32, TX_H[tx_size] as i32);
             let combos: [(i32, i32, i32, i32); 4] = [
-                (tw, th, th, tw),   // full + above-right + below-left
-                (tw, -1, th, -1),   // full top+left, no extension
-                (tw, 0, th, 0),     // extension considered, 0 px
-                (0, -1, th, -1),    // left only
+                (tw, th, th, tw), // full + above-right + below-left
+                (tw, -1, th, -1), // full top+left, no extension
+                (tw, 0, th, 0),   // extension considered, 0 px
+                (0, -1, th, -1),  // left only
             ];
             // Every mode: directional modes (1..=8) sweep angle-delta (pre-scaled
             // by ANGLE_STEP=3), non-directional (0, 9..12) use delta 0.
             for mode in 0..13usize {
-                let deltas: &[i32] =
-                    if (1..=8).contains(&mode) { &[-9, -6, -3, 0, 3, 6, 9] } else { &[0] };
+                let deltas: &[i32] = if (1..=8).contains(&mode) {
+                    &[-9, -6, -3, 0, 3, 6, 9]
+                } else {
+                    &[0]
+                };
                 for &delta in deltas {
                     for &combo in &combos {
                         check(&recon, tx_size, mode, delta, false, 0, false, 1, combo, bd);
@@ -88,7 +120,9 @@ fn predict_intra_matches_c() {
                 let delta = if (1..=8).contains(&mode) { 3 } else { 0 };
                 for disable in [false, true] {
                     for filt in [0i32, 1] {
-                        check(&recon, tx_size, mode, delta, false, 0, disable, filt, combos[0], bd);
+                        check(
+                            &recon, tx_size, mode, delta, false, 0, disable, filt, combos[0], bd,
+                        );
                     }
                 }
             }

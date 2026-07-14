@@ -101,18 +101,31 @@ impl CflCtx {
 }
 
 // tx_size_wide / tx_size_high (common_data.h), TX_SIZES_ALL.
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 // block_size_wide / block_size_high (common_data.h), BLOCK_SIZES_ALL.
-const BLK_W: [i32; 22] = [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64];
-const BLK_H: [i32; 22] = [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16];
+const BLK_W: [i32; 22] = [
+    4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+];
+const BLK_H: [i32; 22] = [
+    4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
 
 /// `cfl_luma_subsampling_420_hbd_c`: each output Q3 sample is the sum of a 2x2
 /// luma quad, `<< 1` (·8 total). Output rows advance one `CFL_BUF_LINE` per
 /// *pair* of luma rows.
 fn subsample_420_hbd(
-    input: &[u16], mut in_off: usize, in_stride: usize, out: &mut [u16; CFL_BUF_SQUARE],
-    mut out_off: usize, width: usize, height: usize,
+    input: &[u16],
+    mut in_off: usize,
+    in_stride: usize,
+    out: &mut [u16; CFL_BUF_SQUARE],
+    mut out_off: usize,
+    width: usize,
+    height: usize,
 ) {
     let mut j = 0;
     while j < height {
@@ -135,8 +148,13 @@ fn subsample_420_hbd(
 
 /// `cfl_luma_subsampling_422_hbd_c`: horizontal pair sum `<< 2`.
 fn subsample_422_hbd(
-    input: &[u16], mut in_off: usize, in_stride: usize, out: &mut [u16; CFL_BUF_SQUARE],
-    mut out_off: usize, width: usize, height: usize,
+    input: &[u16],
+    mut in_off: usize,
+    in_stride: usize,
+    out: &mut [u16; CFL_BUF_SQUARE],
+    mut out_off: usize,
+    width: usize,
+    height: usize,
 ) {
     for _ in 0..height {
         let mut i = 0;
@@ -152,8 +170,13 @@ fn subsample_422_hbd(
 
 /// `cfl_luma_subsampling_444_hbd_c`: straight copy `<< 3`.
 fn subsample_444_hbd(
-    input: &[u16], mut in_off: usize, in_stride: usize, out: &mut [u16; CFL_BUF_SQUARE],
-    mut out_off: usize, width: usize, height: usize,
+    input: &[u16],
+    mut in_off: usize,
+    in_stride: usize,
+    out: &mut [u16; CFL_BUF_SQUARE],
+    mut out_off: usize,
+    width: usize,
+    height: usize,
 ) {
     for _ in 0..height {
         for i in 0..width {
@@ -201,7 +224,12 @@ fn cfl_pad(cfl: &mut CflCtx, width: i32, height: i32) {
 /// size-specific C wrappers pass `round_offset = (width*height)/2` and
 /// `num_pel_log2 = log2(width*height)` (`CFL_SUB_AVG_FN` table, verified for
 /// all 14 CfL sizes).
-fn subtract_average(src: &[u16; CFL_BUF_SQUARE], dst: &mut [i16; CFL_BUF_SQUARE], width: usize, height: usize) {
+fn subtract_average(
+    src: &[u16; CFL_BUF_SQUARE],
+    dst: &mut [i16; CFL_BUF_SQUARE],
+    width: usize,
+    height: usize,
+) {
     let num_pel_log2 = (width * height).trailing_zeros();
     let round_offset = ((width * height) >> 1) as i32;
     let mut sum = round_offset;
@@ -240,7 +268,11 @@ pub fn cfl_idx_to_alpha(alpha_idx: i32, joint_sign: i32, plane: usize) -> i32 {
     if alpha_sign == CFL_SIGN_ZERO {
         return 0;
     }
-    let abs_alpha_q3 = if plane == 1 { alpha_idx >> 4 } else { alpha_idx & 15 };
+    let abs_alpha_q3 = if plane == 1 {
+        alpha_idx >> 4
+    } else {
+        alpha_idx & 15
+    };
     if alpha_sign == CFL_SIGN_POS {
         abs_alpha_q3 + 1
     } else {
@@ -252,7 +284,11 @@ pub fn cfl_idx_to_alpha(alpha_idx: i32, joint_sign: i32, plane: usize) -> i32 {
 #[inline]
 fn scaled_luma_q0(alpha_q3: i32, ac_q3: i16) -> i32 {
     let v = alpha_q3 * i32::from(ac_q3);
-    if v < 0 { -((-v + 32) >> 6) } else { (v + 32) >> 6 }
+    if v < 0 {
+        -((-v + 32) >> 6)
+    } else {
+        (v + 32) >> 6
+    }
 }
 
 /// `clip_pixel_highbd` (aom_dsp_common.h).
@@ -270,8 +306,14 @@ fn clip_pixel_highbd(val: i32, bd: i32) -> u16 {
 /// already hold the DC prediction.
 #[allow(clippy::too_many_arguments)]
 fn cfl_predict_hbd(
-    ac_buf_q3: &[i16; CFL_BUF_SQUARE], dst: &mut [u16], mut dst_off: usize, dst_stride: usize,
-    alpha_q3: i32, bd: i32, width: usize, height: usize,
+    ac_buf_q3: &[i16; CFL_BUF_SQUARE],
+    dst: &mut [u16],
+    mut dst_off: usize,
+    dst_stride: usize,
+    alpha_q3: i32,
+    bd: i32,
+    width: usize,
+    height: usize,
 ) {
     let mut ac_off = 0usize;
     for _ in 0..height {
@@ -290,7 +332,13 @@ fn cfl_predict_hbd(
 /// chroma block with neighbours; the *bottom/right* members of the group (odd
 /// mi position on a subsampled axis) store their luma at the shifted buffer
 /// offset.
-fn sub8x8_adjust_offset(cfl: &CflCtx, mi_row: i32, mi_col: i32, row_out: &mut i32, col_out: &mut i32) {
+fn sub8x8_adjust_offset(
+    cfl: &CflCtx,
+    mi_row: i32,
+    mi_col: i32,
+    row_out: &mut i32,
+    col_out: &mut i32,
+) {
     if (mi_row & 0x01) != 0 && cfl.subsampling_y != 0 {
         debug_assert_eq!(*row_out, 0);
         *row_out += 1;
@@ -306,7 +354,12 @@ fn sub8x8_adjust_offset(cfl: &CflCtx, mi_row: i32, mi_col: i32, row_out: &mut i3
 /// track the written surface. `input`/`in_off`/`in_stride` address the luma
 /// pixels of the tx block.
 fn cfl_store(
-    cfl: &mut CflCtx, input: &[u16], in_off: usize, in_stride: usize, row: i32, col: i32,
+    cfl: &mut CflCtx,
+    input: &[u16],
+    in_off: usize,
+    in_stride: usize,
+    row: i32,
+    col: i32,
     tx_size: usize,
 ) {
     let width = TX_W[tx_size] as i32;
@@ -338,12 +391,36 @@ fn cfl_store(
     let (w, h) = (width as usize, height as usize);
     if sub_x == 1 {
         if sub_y == 1 {
-            subsample_420_hbd(input, in_off, in_stride, &mut cfl.recon_buf_q3, out_off, w, h);
+            subsample_420_hbd(
+                input,
+                in_off,
+                in_stride,
+                &mut cfl.recon_buf_q3,
+                out_off,
+                w,
+                h,
+            );
         } else {
-            subsample_422_hbd(input, in_off, in_stride, &mut cfl.recon_buf_q3, out_off, w, h);
+            subsample_422_hbd(
+                input,
+                in_off,
+                in_stride,
+                &mut cfl.recon_buf_q3,
+                out_off,
+                w,
+                h,
+            );
         }
     } else {
-        subsample_444_hbd(input, in_off, in_stride, &mut cfl.recon_buf_q3, out_off, w, h);
+        subsample_444_hbd(
+            input,
+            in_off,
+            in_stride,
+            &mut cfl.recon_buf_q3,
+            out_off,
+            w,
+            h,
+        );
     }
 }
 
@@ -357,8 +434,16 @@ fn cfl_store(
 /// position.
 #[allow(clippy::too_many_arguments)]
 pub fn cfl_store_tx(
-    cfl: &mut CflCtx, luma: &[u16], block_off: usize, stride: usize, mut row: i32, mut col: i32,
-    tx_size: usize, bsize: usize, mi_row: i32, mi_col: i32,
+    cfl: &mut CflCtx,
+    luma: &[u16],
+    block_off: usize,
+    stride: usize,
+    mut row: i32,
+    mut col: i32,
+    tx_size: usize,
+    bsize: usize,
+    mi_row: i32,
+    mi_col: i32,
 ) {
     let in_off = block_off + ((row as usize * stride + col as usize) << 2);
     if BLK_H[bsize] == 4 || BLK_W[bsize] == 4 {
@@ -377,17 +462,29 @@ pub fn cfl_store_tx(
 /// is 1 (U) or 2 (V).
 #[allow(clippy::too_many_arguments)]
 pub fn cfl_predict_block(
-    cfl: &mut CflCtx, dst: &mut [u16], dst_off: usize, dst_stride: usize, tx_size: usize,
-    plane: usize, cfl_alpha_idx: i32, cfl_joint_sign: i32, bd: i32,
+    cfl: &mut CflCtx,
+    dst: &mut [u16],
+    dst_off: usize,
+    dst_stride: usize,
+    tx_size: usize,
+    plane: usize,
+    cfl_alpha_idx: i32,
+    cfl_joint_sign: i32,
+    bd: i32,
 ) {
     if !cfl.are_parameters_computed {
         cfl.compute_parameters(tx_size);
     }
     let alpha_q3 = cfl_idx_to_alpha(cfl_alpha_idx, cfl_joint_sign, plane);
-    debug_assert!(
-        (TX_H[tx_size] - 1) * CFL_BUF_LINE + TX_W[tx_size] <= CFL_BUF_SQUARE
-    );
+    debug_assert!((TX_H[tx_size] - 1) * CFL_BUF_LINE + TX_W[tx_size] <= CFL_BUF_SQUARE);
     cfl_predict_hbd(
-        &cfl.ac_buf_q3, dst, dst_off, dst_stride, alpha_q3, bd, TX_W[tx_size], TX_H[tx_size],
+        &cfl.ac_buf_q3,
+        dst,
+        dst_off,
+        dst_stride,
+        alpha_q3,
+        bd,
+        TX_W[tx_size],
+        TX_H[tx_size],
     );
 }

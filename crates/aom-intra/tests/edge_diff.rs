@@ -9,10 +9,15 @@ struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
         let mut x = self.0;
-        x ^= x >> 12; x ^= x << 25; x ^= x >> 27; self.0 = x;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
-    fn range(&mut self, lo: i32, hi: i32) -> i32 { lo + (self.next() % (hi - lo) as u64) as i32 }
+    fn range(&mut self, lo: i32, hi: i32) -> i32 {
+        lo + (self.next() % (hi - lo) as u64) as i32
+    }
 }
 
 #[test]
@@ -22,8 +27,16 @@ fn strength_and_upsample_decisions_exhaustive() {
         for &bs1 in &[4, 8, 16, 32, 64] {
             for delta in -90..=90 {
                 for ty in 0..2 {
-                    assert_eq!(edge_filter_strength(bs0, bs1, delta, ty), c::ref_intra_edge_strength(bs0, bs1, delta, ty), "strength {bs0}+{bs1} d={delta} ty={ty}");
-                    assert_eq!(use_upsample(bs0, bs1, delta, ty), c::ref_use_intra_edge_upsample(bs0, bs1, delta, ty), "upsample {bs0}+{bs1} d={delta} ty={ty}");
+                    assert_eq!(
+                        edge_filter_strength(bs0, bs1, delta, ty),
+                        c::ref_intra_edge_strength(bs0, bs1, delta, ty),
+                        "strength {bs0}+{bs1} d={delta} ty={ty}"
+                    );
+                    assert_eq!(
+                        use_upsample(bs0, bs1, delta, ty),
+                        c::ref_use_intra_edge_upsample(bs0, bs1, delta, ty),
+                        "upsample {bs0}+{bs1} d={delta} ty={ty}"
+                    );
                 }
             }
         }
@@ -73,7 +86,8 @@ fn highbd_filter_intra_edge_byte_identical() {
         for sz in 2..=65usize {
             for strength in 0..=3 {
                 for _ in 0..120 {
-                    let base: Vec<u16> = (0..sz).map(|_| (rng.next() as u32 & max) as u16).collect();
+                    let base: Vec<u16> =
+                        (0..sz).map(|_| (rng.next() as u32 & max) as u16).collect();
                     let mut a = base.clone();
                     let mut b = base.clone();
                     aom_intra::edge::highbd_filter_intra_edge(&mut a, sz, strength);

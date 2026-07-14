@@ -11,8 +11,12 @@
 use aom_intra::build_non_directional_intra_high;
 use aom_sys_ref as c;
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 // AV1 PREDICTION_MODE values for the non-directional family.
 const MODES: [usize; 5] = [0, 9, 10, 11, 12]; // DC, SMOOTH, SMOOTH_V, SMOOTH_H, PAETH
 
@@ -87,6 +91,12 @@ fn build_non_directional_matches_c() {
         }
     }
     assert!(saw_dc128, "never exercised the DC_128 (no-neighbour) path");
-    assert!(saw_partial, "never exercised edge replication (partial top)");
-    assert!(saw_toponly, "never exercised the top-only availability path");
+    assert!(
+        saw_partial,
+        "never exercised edge replication (partial top)"
+    );
+    assert!(
+        saw_toponly,
+        "never exercised the top-only availability path"
+    );
 }

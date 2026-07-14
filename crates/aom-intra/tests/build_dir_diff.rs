@@ -10,8 +10,12 @@ use aom_intra::build_directional_intra_high;
 use aom_intra::dir::{get_dx, get_dy};
 use aom_sys_ref as c;
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 struct Rng(u64);
 impl Rng {
@@ -46,8 +50,13 @@ const COL0: usize = 4;
 
 #[allow(clippy::too_many_arguments)]
 fn check(
-    recon: &[u16], tx_size: usize, angle: i32, disable: bool, filt: i32,
-    combo: (i32, i32, i32, i32), bd: i32,
+    recon: &[u16],
+    tx_size: usize,
+    angle: i32,
+    disable: bool,
+    filt: i32,
+    combo: (i32, i32, i32, i32),
+    bd: i32,
 ) {
     let (txw, txh) = (TX_W[tx_size], TX_H[tx_size]);
     let ref_off = ROW0 * STRIDE + COL0;
@@ -55,12 +64,36 @@ fn check(
 
     let mut got = vec![0u16; txw * txh];
     build_directional_intra_high(
-        recon, ref_off, STRIDE, &mut got, txw, angle, disable, filt, tx_size,
-        n_top as usize, n_topright, n_left as usize, n_bottomleft, bd,
+        recon,
+        ref_off,
+        STRIDE,
+        &mut got,
+        txw,
+        angle,
+        disable,
+        filt,
+        tx_size,
+        n_top as usize,
+        n_topright,
+        n_left as usize,
+        n_bottomleft,
+        bd,
     );
     let want = c::ref_hbd_build_dir_intra(
-        recon, ref_off, STRIDE, angle, disable, filt, tx_size, txw, txh, n_top, n_topright, n_left,
-        n_bottomleft, bd,
+        recon,
+        ref_off,
+        STRIDE,
+        angle,
+        disable,
+        filt,
+        tx_size,
+        txw,
+        txh,
+        n_top,
+        n_topright,
+        n_left,
+        n_bottomleft,
+        bd,
     );
     assert_eq!(
         got, want,
@@ -72,7 +105,9 @@ fn check(
 fn build_directional_matches_c() {
     let mut rng = Rng(0xd15e_c710_4a17_7bad);
     for &bd in &[8i32, 10, 12] {
-        let recon: Vec<u16> = (0..STRIDE * ROWS).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+        let recon: Vec<u16> = (0..STRIDE * ROWS)
+            .map(|_| (rng.next() % (1u64 << bd)) as u16)
+            .collect();
         for tx_size in 0..19usize {
             let (txw, txh) = (TX_W[tx_size] as i32, TX_H[tx_size] as i32);
             // Availability combos (n_top, n_topright, n_left, n_bottomleft); -1 =
@@ -81,11 +116,11 @@ fn build_directional_matches_c() {
             // requires n_top==txwpx when n_topright>0, and n_left==txhpx when
             // n_bottomleft>0 (extension only from a full edge), so those slots pair.
             let combos: [(i32, i32, i32, i32); 5] = [
-                (txw, txh, txh, txw),   // full + above-right + below-left
-                (txw, -1, txh, -1),     // full top+left, no extension
-                (txw, 0, txh, 0),       // extension considered, 0 px (replicate)
-                (txw, -1, 0, -1),       // top only
-                (0, -1, txh, -1),       // left only
+                (txw, txh, txh, txw), // full + above-right + below-left
+                (txw, -1, txh, -1),   // full top+left, no extension
+                (txw, 0, txh, 0),     // extension considered, 0 px (replicate)
+                (txw, -1, 0, -1),     // top only
+                (0, -1, txh, -1),     // left only
             ];
 
             // Full angle coverage on the default config (edge filter on, type 1, full avail).

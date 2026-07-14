@@ -7,8 +7,12 @@
 use aom_intra::build_filter_intra_high;
 use aom_sys_ref as c;
 
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 struct Rng(u64);
 impl Rng {
@@ -32,7 +36,9 @@ fn build_filter_intra_matches_c() {
     let mut rng = Rng(0xf117_eb01_14e3_0000);
     let ref_off = ROW0 * STRIDE + COL0;
     for &bd in &[8i32, 10, 12] {
-        let recon: Vec<u16> = (0..STRIDE * ROWS).map(|_| (rng.next() % (1u64 << bd)) as u16).collect();
+        let recon: Vec<u16> = (0..STRIDE * ROWS)
+            .map(|_| (rng.next() % (1u64 << bd)) as u16)
+            .collect();
         for tx_size in 0..19usize {
             let (txw, txh) = (TX_W[tx_size], TX_H[tx_size]);
             if txw > 32 || txh > 32 {
@@ -43,22 +49,42 @@ fn build_filter_intra_matches_c() {
             // unavailable. Extension only from a full edge (n_topright>0 => n_top==txwpx;
             // n_bottomleft>0 => n_left==txhpx).
             let combos: [(i32, i32, i32, i32); 5] = [
-                (tw, th, th, tw),   // full + above-right + below-left
-                (tw, -1, th, -1),   // full top+left, no extension
-                (tw, 0, th, 0),     // extension considered, 0 px (replicate)
-                (tw, -1, 0, -1),    // top only
-                (0, -1, th, -1),    // left only
+                (tw, th, th, tw), // full + above-right + below-left
+                (tw, -1, th, -1), // full top+left, no extension
+                (tw, 0, th, 0),   // extension considered, 0 px (replicate)
+                (tw, -1, 0, -1),  // top only
+                (0, -1, th, -1),  // left only
             ];
             for mode in 0..5usize {
                 for &(n_top, n_topright, n_left, n_bottomleft) in &combos {
                     let mut got = vec![0u16; txw * txh];
                     build_filter_intra_high(
-                        &recon, ref_off, STRIDE, &mut got, txw, mode, tx_size,
-                        n_top as usize, n_topright, n_left as usize, n_bottomleft, bd,
+                        &recon,
+                        ref_off,
+                        STRIDE,
+                        &mut got,
+                        txw,
+                        mode,
+                        tx_size,
+                        n_top as usize,
+                        n_topright,
+                        n_left as usize,
+                        n_bottomleft,
+                        bd,
                     );
                     let want = c::ref_hbd_build_filter_intra(
-                        &recon, ref_off, STRIDE, mode as i32, tx_size, txw, txh, n_top, n_topright,
-                        n_left, n_bottomleft, bd,
+                        &recon,
+                        ref_off,
+                        STRIDE,
+                        mode as i32,
+                        tx_size,
+                        txw,
+                        txh,
+                        n_top,
+                        n_topright,
+                        n_left,
+                        n_bottomleft,
+                        bd,
                     );
                     assert_eq!(
                         got, want,

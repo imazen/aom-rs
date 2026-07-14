@@ -14,7 +14,7 @@
 //! (cfl_subsample_*_c / cfl_subtract_average_*_c / cfl_predict_hbd_*_c) are
 //! DEFERRED until aom-sys-ref is free to take new extern declarations.
 
-use aom_intra::cfl::{CFL_BUF_LINE, CflCtx, cfl_idx_to_alpha, cfl_predict_block, cfl_store_tx};
+use aom_intra::cfl::{cfl_idx_to_alpha, cfl_predict_block, cfl_store_tx, CflCtx, CFL_BUF_LINE};
 
 const TX_4X4: usize = 0;
 const TX_8X8: usize = 1;
@@ -163,8 +163,16 @@ fn pad_and_subtract_average_hand_traced() {
     ];
     for r in 0..4 {
         for c in 0..4 {
-            assert_eq!(cfl.recon_buf_q3[r * CFL_BUF_LINE + c], pad_expect[r][c], "pad ({r},{c})");
-            assert_eq!(cfl.ac_buf_q3[r * CFL_BUF_LINE + c], ac_expect[r][c], "ac ({r},{c})");
+            assert_eq!(
+                cfl.recon_buf_q3[r * CFL_BUF_LINE + c],
+                pad_expect[r][c],
+                "pad ({r},{c})"
+            );
+            assert_eq!(
+                cfl.ac_buf_q3[r * CFL_BUF_LINE + c],
+                ac_expect[r][c],
+                "ac ({r},{c})"
+            );
         }
     }
     // alpha 0: dst unchanged
@@ -183,8 +191,16 @@ fn idx_to_alpha_all_joint_signs() {
     let expect_u = [0, 0, -6, -6, -6, 6, 6, 6];
     let expect_v = [-10, 10, 0, -10, 10, 0, -10, 10];
     for js in 0..8 {
-        assert_eq!(cfl_idx_to_alpha(idx, js, 1), expect_u[js as usize], "U js={js}");
-        assert_eq!(cfl_idx_to_alpha(idx, js, 2), expect_v[js as usize], "V js={js}");
+        assert_eq!(
+            cfl_idx_to_alpha(idx, js, 1),
+            expect_u[js as usize],
+            "U js={js}"
+        );
+        assert_eq!(
+            cfl_idx_to_alpha(idx, js, 2),
+            expect_v[js as usize],
+            "V js={js}"
+        );
     }
     // Alpha magnitude extremes: abs 0 -> ±1, abs 15 -> ±16.
     assert_eq!(cfl_idx_to_alpha(0, 7, 1), 1);

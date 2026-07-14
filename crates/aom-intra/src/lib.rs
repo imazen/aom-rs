@@ -5,7 +5,6 @@
 //!
 //! Validated byte-for-byte against C for every (mode × block size).
 
-
 #![forbid(unsafe_code)]
 pub mod cfl;
 pub mod dir;
@@ -208,8 +207,14 @@ impl AboveRef16<'_> {
 /// `DC_128` depends on `bd` (`128 << (bd-8)`).
 #[allow(clippy::too_many_arguments)]
 pub fn predict_highbd(
-    mode: usize, dst: &mut [u16], stride: usize, bw: usize, bh: usize,
-    above: &AboveRef16, left: &[u16], bd: i32,
+    mode: usize,
+    dst: &mut [u16],
+    stride: usize,
+    bw: usize,
+    bh: usize,
+    above: &AboveRef16,
+    left: &[u16],
+    bd: i32,
 ) {
     let fill16 = |dst: &mut [u16], v: u16| {
         for r in 0..bh {
@@ -222,26 +227,43 @@ pub fn predict_highbd(
         DC => {
             let count = (bw + bh) as i32;
             let mut sum = 0i32;
-            for i in 0..bw { sum += above.at(i); }
-            for &l in left.iter().take(bh) { sum += l as i32; }
+            for i in 0..bw {
+                sum += above.at(i);
+            }
+            for &l in left.iter().take(bh) {
+                sum += l as i32;
+            }
             fill16(dst, ((sum + (count >> 1)) / count) as u16);
         }
         DC_TOP => {
             let mut sum = 0i32;
-            for i in 0..bw { sum += above.at(i); }
+            for i in 0..bw {
+                sum += above.at(i);
+            }
             fill16(dst, ((sum + (bw as i32 >> 1)) / bw as i32) as u16);
         }
         DC_LEFT => {
             let mut sum = 0i32;
-            for &l in left.iter().take(bh) { sum += l as i32; }
+            for &l in left.iter().take(bh) {
+                sum += l as i32;
+            }
             fill16(dst, ((sum + (bh as i32 >> 1)) / bh as i32) as u16);
         }
         DC_128 => fill16(dst, (128u32 << (bd - 8)) as u16),
         V => {
-            for r in 0..bh { for c in 0..bw { dst[r * stride + c] = above.at(c) as u16; } }
+            for r in 0..bh {
+                for c in 0..bw {
+                    dst[r * stride + c] = above.at(c) as u16;
+                }
+            }
         }
         H => {
-            for r in 0..bh { let v = left[r]; for c in 0..bw { dst[r * stride + c] = v; } }
+            for r in 0..bh {
+                let v = left[r];
+                for c in 0..bw {
+                    dst[r * stride + c] = v;
+                }
+            }
         }
         PAETH => {
             let tl = above.top_left();
@@ -262,7 +284,10 @@ pub fn predict_highbd(
                 for c in 0..bw {
                     let wh = sw_h[r] as i32;
                     let ww = sw_w[c] as i32;
-                    let p = wh * above.at(c) + (scale - wh) * below + ww * left[r] as i32 + (scale - ww) * right;
+                    let p = wh * above.at(c)
+                        + (scale - wh) * below
+                        + ww * left[r] as i32
+                        + (scale - ww) * right;
                     dst[r * stride + c] = divide_round(p, log2) as u16;
                 }
             }
@@ -275,7 +300,8 @@ pub fn predict_highbd(
             for r in 0..bh {
                 let w = sw[r] as i32;
                 for c in 0..bw {
-                    dst[r * stride + c] = divide_round(w * above.at(c) + (scale - w) * below, log2) as u16;
+                    dst[r * stride + c] =
+                        divide_round(w * above.at(c) + (scale - w) * below, log2) as u16;
                 }
             }
         }
@@ -287,7 +313,8 @@ pub fn predict_highbd(
             for r in 0..bh {
                 for c in 0..bw {
                     let w = sw[c] as i32;
-                    dst[r * stride + c] = divide_round(w * left[r] as i32 + (scale - w) * right, log2) as u16;
+                    dst[r * stride + c] =
+                        divide_round(w * left[r] as i32 + (scale - w) * right, log2) as u16;
                 }
             }
         }
@@ -301,14 +328,22 @@ fn paeth_single_i32(left: i32, top: i32, top_left: i32) -> i32 {
     let p_left = abs_diff(base, left);
     let p_top = abs_diff(base, top);
     let p_top_left = abs_diff(base, top_left);
-    if p_left <= p_top && p_left <= p_top_left { left }
-    else if p_top <= p_top_left { top }
-    else { top_left }
+    if p_left <= p_top && p_left <= p_top_left {
+        left
+    } else if p_top <= p_top_left {
+        top
+    } else {
+        top_left
+    }
 }
 
 /// Full transform dims per `TX_SIZE` (`tx_size_wide` / `tx_size_high`).
-const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
-const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+const TX_W: [usize; 19] = [
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+];
+const TX_H: [usize; 19] = [
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+];
 
 /// Assemble the non-directional intra reference edges — the constant fills,
 /// contiguous copy, and edge replication of libaom's
@@ -343,7 +378,16 @@ struct NdEdge {
 
 #[autoversion]
 fn assemble_nd_edges(recon: &[u16], g: &NdEdge, above_row: &mut [u16], left_col: &mut [u16]) {
-    let NdEdge { ref_off, ref_stride, av1_mode, txwpx, txhpx, n_top_px, n_left_px, base } = *g;
+    let NdEdge {
+        ref_off,
+        ref_stride,
+        av1_mode,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_left_px,
+        base,
+    } = *g;
 
     // Left column: default base+1, then the real samples with the last one
     // replicated, or the above-corner fallback when only the top is available.
@@ -434,8 +478,22 @@ pub fn build_non_directional_intra_high(
     // [-1..] reference windows: index 0 is the top-left corner.
     let mut above_buf = [0u16; 1 + 64];
     let mut left_buf = [0u16; 1 + 64];
-    let g = NdEdge { ref_off, ref_stride, av1_mode, txwpx, txhpx, n_top_px, n_left_px, base };
-    assemble_nd_edges(recon, &g, &mut above_buf[..1 + txwpx], &mut left_buf[..1 + txhpx]);
+    let g = NdEdge {
+        ref_off,
+        ref_stride,
+        av1_mode,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_left_px,
+        base,
+    };
+    assemble_nd_edges(
+        recon,
+        &g,
+        &mut above_buf[..1 + txwpx],
+        &mut left_buf[..1 + txhpx],
+    );
 
     // Map AV1 mode → predictor index; DC picks the availability variant.
     let pmode = match av1_mode {
@@ -453,7 +511,16 @@ pub fn build_non_directional_intra_high(
     };
 
     let above = AboveRef16(&above_buf[..1 + txwpx]);
-    predict_highbd(pmode, dst, dst_stride, txwpx, txhpx, &above, &left_buf[1..1 + txhpx], bd);
+    predict_highbd(
+        pmode,
+        dst,
+        dst_stride,
+        txwpx,
+        txhpx,
+        &above,
+        &left_buf[1..1 + txhpx],
+        bd,
+    );
 }
 
 /// `highbd_dr_predictor` (reconintra.c): dispatch the highbd directional
@@ -484,16 +551,45 @@ pub fn dr_predict_high(
     } else if angle > 90 && angle < 180 {
         let above = dir::EdgeRef16::new(above_data, pad);
         let left = dir::EdgeRef16::new(left_data, pad);
-        dir::z2_high(dst, dst_stride, bw, bh, &above, &left, upsample_above, upsample_left, dx, dy);
+        dir::z2_high(
+            dst,
+            dst_stride,
+            bw,
+            bh,
+            &above,
+            &left,
+            upsample_above,
+            upsample_left,
+            dx,
+            dy,
+        );
     } else if angle > 180 && angle < 270 {
         let left = dir::EdgeRef16::new(left_data, pad);
         dir::z3_high(dst, dst_stride, bw, bh, &left, upsample_left, dy);
     } else if angle == 90 {
         let above = AboveRef16(&above_data[pad - 1..]);
-        predict_highbd(V, dst, dst_stride, bw, bh, &above, &left_data[pad..pad + bh], bd);
+        predict_highbd(
+            V,
+            dst,
+            dst_stride,
+            bw,
+            bh,
+            &above,
+            &left_data[pad..pad + bh],
+            bd,
+        );
     } else if angle == 180 {
         let above = AboveRef16(&above_data[pad - 1..]);
-        predict_highbd(H, dst, dst_stride, bw, bh, &above, &left_data[pad..pad + bh], bd);
+        predict_highbd(
+            H,
+            dst,
+            dst_stride,
+            bw,
+            bh,
+            &above,
+            &left_data[pad..pad + bh],
+            bd,
+        );
     }
 }
 
@@ -628,8 +724,18 @@ struct DirEdge {
 #[autoversion]
 fn assemble_dir_edges(recon: &[u16], g: &DirEdge, above_data: &mut [u16], left_data: &mut [u16]) {
     let DirEdge {
-        ref_off, ref_stride, txwpx, txhpx, n_top_px, n_topright_px, n_left_px, n_bottomleft_px,
-        need_above, need_left, need_above_left, base,
+        ref_off,
+        ref_stride,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
+        need_above,
+        need_left,
+        need_above_left,
+        base,
     } = *g;
     const P: usize = DIR_PAD;
 
@@ -759,7 +865,11 @@ pub fn build_directional_intra_high(
     // Degenerate early-out (one side needed, none available).
     if (!need_above && n_left_px == 0) || (!need_left && n_top_px == 0) {
         let val = if need_left {
-            if n_top_px > 0 { recon[ref_off - ref_stride] } else { (base + 1) as u16 }
+            if n_top_px > 0 {
+                recon[ref_off - ref_stride]
+            } else {
+                (base + 1) as u16
+            }
         } else if n_left_px > 0 {
             recon[ref_off - 1]
         } else {
@@ -776,8 +886,18 @@ pub fn build_directional_intra_high(
     let mut above_data = [0u16; NUM_INTRA_NEIGHBOUR_PIXELS];
     let mut left_data = [0u16; NUM_INTRA_NEIGHBOUR_PIXELS];
     let g = DirEdge {
-        ref_off, ref_stride, txwpx, txhpx, n_top_px, n_topright_px, n_left_px, n_bottomleft_px,
-        need_above, need_left, need_above_left, base,
+        ref_off,
+        ref_stride,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
+        need_above,
+        need_left,
+        need_above_left,
+        base,
     };
     assemble_dir_edges(recon, &g, &mut above_data, &mut left_data);
 
@@ -788,19 +908,38 @@ pub fn build_directional_intra_high(
         let need_bottom = p_angle > 180;
         if p_angle != 90 && p_angle != 180 {
             if need_above && need_left && txwpx + txhpx >= 24 {
-                edge::filter_corner_high(&mut above_data[DIR_PAD - 1..], &mut left_data[DIR_PAD - 1..]);
+                edge::filter_corner_high(
+                    &mut above_data[DIR_PAD - 1..],
+                    &mut left_data[DIR_PAD - 1..],
+                );
             }
             if need_above && n_top_px > 0 {
-                let strength =
-                    edge::edge_filter_strength(txwpx as i32, txhpx as i32, p_angle - 90, filter_type);
+                let strength = edge::edge_filter_strength(
+                    txwpx as i32,
+                    txhpx as i32,
+                    p_angle - 90,
+                    filter_type,
+                );
                 let n_px = n_top_px + 1 + if need_right { txhpx } else { 0 };
-                edge::highbd_filter_intra_edge(&mut above_data[DIR_PAD - 1..DIR_PAD - 1 + n_px], n_px, strength);
+                edge::highbd_filter_intra_edge(
+                    &mut above_data[DIR_PAD - 1..DIR_PAD - 1 + n_px],
+                    n_px,
+                    strength,
+                );
             }
             if need_left && n_left_px > 0 {
-                let strength =
-                    edge::edge_filter_strength(txhpx as i32, txwpx as i32, p_angle - 180, filter_type);
+                let strength = edge::edge_filter_strength(
+                    txhpx as i32,
+                    txwpx as i32,
+                    p_angle - 180,
+                    filter_type,
+                );
                 let n_px = n_left_px + 1 + if need_bottom { txwpx } else { 0 };
-                edge::highbd_filter_intra_edge(&mut left_data[DIR_PAD - 1..DIR_PAD - 1 + n_px], n_px, strength);
+                edge::highbd_filter_intra_edge(
+                    &mut left_data[DIR_PAD - 1..DIR_PAD - 1 + n_px],
+                    n_px,
+                    strength,
+                );
             }
         }
         upsample_above = edge::use_upsample(txwpx as i32, txhpx as i32, p_angle - 90, filter_type);
@@ -816,8 +955,16 @@ pub fn build_directional_intra_high(
     }
 
     dr_predict_high(
-        dst, dst_stride, tx_size, &above_data, &left_data, DIR_PAD, upsample_above, upsample_left,
-        p_angle, bd,
+        dst,
+        dst_stride,
+        tx_size,
+        &above_data,
+        &left_data,
+        DIR_PAD,
+        upsample_above,
+        upsample_left,
+        p_angle,
+        bd,
     );
 }
 
@@ -860,8 +1007,18 @@ pub fn predict_intra_high(
     let is_dr = (1..=8).contains(&mode); // V_PRED..=D67_PRED
     if use_filter_intra {
         build_filter_intra_high(
-            recon, ref_off, ref_stride, dst, dst_stride, filter_intra_mode, tx_size, n_top_px,
-            n_topright_px, n_left_px, n_bottomleft_px, bd,
+            recon,
+            ref_off,
+            ref_stride,
+            dst,
+            dst_stride,
+            filter_intra_mode,
+            tx_size,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+            bd,
         );
     } else if !is_dr {
         // Non-directional (DC / SMOOTH* / PAETH): above/left only, no extension.
@@ -871,8 +1028,20 @@ pub fn predict_intra_high(
     } else {
         let p_angle = MODE_TO_ANGLE[mode] + angle_delta;
         build_directional_intra_high(
-            recon, ref_off, ref_stride, dst, dst_stride, p_angle, disable_edge_filter, filter_type,
-            tx_size, n_top_px, n_topright_px, n_left_px, n_bottomleft_px, bd,
+            recon,
+            ref_off,
+            ref_stride,
+            dst,
+            dst_stride,
+            p_angle,
+            disable_edge_filter,
+            filter_type,
+            tx_size,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+            bd,
         );
     }
 }
@@ -906,12 +1075,27 @@ pub fn build_filter_intra_high(
     let mut left_data = [0u16; NUM_INTRA_NEIGHBOUR_PIXELS];
     // Filter-intra needs above, left, and the corner (all-need); no early-out.
     let g = DirEdge {
-        ref_off, ref_stride, txwpx, txhpx, n_top_px, n_topright_px, n_left_px, n_bottomleft_px,
-        need_above: true, need_left: true, need_above_left: true, base,
+        ref_off,
+        ref_stride,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
+        need_above: true,
+        need_left: true,
+        need_above_left: true,
+        base,
     };
     assemble_dir_edges(recon, &g, &mut above_data, &mut left_data);
     filter_intra_predict_high(
-        dst, dst_stride, tx_size, &above_data[DIR_PAD - 1..], &left_data[DIR_PAD..DIR_PAD + txhpx],
-        filter_intra_mode, bd,
+        dst,
+        dst_stride,
+        tx_size,
+        &above_data[DIR_PAD - 1..],
+        &left_data[DIR_PAD..DIR_PAD + txhpx],
+        filter_intra_mode,
+        bd,
     );
 }

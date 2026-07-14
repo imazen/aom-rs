@@ -7,8 +7,25 @@ use aom_intra::dir::{get_dx, get_dy, z1_high, z2_high, z3_high, EdgeRef16};
 use aom_sys_ref as c;
 
 const SIZES: [(usize, usize); 19] = [
-    (4, 4), (8, 8), (16, 16), (32, 32), (64, 64), (4, 8), (8, 4), (8, 16), (16, 8),
-    (16, 32), (32, 16), (32, 64), (64, 32), (4, 16), (16, 4), (8, 32), (32, 8), (16, 64), (64, 16),
+    (4, 4),
+    (8, 8),
+    (16, 16),
+    (32, 32),
+    (64, 64),
+    (4, 8),
+    (8, 4),
+    (8, 16),
+    (16, 8),
+    (16, 32),
+    (32, 16),
+    (32, 64),
+    (64, 32),
+    (4, 16),
+    (16, 4),
+    (8, 32),
+    (32, 8),
+    (16, 64),
+    (64, 16),
 ];
 
 struct Rng(u64);
@@ -47,8 +64,12 @@ fn highbd_dr_predictors_identical() {
                     let left = edges(&mut rng, bw, bh, bd);
                     let mut got = vec![0u16; bw * bh];
                     z1_high(&mut got, bw, bw, bh, &EdgeRef16::new(&above, PAD), up, dx);
-                    let want = c::ref_highbd_dr_pred(1, bw, bh, &above, &left, PAD, up, 0, dx, 1, bd);
-                    assert_eq!(got, want, "z1_high divergence {bw}x{bh} up={up} angle={angle} bd={bd}");
+                    let want =
+                        c::ref_highbd_dr_pred(1, bw, bh, &above, &left, PAD, up, 0, dx, 1, bd);
+                    assert_eq!(
+                        got, want,
+                        "z1_high divergence {bw}x{bh} up={up} angle={angle} bd={bd}"
+                    );
                     checks += 1;
                 }
                 // z3: angle in (180,270), dx = 1, dy > 0.
@@ -61,8 +82,12 @@ fn highbd_dr_predictors_identical() {
                     let left = edges(&mut rng, bw, bh, bd);
                     let mut got = vec![0u16; bw * bh];
                     z3_high(&mut got, bw, bw, bh, &EdgeRef16::new(&left, PAD), up, dy);
-                    let want = c::ref_highbd_dr_pred(3, bw, bh, &above, &left, PAD, 0, up, 1, dy, bd);
-                    assert_eq!(got, want, "z3_high divergence {bw}x{bh} up={up} angle={angle} bd={bd}");
+                    let want =
+                        c::ref_highbd_dr_pred(3, bw, bh, &above, &left, PAD, 0, up, 1, dy, bd);
+                    assert_eq!(
+                        got, want,
+                        "z3_high divergence {bw}x{bh} up={up} angle={angle} bd={bd}"
+                    );
                     checks += 1;
                 }
             }
@@ -79,10 +104,20 @@ fn highbd_dr_predictors_identical() {
                         let left = edges(&mut rng, bw, bh, bd);
                         let mut got = vec![0u16; bw * bh];
                         z2_high(
-                            &mut got, bw, bw, bh, &EdgeRef16::new(&above, PAD),
-                            &EdgeRef16::new(&left, PAD), up_a, up_l, dx, dy,
+                            &mut got,
+                            bw,
+                            bw,
+                            bh,
+                            &EdgeRef16::new(&above, PAD),
+                            &EdgeRef16::new(&left, PAD),
+                            up_a,
+                            up_l,
+                            dx,
+                            dy,
                         );
-                        let want = c::ref_highbd_dr_pred(2, bw, bh, &above, &left, PAD, up_a, up_l, dx, dy, bd);
+                        let want = c::ref_highbd_dr_pred(
+                            2, bw, bh, &above, &left, PAD, up_a, up_l, dx, dy, bd,
+                        );
                         assert_eq!(got, want, "z2_high divergence {bw}x{bh} up_a={up_a} up_l={up_l} angle={angle} bd={bd}");
                         checks += 1;
                     }

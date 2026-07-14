@@ -110,8 +110,16 @@ pub fn z1(dst: &mut [u8], stride: usize, bw: usize, bh: usize, above: &EdgeRef, 
 /// `av1_dr_prediction_z2_c` (dx > 0, dy > 0).
 #[allow(clippy::too_many_arguments)]
 pub fn z2(
-    dst: &mut [u8], stride: usize, bw: usize, bh: usize, above: &EdgeRef, left: &EdgeRef,
-    up_above: i32, up_left: i32, dx: i32, dy: i32,
+    dst: &mut [u8],
+    stride: usize,
+    bw: usize,
+    bh: usize,
+    above: &EdgeRef,
+    left: &EdgeRef,
+    up_above: i32,
+    up_left: i32,
+    dx: i32,
+    dy: i32,
 ) {
     let min_base_x = -(1 << up_above);
     let frac_bits_x = 6 - up_above;
@@ -165,7 +173,13 @@ pub fn z3(dst: &mut [u8], stride: usize, bw: usize, bh: usize, left: &EdgeRef, u
 /// `av1_highbd_dr_prediction_z1_c` (dy == 1, dx > 0). Highbd analogue of [`z1`];
 /// `bd` is unused (the two-tap interpolation of in-range samples stays in range).
 pub fn z1_high(
-    dst: &mut [u16], stride: usize, bw: usize, bh: usize, above: &EdgeRef16, up: i32, dx: i32,
+    dst: &mut [u16],
+    stride: usize,
+    bw: usize,
+    bh: usize,
+    above: &EdgeRef16,
+    up: i32,
+    dx: i32,
 ) {
     let max_base_x = (((bw + bh) as i32) - 1) << up;
     let frac_bits = 6 - up;
@@ -199,8 +213,16 @@ pub fn z1_high(
 /// `av1_highbd_dr_prediction_z2_c` (dx > 0, dy > 0). Highbd analogue of [`z2`].
 #[allow(clippy::too_many_arguments)]
 pub fn z2_high(
-    dst: &mut [u16], stride: usize, bw: usize, bh: usize, above: &EdgeRef16, left: &EdgeRef16,
-    up_above: i32, up_left: i32, dx: i32, dy: i32,
+    dst: &mut [u16],
+    stride: usize,
+    bw: usize,
+    bh: usize,
+    above: &EdgeRef16,
+    left: &EdgeRef16,
+    up_above: i32,
+    up_left: i32,
+    dx: i32,
+    dy: i32,
 ) {
     let min_base_x = -(1 << up_above);
     let frac_bits_x = 6 - up_above;
@@ -227,7 +249,13 @@ pub fn z2_high(
 
 /// `av1_highbd_dr_prediction_z3_c` (dx == 1, dy > 0). Highbd analogue of [`z3`].
 pub fn z3_high(
-    dst: &mut [u16], stride: usize, bw: usize, bh: usize, left: &EdgeRef16, up: i32, dy: i32,
+    dst: &mut [u16],
+    stride: usize,
+    bw: usize,
+    bh: usize,
+    left: &EdgeRef16,
+    up: i32,
+    dy: i32,
 ) {
     let max_base_y = ((bw + bh) as i32 - 1) << up;
     let frac_bits = 6 - up;

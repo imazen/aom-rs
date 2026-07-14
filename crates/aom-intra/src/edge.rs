@@ -90,7 +90,10 @@ pub fn filter_intra_edge(p: &mut [u8], sz: usize, strength: i32) {
     let filt = (strength - 1) as usize;
     let edge: [i32; 129] = {
         let mut e = [0i32; 129];
-        e[..sz].iter_mut().zip(p.iter().take(sz)).for_each(|(d, &s)| *d = s as i32);
+        e[..sz]
+            .iter_mut()
+            .zip(p.iter().take(sz))
+            .for_each(|(d, &s)| *d = s as i32);
         e
     };
     #[allow(clippy::needless_range_loop)]
@@ -147,7 +150,10 @@ pub fn highbd_filter_intra_edge(p: &mut [u16], sz: usize, strength: i32) {
     const KERNEL: [[i32; 5]; 3] = [[0, 4, 8, 4, 0], [0, 5, 6, 5, 0], [2, 4, 4, 4, 2]];
     let filt = (strength - 1) as usize;
     let mut edge = [0i32; 129];
-    edge[..sz].iter_mut().zip(p.iter().take(sz)).for_each(|(d, &s)| *d = s as i32);
+    edge[..sz]
+        .iter_mut()
+        .zip(p.iter().take(sz))
+        .for_each(|(d, &s)| *d = s as i32);
     #[allow(clippy::needless_range_loop)]
     for i in 1..sz {
         let mut s = 0i32;
