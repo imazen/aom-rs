@@ -584,10 +584,12 @@ fn stamp_lf_tree(
             // AB is interior-only (module docs on encode_sb.rs's SbTree::
             // HorzA) -- no frame-bound gating on any of the 3 sub-blocks.
             let bsize2 = crate::partition::split_subsize(bsize);
-            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_A)
-                as usize;
+            let subsize =
+                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_A) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            stamp_lf(mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols,
+            );
             stamp_lf(
                 mi,
                 stride,
@@ -611,10 +613,12 @@ fn stamp_lf_tree(
         }
         SbTree::HorzB(subs) => {
             let bsize2 = crate::partition::split_subsize(bsize);
-            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_B)
-                as usize;
+            let subsize =
+                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_B) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            stamp_lf(mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols,
+            );
             stamp_lf(
                 mi,
                 stride,
@@ -638,10 +642,12 @@ fn stamp_lf_tree(
         }
         SbTree::VertA(subs) => {
             let bsize2 = crate::partition::split_subsize(bsize);
-            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_A)
-                as usize;
+            let subsize =
+                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_A) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            stamp_lf(mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols,
+            );
             stamp_lf(
                 mi,
                 stride,
@@ -665,10 +671,12 @@ fn stamp_lf_tree(
         }
         SbTree::VertB(subs) => {
             let bsize2 = crate::partition::split_subsize(bsize);
-            let subsize = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B)
-                as usize;
+            let subsize =
+                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            stamp_lf(mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols);
+            stamp_lf(
+                mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols,
+            );
             stamp_lf(
                 mi,
                 stride,

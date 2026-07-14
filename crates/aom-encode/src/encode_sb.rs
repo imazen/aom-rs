@@ -83,10 +83,10 @@ use crate::encode_intra::{
     EncodeIntraPlaneOutcome, EncodeIntraYEnv, TrellisOptType, UvEncodeParams, UvWinner,
     encode_intra_block_plane_uv, encode_intra_block_plane_y,
 };
-use crate::partition::PartRdStats;
 use crate::intra_uv_rd::{
     UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
+use crate::partition::PartRdStats;
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W};
 use aom_entropy::partition::{get_plane_block_size, update_ext_partition_context};
 use aom_intra::cfl::CflCtx;

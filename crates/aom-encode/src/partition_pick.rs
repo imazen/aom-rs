@@ -1098,7 +1098,11 @@ fn prune_ab_partitions(
     allowed[3] &= vert_b_rd / 16 * 14 < best_rdcost;
 
     // ml_prune_ab_partition (:1995-2004): only when BOTH rect types allowed.
-    if enable_ab_partitions && ext_partition_allowed && partition_rect_allowed[0] && partition_rect_allowed[1] {
+    if enable_ab_partitions
+        && ext_partition_allowed
+        && partition_rect_allowed[0]
+        && partition_rect_allowed[1]
+    {
         allowed = crate::ab_nn_prune::predict_ab_partition_prune(
             bsize,
             pc_tree_partitioning,
@@ -1158,7 +1162,11 @@ fn rd_pick_ab_part(
     let (positions, sizes): ([(i32, i32); 3], [usize; 3]) = match ab_type {
         0 => (
             // HORZ_A: top-left quarter, top-right quarter, bottom half.
-            [(mi_row, mi_col), (mi_row, mi_col + hbs), (mi_row + hbs, mi_col)],
+            [
+                (mi_row, mi_col),
+                (mi_row, mi_col + hbs),
+                (mi_row + hbs, mi_col),
+            ],
             [bsize2, bsize2, subsize],
         ),
         1 => (
@@ -1172,7 +1180,11 @@ fn rd_pick_ab_part(
         ),
         2 => (
             // VERT_A: top-left quarter, bottom-left quarter, right half.
-            [(mi_row, mi_col), (mi_row + hbs, mi_col), (mi_row, mi_col + hbs)],
+            [
+                (mi_row, mi_col),
+                (mi_row + hbs, mi_col),
+                (mi_row, mi_col + hbs),
+            ],
             [bsize2, bsize2, subsize],
         ),
         3 => (
@@ -1250,7 +1262,16 @@ fn rd_pick_ab_part(
             // pick_sb_modes took the reuse early-return (module docs).
             let wi = w[i].as_mut().expect("valid sum implies a winner");
             let _ = crate::encode_sb::encode_b_intra_dry(
-                env, tile, recon_y, recon_u, recon_v, cfl, wi, r, c, partition_type,
+                env,
+                tile,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                wi,
+                r,
+                c,
+                partition_type,
             );
             grid.stamp(r, c, sz, wi.mode as u8, env.mi_rows, env.mi_cols);
         }

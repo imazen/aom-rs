@@ -184,8 +184,8 @@ pub fn predict_ab_partition_prune(
 
     let mut thresh = max_score;
     match bsize {
-        6 => thresh -= 150,  // BLOCK_16X16
-        9 => thresh -= 100,  // BLOCK_32X32
+        6 => thresh -= 150, // BLOCK_16X16
+        9 => thresh -= 100, // BLOCK_32X32
         _ => {}
     }
 
