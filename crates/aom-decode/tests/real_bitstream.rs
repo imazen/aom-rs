@@ -1344,6 +1344,114 @@ fn bd12_composition_decodes_byte_identical_to_c() {
     assert!(lr_applied >= 1, "no bd12 stream had LR change pixels");
 }
 
+// ---- 4:2:2 COMPOSITION GATE: deblock + CDEF + LR on 4:2:2 chroma ----
+//
+// The main sweep's `combos` are 4:2:0 + 4:4:4 + monochrome; 4:2:2
+// (subsampling_x=1, subsampling_y=0 — full-height, half-width chroma) is swept
+// only by `deblocked_422_chroma_byte_identical_to_c` (which runs cdef/lr OFF)
+// and rides along un-floored in the intrabc colour gate. So 4:2:2 chroma with
+// CDEF or loop restoration applied is byte-identity-covered but never PROVEN to
+// fire. CDEF's per-8x8 chroma pass and LR's restoration-unit tiling both key off
+// the chroma plane dimensions, which for 4:2:2 differ from 4:2:0/4:4:4 — a
+// 4:2:2-specific chroma-plane-dims bug would slip. This gate closes that: real
+// cpu-used=0 4:2:2 KEY streams at bd 8/10/12 with --enable-cdef=1
+// --enable-restoration=1, decoded BYTE-IDENTICAL to the REAL C decoder via
+// run_config, with anti-vacuous floors proving deblock (luma+chroma), CDEF, and
+// LR each genuinely fired on 4:2:2.
+#[test]
+fn composition_422_decodes_byte_identical_to_c() {
+    // Widths incl. 130 (chroma 65, ODD half-width) to exercise the 4:2:2
+    // half-width chroma edge under the filters.
+    let sizes = [(64usize, 64usize), (100, 76), (130, 96)];
+    let bds = [8i32, 10, 12];
+    let mut n = 0u32;
+    let mut max_len = 0usize;
+    let mut bd_seen = [0u32; 3]; // 8,10,12
+    let mut nonzero_luma_lf = 0u32;
+    let mut nonzero_chroma_lf = 0u32;
+    let mut cdef_gated = 0u32;
+    let mut cdef_applied = 0u32;
+    let mut lr_gated = 0u32;
+    let mut lr_applied = 0u32;
+    for &(w, h) in &sizes {
+        for &bd in &bds {
+            for &cq in &[16i32, 36, 52] {
+                let f = run_config(&Cfg {
+                    w,
+                    h,
+                    bd,
+                    mono: false,
+                    ss: (1, 0), // 4:2:2
+                    cq,
+                    cdef: true,
+                    restoration: true,
+                    usage: 0,
+                    aq: 0,
+                    two_pass: false,
+                    sb128: false,
+                    tile_columns_log2: 0,
+                    tile_rows_log2: 0,
+                });
+                n += 1;
+                max_len = max_len.max(f.len);
+                bd_seen[match bd {
+                    8 => 0,
+                    10 => 1,
+                    _ => 2,
+                }] += 1;
+                nonzero_luma_lf += (f.filter_level[0] != 0 || f.filter_level[1] != 0) as u32;
+                nonzero_chroma_lf += (f.filter_level[2] != 0 || f.filter_level[3] != 0) as u32;
+                cdef_gated += f.cdef_gated as u32;
+                cdef_applied += f.cdef_applied as u32;
+                lr_gated += f.lr_gated as u32;
+                lr_applied += f.lr_applied as u32;
+            }
+        }
+    }
+    assert_eq!(n, (sizes.len() * bds.len() * 3) as u32, "422 arm count");
+    println!(
+        "422 composition: n={n} max_len={max_len} bd_seen={bd_seen:?} \
+         nonzero_luma_lf={nonzero_luma_lf} nonzero_chroma_lf={nonzero_chroma_lf} \
+         cdef_gated={cdef_gated} cdef_applied={cdef_applied} lr_gated={lr_gated} lr_applied={lr_applied}"
+    );
+    assert!(
+        bd_seen.iter().all(|&c| c > 0),
+        "422 bit-depth coverage gap {bd_seen:?}"
+    );
+    assert!(
+        max_len >= 150,
+        "422 streams all suspiciously small (max {max_len})"
+    );
+    // Anti-vacuous floors (PROBED 2026-07-15, cpu-used=0 on this content): 27
+    // arms all byte-identical; 15 nonzero-luma-LF, 14 nonzero-chroma-LF, 24 CDEF
+    // gated+applied, 15 LR gated+applied. Floors keep each 4:2:2 filter
+    // population from silently collapsing.
+    assert!(
+        nonzero_luma_lf >= 8,
+        "4:2:2 luma-deblock population collapsed ({nonzero_luma_lf})"
+    );
+    assert!(
+        nonzero_chroma_lf >= 6,
+        "4:2:2 chroma-deblock population collapsed ({nonzero_chroma_lf})"
+    );
+    assert!(
+        cdef_gated >= 15,
+        "4:2:2 CDEF-gated population too small ({cdef_gated})"
+    );
+    assert!(
+        cdef_applied >= 15,
+        "4:2:2 CDEF-applied population too small ({cdef_applied})"
+    );
+    assert!(
+        lr_gated >= 6,
+        "4:2:2 LR-gated population too small ({lr_gated})"
+    );
+    assert!(
+        lr_applied >= 6,
+        "4:2:2 LR-applied population too small ({lr_applied})"
+    );
+}
+
 #[test]
 fn cdef_stream_decodes_byte_identical_and_filters() {
     // The old envelope boundary, now INSIDE the envelope: a REAL stream
