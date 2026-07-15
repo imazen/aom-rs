@@ -2096,7 +2096,56 @@ partition trees + per-leaf mode/tx + per-txb `(eob, tx_type)` + reconstruction:
   (coeff cost tables / rdmult / pre-trellis quantized levels) at block (32,0) of
   the diagonal-ramp-cq32 256x256 case and find which input diverges.
 
-Multi-tile (tile_cols/tile_rows > 1) is the next e2e lift; the oracle
-(`ref_encode_av1_kf_tiles`, committed) and the decoder's `split_tiles` byte
-format are in place, the multi-tile assembler in `obu_assemble` is the
-remaining piece.
+Multi-tile is the next e2e lift (now landed -- see below).
+
+## Multi-tile e2e byte match — 2x1 / 2x2 / 4x1 ASSERTED (2026-07-15, encoder track)
+
+**Multi-tile keyframes now byte-match real aomenc end to end.**
+`encoder_gate_multitile_byte_match` (`crates/aom-encode/tests/encoder_gate_multitile.rs`,
+ASSERTED 11/11): this port's OWN per-tile `pack_tile` +
+`obu_assemble::assemble_multitile_frame_obu_payload` produce a byte-identical
+`OBU_FRAME` payload vs real aomenc encoded with `AV1E_SET_TILE_COLUMNS`/`_ROWS`
+(the committed append-only oracle `ref_encode_av1_kf_tiles`). Commit `6899bea`.
+
+Coverage: tile grids **2x1, 2x2, 4x1** at 128/256/512, cq48 + cq32, flat AND
+boundary-crossing gradients (`hgrad`/`vgrad`, whose value varies ACROSS the
+tile-column/row seam). Each AV1 tile is entropy-INDEPENDENT: the gate gives each
+tile a fresh `KfFrameContext` + `OdEcEnc` and an `SbEncodeEnv` whose
+`tile_row/col_start/end` are the tile's OWN MI bounds (from the parsed header's
+`col/row_start_sb`), so intra prediction / tx-size context / the RD search treat
+the tile edges as unavailable and never read the adjacent tile's reconstruction.
+The gradient cases specifically prove that isolation -- a cross-tile prediction
+leak would change their coded bytes. New `assemble_multitile_frame_obu_payload`
+appends the `num_tg == 1` tile-group (one `0x00` present-flag+align byte) then
+the per-tile payloads, every tile except the last prefixed by a
+`tile_size_bytes`-byte LE `tile_size_minus_1` (inverse of the decoder's
+`split_tiles`; verified vs `av1/encoder/bitstream.c`: `num_tg==1 -> OBU_FRAME`,
+present flag `= num_tg>1 = 0`).
+
+**HONEST GAP #1 (decoder-owned, blocks multi-tile HEADER serialization):**
+`aom-entropy::write_tile_info` (`crates/aom-entropy/src/header.rs:426-427`)
+HARDCODES the multi-tile tail as `context_update_tile_id = 0` and
+`tile_size_bytes_minus_1 = 3` (`tile_size_bytes = 4`) instead of writing the
+real `p.context_update_tile_id` / `p.tile_size_bytes - 1`. Real aomenc picks the
+minimum tile-size width (1-2 bytes for still images), so re-serializing a
+multi-tile `FrameHeaderObu` does NOT round-trip -- it diverges in the tile_info
+byte(s). `write_tile_info` takes only `&TileInfoHeader`, which doesn't even carry
+those two fields (they live on `FrameHeaderObu`), so it can't be fixed from the
+caller. The multi-tile gate therefore bootstraps the frame-header bytes VERBATIM
+from the real parse (the header is bootstrapped anyway) and asserts only the TILE
+machinery + tile-group assembly. Fix needed in aom-entropy: thread
+`context_update_tile_id` + `tile_size_bytes` into `write_tile_info` and its call
+site (`header.rs:1511`), mirroring libaom's `write_tile_info`
+(`cm->context_update_tile_id`, `cm->tile_size_bytes - 1`).
+
+**HONEST GAP #2 (encoder track, LF-level search on strong filters):** a
+combined-content probe (gradient + hard edges + texture in one frame, task-3's
+"richer content") drives real aomenc to STRONG nonzero loop-filter levels
+(e.g. `[15,6]`/`[16,5]`) where this port's `pick_filter_level` disagrees, even at
+cq60/cq63. The existing `encoder_gate_lf_level_bit_exact_vs_real` only covers the
+AB-probe checkerboard levels (`[8,8]`/`[8,3]`/`[7,16]`); the strong-filter regime
+is unverified. This blocks the combined-in-one-frame content case (its high
+texture also feeds the coeff-trellis gap -> our recon differs -> our LF search
+sees different pixels). Smallest next chunk: extend the LF-level gate to
+strong-filter content (fed real's own reconstruction, as that gate already does)
+and C-trace the first divergent `pick_filter_level` term at a high level.
