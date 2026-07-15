@@ -6,7 +6,11 @@ flags the **winner-mode subsystem** as the "MAJOR structural chunk / first wall"
 a single RD pass to a **two-pass** scheme (a cheap `MODE_EVAL` first pass that collects
 the top-N "winner" candidates, then a full-RD `WINNER_MODE_EVAL` second pass over only
 those winners). The port (`crates/aom-encode`) implements only the single pass and reads
-the `DEFAULT_EVAL` table column, which is a **verified no-op equivalent** through speed 3
+the `DEFAULT_EVAL` table column, which is a **verified no-op equivalent** through speed 2
+[corrected 2026-07-15: was "through speed 3"; §1.4/§5.4 (source-confirmed) show the
+MODE_EVAL-vs-DEFAULT `skip_txfm_level` divergence at speed 3 (`use_skip_flag_prediction=2`
+→ `predict_skip_levels[2]={1,2,1}`), so DEFAULT-column equivalence holds only through
+speed 2; the winner-mode *two-pass* itself stays inert through speed 3]
 and **breaks at speed 4**. This doc turns the C machinery into a concrete porting design.
 
 **Reference:** libaom v3.14.1 (git 03087864), `reference/libaom/av1/encoder/`. Every line
@@ -461,3 +465,122 @@ not the mode enumeration/prune. **[CONFIRMED]**
 `tx_search.rs`, `rd_pick.rs`, `partition_pick.rs`) on 2026-07-15, libaom v3.14.1 git 03087864.
 **[CONFIRMED]** = read in source; **[INFERRED]** = logical consequence. Companion worklist:
 `docs/cpu_used_allintra_sweep_plan.md`.*
+
+---
+
+## Source-verification review (coordinator-dispatched)
+
+Independent re-read of every cited `reference/libaom/av1/encoder/*` line and every named
+port symbol, on 2026-07-15 (libaom v3.14.1 git 03087864). Reference C files are pristine;
+the port files `speed_features.rs`/`tx_search.rs`/`partition_pick.rs` were under concurrent
+edit at review time, so **their line numbers had drifted** (see the note at the end) —
+symbols were verified by name/role, which all hold. **Verdict up front: implementation-ready.**
+Every load-bearing [CONFIRMED] claim checks out; two [INFERRED] claims are upgraded to
+confirmed; two non-plan-critical defects were found (one corrected inline in §0, one a stray
+citation in §2). Nothing the 6-chunk plan depends on is wrong.
+
+### Linchpin (all four winner flags flip together at speed 4; nothing earlier)
+- ✓ `enable_winner_mode_for_coeff_opt=1` — `speed_features.c:502`
+- ✓ `enable_winner_mode_for_use_tx_domain_dist=1` — `:503`
+- ✓ `multi_winner_mode_type=MULTI_WINNER_MODE_DEFAULT` — `:504`
+- ✓ `enable_winner_mode_for_tx_size_srch=1` — `:505`
+- ✓ All four are inside `if (speed >= 4) {` (opens `:471`, closes `:506`) — a single guard.
+- ✓ **Nothing at speed 0-3 sets any of them.** In the allintra setter
+  (`set_allintra_speed_features_framesize_independent`, `:345-616`) the only winner-flag
+  writes are `:502-505` (speed 4), `:524` (speed 5), `:561` (speed 6). A full-file grep of
+  all four flags shows every *other* write is in a different setter: `:863/:889/:948`
+  (`set_good_speed_features_lc_dec_framesize_dependent`, `:619-690`), `:1344/:1345/:1412/:1447/:1497`
+  (`set_good_speed_features_framesize_independent`, non-allintra), `:2046` (REALTIME,
+  `set_rt_speed_features_framesize_independent`, `:1924-2636`). The allintra *framesize-dependent*
+  setter (`:166-344`) writes none. Base zeroing: `init_winner_mode_sf` `:2511-2514`.
+- ✓ ALLINTRA dispatches to the allintra setter — `:2716` (`case ALLINTRA`).
+
+### §1.1 speed-feature timeline table
+- ✓ speed-5 `multi_winner_mode_type=MULTI_WINNER_MODE_FAST` `:524`; speed-6 `=MULTI_WINNER_MODE_OFF` `:561`, `prune_winner_mode_eval_level=1` `:562`, `dc_blk_pred_level=1` `:563`.
+- ✓ `init_winner_mode_sf` zeroes `tx_size_search_level` `:2510`, the three enables `:2511-2513`, `multi_winner_mode_type` `:2514`, `dc_blk_pred_level` `:2515`, `prune_winner_mode_eval_level` `:2517`.
+- ✓ speed-4 scalars: `winner_mode_tx_type_pruning=2` `:488`, `fast_intra_tx_type_search=2` `:489`, `prune_2d_txfm_mode=TX_TYPE_PRUNE_3` `:490`, `prune_tx_type_est_rd=1` `:491`, `perform_coeff_opt=5` `:493`, `tx_domain_dist_thres_level=3` `:494`.
+- ✓ speed-6 scalars: `winner_mode_tx_type_pruning=3` `:551`, `prune_tx_type_est_rd=0` `:552`, `perform_coeff_opt=6` `:555`, `tx_domain_dist_level=3` `:556`.
+- ✓ speed-3 `use_skip_flag_prediction=2` `:459`.
+- ✓ `MULTI_WINNER_MODE_DEFAULT=2` (`speed_features.h:230`; also OFF=0 `:223`, FAST=1 `:226`); `winner_mode_count_allowed = {1,2,3}` (`rdopt_utils.h:237-239`) ⇒ DEFAULT→3 winners, FAST→2, OFF→1. All as claimed.
+
+### §1.2 `tx_size_search_level` stays 0 for allintra (task #7)
+- ✓ base init `=0` `:2510`; **allintra setter never assigns it** (grep: no write anywhere in `:166-616`, covering BOTH the framesize-dependent and -independent allintra setters — the doc cited only `:345-616` but the conclusion is unchanged).
+- ✓ only override `if (!enable_tx_size_search && !use_nonrd) level=3` — `:2726-2728`; tx-size search on by default ⇒ level stays 0.
+- ✓ `:2047`'s `level=1` is inside the REALTIME setter (`:1924-2636`), not allintra.
+- ✓ selected via `tx_size_search_methods[tx_size_search_level]` `:2822-2823`; row 0 = `{USE_FULL_RD, USE_LARGESTALL, USE_FULL_RD}` `:107`.
+
+### §1.3 eval-column tables + which speed-4 values are selected
+- ✓ `MODE_EVAL_TYPES` enum `{DEFAULT_EVAL=0, MODE_EVAL=1, WINNER_MODE_EVAL=2}` — `rd.h:92-102`.
+- ✓ `coeff_opt_thresholds` row 5 (`perform_coeff_opt=5`) = `{{864,97},{142,16},{UINT_MAX,UINT_MAX}}` — `:94`; selected `:2807-2808` (assert `<9` `:2805`).
+- ✓ `tx_domain_dist_thresholds` row 3 = `{0,0,0}` — `:58`; selected by `tx_domain_dist_thres_level` `:2794-2795`.
+- ✓ `tx_domain_dist_types` row 1 (`tx_domain_dist_level=1`, unchanged since speed 1 `:416`) = `{1,2,0}` — `:73`; selected `:2800-2801`.
+- ✓ `predict_skip_levels` row 2 (`use_skip_flag_prediction=2`) = `{1,2,1}` — `:121`; selected `:2814-2816` (assert `<3`).
+- ✓ `predict_dc_levels` row 0 (`dc_blk_pred_level=0` until speed 6) = `{0,0,0}` — `:137`; selected `:2825-2826`.
+- ✓ MODE_EVAL cheapenings from tx_sf scalars: `use_default_intra_tx_type=(fast_intra_tx_type_search==2)` `rdopt_utils.h:579-581`; `set_tx_type_prune(...,pruning,0)` `:606-608` with `prune_mode[1][0]=TX_TYPE_PRUNE_4` `:508`. WINNER_MODE_EVAL resets `use_default_intra_tx_type=0` `:612` and uses `prune_mode[1][1]=TX_TYPE_PRUNE_0` `:635-637`/`:508`.
+
+### §1.4 no-op at speed 0-3, and where equivalence cracks
+- ✓ `set_mode_eval_params(MODE_EVAL)` called at every speed — `intra_mode_search.c:1515`.
+- ✓ `set_tx_size_search_method` inits to `DEFAULT_EVAL`, overrides only `if (enable_winner_mode_for_tx_size_srch)` — `rdopt_utils.h:483-492`.
+- ✓ `set_tx_domain_dist_params` returns DEFAULT pair `if (!enable_winner_mode_for_tx_domain_dist)` — `:524-530`. (Minor: an earlier `use_qm_dist_metric` early-return `:516-522` precedes this; inert on the QM-off allintra primary — doesn't affect the no-op invariant.)
+- ✓ `get_rd_opt_coeff_thresh` returns DEFAULT pair `if (!enable_winner_mode_for_coeff_opt)` — `rd.h:317-321`.
+- ✓ `set_tx_type_prune` returns after the default `prune_2d_txfm_mode` `if (!winner_mode_tx_type_pruning)` — `rdopt_utils.h:503`.
+- ✓ `is_winner_mode_processing_enabled` intra branch requires `fast_intra_tx_type_search` `:462` **or** `enable_winner_mode_for_coeff_opt` `:469` **or** `enable_winner_mode_for_tx_size_srch` `:473`. All 0 at speed ≤3 (`fast_intra_tx_type_search` base `=0` `:2461`) ⇒ returns 0 ⇒ 2nd pass skipped (`intra_mode_search.c:1730`). `store_winner_mode_stats` returns immediately when OFF `:688`.
+- ✓ ungated raw-column reads `skip_txfm_level`/`predict_dc_level` — `:586-589`. No-op at speed 0-2 because `use_skip_flag_prediction` base `=1` `:2459` → `predict_skip_levels[1]={1,1,1}` (uniform).
+- ✓ **Cracks at speed 3**: `use_skip_flag_prediction=2` `:459` → `predict_skip_levels[2]={1,2,1}` ⇒ MODE_EVAL `skip_txfm_level=2` ≠ DEFAULT `1`. This is what makes the §0 "through speed 3" phrasing wrong — **corrected inline to "through speed 2."**
+
+### §2 call flow (KEY intra)
+- ✓ `av1_rd_pick_intra_mode_sb` — `rdopt.c:3636`.
+- ✓ luma `av1_rd_pick_intra_sby_mode` call `:3655` (fn `intra_mode_search.c:1468`); `set_mode_eval_params(DEFAULT_EVAL)` `:3659`; chroma `av1_rd_pick_intra_sbuv_mode` `:3670` — chroma runs at DEFAULT_EVAL, no winner two-pass. Two-pass is contained in the luma fn. ✓
+- ✗ **Citation off (non-critical, [INFERRED] side-note):** the doc says "other WINNER_MODE_EVAL sites — `rdopt.c:3883`, `:4456`". Only **one** WINNER_MODE_EVAL site exists in `rdopt.c` — `:3883` (`refine_winner_mode_tx`, `:3866-`, inter path, past `rd_pick_skip_mode` `:3705`). `:4456` is a `set_mode_eval_params(MODE_EVAL)` call (inter mode-eval loop), **not** WINNER_MODE_EVAL. The doc's conclusion (these are inter-path, not on the KEY intra path) is unaffected and independently established by the `:3636-3670` flow.
+
+### §2.1 luma two-pass — line-by-line all ✓ (`intra_mode_search.c`)
+- ✓ setup `:1499-1543` (`set_mode_eval_params(MODE_EVAL)` `:1515`; `max_winner_mode_count` `:1518-1519`; `zero_winner_mode_stats`+count=0 `:1520-1521`).
+- ✓ pass-1 loop `:1545-1661`: `set_y_mode_and_delta_angle` `:1547`; `intra_model_rd` @`min(TX_32X32,max)` `:1601-1603`; `prune_intra_y_mode` `:1608-1611`; `av1_pick_uniform_tx_size_type_yrd` `:1617`; RD + ALLINTRA variance multiply `:1631-1639`; `intra_modes_rd_cost[...]` `:1641`; `store_winner_mode_stats` `:1646-1648`; strict-`<` best update + `tx_type_map` snapshot `:1649-1660`.
+- ✓ post-loop `:1663-1684` (palette, filter-intra, `if(!beat_best_rd) return INT64_MAX`).
+- ✓ pass-2 multi-winner `:1689-1725` (`is_winner_mode_processing_enabled` `:1698`, `set_mode_eval_params(WINNER_MODE_EVAL)` `:1707`, `intra_block_yrd` `:1713`); single-winner `:1726-1737`; tail `*mbmi=best_mbmi`+copy `:1738-1740`.
+- ✓ `LUMA_MODE_COUNT = 61` — `intra_mode_search.h:313` (the "all 61 luma candidates" figure).
+
+### §2.2 `store_winner_mode_stats` (`rdopt_utils.h:679-718`)
+- ✓ OFF-return `:688`; `INT64_MAX` return `:690`; **strict `>`** first-worse scan `:701-702`; drop-if-full `:704-706`; `memmove` `:707-712`; write `{mbmi,rd,mode_index}` `:715-717`. Tie-break = first-seen wins (as claimed).
+
+### §2.3 `intra_block_yrd` (`intra_mode_search.c:1188-1228`)
+- ✓ `ref_best_rd = use_rd_based_breakout_for_intra_tx_search ? *best_rd : INT64_MAX` `:1200-1202` (flag true @speed≥3 `speed_features.c:460`); tx call `:1203`; strict-`<` update + snapshot `:1217-1224`.
+
+### §3 port structure — every named symbol EXISTS (names/roles correct)
+- ✓ `partition_pick.rs`: `leaf_pick_sb_modes`, `IntraSbySearchCfg{…}` build, `pol: cfg.pol`.
+- ✓ `rd_pick.rs`: `rd_pick_intra_mode_sb`, `winner_tx_type_map`.
+- ✓ `intra_rd.rs`: `rd_pick_intra_sby_mode_y`, `prune_intra_y_mode`, `get_model_rd_index_for_pruning`, `IntraSbyBest`, `IntraSbyOutcome`, `intra_rd_variance_factor`, `IntraSbySearchCfg` (struct def), the `store_winner_mode_stats: hard no-op at speed 0` marker comment.
+- ✓ `tx_search.rs`: `pick_uniform_tx_size_type_yrd_intra`, `choose_tx_size_type_from_rd_intra`, `uniform_txfm_yrd_intra`, `TxTypeSearchPolicy`, `TxfmYrdEnv`, and the "`USE_LARGESTALL` … out of scope" docstring.
+- ✓ `speed_features.rs`: `DEFAULT_EVAL=0`, `TX_DOMAIN_DIST_THRESHOLDS`/`TX_DOMAIN_DIST_TYPES`/`COEFF_OPT_THRESHOLDS` (shapes `[[u32;3];4]`/`[[u32;3];4]`/`[[[u32;2];3];9]` match C), `tx_type_search_policy` reading `[DEFAULT_EVAL]` at the three sites.
+- ✓ Correctly **absent** (all documented as future chunk work, not misnamed): `TX_SIZE_SEARCH_METHODS`, `PREDICT_SKIP_LEVELS`, `PREDICT_DC_LEVELS`, the `tx_size_search_level`/`use_rd_based_breakout_for_intra_tx_search` SpeedFeatures fields, `WinnerModeStat`, `store_winner_mode_stats`.
+
+### §4 six-chunk plan — every file/fn/struct/table named is real
+- ✓ chunk 0 targets `speed_features.rs` + its test module (`#[cfg(test)] mod tests`, `#[test]`s present); tables to port named correctly.
+- ✓ chunk 1 policy builders extend the real `tx_type_search_policy`/`TxTypeSearchPolicy`.
+- ✓ chunk 2 `USE_LARGESTALL` arm lands in real `pick_uniform_tx_size_type_yrd_intra`, calling real `uniform_txfm_yrd_intra`.
+- ✓ chunk 3 `WinnerModeStat`+`store_winner_mode_stats` into `intra_rd.rs` (new).
+- ✓ chunk 4 `is_winner_mode_processing_enabled` port + winner re-eval, threading real `IntraSbySearchCfg`.
+- ✓ chunk 5 real `partition_pick.rs` leaf policy selection + speed-4 scalars; chunk 6 `speed_features.rs`.
+- ✓ dependency note (speed-3 `use_skip_flag_prediction=2` is a prerequisite) is consistent with the §5.4/§1.4 finding.
+
+### §5 risks/subtleties
+- ✓ 5.1 strict-`>` tie-break `rdopt_utils.h:702`.
+- ✓ 5.2 `best_rd` carried into pass 2; `ref_best_rd` `intra_mode_search.c:1200-1202`.
+- ✓ 5.3 pass-2 re-eval overwrites best/`tx_type_map` `:1217-1224`.
+- ✓ 5.4 **[INFERRED → CONFIRMED]** the table divergence at speed 3 is real AND the port does not model `skip_txfm_level` (`PREDICT_SKIP_LEVELS` absent from `speed_features.rs`; no `skip_txfm_level` field). Latent speed-3 gap as the doc warns.
+- ✓ 5.5 the TX64-disable interaction exists in the port (`is_tx64` handling + `enable_tx64` init-depth gating in `tx_search.rs`).
+- ✓ 5.6 variance factor applied only in pass 1 (`intra_mode_search.c:1637-1639`) and **absent** from `intra_block_yrd` (`:1216` is a plain `RDCOST`, no multiply) — port must not re-apply it in pass 2.
+- ✓ 5.7 `reset_mb_rd_record` on eval-stage change `rdopt_utils.h:645-646` [CONFIRMED]; the port's residue-hash path is inter-only (its own docstring says so) ⇒ inert for intra [INFERRED → CONFIRMED].
+- ✓ 5.8 `prune_intra_y_mode` runs before the tx search and is eval-column-independent — blast radius confined to the tx-search policy/collection/re-eval.
+
+### Defects found
+1. **§0 internal inconsistency (corrected inline, plan-adjacent):** "no-op equivalent through speed 3" contradicted the doc's own source-confirmed §1.4/§5.4 ("only true through speed 2"). Root: the MODE_EVAL vs DEFAULT `skip_txfm_level` split at `use_skip_flag_prediction=2` (speed 3). Corrected §0 to "through speed 2" with a `[corrected 2026-07-15]` note; the §4 invariant (already scoped to the "speed 0-2 baseline") and the dependency note were already right, so the plan itself needed no change.
+2. **§2 stray citation (non-critical):** `rdopt.c:4456` is a `MODE_EVAL` call, not a second `WINNER_MODE_EVAL` site (the only one is `:3883`). Left in place as a review note — the doc's conclusion is unaffected.
+
+### Note on port line numbers
+`tx_search.rs`, `speed_features.rs`, and `partition_pick.rs` were being edited by other
+agents during this review, so several port line-cites in §3/§5 (e.g. `tx_search.rs:1410/:1341/:1407/:919`)
+had drifted by roughly +19…+24 lines from the current working tree. Every symbol was
+re-located by name and is present with the stated role; the drift is cosmetic and will
+re-baseline once the concurrent edits land. Reference C cites (the load-bearing ones) were
+exact.
