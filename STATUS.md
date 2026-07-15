@@ -1987,3 +1987,61 @@ None of the four project gates (full-corpus correctness, ≤1.20× perf, full
 coverage, zenavif parity) is satisfied yet; the machinery that makes each
 mechanically checkable is in place and every landed module is byte-exact vs
 C within it.
+
+## Multi-SB scale e2e byte match — 256x256 + 512x512 ASSERTED (2026-07-15, encoder track)
+
+**Every prior end-to-end gate was a single 64x64 superblock.** This lands the
+FIRST multi-superblock byte-match proof: `encoder_gate_e2e_multi_sb_scale`
+(`crates/aom-encode/tests/encoder_gate_e2e_byte_match.rs`) drives the port's
+own `rd_pick_partition_real` + `pack_tile` pipeline over **256x256 (16 SB64)**
+and **512x512 (64 SB64)** frames and asserts the assembled `OBU_FRAME` payload
+is byte-identical to real aomenc. This exercises, for the first time e2e, the
+multi-SB path: cross-SB above/left neighbour-context threading, one adapting
+CDF shared across every SB of the tile, and the deblock/LF-level search over
+interior SB edges. Commit `ac24458` (gate + localizer), `3961cae` (sharpened
+localizer).
+
+**Coverage: 12 of 16 swept (size, content, cq) cells byte-match, ASSERTED.**
+The swept matrix is {256x256, 512x512} x {flat, two-tone L/R split, vertical
+gradient, diagonal ramp} x {cq32, cq48}. Byte-matching (asserted): flat 256/512
+cq32+cq48 (pure structural proof), two-tone-split 256/512 cq32+cq48 (hard
+edges), vertical-gradient 256/512 (both cq at 512, cq48 at 256), diagonal-ramp
+256 cq48. Single-tile, mono, ALLINTRA, speed 0; frame header bootstrapped from
+the real parse (same boundary as the 64x64 gates). STRIDE in
+`attempt_case_content_uv` widened `320 -> 320.max(w+4)` so 512-wide frames fit;
+all <=316px cases keep stride 320 and are byte-for-byte unchanged (stride is
+buffer padding only). Existing gates stay green: `encoder_gate_e2e_attempt`
+3/3, `_textured_attempt` 7/7, `_ab_attempt` 4/4, `lf_level_bit_exact_vs_real`.
+
+**Honest gap — the 4 excluded cells (steepest content at higher quality) and
+their EXACT localized term.** The smooth diagonal ramp (energy on both axes) at
+cq32 (256 + 512) and cq48 (512), plus the steep 256px vertical gradient at
+cq32, diverge in the coded tile data. `decode_diff_multisb.rs` (a committed
+diagnostic) decodes BOTH bitstreams with the bit-exact decoder and compares
+partition trees + per-leaf mode/tx + per-txb `(eob, tx_type)` + reconstruction:
+
+- It is NOT a structural multi-SB bug — FLAT 256x256/512x512, which exercises
+  the identical cross-SB structure, byte-matches; only real-content coefficient
+  competition diverges.
+- Every diverging block's partition, bsize, intra Y-mode, angle-delta,
+  filter-intra flag, tx_size and uv_mode MATCH real aomenc exactly. The
+  divergence is confined to the **coefficient-optimization (`av1_optimize_b`
+  trellis) layer**, two flavors:
+  - **code-vs-skip** (diagonal ramp, block mi=(32,0) BLOCK_64X64 DCT_DCT): real
+    codes `eob=1` (a DC coeff), ours codes `eob=0` (txb-skip), same tx_type,
+    reconstruction IDENTICAL -> a rate-only trellis tie-break on a
+    zero-recon-effect DC.
+  - **coefficient-level** (vertical gradient): partition+mode+tx_size+eob+
+    tx_type all identical, reconstruction diverges at luma (row=0,col=66)
+    real=81 ours=80 -> a trellis level choice, off-by-one.
+- Why cq48 matches but cq32 diverges: at heavier quant (qindex 192) there are no
+  marginal coefficients for the trellis to tie-break on; at qindex 128 there
+  are. The `optimize_txb` KERNEL is already bit-exact vs C given identical
+  inputs, so the smallest next chunk is to C-oracle-trace the trellis INPUTS
+  (coeff cost tables / rdmult / pre-trellis quantized levels) at block (32,0) of
+  the diagonal-ramp-cq32 256x256 case and find which input diverges.
+
+Multi-tile (tile_cols/tile_rows > 1) is the next e2e lift; the oracle
+(`ref_encode_av1_kf_tiles`, committed) and the decoder's `split_tiles` byte
+format are in place, the multi-tile assembler in `obu_assemble` is the
+remaining piece.
