@@ -199,7 +199,19 @@ fn image_md5(
         }
     };
     push_plane(&mut m, y, w, h);
-    if !monochrome {
+    if monochrome {
+        // libaom emits a decoded monochrome frame as I420 with the two chroma
+        // planes filled with the neutral value 1<<(bd-1) at 4:2:0, and the
+        // shipped golden .md5 (named "...-WxH-NNNN.i420") hashes exactly that
+        // Y + neutral-U + neutral-V image. The C decode shim returns EMPTY
+        // chroma for monochrome, so synthesise the same neutral planes here to
+        // reproduce the golden (the port likewise carries no chroma, so this
+        // affects only the golden-integrity check, not the port-vs-C compare).
+        let (cw, ch) = ((w + 1) >> 1, (h + 1) >> 1);
+        let neutral = vec![1u16 << (bd - 1); cw * ch];
+        push_plane(&mut m, &neutral, cw, ch);
+        push_plane(&mut m, &neutral, cw, ch);
+    } else {
         let cw = (w + ss_x) >> ss_x;
         let ch = (h + ss_y) >> ss_y;
         push_plane(&mut m, u, cw, ch);
@@ -267,13 +279,18 @@ fn scope_for(name: &str) -> Option<Scope> {
         Some(Scope::FirstKey(1)) // KEY,INTER — frame 0 only
     } else if name.contains("-01-size-") {
         Some(Scope::FirstKey(1)) // KEY,INTER — frame 0 only
+    } else if name.contains("-23-film_grain") {
+        Some(Scope::FirstKey(1)) // KEY,INTER — frame 0 (film grain synthesised on output)
+    } else if name.contains("-24-monochrome") {
+        Some(Scope::FirstKey(1)) // KEY,INTER — frame 0 (monochrome: Y plane only)
+    } else if name.contains("-04-cdfupdate") {
+        // The stream USES cross-frame CDF adaptation (frames >=1 carry state the
+        // stateless single-frame decoder can't reproduce), but frame 0 is an
+        // ordinary KEY frame decoded from default CDFs — single-frame in scope.
+        Some(Scope::FirstKey(1))
     } else if name.contains("-05-mv") || name.contains("-06-mfmv") || name.contains("-22-svc") {
         Some(Scope::OutOfEnvelope(
             "inter: motion compensation / multi-ref",
-        ))
-    } else if name.contains("-04-cdfupdate") {
-        Some(Scope::OutOfEnvelope(
-            "cross-frame CDF carry (stateless single-frame decode)",
         ))
     } else {
         None
@@ -405,9 +422,11 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
     let mut vectors_in_scope = 0usize;
     let mut skipped: Vec<String> = Vec::new();
     // Coverage witnesses (anti-vacuous: the corpus must genuinely exercise
-    // high bit depth, CDEF, loop restoration, intrabc, and odd frame sizes).
+    // high bit depth, CDEF, loop restoration, intrabc, odd frame sizes,
+    // monochrome, and film-grain synthesis).
     let (mut saw_bd10, mut saw_cdef, mut saw_lr, mut saw_intrabc) = (false, false, false, false);
     let mut saw_odd_size = false;
+    let (mut saw_monochrome, mut saw_film_grain) = (false, false);
 
     for name in &names {
         let scope = match scope_for(name) {
@@ -545,6 +564,13 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
             saw_lr |= rust.lr_frame_restoration_type.iter().any(|&t| t != 0);
             saw_intrabc |= name.contains("intrabc");
             saw_odd_size |= w % 8 != 0 || h % 8 != 0;
+            saw_monochrome |= rust.monochrome;
+            // Name-based (like intrabc): the golden for the -23-film_grain frame
+            // is the grain-APPLIED md5 -- verified distinct from `aomdec
+            // --skip-film-grain` (9fc2c754.. vs d10c5738.. on b8 frame 0) -- so
+            // the byte-match above IS the functional grain gate; this witness
+            // just proves the vector was reached, not silently absent.
+            saw_film_grain |= name.contains("film_grain");
 
             frames_checked += 1;
             report.push_str(&format!("  OK  {where_}  ({w}x{h} bd{bd})\n"));
@@ -599,5 +625,14 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
             saw_odd_size,
             "size vectors present but no non-8-multiple frame verified"
         );
+    }
+    if has("-24-monochrome") {
+        assert!(
+            saw_monochrome,
+            "monochrome vector present but no monochrome frame verified"
+        );
+    }
+    if has("film_grain") {
+        assert!(saw_film_grain, "film-grain vector present but not verified");
     }
 }

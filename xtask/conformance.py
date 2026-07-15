@@ -42,23 +42,27 @@ DATA_DIR = os.path.join(ROOT, "conformance", "data")
 OUT_JSON = os.path.join(ROOT, "conformance", "vectors.json")
 AOMDEC = os.path.join(REF, "build", "aomdec")
 
-# Feature-family -> coarse decode scope. "intra" families decode with only
-# intra/KEY tooling (in scope for the current decoder); "inter" needs motion
+# Feature-family -> coarse decode scope. "intra" families expose a leading
+# KEY/intra frame the current decoder reproduces byte-exact (the test's
+# `scope_for` bounds mixed streams to that frame); "inter" needs motion
 # compensation / multi-ref (not yet ported); "special" needs an extra tool
-# (superres, film grain, monochrome, mid-stream CDF carry).
+# for its SHOWN frame (superres upscale/downscale) so even frame 0 is out.
+# film-grain / monochrome / cdf-update carry an ordinary KEY frame 0 that IS
+# in intra scope (grain synthesis + monochrome neutral chroma are byte-locked;
+# cross-frame CDF carry only affects frames >=1, which stay out of scope).
 FAMILY_SCOPE = {
     "00-quantizer": "intra",     # per-qindex KEY sweep
     "01-size": "intra",          # frame-dimension conformance (intra frames)
     "02-allintra": "intra",      # AOM_USAGE_ALL_INTRA -- our primary target
     "16-intra": "intra",         # intra-only, incl. intrabc extreme-dv
-    "03-sizeup": "special",      # superres upscale
-    "03-sizedown": "special",    # superres downscale
-    "04-cdfupdate": "special",   # cross-frame CDF carry
+    "04-cdfupdate": "intra",     # frame 0 KEY (default CDFs); carry only >=1
+    "23-film": "intra",          # frame 0 KEY with film-grain synthesis applied
+    "24-monochrome": "intra",    # frame 0 KEY, monochrome (Y-only + neutral UV)
+    "03-sizeup": "special",      # superres upscale (shown frame needs superres)
+    "03-sizedown": "special",    # superres downscale (shown frame needs superres)
     "05-mv": "inter",
     "06-mfmv": "inter",
     "22-svc": "inter",
-    "23-film": "special",        # film grain synthesis
-    "24-monochrome": "special",  # monochrome (no chroma planes)
 }
 
 
