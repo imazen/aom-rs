@@ -51,6 +51,9 @@ const SB_MI: i32 = 16; // 64px / 4
 const MI_SIZE_WIDE_B: [usize; 22] = [
     1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
 ];
+const MI_SIZE_HIGH_B: [usize; 22] = [
+    1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+];
 
 const PARTITION_NAMES: [&str; 10] = [
     "NONE", "HORZ", "VERT", "SPLIT", "HORZ_A", "HORZ_B", "VERT_A", "VERT_B", "HORZ_4", "VERT_4",
@@ -550,6 +553,36 @@ fn localize_real(
                     ob.txbs, ob.txbs_uv
                 ));
                 break;
+            }
+        }
+    }
+
+    // Diagnostic: when the partition tree flips, dump the real vs port leaves
+    // covering that node's mi extent, so the flipped sub-partition's per-leaf
+    // modes/eobs are visible (e.g. C's HORZ_4 strips vs the port's SPLIT leaves).
+    if let Some((dr, dc, dbs, rp, op)) = partition_div {
+        let (nw, nh) = (MI_SIZE_WIDE_B[dbs] as i32, MI_SIZE_HIGH_B[dbs] as i32);
+        eprintln!(
+            "  --- divergent node ({dr},{dc}) bsize={dbs} {nw}x{nh}mi: real={} vs ours={} ---",
+            PARTITION_NAMES[rp as usize], PARTITION_NAMES[op as usize]
+        );
+        for (tag, blocks) in [("real", &t_real.blocks), ("ours", &t_ours.blocks)] {
+            for b in blocks.iter().filter(|b| {
+                b.mi_row >= dr && b.mi_row < dr + nh && b.mi_col >= dc && b.mi_col < dc + nw
+            }) {
+                eprintln!(
+                    "    {tag} ({},{}) bsize={} part={} y_mode={} adly={} use_fi={} tx={} uv_mode={} eobs={:?}",
+                    b.mi_row,
+                    b.mi_col,
+                    b.bsize,
+                    b.partition,
+                    b.info.y_mode,
+                    b.info.angle_delta_y,
+                    b.info.use_filter_intra,
+                    b.tx_size,
+                    b.info.uv_mode,
+                    b.txbs.iter().map(|t| t.0).collect::<Vec<_>>()
+                );
             }
         }
     }
