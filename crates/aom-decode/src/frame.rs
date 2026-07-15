@@ -55,11 +55,13 @@
 //! - deblocking IS applied ([`aom_loopfilter::frame::loop_filter_frame`],
 //!   C-diffed against the real `av1_filter_block_plane_vert/horz` walk) —
 //!   any filter levels, sharpness, mode/ref deltas, and per-block delta-lf
-//!   are in the envelope. ONE exception: 4:2:2 streams with nonzero CHROMA
-//!   levels are rejected — libaom's chroma path reads
-//!   `max_txsize_rect_lookup[BLOCK_INVALID]` out of bounds for tall blocks
-//!   at `ss = (1,0)` (av1_ss_size_lookup, common_data.c:17), which is not
-//!   portable behavior. 4:2:2 luma-only deblocking is in the envelope.
+//!   are in the envelope, for ALL subsampling modes INCLUDING 4:2:2 chroma.
+//!   (Past sessions rejected 4:2:2 nonzero-chroma-level deblock believing
+//!   libaom's chroma path reads `max_txsize_rect_lookup[BLOCK_INVALID]` OOB
+//!   for tall blocks at `ss = (1,0)`; VERIFIED FALSE — the portrait luma
+//!   sizes that map to BLOCK_INVALID never reach the chroma loop filter for
+//!   a conformant 4:2:2 stream, so that branch is dead. 4:2:2 chroma deblock
+//!   is byte-exact vs the C decoder — see real_bitstream.rs's 4:2:2 gate.)
 //! - segmentation IS in the envelope: per-block segment ids (spatial-pred
 //!   symbols over the current-frame segment map), `SEG_LVL_ALT_Q` per-block
 //!   dequant shifts (composing with delta-q), `SEG_LVL_SKIP` forced skips,
@@ -582,19 +584,15 @@ fn parse_frame_header(
             return Err("mixed lossless/non-lossless segments (out of envelope)".into());
         }
     }
-    let lf = &p.loopfilter;
-    if c.subsampling_x == 1
-        && c.subsampling_y == 0
-        && (lf.filter_level_u != 0 || lf.filter_level_v != 0)
-    {
-        // libaom's 4:2:2 chroma deblock path indexes
-        // max_txsize_rect_lookup[BLOCK_INVALID] out of bounds for tall
-        // blocks; not portable — see aom-loopfilter/tests/lf_apply_diff.rs.
-        return Err(format!(
-            "4:2:2 chroma deblocking (levels u={} v={}) out of envelope",
-            lf.filter_level_u, lf.filter_level_v
-        ));
-    }
+    // 4:2:2 chroma deblocking IS in the envelope. libaom's
+    // `av1_ss_size_lookup[bsize][1][0]` marks the portrait (height>width)
+    // luma sizes BLOCK_INVALID — the ss_x-only chroma-plane-size that
+    // `av1_get_max_uv_txsize` would index `max_txsize_rect_lookup` with — but
+    // those portrait sizes never reach the chroma loop filter for a conformant
+    // 4:2:2 stream (they are never chroma-reference blocks; measured: zero OOB
+    // hits across a wide encode/decode sweep — see the 4:2:2 deblock gate in
+    // real_bitstream.rs). So the BLOCK_INVALID branch is dead, and the wide/
+    // square chroma tx sizes that DO occur deblock byte-exact vs the C decoder.
 
     let tile_data_off = if is_obu_frame {
         rb.byte_align();

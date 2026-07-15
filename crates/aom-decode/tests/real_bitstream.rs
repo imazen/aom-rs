@@ -35,10 +35,12 @@
 //!   lossless / 128x128 SBs (decode_frame_obus hard-errors).
 //! - sizes include non-multiple-of-SB (96x80) and non-multiple-of-8 (100x76,
 //!   the decoder's 8px-aligned mi grid cropped back).
-//! - 4:2:0 + 4:4:4 + monochrome, bit depths 8 and 10. (4:2:2 with nonzero
-//!   CHROMA deblock levels is the one rejected combination — libaom's
-//!   4:2:2 chroma path reads max_txsize_rect_lookup[BLOCK_INVALID] out of
-//!   bounds; see `deblocked_422_chroma_is_rejected`.)
+//! - 4:2:0 + 4:4:4 + monochrome + 4:2:2, bit depths 8 and 10. 4:2:2 chroma
+//!   deblocking (nonzero U/V filter levels) IS in the envelope and decodes
+//!   byte-identical to C — see `deblocked_422_chroma_byte_identical_to_c`
+//!   (the past "unportable BLOCK_INVALID OOB" claim was verified false: the
+//!   portrait luma sizes that map to BLOCK_INVALID are never chroma-reference
+//!   blocks, so the OOB branch is dead for conformant 4:2:2 streams).
 
 use aom_decode::frame::{
     apply_cdef, apply_deblock, apply_restoration, decode_frame_obus, decode_frame_obus_prefilter,
@@ -139,7 +141,10 @@ struct RunFacts {
     tile_rows: usize,
 }
 
-fn run_config(cfg: &Cfg) -> RunFacts {
+/// Reproduce the REAL encoder bytes for a config (deterministic seed from
+/// (w,h,bd,cq)). Factored out of `run_config` so gates that need to recompose
+/// the decode pipeline from the SAME bytes can't drift from the gated encode.
+fn encode_stream(cfg: &Cfg) -> Vec<u8> {
     let (cw, ch) = if cfg.mono {
         (0, 0)
     } else {
@@ -158,7 +163,7 @@ fn run_config(cfg: &Cfg) -> RunFacts {
     // routes through the multi-tile oracle entry point (--tile-columns/-rows,
     // sb128 controllable too); else sb128 routes through the SB128 oracle
     // entry point (--sb-size=128); otherwise --sb-size=64 as before.
-    let bytes = if cfg.tile_columns_log2 != 0 || cfg.tile_rows_log2 != 0 {
+    if cfg.tile_columns_log2 != 0 || cfg.tile_rows_log2 != 0 {
         c::ref_encode_av1_kf_tiles(
             &y,
             &u,
@@ -219,7 +224,11 @@ fn run_config(cfg: &Cfg) -> RunFacts {
             cfg.aq,
             cfg.two_pass,
         )
-    };
+    }
+}
+
+fn run_config(cfg: &Cfg) -> RunFacts {
+    let bytes = encode_stream(cfg);
 
     // Rust decode (hard-errors outside the envelope — that FAILS the test).
     let rust = decode_frame_obus(&bytes).unwrap_or_else(|e| {
@@ -1025,44 +1034,183 @@ fn high_q_deblocked_stream_decodes_byte_identical() {
 }
 
 #[test]
-fn deblocked_422_chroma_is_rejected_not_misdecoded() {
-    // 4:2:2 with nonzero CHROMA deblock levels is the one deblock combination
-    // out of envelope (libaom's 4:2:2 chroma path indexes
-    // max_txsize_rect_lookup[BLOCK_INVALID] out of bounds for tall blocks —
-    // not portable). Luma-only or level-0 4:2:2 must still decode identical.
-    // This config picks u=16 v=17 (probed 2026-07-14) — the rejection arm.
-    let (w, h, bd) = (96usize, 80usize, 10);
-    let cq = 44;
-    let seed = ((w as u64) << 32) ^ ((h as u64) << 16) ^ ((bd as u64) << 8) ^ cq as u64;
-    let y = gen_plane(w, h, bd, seed ^ 0x1111, false);
-    let u = gen_plane(w / 2, h, bd, seed ^ 0x2222, true);
-    let v = gen_plane(w / 2, h, bd, seed ^ 0x3333, true);
-    let bytes = c::ref_encode_av1_kf(
-        &y, &u, &v, w, h, bd, false, 1, 0, cq, 0, false, false, 0, 0, false,
+fn deblocked_422_chroma_nonzero_levels_byte_identical() {
+    // The exact config a past session flagged as the "rejection arm"
+    // (96x80 bd10 cq44, chroma levels u=16 v=17 — both NONZERO). It is NOT
+    // out of envelope: it decodes BYTE-IDENTICAL to the C decoder. This pins
+    // the single stream the old rejection was built around; the broad
+    // coverage lives in `deblocked_422_chroma_byte_identical_to_c`.
+    let cfg = Cfg {
+        w: 96,
+        h: 80,
+        bd: 10,
+        mono: false,
+        ss: (1, 0),
+        cq: 44,
+        cdef: false,
+        restoration: false,
+        usage: 0,
+        aq: 0,
+        two_pass: false,
+        sb128: false,
+        tile_columns_log2: 0,
+        tile_rows_log2: 0,
+    };
+    // run_config asserts full-frame Y/U/V byte-identity vs the C decoder.
+    let f = run_config(&cfg);
+    println!("422 nonzero-chroma arm: filter_level = {:?}", f.filter_level);
+    assert!(
+        f.filter_level[2] != 0 && f.filter_level[3] != 0,
+        "expected NONZERO U and V chroma deblock levels on this arm, got {:?}",
+        f.filter_level
     );
-    match decode_frame_obus(&bytes) {
-        Err(e) => {
-            println!("422 arm: REJECTED ({e})");
-            assert!(
-                e.contains("4:2:2 chroma deblocking"),
-                "expected the 4:2:2 chroma-deblock envelope error, got: {e}"
-            );
+}
+
+// ---- 4:2:2 CHROMA DEBLOCK GATE ------------------------------------------
+//
+// 4:2:2 (subsampling_x=1, subsampling_y=0) chroma deblocking decodes
+// BYTE-IDENTICAL to the REAL C decoder. Past sessions rejected this
+// combination believing libaom's chroma path reads
+// `max_txsize_rect_lookup[BLOCK_INVALID]` out of bounds "for tall blocks" —
+// VERIFIED FALSE. `av1_ss_size_lookup[bsize][1][0]` does mark the portrait
+// (height>width) luma sizes BLOCK_INVALID, but those bsizes are never
+// chroma-reference blocks in a conformant 4:2:2 stream, so the chroma loop
+// filter never queries them (measured: zero OOB hits across a wide
+// encode+decode sweep of the real libaom decoder). The wide/square chroma
+// tx sizes that DO occur deblock byte-exact.
+//
+// This gate is deliberately ANTI-VACUOUS. For each of a grid of real 4:2:2
+// KEY streams (8- and 10-bit, several sizes INCLUDING non-8-multiple widths
+// so the odd chroma half-width edge is exercised, cq chosen so the encoder
+// picks nonzero chroma filter levels) it asserts, via `run_config`, that the
+// full decode is byte-identical to C on Y/U/V. Then it independently proves
+// the chroma deblock stage is (a) ACTIVE — nonzero U/V filter levels — and
+// (b) EFFECTIVE — recomposing the decode WITHOUT the deblock stage yields
+// DIFFERENT chroma pixels — and that the chroma actually carries AC content
+// (non-flat plane). Floors require >= 8 such streams across both bit depths.
+#[test]
+fn deblocked_422_chroma_byte_identical_to_c() {
+    // (bd, w, h, cq). Widths 130 and 100 are non-8-multiple -> chroma widths
+    // 65 (ODD) and 50, exercising the half-width chroma edge stepping. cq
+    // chosen from the probed levels: bd10 reaches nonzero chroma levels from
+    // ~cq32 up; bd8 needs the high-cq arms (~cq56-60).
+    let grid: &[(i32, usize, usize, i32)] = &[
+        // 10-bit — chroma deblock active across most of the range.
+        (10, 96, 80, 40),
+        (10, 96, 80, 56),
+        (10, 128, 128, 44),
+        (10, 128, 128, 60),
+        (10, 130, 96, 44),  // non-8-multiple width (chroma 65, odd)
+        (10, 130, 96, 56),
+        (10, 100, 76, 44),  // non-8-multiple width (chroma 50)
+        (10, 100, 76, 60),
+        (10, 256, 192, 52),
+        (10, 66, 64, 48),   // small + non-8-multiple width (chroma 33, odd)
+        // 8-bit — needs the high-cq arms for nonzero chroma levels.
+        (8, 96, 80, 60),
+        (8, 128, 128, 60),
+        (8, 100, 76, 60),   // non-8-multiple width
+        (8, 256, 192, 60),
+    ];
+
+    let mut chroma_active = 0u32;
+    let mut chroma_changed = 0u32;
+    let mut bd8_active = 0u32;
+    let mut bd10_active = 0u32;
+    let mut odd_halfwidth_active = 0u32;
+
+    for &(bd, w, h, cq) in grid {
+        let cfg = Cfg {
+            w,
+            h,
+            bd,
+            mono: false,
+            ss: (1, 0),
+            cq,
+            cdef: false,
+            restoration: false,
+            usage: 0,
+            aq: 0,
+            two_pass: false,
+            sb128: false,
+            tile_columns_log2: 0,
+            tile_rows_log2: 0,
+        };
+        // run_config asserts subsampling == (1,0) AND full-frame Y/U/V
+        // byte-identity vs the C decoder (with cdef/restoration off, the
+        // chroma difference vs undeblocked is purely reconstruction+deblock).
+        let f = run_config(&cfg);
+
+        let u_active = f.filter_level[2] != 0;
+        let v_active = f.filter_level[3] != 0;
+        if u_active || v_active {
+            chroma_active += 1;
+            if bd == 8 {
+                bd8_active += 1;
+            } else {
+                bd10_active += 1;
+            }
+            // ODD chroma half-width (non-8-multiple, w/2 odd) exercised.
+            if (w >> 1) & 1 == 1 {
+                odd_halfwidth_active += 1;
+            }
         }
-        Ok(f) => {
-            // Chroma levels 0 on this content: legitimately in envelope
-            // (luma-only 4:2:2 deblocking is supported) — must match C.
-            println!("422 arm: decoded, filter_level = {:?}", f.filter_level);
-            assert_eq!(
-                (f.filter_level[2], f.filter_level[3]),
-                (0, 0),
-                "Ok decode implies zero chroma levels"
-            );
-            let cref = c::ref_decode_av1_kf(&bytes, w, h);
-            assert_eq!(f.y, cref.y);
-            assert_eq!(f.u, cref.u);
-            assert_eq!(f.v, cref.v);
+
+        // EFFECTIVENESS + AC-content: recompose without the deblock stage and
+        // confirm the chroma pixels genuinely differ, and that the chroma
+        // plane is non-flat (real AC content, not a trivial constant field).
+        let (mut t, tcfg, header) = decode_frame_obus_prefilter(&encode_stream(&cfg)).unwrap();
+        assert_eq!(
+            (tcfg.subsampling_x, tcfg.subsampling_y),
+            (1, 0),
+            "gate must be 4:2:2"
+        );
+        let pre_u = t.recon_u.clone();
+        let pre_v = t.recon_v.clone();
+        let distinct_u = {
+            let mut s = pre_u.clone();
+            s.sort_unstable();
+            s.dedup();
+            s.len()
+        };
+        assert!(
+            distinct_u > 8,
+            "chroma U flat (no AC content) {w}x{h} bd{bd} cq{cq}: {distinct_u} distinct"
+        );
+        if header.loopfilter.filter_level != [0, 0] {
+            apply_deblock(&mut t, &tcfg, &header);
         }
+        let this_changed = t.recon_u != pre_u || t.recon_v != pre_v;
+        if this_changed {
+            chroma_changed += 1;
+        }
+        println!(
+            "422gate {w}x{h} bd{bd} cq{cq}: lvl={:?} u_act={u_active} v_act={v_active} \
+             chroma_pixels_changed={this_changed} distinct_u={distinct_u}"
+        , f.filter_level);
     }
+
+    println!(
+        "422gate: chroma_active={chroma_active} chroma_changed={chroma_changed} \
+         bd8_active={bd8_active} bd10_active={bd10_active} \
+         odd_halfwidth_active={odd_halfwidth_active}"
+    );
+    // ANTI-VACUOUS floors: the byte-identity above is only meaningful if
+    // chroma deblock actually fired on a real population of streams.
+    assert!(
+        chroma_active >= 8,
+        "expected >=8 chroma-deblock-active 4:2:2 streams, got {chroma_active}"
+    );
+    assert!(
+        chroma_changed >= 8,
+        "expected >=8 streams whose chroma pixels the deblock actually changed, got {chroma_changed}"
+    );
+    assert!(bd8_active >= 1, "no 8-bit 4:2:2 chroma-deblock stream");
+    assert!(bd10_active >= 1, "no 10-bit 4:2:2 chroma-deblock stream");
+    assert!(
+        odd_halfwidth_active >= 1,
+        "no chroma-deblock stream with an ODD chroma half-width (non-8-mult width)"
+    );
 }
 
 #[test]
@@ -1393,11 +1541,10 @@ fn palette_streams_decode_byte_identical_to_c() {
             cq: 36,
             usage: 2,
         }, // 4:4:4
-        // NOTE: 4:2:2 is deliberately excluded here — nonzero-CHROMA-deblock
-        // 4:2:2 streams are ALREADY a documented, unrelated envelope
-        // rejection (deblocked_422_chroma_is_rejected_not_misdecoded above;
-        // libaom's 4:2:2 chroma path itself reads out of bounds). Palette's
-        // 4:4:4 coverage is the arm just above; 4:2:0 dominates the rest.
+        // NOTE: 4:2:2 is not swept in THIS palette gate (palette's 4:4:4
+        // coverage is the arm just above; 4:2:0 dominates the rest). 4:2:2
+        // chroma deblock itself is byte-exact and covered by
+        // deblocked_422_chroma_byte_identical_to_c.
         PalCfg {
             w: 96,
             h: 96,
