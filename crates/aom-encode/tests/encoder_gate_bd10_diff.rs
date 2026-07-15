@@ -590,3 +590,110 @@ fn encoder_gate_bd10_bd12_420() {
     let c12 = run_case(64, 64, false, 1, 1, 2, 32, 12, y12, uv12);
     assert!(c12.matched, "bd12 4:2:0 must byte-match real aomenc");
 }
+
+/// Multi-size / multi-qindex bd10+bd12 gate with REPRESENTABLE-magnitude content
+/// (luma/chroma values in `[0,255]`, fed identically at every bit depth). This
+/// locks the high-bit-depth PLUMBING — quantizer build/selection, bit-depth
+/// threading through the whole pack pipeline, header signaling — across
+/// superblock boundaries (128 = 2x2 SB, 192 = 3x3 SB force real partition
+/// recursion) and the aggressive-web qindex range (cq {12,32,63} -> qindex
+/// ~48/128/232). Every cell's result is collected in one pass so a regression
+/// shows the full grid, not just the first failing cell.
+///
+/// Genuine full-dynamic-range (>8-bit) coefficient magnitudes are covered
+/// separately and exhaustively at the BLOCK level — `xform_quant_diff`,
+/// `encode_block_coeffs_diff`, and `xform_quant_optimize_highbd_diff` all drive
+/// ±4095 bd12 — so quantize / coeff-coding / trellis are byte-exact at high
+/// magnitude. See KNOWN DIVERGENCE below for the one frame-level gap that remains.
+///
+/// KNOWN DIVERGENCE (staged for the encoder track, not asserted here): with
+/// FULL-dynamic-range (>8-bit) aggressive high-frequency content at LOW qindex,
+/// the port's tile bytes diverge from aomenc — different mode/tx/partition RD
+/// winners, i.e. different byte counts, not a coding-of-fixed-decision bug. By
+/// elimination (all block-level coefficient kernels are byte-exact at ±4095 bd12;
+/// representable-magnitude frames are byte-exact here across all sizes/qindex; no
+/// int64 overflow fires in debug), the divergence is in the RD *decision* layer
+/// (tx_search / intra_rd / partition_pick), whose large-coefficient RD-cost
+/// accumulation differs at high bit depth. Those are the encoder track's ACTIVE
+/// files, so this bd10-track test does not touch them — the finding is reported.
+#[test]
+fn encoder_gate_bd10_bd12_multisize() {
+    // Representable content (<=255): the SAME samples encode at bd8/10/12, so the
+    // only high-bd variable is the quantizer/plumbing, not the coefficient range.
+    let luma = |r: usize, cc: usize| {
+        let base = ((r * 37 + cc * 23) as u16) & 0xff;
+        let hf = if (r ^ cc) & 1 == 1 { 21 } else { 0 };
+        base ^ hf
+    };
+    let uv = |r: usize, cc: usize| {
+        let base = ((r * 19 + cc * 29) as u16) & 0xff;
+        let hf = if (r + cc) % 3 == 0 { 11 } else { 0 };
+        base ^ hf
+    };
+    let mut results: Vec<(String, bool)> = Vec::new();
+    let mut run = |w: usize, h: usize, mono: bool, cq: i32, bd: u8| {
+        let res = run_case(w, h, mono, 1, 1, 2, cq, bd, luma, uv);
+        let kind = if mono { "mono" } else { "420 " };
+        results.push((format!("bd{bd} {w}x{h} {kind} cq{cq:>2}"), res.matched));
+    };
+
+    // bd10 mono: three sizes (64/128/192 = 1x1 / 2x2 / 3x3 SB) x three qindex.
+    for &(w, h) in &[(64usize, 64usize), (128, 128), (192, 192)] {
+        for &cq in &[12i32, 32, 63] {
+            run(w, h, true, cq, 10);
+        }
+    }
+    // bd12 mono: two sizes x low+high qindex.
+    for &(w, h) in &[(64usize, 64usize), (128, 128)] {
+        for &cq in &[12i32, 63] {
+            run(w, h, true, cq, 12);
+        }
+    }
+    // Multi-SB 4:2:0 at both bit depths.
+    run(128, 128, false, 32, 10);
+    run(128, 128, false, 32, 12);
+
+    eprintln!("\n=== bd10/bd12 multisize gate ===");
+    for (label, ok) in &results {
+        eprintln!("  {label}: {}", if *ok { "MATCH" } else { "MISMATCH" });
+    }
+    let failed: Vec<&String> = results
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(l, _)| l)
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{}/{} cells diverged from real aomenc: {:?}",
+        failed.len(),
+        results.len(),
+        failed
+    );
+}
+
+/// Cross-bit-depth plumbing guard: feed byte-IDENTICAL content (values in
+/// `[0,255]`) to bd8, bd10 AND bd12, and require the port to byte-match aomenc at
+/// every bit depth. Bit depth is the ONLY variable, so this proves the highbd
+/// quantizer/threading is correct (not silently downcast) independent of content
+/// range — and, with `bd10_stream_is_really_10bit`, that the streams genuinely
+/// differ by bit depth.
+#[test]
+fn encoder_gate_bd_plumbing_8_10_12() {
+    let luma = |r: usize, cc: usize| {
+        let base = ((r * 37 + cc * 23) as u16) & 0xff;
+        let hf = if (r ^ cc) & 1 == 1 { 21 } else { 0 };
+        base ^ hf
+    };
+    let uv = |_r: usize, _cc: usize| 0u16;
+    for &bd in &[8u8, 10, 12] {
+        for &(w, h) in &[(64usize, 64usize), (128usize, 128usize)] {
+            for &cq in &[12i32, 32] {
+                let r = run_case(w, h, true, 1, 1, 2, cq, bd, luma, uv);
+                assert!(
+                    r.matched,
+                    "bd{bd} {w}x{h} cq{cq} must byte-match real aomenc"
+                );
+            }
+        }
+    }
+}
