@@ -1577,3 +1577,34 @@ void shim_intra_cnn_partition_decision(const uint8_t *win, int qindex,
     out_flags[3] = 1; /* av1_disable_square_split_partition */
   }
 }
+
+/* Oracle for av1/encoder/ml.c `av1_nn_predict_c` (the DNN forward pass used by
+ * intra_mode_cnn_partition + friends), with `av1_nn_output_prec_reduce` when
+ * reduce_prec. Reconstructs the NN_CONFIG from FLAT concatenated weights/biases
+ * (per-layer sizes derived from num_inputs / hidden_nodes / num_outputs), so a
+ * Rust port can be diffed on arbitrary shapes without marshalling pointer
+ * arrays across FFI. Layout matches NN_CONFIG: weights[l][node*num_in + i],
+ * bias[l][node]; entry num_hidden_layers is the (linear) output layer. */
+void shim_nn_predict(const float *features, int num_inputs, int num_outputs,
+                     int num_hidden_layers, const int *hidden_nodes,
+                     const float *weights_flat, const float *bias_flat,
+                     int reduce_prec, float *output) {
+  NN_CONFIG cfg;
+  cfg.num_inputs = num_inputs;
+  cfg.num_outputs = num_outputs;
+  cfg.num_hidden_layers = num_hidden_layers;
+  const float *wp = weights_flat;
+  const float *bp = bias_flat;
+  int in = num_inputs;
+  for (int l = 0; l < num_hidden_layers; l++) {
+    cfg.num_hidden_nodes[l] = hidden_nodes[l];
+    cfg.weights[l] = wp;
+    wp += (size_t)in * hidden_nodes[l];
+    cfg.bias[l] = bp;
+    bp += hidden_nodes[l];
+    in = hidden_nodes[l];
+  }
+  cfg.weights[num_hidden_layers] = wp;
+  cfg.bias[num_hidden_layers] = bp;
+  av1_nn_predict_c(features, &cfg, reduce_prec, output);
+}

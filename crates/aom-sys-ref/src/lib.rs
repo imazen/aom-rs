@@ -8962,6 +8962,51 @@ extern "C" {
         out_logits: *mut f32,
         out_flags: *mut i32,
     );
+    #[allow(clippy::too_many_arguments)]
+    fn shim_nn_predict(
+        features: *const f32,
+        num_inputs: i32,
+        num_outputs: i32,
+        num_hidden_layers: i32,
+        hidden_nodes: *const i32,
+        weights_flat: *const f32,
+        bias_flat: *const f32,
+        reduce_prec: i32,
+        output: *mut f32,
+    );
+}
+
+/// Oracle for `av1/encoder/ml.c` `av1_nn_predict_c` (+ `av1_nn_output_prec_reduce`
+/// when `reduce_prec`). `hidden_nodes` gives the per-hidden-layer node counts;
+/// `weights_flat`/`bias_flat` are the per-layer weight/bias tables concatenated
+/// in NN_CONFIG order (`weights[l][node*num_in + i]`, `bias[l][node]`; the final
+/// entry is the linear output layer). Returns the `num_outputs` logits.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_nn_predict(
+    features: &[f32],
+    num_inputs: usize,
+    num_outputs: usize,
+    hidden_nodes: &[i32],
+    weights_flat: &[f32],
+    bias_flat: &[f32],
+    reduce_prec: bool,
+) -> Vec<f32> {
+    assert!(features.len() >= num_inputs);
+    let mut out = vec![0.0f32; num_outputs];
+    unsafe {
+        shim_nn_predict(
+            features.as_ptr(),
+            num_inputs as i32,
+            num_outputs as i32,
+            hidden_nodes.len() as i32,
+            hidden_nodes.as_ptr(),
+            weights_flat.as_ptr(),
+            bias_flat.as_ptr(),
+            i32::from(reduce_prec),
+            out.as_mut_ptr(),
+        );
+    }
+    out
 }
 
 /// Oracle for `av1/encoder/partition_strategy.c` `intra_mode_cnn_partition`
