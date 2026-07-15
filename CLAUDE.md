@@ -28,9 +28,22 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
 - **Symptom:** decoded RECON diverges from the C oracle at `base_qindex >= 249` — the
   `quantizer-62` / `quantizer-63` conformance vectors. Reproduces at **bd8 AND bd10, luma AND
   chroma**. Divergence is an edge-local ±1 prediction cascade.
-- **Localization (Gate-1 agent):** all recon kernels (inv-transform, dequant, intra-pred,
-  deblock) + all 16 tx scan orders proven **byte-exact**; the first divergence is in the
-  **entropy coefficient-decode path** (`aom-txb` / coeff-context), not reconstruction.
+- **Root cause (CONFIRMED via isolated C-decoder instrumentation):** NOT an entropy/coeff-value
+  bug. The first 311 txb records dump byte-identical (plane, tx, eob, dc_sign_ctx, txb_skip_ctx,
+  levels ALL match) — the per-txb entropy decoder + context maintenance are FAITHFUL. The bug is
+  the **txb ITERATION ORDER for coding blocks >64×64**: C (`decodeframe.c:929-962`,
+  `decode_token_recon_block` intra path) chunks each block into BLOCK_64X64 units and within each
+  chunk iterates planes→txbs → **L,U,V interleaved per 64-unit**; the port iterates each plane
+  across the WHOLE block (all luma txbs, then all chroma) in `aom-decode/src/lib.rs` (~2235 luma
+  loop + separate chroma loop). Identical for ≤64×64 blocks; for 128-sized blocks it desyncs the
+  arithmetic decoder and everything cascades (the "edge-local ±1" symptom). Only q62/q63 pick
+  partitions >64×64 (flat high-q blocks) → exact q61→q62 threshold. **Fix:** wrap luma+chroma
+  reconstruction in the outer 64×64-chunk loop, plane-interleaved, matching C.
+  (Earlier "entropy coefficient-decode path" localization was one layer too low.)
+- **Encoder cross-check (low priority):** the encoder pack must write txbs in the SAME
+  64×64-chunk plane-interleaved order for >64 blocks. The encoder already byte-matches
+  `diag+vbars16 256×256 cq63` (strong-LF gate 5/5), which is empirical evidence its order is
+  correct — but confirm pack.rs's >64-block txb order once the decode-order fix lands.
 - **CI status (TEMPORARY quarantine):** `.github/workflows/ci.yml:63-64` `rm`s the q62/q63
   vectors after fetch so Gate-1 goes green on the rest. This is a **must-fix corruption bug**
   under the zero-tolerance rule (wrong pixels are a shipping bug, never a known limitation),
