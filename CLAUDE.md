@@ -220,29 +220,39 @@ is what "single-frame exact" means:
 - **CDEF: OFF** by default in allintra ("CDEF has been found to blur images, so it's disabled
   in all-intra mode"). Only `--enable-cdef` turns it on.
 - **Loop-restoration: OFF** by default in allintra.
-- **QM: ON** by default in allintra (`enable_qm=1`, qm_min=4, qm_max=10, alternative QM formula).
+- **QM: OFF** by default in allintra. CORRECTED 2026-07-15 (the prior "QM: ON" claim was WRONG —
+  it conflated the qm_min/max override with `enable_qm`). The allintra override at
+  `av1_cx_iface.c:3065` sets `qm_min=4`/`qm_max=10` but does NOT assign `enable_qm`, which stays
+  at its base default `0` (`:290/447`); `using_qm = enable_qm` (`:1310`). qm_min/max are INERT
+  unless QM is turned on by `--enable-qm` (`:2076`) or `tune=IQ`/`SSIMULACRA2` (`:1946`).
+  Empirical proof: the passing `encoder_gate_e2e_*` gates byte-match the port with `qm=None` —
+  impossible if the reference allintra encodes were QM-on.
 - screen_detection_mode = ANTIALIASING_AWARE.
 
 **What the encoder track has byte-matched (`encoder_gate_e2e_*`):** own-search partition / mode /
-tx / coefficients + LF-level derivation, in a **CDEF-off + restoration-off** reference encode
-(`shim encode_av1_kf`, cdef/restoration/qm passed as explicit params). This envelope MATCHES the
-allintra defaults for CDEF+restoration. The frame HEADER is still bootstrapped from the real
-parse (qindex, tile info, cdf-update, ...) — only LF-level is port-derived.
+tx / coefficients + LF-level derivation, in a **CDEF-off + restoration-off + QM-off** reference
+encode (`shim encode_av1_kf`, cdef/restoration/qm passed as explicit params). This envelope
+MATCHES the allintra defaults for CDEF, restoration, AND QM (all off). The frame HEADER is still
+bootstrapped from the real parse (qindex, tile info, cdf-update, ...) — only LF-level is
+port-derived.
 
 **Remaining for single-frame-PRIMARY exactness (blocks "all single frame exactly"):**
-- **#8 qindex-from-cq mapping** — port must derive base_qindex from cq_level itself (currently
-  read off the real parsed header). Small deterministic function.
-- **#23 QM-on encode** — allintra auto-enables QM; confirm the port applies forward quantization
-  matrices to byte-match a QM-on allintra encode (decoder QM decode already ported). If the e2e
-  gates run QM-off, this is a real open primary hole; if QM-on, already covered — VERIFY.
+- **KB-2 (#22) cq62 speed-0 V_PRED angle_delta near-tie** — port picks adj=0, C picks adj=−1 at
+  16×64; encoder actively root-causing in `intra_rd.rs`. Speed-0 default-config hole.
+- **#25 two latent speed-1 bugs** — `part4_prune.rs:234` LEVEL_INDEX, `tx_search.rs:1305` rect
+  init-depth; need speed-1 RECT-partition test cells to validate.
 - **#10 cpu-used 0..9 speed-feature sweep** (Gate 2) — the large remaining item.
-- **#21 (decoder q62/63)** — the decoder-side must-fix corruption bug.
+  (#8 qindex-from-cq and #21 decoder q62/q63 are DONE + CI-green — no longer remaining.)
 
-**NOT blocking single-frame-primary (deferred to non-default knobs / "the rest"):**
+**NOT blocking single-frame-primary (non-default single-frame knobs — these ARE single-frame work
+to be done before "the rest"=inter-frame, but lower priority than the primary default config):**
+- **#23 QM-on encode** — reclassified here 2026-07-15 (QM is OFF by default, per the corrected
+  line above). Only reached by `--enable-qm` / `tune=IQ`/`SSIMULACRA2`. Forward-quant +
+  `wt_matrix` table; decoder QM decode already ported. Gate-4 knob coverage, not a primary hole.
 - **#7 CDEF-strength RD search** — off by default in allintra; only for explicit `--enable-cdef`.
   Building blocks exist as shims (`cdef_find_dir`, `cdef_filter_8/16`, `shim_encode_cdef`).
-- **Loop-restoration (Wiener/SGR) search** — off by default in allintra; not tracked as a task
-  (would be a non-primary item if a `--enable-restoration` config is ever targeted).
+- **Loop-restoration (Wiener/SGR) search** — off by default in allintra; only for explicit
+  `--enable-restoration`.
 
 ## Coordination (parallel tracks)
 
