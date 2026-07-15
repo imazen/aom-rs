@@ -1508,7 +1508,19 @@ pub fn write_frame_header_obu(wb: &mut WriteBitBuffer, p: &FrameHeaderObu) {
         p.refresh_frame_context_disabled,
     );
 
-    write_tile_info(wb, &p.tile_info);
+    // Inline of `write_tile_info` (kept intact for the header_diff/rb_diff
+    // roundtrips) that ALSO records the saved position — the port's
+    // `*saved_wb = *wb` (libaom `write_tile_info`, `av1/encoder/bitstream.c`),
+    // snapshotted right before the `context_update_tile_id` +
+    // `tile_size_bytes_minus_1` placeholders so a multi-tile assembler can
+    // overwrite them once the real tile sizes are known. Byte-for-byte identical
+    // output to `write_tile_info(wb, &p.tile_info)`.
+    write_tile_info_max_tile(wb, &p.tile_info);
+    wb.mark_saved_position();
+    if p.tile_info.rows * p.tile_info.cols > 1 {
+        wb.write_literal(0, (p.tile_info.log2_cols + p.tile_info.log2_rows) as u32);
+        wb.write_literal(3, 2);
+    }
     encode_quantization(wb, &p.quant, p.num_planes, p.separate_uv_delta_q);
     encode_segmentation(wb, &p.segmentation);
     write_delta_q_params(wb, &p.delta_q);

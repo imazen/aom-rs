@@ -8,6 +8,12 @@
 pub struct WriteBitBuffer {
     buf: Vec<u8>,
     bit_offset: usize,
+    /// A single saved append position (bits), the port's analogue of libaom's
+    /// `*saved_wb = *wb` in `write_tile_info` (`av1/encoder/bitstream.c`),
+    /// recorded just before the `context_update_tile_id` +
+    /// `tile_size_bytes_minus_1` placeholders so a later [`Self::overwrite_literal`]
+    /// can patch them once the real tile sizes / largest-tile id are known.
+    saved_pos: Option<usize>,
 }
 
 impl WriteBitBuffer {
@@ -86,6 +92,47 @@ impl WriteBitBuffer {
     /// The written bytes (`bytes_written()`-long).
     pub fn bytes(&self) -> &[u8] {
         &self.buf[..self.bytes_written()]
+    }
+
+    /// The current append position, in bits (libaom `aom_wb`'s `bit_offset`).
+    pub fn bit_position(&self) -> usize {
+        self.bit_offset
+    }
+
+    /// Record the current append position as the single saved position — the
+    /// port's `*saved_wb = *wb` (libaom `write_tile_info`,
+    /// `av1/encoder/bitstream.c`). Read it back with [`Self::saved_position`] and
+    /// patch the placeholder(s) that follow with [`Self::overwrite_literal`].
+    pub fn mark_saved_position(&mut self) {
+        self.saved_pos = Some(self.bit_offset);
+    }
+
+    /// The position recorded by the most recent [`Self::mark_saved_position`].
+    pub fn saved_position(&self) -> Option<usize> {
+        self.saved_pos
+    }
+
+    /// `aom_wb_overwrite_literal` (libaom `aom_dsp/bitwriter_buffer.c`): overwrite
+    /// `bits` MSB-first bits of `data` at an EARLIER, already-written bit position
+    /// `bit_pos`, read-modify-writing each target bit (never zero-filling) and
+    /// leaving the append cursor untouched. Unlike libaom's `overwrite_bit`,
+    /// which advances a SEPARATE `saved_wb` copy, this port has a single buffer,
+    /// so the caller passes each field's explicit `bit_pos` (the next field lives
+    /// at `bit_pos + bits`). `bit_pos + bits` must be <= the current append
+    /// position (the placeholder must already have been written).
+    pub fn overwrite_literal(&mut self, bit_pos: usize, data: i32, bits: u32) {
+        debug_assert!(
+            bit_pos + bits as usize <= self.bit_offset,
+            "overwrite_literal targets bits past the append cursor"
+        );
+        for i in 0..bits {
+            let off = bit_pos + i as usize;
+            let bit = ((data >> (bits - 1 - i)) & 1) as u8;
+            let p = off / 8;
+            let q = 7 - off % 8;
+            self.buf[p] &= !(1u8 << q);
+            self.buf[p] |= bit << q;
+        }
     }
 
     /// `aom_wb_write_uvlc`: unsigned variable-length (Exp-Golomb) code — `msb(v+1)`

@@ -170,3 +170,106 @@ pub fn assemble_multitile_frame_obu_payload(
     }
     payload
 }
+
+/// `choose_size_bytes(size, spare_msbs=0)` (`av1/encoder/bitstream.c:3244`): the
+/// minimum number of bytes (1..=4) needed to hold `size`. NOTE: libaom sizes the
+/// `tile_size_bytes` field from the RAW maximum tile payload length, NOT
+/// `max - 1`, even though each written prefix value is `len - 1` — so a max tile
+/// of exactly 256 bytes yields `tile_size_bytes == 2` although every prefix
+/// value (<= 255) fits in one byte. Reproduced exactly for byte-identity.
+fn choose_size_bytes(size: u32) -> i32 {
+    if size >> 24 != 0 {
+        4
+    } else if size >> 16 != 0 {
+        3
+    } else if size >> 8 != 0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Assemble the `OBU_FRAME` PAYLOAD for a MULTI-tile frame (`num_tiles > 1`,
+/// `num_tg == 1`) by INDEPENDENTLY serializing the frame header from
+/// `frame_header` (not bootstrapped from a reference header's bytes) and filling
+/// in the real `context_update_tile_id` + `tile_size_bytes` the way libaom's
+/// encoder does after tile packing.
+///
+/// `write_frame_header_obu` writes `write_tile_info`'s placeholders (`0`,
+/// `tile_size_bytes_minus_1 == 3`) and records the saved bit position
+/// (`WriteBitBuffer::saved_position`, the port's `*saved_wb = *wb`). This
+/// function then, matching `av1/encoder/bitstream.c`'s `write_tile_obu_size`
+/// (`:4053` + `:4068`):
+///   * derives `tile_size_bytes = choose_size_bytes(max_tile_size)` over the RAW
+///     tile payload lengths (the last tile's length participates too, even
+///     though it carries no prefix), and `largest_tile_id` = the raster index of
+///     the first tile of that maximum length;
+///   * overwrites `context_update_tile_id` with `largest_tile_id`
+///     (`log2_cols + log2_rows` bits) and `tile_size_bytes_minus_1` with
+///     `tile_size_bytes - 1` (2 bits).
+///
+/// Each non-last tile is then prefixed by its `len - 1`
+/// (`- AV1_MIN_TILE_SIZE_BYTES`) as a `tile_size_bytes`-byte little-endian
+/// value; the last tile carries no prefix. `tiles` are the raw per-tile entropy
+/// payloads in raster (row-major) order.
+pub fn assemble_multitile_frame_obu_payload_derived(
+    frame_header: &FrameHeaderObu,
+    tiles: &[Vec<u8>],
+) -> Vec<u8> {
+    let n = tiles.len();
+    assert!(n > 1, "multi-tile assembler requires > 1 tile");
+    let ti = &frame_header.tile_info;
+    assert_eq!(
+        ti.rows * ti.cols,
+        n,
+        "tile count {n} != tile_info.rows*cols {}",
+        ti.rows * ti.cols
+    );
+
+    // max_tile_size over the RAW payload lengths of ALL tiles (incl. the last),
+    // and largest_tile_id = raster index of the first tile of that max length
+    // (strict `>`, matching bitstream.c:4024).
+    let mut max_tile_size = 0u32;
+    let mut largest_tile_id = 0i32;
+    for (i, tb) in tiles.iter().enumerate() {
+        let sz = tb.len() as u32;
+        if sz > max_tile_size {
+            max_tile_size = sz;
+            largest_tile_id = i as i32;
+        }
+    }
+    let tile_size_bytes = choose_size_bytes(max_tile_size);
+
+    // Serialize the header; write_frame_header_obu records the saved position
+    // right before the context_update_tile_id + tile_size_bytes_minus_1 fields.
+    let mut wb = WriteBitBuffer::new();
+    write_frame_header_obu(&mut wb, frame_header);
+    let saved = wb
+        .saved_position()
+        .expect("multi-tile frame header must record the tile-info saved position");
+    let ctx_bits = (ti.log2_cols + ti.log2_rows) as u32;
+    // C write_tile_obu_size: overwrite context_update_tile_id first (its
+    // aom_wb_overwrite_literal auto-advances saved_wb by ctx_bits), then
+    // tile_size_bytes_minus_1. Single buffer here -> explicit positions.
+    wb.overwrite_literal(saved, largest_tile_id, ctx_bits);
+    wb.overwrite_literal(saved + ctx_bits as usize, tile_size_bytes - 1, 2);
+
+    wb.byte_align_zeros(); // frame_obu()'s byte_alignment()
+    let mut payload = wb.bytes().to_vec();
+    // tile_group_obu() for num_tg == 1: tile_start_and_end_present_flag (one 0
+    // bit) + byte_alignment() -> one 0x00 byte (header already aligned).
+    payload.push(0);
+    let tsb = tile_size_bytes as usize;
+    for (i, tb) in tiles.iter().enumerate() {
+        if i + 1 < n {
+            let v = (tb.len() as u64)
+                .checked_sub(1)
+                .expect("a coded tile payload is never empty");
+            for b in 0..tsb {
+                payload.push(((v >> (8 * b)) & 0xff) as u8);
+            }
+        }
+        payload.extend_from_slice(tb);
+    }
+    payload
+}
