@@ -1226,6 +1226,124 @@ fn deblocked_422_chroma_byte_identical_to_c() {
     );
 }
 
+// ---- 12-BIT COMPOSITION GATE: deblock + CDEF + LR at bit depth 12 ----
+//
+// The main `real_bitstreams_decode_byte_identical_to_c` sweep runs bit depths
+// 8 and 10 only; 12-bit (seq profile 2) rides along in the QM/palette/4:2:2
+// gates but its POST-FILTER pipeline is not floored there — the 4:2:2 gate
+// runs cdef/lr OFF, and the single bd12 palette arm (4:2:0) doesn't assert the
+// filters actually fired. Filter kernels are bit-depth-sensitive (deblock
+// thresholds and CDEF clamps scale with bd; the WHT/inverse-transform ranges
+// widen), so a 12-bit-only filter bug would slip both. This gate closes that:
+// real cpu-used=0 KEY streams at bd12 across 4:2:0 + 4:4:4 + monochrome, with
+// `--enable-cdef=1 --enable-restoration=1`, decoded BYTE-IDENTICAL to the REAL
+// C decoder (via `run_config`) — then anti-vacuous floors prove deblock, CDEF,
+// and loop restoration each genuinely fired (and changed pixels) at bd12.
+#[test]
+fn bd12_composition_decodes_byte_identical_to_c() {
+    let sizes = [(64usize, 64usize), (96, 80), (100, 76)];
+    // (ss, mono): 4:2:0, 4:4:4, monochrome — the three chroma layouts the
+    // bd8/bd10 main sweep floors but bd12 did not.
+    let combos = [((1i32, 1i32), false), ((0, 0), false), ((1, 1), true)];
+    let mut n = 0u32;
+    let mut max_len = 0usize;
+    let mut ss420 = 0u32;
+    let mut ss444 = 0u32;
+    let mut mono_arms = 0u32;
+    let mut nonzero_luma_lf = 0u32;
+    let mut nonzero_chroma_lf = 0u32;
+    let mut cdef_gated = 0u32;
+    let mut cdef_applied = 0u32;
+    let mut lr_gated = 0u32;
+    let mut lr_applied = 0u32;
+    let mut lr_wiener = 0usize;
+    let mut lr_sgrproj = 0usize;
+    for &(w, h) in &sizes {
+        for &(ss, mono) in &combos {
+            // cq grid: bd12 (like bd10) picks nonzero deblock levels from low
+            // cq; the speed-0 CDEF + restoration searches pick real strengths /
+            // RU kernels at the moderate/high-cq arms. cdef+lr both enabled.
+            for &cq in &[16i32, 36, 52] {
+                let f = run_config(&Cfg {
+                    w,
+                    h,
+                    bd: 12,
+                    mono,
+                    ss,
+                    cq,
+                    cdef: true,
+                    restoration: true,
+                    usage: 0,
+                    aq: 0,
+                    two_pass: false,
+                    sb128: false,
+                    tile_columns_log2: 0,
+                    tile_rows_log2: 0,
+                });
+                // No per-arm size floor: a small-but-byte-identical stream is
+                // valid coverage (aggressive-q monochrome legitimately codes to
+                // ~30-40 bytes). Track the max to catch a degenerate all-empty
+                // regression instead.
+                max_len = max_len.max(f.len);
+                n += 1;
+                ss420 += (ss == (1, 1) && !mono) as u32;
+                ss444 += (ss == (0, 0)) as u32;
+                mono_arms += mono as u32;
+                nonzero_luma_lf += (f.filter_level[0] != 0 || f.filter_level[1] != 0) as u32;
+                nonzero_chroma_lf += (f.filter_level[2] != 0 || f.filter_level[3] != 0) as u32;
+                cdef_gated += f.cdef_gated as u32;
+                cdef_applied += f.cdef_applied as u32;
+                lr_gated += f.lr_gated as u32;
+                lr_applied += f.lr_applied as u32;
+                lr_wiener += f.lr_units.0;
+                lr_sgrproj += f.lr_units.1;
+            }
+        }
+    }
+    assert_eq!(n, (sizes.len() * combos.len() * 3) as u32, "bd12 arm count");
+    println!(
+        "bd12 composition: n={n} max_len={max_len} ss420={ss420} ss444={ss444} mono={mono_arms} \
+         nonzero_luma_lf={nonzero_luma_lf} nonzero_chroma_lf={nonzero_chroma_lf} \
+         cdef_gated={cdef_gated} cdef_applied={cdef_applied} \
+         lr_gated={lr_gated} lr_applied={lr_applied} wiener={lr_wiener} sgrproj={lr_sgrproj}"
+    );
+    // All three chroma layouts exercised at bd12.
+    assert!(
+        ss420 > 0 && ss444 > 0 && mono_arms > 0,
+        "bd12 layout coverage gap"
+    );
+    // A degenerate all-empty encode would give tiny streams everywhere; a real
+    // content-bearing arm must exist (PROBED 2026-07-15: max 324 bytes).
+    assert!(
+        max_len >= 150,
+        "bd12 streams all suspiciously small (max {max_len})"
+    );
+    // Anti-vacuous floors (PROBED 2026-07-15, cpu-used=0 on this content): the
+    // byte-identity vs C in run_config is only meaningful if the filters ran.
+    // Observed: 22 nonzero-luma-LF, 16 nonzero-chroma-LF, 11 CDEF gated+applied,
+    // 2 LR gated+applied (both sgrproj). Floors keep each population from
+    // silently collapsing (LR is sparse at bd12 on this content — >=1 is the
+    // honest guarantee; the palette bd12 arm adds more LR coverage).
+    assert!(
+        nonzero_luma_lf >= 10,
+        "bd12 luma-deblock population collapsed ({nonzero_luma_lf})"
+    );
+    assert!(
+        nonzero_chroma_lf >= 5,
+        "bd12 chroma-deblock population collapsed ({nonzero_chroma_lf})"
+    );
+    assert!(
+        cdef_gated >= 6,
+        "bd12 CDEF-gated population too small ({cdef_gated})"
+    );
+    assert!(
+        cdef_applied >= 6,
+        "bd12 CDEF-applied population too small ({cdef_applied})"
+    );
+    assert!(lr_gated >= 1, "no bd12 stream carried LR syntax");
+    assert!(lr_applied >= 1, "no bd12 stream had LR change pixels");
+}
+
 #[test]
 fn cdef_stream_decodes_byte_identical_and_filters() {
     // The old envelope boundary, now INSIDE the envelope: a REAL stream
