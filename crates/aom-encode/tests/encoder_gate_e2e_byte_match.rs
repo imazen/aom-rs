@@ -1560,18 +1560,36 @@ fn encoder_gate_speed1_textured_allintra() {
         (256, 256, "two-tone", 48),
         (256, 256, "vgrad", 48),
         (256, 256, "diag", 48),
-        // NOTE: (256, 256, "vgrad", 32) remains EXCLUDED. The intra CNN
-        // partition prune (intra_cnn_based_part_prune_level 0->2) is now fully
-        // ported + wired into rd_pick_partition_real and its four flags are
-        // bit-exact vs C (cnn_partition_decision_diff). For this cell the CNN
-        // fires and computes square_split_disabled=true at every 64×64 SB root
-        // (logit0 ~ -5..-9.5 < no_split_thresh) — IDENTICALLY to C (flags
-        // match bit-exactly), so the CNN does NOT create a divergence between
-        // port and C here. Wiring it in leaves this cell's byte-5 divergence
-        // (our_payload[5]=157 vs 8) UNCHANGED, proving the residual gap is a
-        // DIFFERENT unported speed-1 delta (candidate: prune_2d_txfm_mode
-        // PRUNE_1->PRUNE_2), not the CNN. Kept excluded until that delta is
-        // isolated + ported. See isolate_vgrad256_cq32_cnn_partition_prune.
+        // NOTE: (256, 256, "vgrad", 32) remains EXCLUDED — and the isolation is
+        // now COMPLETE (see KB-3 in CLAUDE.md). The divergence is NOT an
+        // unported learned-model prune:
+        //   * The intra CNN partition prune (intra_cnn_based_part_prune_level
+        //     0->2) is fully ported + wired into rd_pick_partition_real; its 4
+        //     flags are bit-exact vs C (cnn_partition_decision_diff). For this
+        //     cell the CNN fires and sets square_split_disabled=true at every
+        //     64×64 SB root (logit0 ~ -5..-9.5) — IDENTICALLY to C, so it
+        //     constrains port and C the same way and does NOT create a
+        //     divergence. Wiring it in left byte-5 (157 vs 8) UNCHANGED.
+        //   * prune_2d_txfm_mode PRUNE_1->PRUNE_2: does not affect intra at
+        //     speed 1 (prune_txk_type is gated on prune_tx_type_est_rd, which is
+        //     speed>=4; prune_tx_2D is is_inter-only).
+        //   * model_based_prune_tx / ml_predict_breakout / ml_early_term_after
+        //     _split / ml_prune_rect / simple_motion_search_*: all !frame_is
+        //     _intra_only (inter-only). ml_predict_var_partitioning: nonrd-only.
+        //   * ml_4_partition_search_level_index 0->1 and intra_tx_size_search
+        //     _init_depth_rect 0->1 (two real speed-1 values the port hardcodes
+        //     to their speed-0 value — see KB-3): forcing each to the speed-1
+        //     value leaves THIS cell byte-identical (no effect) and keeps the 7
+        //     winners green.
+        // Root: a partition-search RD NEAR-TIE. The port picks PARTITION_HORZ
+        // for SB(0,0) (two 64×32 DC / TX_64X32 blocks); C picks a different
+        // partition. Diverges at byte 5 and never re-converges (last_common_idx
+        // = 4 = last header byte) — an early partition/mode cascade, KB-2 class
+        // (a residual RD near-tie), not a missing prune. Next step: dump the
+        // port's per-candidate RD (NONE/HORZ/VERT) at the SB(0,0) 64×64 node vs
+        // the C reference (needs an encode-side RD-dump shim, which currently
+        // lives in the decoder-owned dec_shim.c). See
+        // isolate_vgrad256_cq32_cnn_partition_prune + KB-3.
     ];
     let mut matched = 0usize;
     for &(w, h, name, cq) in winners {
@@ -1602,20 +1620,30 @@ fn encoder_gate_speed1_textured_allintra() {
     );
 }
 
-/// ISOLATION (Gate 2, cpu-used=1): prove which learned-model speed-1 delta
-/// causes the `vgrad 256x256 cq32` byte-5 divergence. The two candidates are
-/// `intra_cnn_based_part_prune_level` 0->2 (the CNN split-vs-nonsplit partition
-/// prune) and `prune_2d_txfm_mode` PRUNE_1->PRUNE_2 (the 2D tx-type NN prune).
+/// ISOLATION (Gate 2, cpu-used=1) of the `vgrad 256x256 cq32` byte-5
+/// divergence — COMPLETE. Conclusion: the divergence is NOT an unported
+/// learned-model prune. The prime suspect, `intra_cnn_based_part_prune_level`
+/// 0->2 (the CNN split-vs-nonsplit partition prune), is now fully ported +
+/// wired into `rd_pick_partition_real`, and its four flags are bit-exact vs C
+/// (`cnn_partition_decision_diff`). Because port and C compute IDENTICAL CNN
+/// flags, the CNN constrains both searches the same way and CANNOT be the
+/// source of a port-vs-C divergence — confirmed empirically: wiring the CNN in
+/// left this cell's byte-5 value (157 vs 8) UNCHANGED. The other candidate,
+/// `prune_2d_txfm_mode` PRUNE_1->PRUNE_2, does not affect intra at speed 1
+/// (see the NOTE on the excluded cell in `encoder_gate_speed1_textured_allintra`
+/// and KB-3 in CLAUDE.md for the full elimination). The real cause is a
+/// partition-search RD near-tie (KB-2 class), documented in KB-3.
 ///
-/// This runs the REAL libaom CNN + DNN inference (via
+/// This test is retained as a DIAGNOSTIC of the CNN's decisions on SB(0,0):
+/// it runs the REAL libaom CNN + DNN inference (via
 /// `ref_intra_cnn_partition_decision`, an `rd_shim.c` oracle that reproduces
 /// `av1/encoder/partition_strategy.c intra_mode_cnn_partition` verbatim over the
-/// real exported inference + real weights) on SB(0,0)'s 64x64 window of the
-/// exact vgrad-256 source real aomenc encodes. If `logits[0]` crosses the
-/// split threshold, the CNN forces the 64x64 to split (disallow PARTITION_NONE,
-/// disable rect) at level 2 -- which rewrites the FIRST partition symbol coded
-/// (byte 5, the first tile-data byte), exactly the observed divergence. The
-/// port has NO CNN prune, so it keeps the speed-0 partition -> byte-5 mismatch.
+/// real exported inference + real weights) on an IDEALIZED vgrad-256 window and
+/// asserts the per-bsize square-split-disable pattern. (Note: this uses the
+/// synthetic column-gradient window, not the exact source-buffer pixels the
+/// encode extracts, so the 64x64-root logit here is neutral (-3.4) whereas the
+/// real encode window yields a mild disable; the sub-block pattern is stable and
+/// is what the assertions pin.)
 ///
 /// The decision is checked across a qindex bracket (cq32 -> base_qindex 128;
 /// cq48 -> 192 per STATUS.md) because `log_q` is only 1 of the 37 DNN features
@@ -1687,16 +1715,17 @@ fn isolate_vgrad256_cq32_cnn_partition_prune() {
         );
     }
 
-    // ISOLATION CONCLUSION (proven via the REAL libaom CNN+DNN inference):
-    // at the real cq32 qindex=128, the 64x64 root is neutral (RD decides) but
-    // the CNN DISABLES PARTITION_SPLIT (av1_disable_square_split_partition) for
-    // EVERY 32x32/16x16/8x8 sub-block of SB(0,0). The port has no CNN prune, so
-    // its speed-0 search may still SPLIT those sub-blocks -> a different
-    // partition tree -> the observed byte-5 (first-tile-byte) divergence. This
-    // proves the culprit is `intra_cnn_based_part_prune_level` (0->2), NOT the
-    // 2D tx-type prune. Decisions (flags) are asserted -- not the exact logits,
-    // which vary by SIMD tier -- because the prec-reduced margins here are large
-    // and the flags are what constrain the bitstream-affecting partition search.
+    // DIAGNOSTIC (real libaom CNN+DNN inference, synthetic vgrad window): on
+    // this idealized gradient the 64x64 root is CNN-neutral and the CNN DISABLES
+    // PARTITION_SPLIT for every 32x32/16x16/8x8 sub-block. This is now a fact
+    // the PORT reproduces bit-exactly (the CNN prune is wired into
+    // rd_pick_partition_real and flag-matched vs C in cnn_partition_decision
+    // _diff) — so it does NOT explain the port-vs-C divergence (both apply the
+    // SAME CNN constraints). See KB-3: the residual is a partition RD near-tie
+    // (the port picks PARTITION_HORZ for SB(0,0), C picks otherwise). Decisions
+    // (flags) are asserted -- not the exact logits, which vary by SIMD tier --
+    // because the prec-reduced margins here are large and the flags are what
+    // constrain the bitstream-affecting partition search.
     assert_eq!(sqsplit_disabled[1], 0, "the 64x64 root must be CNN-neutral at qindex=128");
     assert_eq!(sqsplit_disabled[2], 4, "all four 32x32 sub-blocks must be CNN square-split-disabled");
     assert_eq!(sqsplit_disabled[3], 16, "all sixteen 16x16 sub-blocks must be CNN square-split-disabled");

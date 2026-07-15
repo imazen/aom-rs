@@ -88,6 +88,45 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
   closed for Gate 2, not excluded. Verify whether any gate currently *excludes* this cell (a
   relaxation to be reverted on fix) vs merely documenting it.
 
+### KB-3 — Encoder: `vgrad 256x256 cq32` cpu-used=1 cell — partition RD near-tie (isolation COMPLETE, not a learned-model prune)
+- **Symptom:** in `encoder_gate_speed1_textured_allintra`, the `vgrad 256×256 cq32`
+  (base_qindex 128) cell does not e2e byte-match aomenc. Diverges at **byte 5** (first
+  tile-data byte) and **never re-converges** (`last_common_idx = 4` = last header byte) — an
+  early partition/mode cascade at SB(0,0). Excluded (documented) in the winners list of that
+  gate; the sibling cells (256×256 cq48, 128×128 cq32/cq48) all byte-match.
+- **Isolation COMPLETE — NOT an unported learned-model prune.** The originally-suspected
+  `intra_cnn_based_part_prune_level` 0→2 (intra CNN partition prune) is now **fully ported +
+  wired** into `rd_pick_partition_real` (commit `a600394`) and its four flags are **bit-exact
+  vs C** (`cnn_partition_decision_diff`). For this cell the CNN fires and sets
+  `square_split_disabled=true` at every 64×64 SB root — **identically to C** — so it constrains
+  port and C the same way and cannot cause a divergence. **Empirically confirmed:** wiring the
+  CNN in left byte-5 (157 vs 8) byte-identical. Eliminated candidates (with evidence):
+  `prune_2d_txfm_mode` PRUNE_2 (intra path needs `prune_tx_type_est_rd`, which is speed≥4;
+  `prune_tx_2D` is `is_inter`-only); `model_based_prune_tx_search_level`,
+  `av1_ml_predict_breakout`, `av1_ml_early_term_after_split`, `av1_ml_prune_rect_partition`,
+  `simple_motion_search_*` (all `!frame_is_intra_only`); `ml_predict_var_partitioning` (nonrd).
+- **Root cause (localized):** a **partition-search RD near-tie** (KB-2 class). The port picks
+  `PARTITION_HORZ` for SB(0,0) (two 64×32 DC / TX_64X32 blocks); C picks a different partition.
+  A speed-1 RD-cost delta tips the NONE/HORZ/VERT comparison for this specific content+qindex.
+- **Next step:** dump the port's per-candidate RD (NONE/HORZ/VERT) at the SB(0,0) 64×64 node vs
+  the C reference. Needs an **encode-side RD-dump shim** — but `shim_encode_av1_kf` currently
+  lives in the decoder-owned `dec_shim.c` and drives the opaque `aom_codec` API (no `cpi->sf`
+  hook), so per-feature C-side toggling / RD dumps aren't reachable from the encoder track
+  without a coordinated new shim entry point. Candidate speed-1 RD deltas to bisect once that
+  exists: `perform_coeff_opt=2`, `tx_domain_dist_level/thres_level=1`, `adaptive_txb_search
+  _level=2`, `top_intra_model_count_allowed=3`.
+- **Two LATENT speed-1 bugs found while isolating (NOT this cell's cause — both leave these 8
+  cells byte-identical, so no current test exercises them; documented for a future fix + new
+  validation cells):**
+  1. `part4_prune.rs:234` hardcodes `LEVEL_INDEX = 0`, but C's `ml_4_partition_search_level
+     _index` is `min(speed,3)` (1 at speed-1) → the 4-way DNN prune uses the wrong
+     `SEARCH_THRESH`/`NOT_SEARCH_THRESH` row at speed≥1 (partition_strategy.c:1508-1510).
+  2. `tx_search.rs:1305` `get_search_init_depth_intra_speed0` hardcodes the speed-0
+     `intra_tx_size_search_init_depth_rect = 0`, but C uses 1 at speed≥1 (speed_features.c:409)
+     → rect intra tx-size search starts at the wrong depth at speed≥1.
+  Both should be threaded from the (already-correct) `SpeedFeatures` fields; needs new speed-1
+  RECT-partition test cells to validate the fix (the 7 current winners don't distinguish).
+
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
 Primary config = ALLINTRA (usage=2), speed-0 KEY frame. libaom's own allintra tuning
