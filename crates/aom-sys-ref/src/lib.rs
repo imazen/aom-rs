@@ -7328,6 +7328,32 @@ extern "C" {
     ) -> u16;
 }
 
+// Forward QM selector oracle: av1_qm_init packs pointers to the static
+// wt_matrix_ref into gqmatrix[q][c][t]; the shim reads them back (see
+// shim/qm_shim.c).
+extern "C" {
+    fn shim_qm_gqmatrix(q: i32, c: i32, t: i32, out: *mut u8, out_cap: i32) -> i32;
+}
+
+/// Real libaom forward QM matrix for (qm level `q`, plane group `c` in
+/// `0=luma / 1=chroma`, raw tx size `t`), exactly as `av1_qm_init` packs
+/// `gqmatrix[q][c][t]` from the file-static `wt_matrix_ref`. Returns `None` for
+/// the flat level (`q == NUM_QM_LEVELS - 1`, a NULL pointer). The returned
+/// bytes are read through the genuine C init pointer — the priority-1 oracle for
+/// [`aom_quant::qmatrix`].
+pub fn ref_qm_gqmatrix(q: usize, c: usize, t: usize) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; 1024]; // max matrix area == 32*32
+    let len = unsafe {
+        shim_qm_gqmatrix(q as i32, c as i32, t as i32, out.as_mut_ptr(), out.len() as i32)
+    };
+    assert!(len != -2, "shim_qm_gqmatrix: out_cap overflow for (q={q}, c={c}, t={t})");
+    if len < 0 {
+        return None;
+    }
+    out.truncate(len as usize);
+    Some(out)
+}
+
 /// Reference `av1_quantize_dc_facade` (`quantize_dc`, DC-only). `qm`/`iqm` are
 /// `None` for the flat path. Returns (qcoeff, dqcoeff, eob).
 #[allow(clippy::too_many_arguments)]

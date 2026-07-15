@@ -31,6 +31,7 @@ fn main() {
         "txb_shim",
         "intra_edge_shim",
         "quant_fp_shim",
+        "qm_shim",
         "wb_shim",
         "modeinfo_shim",
         "avail_shim",
