@@ -52,6 +52,39 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
   closed for Gate 2, not excluded. Verify whether any gate currently *excludes* this cell (a
   relaxation to be reverted on fix) vs merely documenting it.
 
+## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
+
+Primary config = ALLINTRA (usage=2), speed-0 KEY frame. libaom's own allintra tuning
+(`av1/av1_cx_iface.c:3065`) sets these **defaults** — so matching them, NOT the base defaults,
+is what "single-frame exact" means:
+
+- **CDEF: OFF** by default in allintra ("CDEF has been found to blur images, so it's disabled
+  in all-intra mode"). Only `--enable-cdef` turns it on.
+- **Loop-restoration: OFF** by default in allintra.
+- **QM: ON** by default in allintra (`enable_qm=1`, qm_min=4, qm_max=10, alternative QM formula).
+- screen_detection_mode = ANTIALIASING_AWARE.
+
+**What the encoder track has byte-matched (`encoder_gate_e2e_*`):** own-search partition / mode /
+tx / coefficients + LF-level derivation, in a **CDEF-off + restoration-off** reference encode
+(`shim encode_av1_kf`, cdef/restoration/qm passed as explicit params). This envelope MATCHES the
+allintra defaults for CDEF+restoration. The frame HEADER is still bootstrapped from the real
+parse (qindex, tile info, cdf-update, ...) — only LF-level is port-derived.
+
+**Remaining for single-frame-PRIMARY exactness (blocks "all single frame exactly"):**
+- **#8 qindex-from-cq mapping** — port must derive base_qindex from cq_level itself (currently
+  read off the real parsed header). Small deterministic function.
+- **#23 QM-on encode** — allintra auto-enables QM; confirm the port applies forward quantization
+  matrices to byte-match a QM-on allintra encode (decoder QM decode already ported). If the e2e
+  gates run QM-off, this is a real open primary hole; if QM-on, already covered — VERIFY.
+- **#10 cpu-used 0..9 speed-feature sweep** (Gate 2) — the large remaining item.
+- **#21 (decoder q62/63)** — the decoder-side must-fix corruption bug.
+
+**NOT blocking single-frame-primary (deferred to non-default knobs / "the rest"):**
+- **#7 CDEF-strength RD search** — off by default in allintra; only for explicit `--enable-cdef`.
+  Building blocks exist as shims (`cdef_find_dir`, `cdef_filter_8/16`, `shim_encode_cdef`).
+- **Loop-restoration (Wiener/SGR) search** — off by default in allintra; not tracked as a task
+  (would be a non-primary item if a `--enable-restoration` config is ever targeted).
+
 ## Coordination (parallel tracks)
 
 - Max clean parallelism = **2** (one decoder agent + one encoder agent); cargo's shared
