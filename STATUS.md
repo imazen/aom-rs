@@ -2253,3 +2253,49 @@ texture also feeds the coeff-trellis gap -> our recon differs -> our LF search
 sees different pixels). Smallest next chunk: extend the LF-level gate to
 strong-filter content (fed real's own reconstruction, as that gate already does)
 and C-trace the first divergent `pick_filter_level` term at a high level.
+
+## Multi-SB e2e byte match at 16/16 — `INTERNAL_COST_UPD_SB` per-SB cost update ported (2026-07-15, encoder track)
+
+`encoder_gate_e2e_multi_sb_scale` now sweeps the FULL 16-cell grid (flat /
+two-tone / vertical-gradient / diagonal-ramp × 256x256 + 512x512 × cq32 + cq48)
+and asserts **all 16 byte-identical end-to-end** vs real aomenc. The 4
+steep-content cells the gate previously excluded (256x256 vgrad+diag cq32; 512x512
+diag cq32+cq48) now match. Commits `53431ae` (fix) + `76b1ffb` (gate). Full
+`aom-encode` + `aom-txb` suite green (103 tests), no regressions.
+
+**Root cause (one bug, two symptoms).** At speed 0 libaom's default cost-update
+level is `INTERNAL_COST_UPD_SB` (`speed_features.c`: `coeff_cost_upd_level` =
+`mode_cost_upd_level` = `INTERNAL_COST_UPD_SB`). At the start of EVERY superblock
+it re-derives BOTH the coefficient cost tables (`av1_fill_coeff_costs`) AND every
+mode-rate table (`av1_fill_mode_rates`: y_mode / tx_size / angle_delta / partition
+/ skip / cfl / intra tx-type) from the CURRENT adapting tile entropy context
+(`encodeframe_utils.c:1643/1658`); the search + encode of that SB use those costs.
+The port used frame-init tables for the whole frame, so on the LATER superblocks
+of steep continuous-tone content — whose CDFs have adapted enough to move the
+tables — the stale rate flipped near-tie RD decisions:
+- **Coefficient (code-vs-skip):** diagonal-ramp mi=(32,0) BLOCK_64X64 real eob=1
+  vs port eob=0 — the stale TX_64X64 coeff cost, compounded by an unadapted br
+  slot (see below).
+- **Intra-mode (DC vs directional/PAETH):** 512x512 diagonal mi=(32,64)
+  BLOCK_64X64 real D45 / port DC. C-oracle per-mode trace: distortion matched
+  EXACTLY (DC 15856, D45 29424) but the port over-charged the mode-signaling rate
+  (stale y_mode/tx_size/angle_delta), giving DC mode_info 1564 vs C 1355 and D45
+  2918 vs C 2183 — flipping a near-tie the real encoder wins for the directional
+  mode (correct for diagonal content).
+
+**Fix.** `pack_tile` runs a full `derive_real_costs(kf, ..)` per superblock (`kf`
+is the pack-adapting context, == C's `xd->tile_ctx`) and threads the result into
+BOTH the search (`sb_pick_cfg`) and the encode (`sb_env`), reproducing both
+updates in one shot. SB 0 / single-SB frames read the frame-init defaults
+unchanged, so every smaller gate is byte-for-byte unaffected.
+
+**Also fixed (`fill.rs`):** `av1_fill_coeff_costs` reads
+`coeff_br_cdf[AOMMIN(tx_size, TX_32X32)]` (rd.c) — TX_64X64 shares TX_32X32's br
+CDF and the arena's txs_ctx==4 br slot is never adapted; capping the br index at
+TX_32X32 stops TX_64X64 mis-costing every level-range (Golomb) term off an
+unadapted uniform CDF. New `coeff_costs_fill_diff.rs` pins the port's CDF->cost
+derivation integer-for-integer against real `av1_fill_coeff_costs` across qindex /
+txs_ctx / plane / eob_multi_size (new append-only `shim_fill_coeff_costs`).
+`decode_diff_multisb.rs` (the structural localizer that pinned the last two cells
+to the intra-mode divergence) is kept as the regression localizer and now reports
+identical reconstruction on the cases it once flagged.
