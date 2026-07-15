@@ -2400,9 +2400,27 @@ at speed>=4 → NOT needed for speed 1. `intra_pruning_with_hog` (stays 1 at s1,
 
 NEXT LOCALIZATION TARGET (1 diverging cell): **vgrad 256×256 cq32** at speed 1
 (byte-matches at speed 0 — an asserted `encoder_gate_e2e_multi_sb_scale` winner —
-so a genuine speed-1 delta bites). NOT a tx-policy delta (those match across the 7
-winners incl. vgrad 256² cq48 and vgrad 128² cq32); it is one of the still-unwired
-deltas #1 `intra_cnn_based_part_prune_level` 0→2, #4 `top_intra_model_count_allowed`
-4→3, #11 `prune_2d_txfm_mode` PRUNE_1→PRUNE_2, or #8 `intra_tx_size_search_init_depth_rect`
-0→1, biting on this steep low-q 16-SB frame. Localize by first-diverging-block
-mode/partition/tx-size decode, then wire the responsible delta.
+so a genuine speed-1 delta bites). Localized: the 5-byte frame header matches; the
+first differing byte is **byte 5 = the first tile-data byte** (`our[5]=157`,
+`real[5]=8`), i.e. an early **SB(0,0)** symbol (partition / first-leaf mode / first
+tx). RULED OUT by experiment (divergence byte + values are identical either way):
+
+- the tx-policy deltas #7/#12/#13/#14/#15 — all 7 textured winners (incl. vgrad
+  256² cq48 and vgrad 128² cq32, which exercise the same tx path) match;
+- **#4 `top_intra_model_count_allowed` 4→3** — wired from the scaffold, tested,
+  did NOT change the divergence (reverted, unverifiable in isolation);
+- **#8 `intra_tx_size_search_init_depth_rect` 0→1** — probed (forced rect init
+  depth to 1), divergence unchanged (byte 5, 157 vs 8), reverted;
+- #9 `model_based_prune_tx_search_level` 1→0 — no-op (the port's tx mask never
+  applies model-based pruning: tx_search.rs:150, so 1 and 0 behave identically).
+
+So the culprit is a **learned-model** speed-1 delta hitting SB(0,0)'s early
+symbols: **#1 `intra_cnn_based_part_prune_level` 0→2** (the CNN split-vs-nonsplit
+intra partition prune, `av1/encoder/partition_strategy.c` `intra_mode_cnn_partition`
+— frame-intra-gated so it runs on KEY) or **#11 `prune_2d_txfm_mode`
+PRUNE_1→PRUNE_2** (the 2D tx-type NN prune, structurally off in the port). A big
+byte-5 delta (157 vs 8) points at a partition-tree change → **#1 (CNN) is the
+prime suspect**. Both are learned models (NN weights + feature extraction) and are
+the next-slice implementation targets. To confirm which, decode SB(0,0)'s partition
+symbol from `real_payload` vs `our_payload` (decoder-track tooling) or port #11
+first (smaller model) and re-test; if it doesn't resolve, it is #1.

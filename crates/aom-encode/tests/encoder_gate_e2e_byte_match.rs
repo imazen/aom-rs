@@ -1563,13 +1563,18 @@ fn encoder_gate_speed1_textured_allintra() {
     ];
     // NEXT LOCALIZATION TARGET (excluded, NOT yet byte-matching at speed 1):
     //   (256, 256, "vgrad", 32) -- steep vertical gradient, 16 SB64, low
-    //   quality. Byte-matches at SPEED 0 (it is an asserted winner in
-    //   encoder_gate_e2e_multi_sb_scale) but diverges at speed 1. The divergence
-    //   is NOT in the tx-policy deltas (those are wired + validated by the 7
-    //   winners above); it is one of the still-unwired speed-1 sf deltas
-    //   (intra_cnn_based_part_prune_level 0->2, top_intra_model_count 4->3,
-    //   prune_2d_txfm_mode PRUNE_1->PRUNE_2, or intra_tx_size_search_init_depth
-    //   0->1) biting on this steep low-q cell. See STATUS.md Gate 2.
+    //   quality. Byte-matches at SPEED 0 (an asserted winner in
+    //   encoder_gate_e2e_multi_sb_scale) but diverges at speed 1, at the FIRST
+    //   tile-data byte (byte 5; the 5-byte frame header matches) -- i.e. an
+    //   early SB(0,0) symbol. RULED OUT: the tx-policy deltas (all 7 winners
+    //   match), top_intra_model_count_allowed 4->3, and
+    //   intra_tx_size_search_init_depth_rect 0->1 (both tried; the divergence
+    //   byte + values are identical either way). The culprit is one of the
+    //   remaining LEARNED-MODEL deltas -- intra_cnn_based_part_prune_level 0->2
+    //   (CNN split-vs-nonsplit partition prune, av1/encoder/partition_strategy.c
+    //   intra_mode_cnn_partition) or prune_2d_txfm_mode PRUNE_1->PRUNE_2 (the 2D
+    //   tx-type NN prune, structurally off in the port -- tx_search.rs:150).
+    //   See STATUS.md Gate 2 for the localization detail + next-slice plan.
     let mut matched = 0usize;
     for &(w, h, name, cq) in winners {
         let content = content_for(w, h, name);
