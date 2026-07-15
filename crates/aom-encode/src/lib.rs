@@ -29,6 +29,7 @@ pub mod part4_nn_weights;
 pub mod part4_prune;
 pub mod partition;
 pub mod partition_pick;
+pub mod rc;
 pub mod rd;
 pub mod rd_pick;
 pub mod real_costs;
