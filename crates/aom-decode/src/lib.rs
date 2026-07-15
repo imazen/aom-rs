@@ -2924,6 +2924,25 @@ impl<'c> TileKf<'c> {
         self.tree.push(p as i8);
         let subsize = get_partition_subsize(bsize, p as i32) as usize;
         assert_ne!(subsize, 255, "invalid partition {p} for bsize {bsize}");
+        // Conformance (decode_partition, decodeframe.c:1359-1371): a partition
+        // whose sub-block subsamples to an invalid chroma block size is a
+        // corrupt frame — libaom aborts it with AOM_CODEC_CORRUPT_FRAME BEFORE
+        // the block is created. This is what makes the PORTRAIT luma sizes
+        // (which map to BLOCK_INVALID at ss=(1,0)) structurally impossible in a
+        // conformant 4:2:2 stream, so the chroma loop filter / reconstruction
+        // never index max_txsize_rect_lookup[BLOCK_INVALID]. Scoped to 4:2:2
+        // (the only mode where a valid partition subsize can subsample to
+        // BLOCK_INVALID; equivalent to C's check for every conformant stream).
+        // Inert for conformant streams — exercised, and proven non-firing, by
+        // the 14-stream 4:2:2 gate in real_bitstream.rs.
+        if self.cfg.subsampling_x == 1
+            && self.cfg.subsampling_y == 0
+            && get_plane_block_size(subsize, self.cfg.subsampling_x, self.cfg.subsampling_y) == 255
+        {
+            panic!(
+                "4:2:2 corrupt frame: block size index {subsize} invalid with subsampling (1,0)"
+            );
+        }
         let bsize2 = get_partition_subsize(bsize, PARTITION_SPLIT as i32) as usize;
 
         match p {

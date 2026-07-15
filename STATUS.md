@@ -422,12 +422,57 @@ harness mutation-verified. `real_bitstream.rs` now: **87 real cpu-used=0 KEY str
 byte-identical** — 76 level-0 + **11 genuinely deblocked (6 also chroma)**, incl.
 the previously-excluded bd10 cq>6 arm and (100x76,444) cq36. The one wiring bug the
 real gate caught (synthetic diff could not): aligned-vs-crop dims passed as the
-`dst.width` guard — fixed to header frame dims. Remaining deblock envelope hole:
-**4:2:2 chroma deblocking rejected** (libaom reads
-`max_txsize_rect_lookup[BLOCK_INVALID=255]` OOB for tall blocks at ss=(1,0) —
-NDEBUG production build; not portable). 4:2:2 luma-only IS in envelope. Next
-envelope tools: CDEF (kernels partial), segmentation, palette, SB128, multi-tile,
-superres, intrabc (loop restoration landed 2026-07-14 — see below).
+`dst.width` guard — fixed to header frame dims. **4:2:2 chroma deblocking is now
+byte-exact and IN the envelope** (2026-07-15 — see the "4:2:2 chroma deblock"
+milestone below; the earlier "unportable BLOCK_INVALID OOB" claim was VERIFIED
+FALSE — the branch is dead for conformant 4:2:2). Next envelope tools: CDEF
+(kernels partial), segmentation, palette, SB128, multi-tile, superres, intrabc
+(loop restoration landed 2026-07-14 — see below).
+
+## 4:2:2 chroma deblock — byte-exact; the "unportable OOB" claim was FALSE (2026-07-15, decoder track)
+
+The decode envelope had rejected 4:2:2 (ss=(1,0)) streams with nonzero chroma
+filter levels, citing an unportable OOB read of `max_txsize_rect_lookup[BLOCK_INVALID]`
+in libaom's chroma loop filter "for tall blocks." That was a past-session
+assumption, not a measured fact — **VERIFIED FALSE**. Rejection removed (frame.rs);
+4:2:2 chroma deblock is byte-exact vs the C decoder.
+
+What the OOB actually is, and why it is DEAD code:
+- `av1_ss_size_lookup[bsize][1][0]` (common_data.c:17) marks the eight PORTRAIT
+  (height>width) luma sizes `BLOCK_INVALID` (4x8/8x16/16x32/32x64/64x128/4x16/
+  8x32/16x64). `av1_get_max_uv_txsize`→`get_plane_block_size` indexes
+  `max_txsize_rect_lookup` with that, so a portrait `mbmi->bsize` at ss=(1,0)
+  would read OOB (asserts compiled out in the `-DNDEBUG` Release oracle). The
+  read is a static-array OOB, not a frame-buffer border read.
+- But portrait luma blocks are **structurally impossible** in a conformant 4:2:2
+  stream. `decode_partition` (decodeframe.c:1359-1371) rejects any partition
+  whose `subsize` maps to `BLOCK_INVALID` under the chroma subsampling
+  (`AOM_CODEC_CORRUPT_FRAME`) BEFORE the block is created; the encoder gates
+  every VERT / VERT_4 / VERT_A / VERT_B split on the same check
+  (partition_search.c). So the chroma loop filter (and reconstruction, which
+  uses the identical raw-`bsize` lookup with no guard) never sees a portrait
+  block. The `BLOCK_INVALID` branch is unreachable for valid 4:2:2.
+- MEASURED: instrumented the real libaom decoder's `set_lpf_parameters` (the
+  decoder's `lpf_opt_level=0` path) and swept the real encoder+decoder over 4:2:2
+  across sizes / cq / cpu-used and content engineered to force vertical splits —
+  **ZERO OOB hits**; the chroma path only ever sees wide/square bsizes. The
+  encoder never even produces portrait blocks in 4:2:2. Instrumentation reverted.
+
+Ported the same conformance check into the Rust `decode_partition` (lib.rs,
+scoped to ss=(1,0)) so a malformed portrait-partition 4:2:2 stream fails fast
+like C instead of an opaque OOB panic in reconstruction; inert for conformant
+streams (exercised, non-firing, by the 14-stream gate).
+
+Gate: `deblocked_422_chroma_byte_identical_to_c` (real_bitstream.rs) — 14 real
+4:2:2 KEY streams, 8- and 10-bit, sizes incl. non-8-multiple widths (130/100/66 →
+ODD chroma half-widths 65/33), full-frame Y/U/V byte-identical to the C decoder.
+ANTI-VACUOUS: asserts ss=(1,0); ≥8 streams with NONZERO U/V filter levels (up to
+31); ≥8 whose chroma pixels the deblock ACTUALLY changed (recomposed without the
+deblock stage); both bit depths; odd chroma half-width present; real chroma AC
+content (non-flat plane). Full aom-decode + aom-entropy regression stays green —
+all 4:2:0 / 4:4:4 / mono / palette / qm / lossless / intrabc / sb128 / multi-tile /
+film-grain / superres gates byte-identical (this change touches only the 4:2:2
+path). Commits: 42423ab (deblock + gate), <partition-check> (conformance guard).
 
 ## CDEF applied — enable_cdef envelope constraint DROPPED (2026-07-14, decoder track)
 
