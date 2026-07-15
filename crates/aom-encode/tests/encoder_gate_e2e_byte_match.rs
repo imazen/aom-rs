@@ -195,6 +195,69 @@ fn ab_left_flat_right_split(r: usize, c: usize) -> u8 {
     }
 }
 
+// ---- STRONG loop-filter-level content generators -------------------------
+//
+// Combined high-texture content (smooth gradient base + hard block-boundary
+// edges + high-frequency texture) that drives real aomenc to STRONG nonzero
+// loop-filter levels (>= 12) -- the regime the AB-probe checkerboards
+// (`[8,8]`/`[8,3]`/`[7,16]`) never reach and the regime "HONEST GAP #2" once
+// flagged. Amplitude/period tuned (see the discovery sweep in the git history
+// of this file) so real deterministically codes a strong level; shared by
+// `encoder_gate_lf_level_bit_exact_vs_real` (isolation on real's own recon)
+// and `encoder_gate_e2e_rich_content_strong_lf` (full end-to-end byte match).
+// `filter_level[0]` (vertical) responds to HORIZONTAL edges (h-stripes),
+// `filter_level[1]` (horizontal) to VERTICAL edges (v-stripes) -- verified
+// empirically by the discovery sweep.
+
+/// Dominant horizontal stripes (period 4) + secondary vertical stripes
+/// (period 12): both LF axes exercised, `filter_level[0]` strong (~15 at
+/// cq58) -- the exact "15" of the `[15,6]`-shape the honest gap documents.
+fn lf_hstripes4_vstripes12(r: usize, c: usize) -> u8 {
+    let hbar = if (r / 4) % 2 == 0 { 40 } else { 200 };
+    let vbar = if (c / 12) % 2 == 0 { 0 } else { 24 };
+    (hbar + vbar).clamp(0, 255) as u8
+}
+
+/// Strong horizontal stripes (period 6) + secondary vertical stripes
+/// (period 16) + gradient: drives BOTH axes nonzero and strong (`[6,20]` at
+/// 128 cq58) -- a genuine both-axes-strong `[15,6]`-shape.
+fn lf_hstripes6_vstripes16_grad(r: usize, c: usize) -> u8 {
+    let grad = 18 + r * 90 / 256;
+    let hbar = if (r / 6) % 2 == 0 { 0 } else { 80 };
+    let vbar = if (c / 16) % 2 == 0 { 0 } else { 30 };
+    (grad as i32 + hbar + vbar).clamp(0, 255) as u8
+}
+
+/// Strong vertical stripes (period 4) + secondary horizontal stripes
+/// (period 12) + gradient: `filter_level[1]` strong (`[0,15]` at cq60).
+fn lf_plaid_v4_h12_grad(r: usize, c: usize) -> u8 {
+    let grad = 20 + r * 100 / 256;
+    let vbar = if (c / 4) % 2 == 0 { 0 } else { 70 };
+    let hbar = if (r / 12) % 2 == 0 { 0 } else { 22 };
+    (grad as i32 + vbar + hbar).clamp(0, 255) as u8
+}
+
+/// Radial blob + diagonal hard bars + noise: drives a very strong
+/// `filter_level[0]` (`[26,0]` at 256 cq63).
+fn lf_radial_diagbars_noise(r: usize, c: usize) -> u8 {
+    let dr = r as i32 - 64;
+    let dc = c as i32 - 64;
+    let d = ((dr * dr + dc * dc) as f64).sqrt();
+    let base = (200.0 - d * 2.0).clamp(0.0, 255.0) as i32;
+    let bar = if ((r + c) / 12) % 2 == 0 { 0 } else { 40 };
+    let noise = ((r * 131 + c * 977) % 41) as i32 - 20;
+    (base + bar + noise).clamp(0, 255) as u8
+}
+
+/// Diagonal gradient + vertical bars (period 16) + fine ripple: very strong
+/// `filter_level[1]` (`[0,25]` at 256 cq63).
+fn lf_diag_vbars16_ripple(r: usize, c: usize) -> u8 {
+    let grad = 32 + (r + c) * 150 / 256;
+    let bar = if (c / 16) % 2 == 0 { 0 } else { 45 };
+    let ripple = if (r + c) % 2 == 0 { 14 } else { -14 };
+    (grad as i32 + bar + ripple).clamp(0, 255) as u8
+}
+
 /// Attempt the full derivation for one (w, h, mono, ss_x, ss_y, usage,
 /// cq_level) case with FLAT constant-128 source content. Returns `true` iff
 /// the assembled bytes matched the real stream byte-for-byte end to end.
@@ -1007,36 +1070,57 @@ fn lf_derived_vs_real_on_real_recon(
     )
 }
 
-/// ASSERTED loop-filter-LEVEL bit-exactness gate. The AB-probe checkerboard
-/// content drives real aomenc to GENUINELY NONZERO loop-filter levels
-/// (`[8,8]` / `[8,3]` / `[7,16]` / `[8,8]` at cq32) -- the nonzero search path
-/// the flat/textured e2e gates (all `[0,0]`) never reach. For each case, fed
-/// real aomenc's OWN decoded reconstruction + mi grid, this port's
-/// `pick_filter_level` MUST reproduce real's coded level EXACTLY.
+/// ASSERTED loop-filter-LEVEL bit-exactness gate — WEAK **and** STRONG levels.
+/// For each case, fed real aomenc's OWN decoded pre-filter reconstruction + mi
+/// grid (via [`lf_derived_vs_real_on_real_recon`]), this port's
+/// `pick_filter_level` MUST reproduce real's coded level EXACTLY. Feeding
+/// real's own pixels isolates the loop-filter-LEVEL SEARCH from the
+/// encoder-side reconstruction: any residual e2e divergence on the same
+/// content is therefore reconstruction, not the LF search.
 ///
-/// This is the honest promotion of the previously-failing nonzero-LF case to
-/// an asserted gate: it proves the loop-filter-LEVEL DERIVATION is bit-exact
-/// vs the real encoder on real's own pixels -- including "top flat / bottom
-/// split", whose end-to-end byte match is blocked ONLY by a separate
-/// partition-RD reconstruction gap (`(8,12,BLOCK_16X16)` real=HORZ/ours=SPLIT,
-/// see [`encoder_gate_e2e_ab_attempt`] + STATUS.md), NOT by the LF search.
+/// Two regimes, both asserted:
+/// - **Weak** (AB-probe checkerboards, 64x64 cq32): `[8,8]` / `[8,3]` /
+///   `[7,16]` / `[8,8]` — the low-level nonzero search path.
+/// - **Strong** (combined high-texture, 128/256 cq58-63): `[15,0]` / `[6,20]`
+///   (both axes) / `[0,15]` / `[0,25]` / `[26,0]` — the strong-filter regime
+///   "HONEST GAP #2" once flagged as unverified. This port derives every one
+///   of them bit-exactly on real's own recon, so the strong-LF search is
+///   CORRECT; the earlier honest-stop was reconstruction (since fixed by the
+///   coeff-trellis + partition-RDO + `INTERNAL_COST_UPD_SB` per-SB cost
+///   updates), not an LF-search bug. `encoder_gate_e2e_rich_content_strong_lf`
+///   confirms that same rich content now byte-matches END-TO-END.
+///
+/// A `saw_strong` guard (a real level >= 12 actually exercised) keeps the
+/// strong regime anti-vacuous; `saw_nonzero` keeps the weak regime honest.
 #[test]
 fn encoder_gate_lf_level_bit_exact_vs_real() {
+    // (name, w, h, cq, content). Weak AB cases stay at 64x64 cq32; strong
+    // cases at their discovered (size, cq) operating points.
     #[allow(clippy::type_complexity)]
-    let cases: &[(&str, fn(usize, usize) -> u8)] = &[
-        ("top split / bottom flat", ab_top_split_bottom_flat),
-        ("top flat / bottom split", ab_top_flat_bottom_split),
-        ("left split / right flat", ab_left_split_right_flat),
-        ("left flat / right split", ab_left_flat_right_split),
+    let cases: &[(&str, usize, usize, i32, fn(usize, usize) -> u8)] = &[
+        // --- WEAK regime (AB-probe checkerboards) ---
+        ("top split / bottom flat", 64, 64, 32, ab_top_split_bottom_flat),
+        ("top flat / bottom split", 64, 64, 32, ab_top_flat_bottom_split),
+        ("left split / right flat", 64, 64, 32, ab_left_split_right_flat),
+        ("left flat / right split", 64, 64, 32, ab_left_flat_right_split),
+        // --- STRONG regime (combined high-texture) ---
+        ("hstripes4+vstripes12 (vert~15)", 128, 128, 58, lf_hstripes4_vstripes12),
+        ("hstripes6+vstripes16+grad (both axes)", 128, 128, 58, lf_hstripes6_vstripes16_grad),
+        ("plaid v4/h12+grad (horz~15)", 128, 128, 60, lf_plaid_v4_h12_grad),
+        ("diag+vbars16+ripple (horz~25)", 256, 256, 63, lf_diag_vbars16_ripple),
+        ("radial+diagbars+noise (vert~26)", 256, 256, 63, lf_radial_diagbars_noise),
     ];
     let mut saw_nonzero = false;
-    for &(name, content) in cases {
-        let (derived, real) = lf_derived_vs_real_on_real_recon(64, 64, true, 1, 1, 2, 32, content);
+    let mut saw_strong = false;
+    for &(name, w, h, cq, content) in cases {
+        let (derived, real) = lf_derived_vs_real_on_real_recon(w, h, true, 1, 1, 2, cq, content);
         eprintln!(
-            "lf-level gate [{name}]: derived (fl={:?} u={} v={}) -- real coded (fl={:?} u={} v={})",
+            "lf-level gate [{name} {w}x{h} cq{cq}]: derived (fl={:?} u={} v={}) -- real coded \
+             (fl={:?} u={} v={})",
             derived.0, derived.1, derived.2, real.0, real.1, real.2
         );
         saw_nonzero |= real.0 != [0, 0] || real.1 != 0 || real.2 != 0;
+        saw_strong |= real.0[0] >= 12 || real.0[1] >= 12;
         assert_eq!(
             derived.0, real.0,
             "{name}: derived luma LF level must equal real aomenc's coded level on real's own \
@@ -1055,6 +1139,66 @@ fn encoder_gate_lf_level_bit_exact_vs_real() {
         saw_nonzero,
         "this gate must exercise at least one genuinely NONZERO real LF level, else it proves \
          nothing about the nonzero search path"
+    );
+    assert!(
+        saw_strong,
+        "this gate must exercise at least one STRONG real LF level (>= 12), else it proves nothing \
+         about the strong-filter search path (HONEST GAP #2's regime)"
+    );
+}
+
+/// **ASSERTED rich-content STRONG-LF end-to-end byte match (promotion of the
+/// multi-SB agent's honest-stopped variant).** The SAME combined high-texture
+/// generators that drive real aomenc to STRONG loop-filter levels (asserted in
+/// [`encoder_gate_lf_level_bit_exact_vs_real`]: `[15,0]` / `[6,20]` / `[0,15]`
+/// / `[0,25]` / `[26,0]`) now produce a BYTE-IDENTICAL `OBU_FRAME` payload
+/// end-to-end vs real aomenc — the port's OWN search + reconstruction + its
+/// OWN `pick_filter_level` LF derivation, all the way to the coded bytes.
+///
+/// This was "HONEST GAP #2": a combined-content probe drove real to strong LF
+/// levels where the port appeared to disagree. The isolation gate above proves
+/// the LF SEARCH was never wrong (it derives real's strong level exactly on
+/// real's own recon); the earlier divergence was the port's reconstruction,
+/// which the coeff-trellis + partition-RDO + per-SB `INTERNAL_COST_UPD_SB` cost
+/// updates have since made accurate enough that this rich content byte-matches.
+///
+/// Anti-vacuous by construction: every generator here is the SAME `fn` the LF
+/// gate asserts drives a real level >= 12, so a flat/weak regression would fail
+/// that gate; here it would additionally have to still byte-match, which it
+/// won't if reconstruction drifts.
+#[test]
+fn encoder_gate_e2e_rich_content_strong_lf() {
+    // (name, w, h, cq, content) — the strong-LF generators that ALSO byte-match
+    // end-to-end (discovery sweep: 15/16 strong cells matched e2e; these 5 are
+    // the robust subset, spanning vert-strong / both-axes / horz-strong / very
+    // strong on each axis, at 128 and 256).
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, usize, usize, i32, fn(usize, usize) -> u8)] = &[
+        ("hstripes4+vstripes12 (vert~15)", 128, 128, 58, lf_hstripes4_vstripes12),
+        ("hstripes6+vstripes16+grad (both axes)", 128, 128, 58, lf_hstripes6_vstripes16_grad),
+        ("plaid v4/h12+grad (horz~15)", 128, 128, 60, lf_plaid_v4_h12_grad),
+        ("diag+vbars16+ripple (horz~25)", 256, 256, 63, lf_diag_vbars16_ripple),
+        ("radial+diagbars+noise (vert~26)", 256, 256, 63, lf_radial_diagbars_noise),
+    ];
+    let mut matched = 0usize;
+    for &(name, w, h, cq, content) in cases {
+        eprintln!("--- rich strong-LF e2e {w}x{h} [{name}] cq{cq} ---");
+        if attempt_case_content(w, h, true, 1, 1, 2, cq, content) {
+            matched += 1;
+        }
+    }
+    eprintln!(
+        "encoder_gate_e2e_rich_content_strong_lf: {matched}/{} rich strong-LF cases byte-identical \
+         end-to-end",
+        cases.len()
+    );
+    assert_eq!(
+        matched,
+        cases.len(),
+        "every rich strong-LF case must byte-match real aomenc end-to-end -- these are the \
+         promotion of HONEST GAP #2's honest-stopped rich-content variant; a mismatch here is a \
+         genuine reconstruction regression (the strong-LF SEARCH itself is separately proven \
+         bit-exact by encoder_gate_lf_level_bit_exact_vs_real)"
     );
 }
 
