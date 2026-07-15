@@ -84,9 +84,45 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
   **non-LF coeff/partition near-tie** (the port picks a marginally different coeff/partition
   decision than C). Analogous in kind to the already-fixed partition-RDO 26-bit palette-flag
   bug and the INTERNAL_COST_UPD_SB coeff-trellis bug. See `STATUS.md:2275`, commit `4940315`.
-- **Status:** encoder track; not yet root-caused. A single-frame byte-exactness hole → must be
-  closed for Gate 2, not excluded. Verify whether any gate currently *excludes* this cell (a
-  relaxation to be reverted on fix) vs merely documenting it.
+- **Status:** encoder track; NOT excluded from any gate (the asserted `strong_lf` gate uses the
+  cq**63** neighbour, which matches; the cq62 variant is documented-only, never asserted — so no
+  relaxation to revert). Must be closed for Gate 2.
+- **Re-verified 2026-07-15 (still diverges), with much sharper isolation:**
+  - Facts: qindex **249**, `screen_content=true` (auto-detected — the ONLY screen-content cell in
+    the whole encoder suite), port tile **95 bytes vs real 100** (port codes FEWER symbols), port
+    derives LF luma **[0,17]** vs real **[1,17]** (a DOWNSTREAM recon symptom, not the cause), first
+    payload mismatch at byte 3 (= the header LF-level byte). First **TILE**-byte divergence is at
+    **tile-byte 60 of 100** → the first ~60% of the tile is byte-identical, so the divergence is in a
+    **MID-FRAME SB, NOT SB(0,0)** (unlike KB-3).
+  - **RULED OUT — palette flag** (definitively): the port's RD `try_palette =
+    allow_palette(allow_screen_content_tools, bsize)` (partition_pick.rs:589, no `enable_palette`
+    gate) is EMPIRICALLY byte-exact — `encoder_gate_e2e_ab_attempt` is the exact
+    `enable_palette=0`(standard shim) + `screen_content=1` config and byte-matches WITH it; forcing
+    `try_palette=false` REGRESSED that gate. So real includes the palette-Y no-palette flag cost for
+    screen-content frames regardless of `--enable-palette=0`, and the port matches. Write side
+    (pack.rs:274, `allow_palette` only) matches C (bitstream.c:1042). Palette is fully correct.
+  - **RULED OUT — all other screen-content RD effects** (parallel-agent survey of the sibling C,
+    verified against build config): at speed-0 / full non-realtime build / ALLINTRA / KEY / qidx249 /
+    <720p, there is **zero** screen-content dependence in rdmult (rd.c), quantizer (av1_quantize.c),
+    coeff trellis (encodemb.c/txb_rdopt.c), tx-set context, angle-delta / filter-intra / smooth, or
+    the partition search — beyond palette (handled) and the header intrabc-present bit (handled: AB
+    gate proves the port's header writer emits it). The one latent tx path, `get_default_tx_type`
+    forcing DCT_DCT under screen content (blockd.h:1175), is **dormant** because
+    `use_intra_default_tx_only=0` in the non-realtime reference build (verified `CONFIG_REALTIME_ONLY
+    0` + av1_cx_iface.c:374 default 0). RANK-3 `exhaustive_searches_thresh` differs at speed-0 but is
+    inert (no motion search in all-intra). RC is bypassed (fixed AOM_Q, per-block qindex stays 249).
+  - **CONCLUSION:** a plain **speed-0 coeff/partition/mode near-tie**, NOT screen-content-specific.
+    Same content+generator as the cq**63** cell that byte-matches (strong_lf gate 5/5); cq62 → qidx
+    249 tips a near-tie in a later SB. Class-identical to KB-1's "only very-high-qindex flips it".
+  - **NEXT (RD-dump plan, two-stage):** (1) PIN the diverging SB (16 SBs; first 60/100 tile bytes
+    match → a later SB). Cheapest: extend the sibling instrument's SB(0,0)-gated partition dump to
+    ALL SBs (print mi_row/mi_col + partition per node) AND add a matching port-side per-SB partition
+    dump (`pack_tile` returns `trees: Vec<SbTree>` row-major), diff to find the first SB whose
+    partition/mode differs. (`OdEcEnc` has no `tell()`, so byte-offset-per-SB isn't free.) (2) Dump
+    THAT SB's per-candidate RD in port + sibling C, diff. Sibling harness `/root/libaom-enc-instrument
+    /rd_harness.c` must be re-tailored for `diag+vbars16 256×256 cq62` (content = `lf_diag_vbars16
+    _ripple`; see `encoder_gate_e2e_byte_match.rs`). Same playbook as KB-3, but the target SB is
+    mid-frame, not SB(0,0).
 
 ### KB-3 — Encoder: `vgrad 256x256 cq32` cpu-used=1 cell — FIXED (missing speed-1 `use_square_partition_only_threshold` rect-kill)
 - **FIXED** (commit pending on origin): the cell now byte-matches; promoted to an asserted winner
