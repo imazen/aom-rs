@@ -1111,12 +1111,20 @@ fn deblocked_422_chroma_byte_identical_to_c() {
         (8, 128, 128, 60),
         (8, 100, 76, 60),   // non-8-multiple width
         (8, 256, 192, 60),
+        // 12-bit — closes the 12-bit 4:2:2 chroma-deblock gap (seq profile 2).
+        (12, 96, 80, 44),
+        (12, 96, 80, 60),
+        (12, 128, 128, 52),
+        (12, 130, 96, 56),  // non-8-multiple width (chroma 65, odd)
+        (12, 100, 76, 60),  // non-8-multiple width (chroma 50)
+        (12, 256, 192, 52),
     ];
 
     let mut chroma_active = 0u32;
     let mut chroma_changed = 0u32;
     let mut bd8_active = 0u32;
     let mut bd10_active = 0u32;
+    let mut bd12_active = 0u32;
     let mut odd_halfwidth_active = 0u32;
 
     for &(bd, w, h, cq) in grid {
@@ -1145,10 +1153,10 @@ fn deblocked_422_chroma_byte_identical_to_c() {
         let v_active = f.filter_level[3] != 0;
         if u_active || v_active {
             chroma_active += 1;
-            if bd == 8 {
-                bd8_active += 1;
-            } else {
-                bd10_active += 1;
+            match bd {
+                8 => bd8_active += 1,
+                10 => bd10_active += 1,
+                _ => bd12_active += 1,
             }
             // ODD chroma half-width (non-8-multiple, w/2 odd) exercised.
             if (w >> 1) & 1 == 1 {
@@ -1192,7 +1200,7 @@ fn deblocked_422_chroma_byte_identical_to_c() {
 
     println!(
         "422gate: chroma_active={chroma_active} chroma_changed={chroma_changed} \
-         bd8_active={bd8_active} bd10_active={bd10_active} \
+         bd8_active={bd8_active} bd10_active={bd10_active} bd12_active={bd12_active} \
          odd_halfwidth_active={odd_halfwidth_active}"
     );
     // ANTI-VACUOUS floors: the byte-identity above is only meaningful if
@@ -1207,6 +1215,7 @@ fn deblocked_422_chroma_byte_identical_to_c() {
     );
     assert!(bd8_active >= 1, "no 8-bit 4:2:2 chroma-deblock stream");
     assert!(bd10_active >= 1, "no 10-bit 4:2:2 chroma-deblock stream");
+    assert!(bd12_active >= 1, "no 12-bit 4:2:2 chroma-deblock stream");
     assert!(
         odd_halfwidth_active >= 1,
         "no chroma-deblock stream with an ODD chroma half-width (non-8-mult width)"
