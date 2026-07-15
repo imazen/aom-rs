@@ -288,6 +288,8 @@ impl SpeedFeatures {
             skip_tx_search: self.skip_tx_search,
             sharpness,
             use_chroma_trellis_rd_mult: self.use_chroma_trellis_rd_mult,
+            intra_tx_size_init_depth_rect: self.intra_tx_size_search_init_depth_rect,
+            intra_tx_size_init_depth_sqr: self.intra_tx_size_search_init_depth_sqr,
         }
     }
 }

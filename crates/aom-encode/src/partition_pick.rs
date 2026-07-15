@@ -2170,6 +2170,11 @@ pub fn rd_pick_partition_real(
             let frame_h_px = env.mi_rows * 4;
             let min_dim = frame_w_px.min(frame_h_px);
             let res_idx = usize::from(min_dim >= 480) + usize::from(min_dim >= 720);
+            // ml_4_partition_search_level_index (part_sf, speed_features.c:210):
+            // 0 at speed 0, 1 at speed >= 1 — mirrors SpeedFeatures::set_allintra
+            // for the modeled range (the speed-2/3 min(speed,3) deltas are
+            // unmodeled = #10; predict_4partition_prune guards level_index >= 3).
+            let ml_4_level_index = i32::from(cfg.speed >= 1);
             let (h4, v4) = crate::part4_prune::predict_4partition_prune(
                 bsize,
                 pc_tree_partitioning,
@@ -2180,6 +2185,7 @@ pub fn rd_pick_partition_real(
                 horz4_var,
                 vert4_var,
                 res_idx,
+                ml_4_level_index,
                 part4_allowed[0],
                 part4_allowed[1],
             );

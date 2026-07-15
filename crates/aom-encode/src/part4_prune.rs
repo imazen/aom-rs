@@ -6,14 +6,14 @@
 //! independent`, speed_features.c -- not gated by any `if (speed >= N)`).
 //!
 //! Only the `ml_model_index == 1` ("hd_" weight set, `NEW_LABEL_SIZE=3`
-//! softmax) branch is reachable: `ml_model_index = (ml_4_partition_search_
-//! level_index < 3)`, and `ml_4_partition_search_level_index` stays at its
-//! `av1_reset_part_sf` default of 0 at speed 0 for BOTH usages (every
-//! override in speed_features.c is gated `if (speed >= 1)` or higher) --
-//! `0 < 3` => `ml_model_index = 1` always. The `ml_model_index == 0`
-//! (`LABEL_SIZE=4`, no softmax) weight variant is therefore dead code at
-//! speed 0 and is intentionally NOT transcribed (see
-//! `xtask/transcribe_part4_nn.py`).
+//! softmax) branch is transcribed: `ml_model_index = (ml_4_partition_search_
+//! level_index < 3)`. `ml_4_partition_search_level_index` is threaded in via
+//! `predict_4partition_prune`'s `level_index` param — 0 at speed 0, 1 at
+//! speed >= 1 in the port's modeled range (speed_features.c:210), always
+//! `< 3` => `ml_model_index = 1`. The `ml_model_index == 0` (`LABEL_SIZE=4`,
+//! no softmax) weight variant used at level 3 (speed >= 3) is NOT transcribed
+//! (see `xtask/transcribe_part4_nn.py`); `predict_4partition_prune` guards
+//! `level_index >= 3` and leaves the 4-way flags untouched there (#10).
 //!
 //! `ext_ml_model_decision_after_part_ab` (the external-partition-model
 //! hook) requires `!frame_is_intra_only(cm)`, which is always false for our
@@ -155,6 +155,7 @@ pub fn predict_4partition_prune(
     horz4_source_var: [u32; 4],
     vert4_source_var: [u32; 4],
     res_idx: usize,
+    level_index: i32,
     horz4_in: bool,
     vert4_in: bool,
 ) -> (bool, bool) {
@@ -230,9 +231,16 @@ pub fn predict_4partition_prune(
     let score = nn_predict_1layer(&features, t.w0, t.b0, t.hidden, t.w1, t.b1);
     let probs = softmax3(score);
 
-    // `ml_4_partition_search_level_index == 0` at speed 0, both usages.
-    const LEVEL_INDEX: usize = 0;
-    let thresh_idx = (LEVEL_INDEX * 3 + res_idx) * 5 + t.bsize_idx;
+    // `ml_4_partition_search_level_index` (part_sf): 0 at speed 0, 1 at
+    // speed >= 1 (SpeedFeatures::set_allintra, speed_features.c:210). The
+    // threshold-table path below is how C decides at levels 0/1/2; at level 3
+    // (speed >= 3) C switches to a different NN model with no threshold table
+    // (partition_strategy.c:1359) — unported (#10), so leave the 4-way allowed
+    // flags untouched rather than mis-index the table.
+    if level_index >= 3 {
+        return (horz4_in, vert4_in);
+    }
+    let thresh_idx = (level_index as usize * 3 + res_idx) * 5 + t.bsize_idx;
     let search_thresh = w::SEARCH_THRESH[thresh_idx];
     let not_search_thresh = w::NOT_SEARCH_THRESH[thresh_idx];
 

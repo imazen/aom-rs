@@ -1667,6 +1667,58 @@ fn encoder_gate_speed1_textured_allintra() {
     );
 }
 
+/// **ASSERTED speed-1 (cpu-used=1) witness for the two #25 latent fixes.**
+/// Before #25 the port carried the speed-0 tx/partition speed-feature values
+/// into the speed-1 search: the rectangular tx-size depth-search floor
+/// `intra_tx_size_search_init_depth_rect` stayed 0 (C sets 1 at speed >= 1,
+/// speed_features.c:409) and the 4-partition ML-prune row
+/// `ml_4_partition_search_level_index` stayed 0 (C sets 1 at speed >= 1,
+/// speed_features.c:210). Both are now threaded from the resolved
+/// `SpeedFeatures`: Feature 2 via `TxTypeSearchPolicy::intra_tx_size_init_depth_
+/// {rect,sqr}`, Feature 1 via `predict_4partition_prune`'s `level_index` param.
+///
+/// These three ALLINTRA cells diverged from real aomenc pre-#25 and byte-match
+/// after. Per-fix isolation (reverting one fix at a time) attributes them:
+///   - `hstripes6+vstripes16 cq8` — needs BOTH fixes: re-diverges if EITHER the
+///     rect init-depth (F2) OR the 4-partition LEVEL (F1) is reverted.
+///   - `diag+vbars16 cq32`, `hstripes6+vstripes16 cq56` — need the rect
+///     init-depth fix (F2): re-diverge if F2 is reverted; F1 alone leaves them
+///     matching. vbars16/vstripes16 produce VERT_4 -> 16x64 rect leaves whose
+///     tx-size winner moves when the extra smallest sub-tx (TX_16X16, which C
+///     skips at speed >= 1) is or isn't searched.
+///
+/// Together the three give per-feature revert coverage: this gate FAILS if
+/// either #25 fix is reverted. Anti-vacuous — three real end-to-end encodes vs
+/// aomenc, each confirmed DIFF before the fix. (17 of the 24 swept
+/// vbars/vstripes speed-1 cells still diverge for reasons outside #25's two
+/// fixes — separate later speed-1 / #10 work.)
+#[test]
+fn encoder_gate_speed1_rect_and_4way_25() {
+    // (generator, cq) — the #25 witness cells; per-fix attribution in the doc.
+    #[allow(clippy::type_complexity)]
+    let cells: &[(&str, fn(usize, usize) -> u8, i32)] = &[
+        ("hstripes6+vstripes16+grad", lf_hstripes6_vstripes16_grad, 8), // needs F1 AND F2
+        ("diag+vbars16+ripple", lf_diag_vbars16_ripple, 32),            // needs F2
+        ("hstripes6+vstripes16+grad", lf_hstripes6_vstripes16_grad, 56), // needs F2
+    ];
+    let mut matched = 0usize;
+    for &(name, g, cq) in cells {
+        let ok = attempt_case_content_uv(256, 256, true, 1, 1, 2, cq, 1, 1, g, |_r, _c| 128);
+        eprintln!("speed1 #25 [{name}] cq{cq}: {}", if ok { "MATCH" } else { "DIFF" });
+        if ok {
+            matched += 1;
+        }
+    }
+    assert_eq!(
+        matched,
+        cells.len(),
+        "every speed-1 (cpu-used=1) ALLINTRA #25 witness cell must byte-match real aomenc \
+         end-to-end -- these cells re-diverge if either the rect tx-size init-depth fix \
+         (tx_search + speed_features) or the 4-partition ml_4_partition_search_level_index fix \
+         (part4_prune + partition_pick) is reverted"
+    );
+}
+
 /// ISOLATION (Gate 2, cpu-used=1) of the `vgrad 256x256 cq32` byte-5
 /// divergence — COMPLETE. Conclusion: the divergence is NOT an unported
 /// learned-model prune. The prime suspect, `intra_cnn_based_part_prune_level`

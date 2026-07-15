@@ -389,7 +389,7 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
 #[test]
 fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
     use aom_encode::tx_search::{
-        MAX_TXSIZE_RECT_LOOKUP, SUB_TX_SIZE_MAP, get_search_init_depth_intra_speed0,
+        MAX_TXSIZE_RECT_LOOKUP, SUB_TX_SIZE_MAP, get_search_init_depth_intra,
         pick_uniform_tx_size_type_yrd_intra,
     };
     c::ref_init();
@@ -616,7 +616,9 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                 }
                 lossless_cases += 1;
             } else {
-                let init_depth = get_search_init_depth_intra_speed0(MI_W[bsize], MI_H[bsize]);
+                // Speed-0 init-depths (rect 0, sqr 1) — this differential pins the
+                // speed-0 depth loop; the speed>=1 rect=1 path is exercised e2e.
+                let init_depth = get_search_init_depth_intra(MI_W[bsize], MI_H[bsize], 0, 1);
                 let start_tx = MAX_TXSIZE_RECT_LOOKUP[bsize];
                 let mut rd_arr = [i64::MAX; 3];
                 let mut best_rd_c = i64::MAX;

@@ -441,6 +441,15 @@ pub struct TxTypeSearchPolicy {
     /// GOOD leaves the default 0** (chroma multiplier 20, not 13). Luma
     /// unaffected.
     pub use_chroma_trellis_rd_mult: bool,
+    /// sf `tx_sf.intra_tx_size_search_init_depth_rect` — the tx-size depth
+    /// search FLOOR for a rectangular (w != h) intra block: 0 at speed 0
+    /// (searches down to the smallest sub-tx), 1 at speed >= 1 (stops one
+    /// shrink-step shallower, skipping that smallest sub-tx). Mirrors
+    /// `SpeedFeatures::intra_tx_size_search_init_depth_rect` (speed_features.c:409).
+    pub intra_tx_size_init_depth_rect: i32,
+    /// sf `tx_sf.intra_tx_size_search_init_depth_sqr` — the square (w == h)
+    /// block floor; 1 for all speeds (speed_features.c:367).
+    pub intra_tx_size_init_depth_sqr: i32,
 }
 
 impl TxTypeSearchPolicy {
@@ -456,6 +465,8 @@ impl TxTypeSearchPolicy {
             skip_tx_search: false,
             sharpness: 0,
             use_chroma_trellis_rd_mult: true,
+            intra_tx_size_init_depth_rect: 0,
+            intra_tx_size_init_depth_sqr: 1,
         }
     }
 
@@ -1297,16 +1308,23 @@ pub const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3,
 /// `MAX_TX_DEPTH` (blockd.h).
 pub const MAX_TX_DEPTH: i32 = 2;
 
-/// `get_search_init_depth` (tx_search.c) for intra at speed-0 all-intra:
-/// `intra_tx_size_search_init_depth_sqr = 1` (speed-0 allintra block),
-/// `intra_tx_size_search_init_depth_rect = 0` (default),
-/// `tx_size_search_lgr_block = 0` (default). USE_FULL_RD (never LARGESTALL
-/// here — that arm returns MAX_VARTX_DEPTH upstream).
-pub fn get_search_init_depth_intra_speed0(mi_width: usize, mi_height: usize) -> i32 {
+/// `get_search_init_depth` (tx_search.c) for an intra block: the per-shape
+/// tx-size depth-search FLOOR. `tx_size_search_lgr_block = 0` (default) => the
+/// (rect, sqr) init-depth arm; USE_FULL_RD (never LARGESTALL here — that arm
+/// returns MAX_VARTX_DEPTH upstream). Rectangular (w != h) blocks use
+/// `init_depth_rect`, square (w == h) blocks `init_depth_sqr`; both are speed
+/// features carried on [`TxTypeSearchPolicy`] (rect: 0 at speed 0, 1 at
+/// speed >= 1; sqr: 1 for all speeds — speed_features.c:367/409).
+pub fn get_search_init_depth_intra(
+    mi_width: usize,
+    mi_height: usize,
+    init_depth_rect: i32,
+    init_depth_sqr: i32,
+) -> i32 {
     if mi_height != mi_width {
-        0 // intra_tx_size_search_init_depth_rect
+        init_depth_rect
     } else {
-        1 // intra_tx_size_search_init_depth_sqr
+        init_depth_sqr
     }
 }
 
@@ -1327,8 +1345,9 @@ pub struct TxSizeChoice {
 /// keep the strict-min, stop at TX_4X4 or on the low-contrast
 /// (`source_variance < 256`) regression prune.
 ///
-/// Speed-0 resolution (each named): `init_depth` per
-/// [`get_search_init_depth_intra_speed0`]; `enable_tx64`/`enable_rect_tx`
+/// Per-speed resolution (each named): `init_depth` per
+/// [`get_search_init_depth_intra`] from the pol's rect/sqr init-depths (rect 0
+/// at speed 0, 1 at speed >= 1; sqr 1 always); `enable_tx64`/`enable_rect_tx`
 /// CLI-default ON (the disable arms are `continue`s, kept via params);
 /// `use_rd_based_breakout_for_intra_tx_search = false` (rd_thresh is always
 /// `ref_best_rd`); `prune_intra_tx_depths_using_nn = false` (no NN pruning);
@@ -1352,8 +1371,12 @@ pub fn choose_tx_size_type_from_rd_intra(
     // tx_select is TX_MODE_SELECT here (the LARGESTALL/ONLY_4X4 arms are the
     // caller's — see av1_pick_uniform_tx_size_type_yrd).
     let mut start_tx = max_rect_tx_size;
-    let init_depth =
-        get_search_init_depth_intra_speed0(MI_SIZE_WIDE_B[bsize], MI_SIZE_HIGH_B[bsize]);
+    let init_depth = get_search_init_depth_intra(
+        MI_SIZE_WIDE_B[bsize],
+        MI_SIZE_HIGH_B[bsize],
+        pol.intra_tx_size_init_depth_rect,
+        pol.intra_tx_size_init_depth_sqr,
+    );
     if init_depth == MAX_TX_DEPTH && !enable_tx64 && TXSIZE_SQR_UP_MAP[start_tx] == 4 {
         start_tx = SUB_TX_SIZE_MAP[start_tx];
     }
