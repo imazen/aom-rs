@@ -99,12 +99,23 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
 - **Verified:** the cq62 cell now achieves TRUE END-TO-END BYTE MATCH vs real aomenc and is an
   **asserted** case in `encoder_gate_e2e_rich_content_strong_lf` (6/6); full `aom-encode` suite
   green; the port's angled prediction matches C pixel-for-pixel (per-tx-block SATDs identical).
-- **Latent follow-up (documented, not KB-2):** the **chroma** `filter_type` (UvRdEnv, both the
-  production `partition_pick.rs:673` and `CPick`) is still frozen at 0 — C's
-  `get_intra_edge_filter_type(xd, 1)` uses chroma neighbours' `uv_mode` smoothness, which the port
-  does not yet track. Dormant here (KB-2 is monochrome/luma); would only bite a 4:2:0 cell with a
-  smooth chroma neighbour + angled chroma prediction. Fixing it needs a chroma-neighbour uv_mode
-  grid. Flagged for the cpu-used sweep (#10) / a dedicated chroma cell.
+- **Chroma follow-up (#26) — FIXED ✅ 2026-07-15.** The **chroma** `filter_type` (UvRdEnv) was the
+  same frozen-at-0 bug on the UV plane: C's `get_intra_edge_filter_type(xd, plane=1)` is `1` iff an
+  available above/left chroma neighbour's `uv_mode` is SMOOTH (UV_SMOOTH_PRED=9 / UV_SMOOTH_V=10 /
+  UV_SMOOTH_H=11). Fix mirrors the KB-2 luma recompute on chroma: `ModeGrid` now carries a parallel
+  `uv_modes` grid (`partition_pick.rs`, stamped alongside luma at every `stamp`/`stamp_grid_from_tree`
+  site); `leaf_pick_sb_modes` recomputes the per-block chroma edge `filter_type` from the chroma
+  neighbours (chroma-reference mi derivation, av1_common_int.h:1400-1416: `base=(mi_row-(mi_row&ss_y),
+  mi_col-(mi_col&ss_x))`, above=`base+(-1,+ss_x)`, left=`base+(+ss_y,-1)`) and feeds it to BOTH the UV
+  RD search AND — via the new `LeafWinner::uv_edge_filter_type` — the pack re-encode
+  (`encode_b_intra_dry`, encode_sb.rs), which produces the coded chroma bytes. The `CPick`
+  C-recursion reference in `partition_pick_diff.rs` got the identical recompute + a parallel `uv_grid`
+  (randomized UV neighbours now exercise it as a differential witness). **Verified:** new
+  `encoder_gate_444_bd8_chroma_edge_filter_witness` (encoder_gate_chroma_ss_e2e.rs) byte-matches real
+  aomenc on all 4 cells WITH the fix and DIVERGES on the 128×128 cq12/cq32 cells with it reverted
+  (proven fails-before/matches-after); `partition_pick_diff` passes with randomized smooth UV
+  neighbours; full `aom-encode` suite green. Commit: partition_pick.rs + encode_sb.rs +
+  partition_pick_diff.rs + encode_sb_diff.rs + the witness.
 - **Historical isolation trail (how it was root-caused) below:**
 - **Re-verified 2026-07-15 (still diverges), with much sharper isolation:**
   - Facts: qindex **249**, `screen_content=true` (auto-detected — the ONLY screen-content cell in

@@ -523,6 +523,37 @@ fn tex_chroma(mask: u32) -> impl Fn(usize, usize) -> u16 {
     }
 }
 
+/// Luma companion for the chroma-edge-filter witness: gentle, low-detail content
+/// so the *luma* partition stays coarse and the chroma mode search (not luma) is
+/// what drives the block layout the witness depends on.
+fn witness_luma(mask: u32) -> impl Fn(usize, usize) -> u16 {
+    move |r, cc| (((r + cc) as u32 * mask / 200) & mask) as u16
+}
+
+/// Chroma engineered to FIRE the per-block chroma intra edge filter
+/// (`get_intra_edge_filter_type(xd, plane=1)`): 16-wide vertical bands alternate
+/// between a SMOOTH bilinear gradient (the SMOOTH_PRED / SMOOTH_V / SMOOTH_H
+/// family wins those blocks with near-zero residual) and a strong diagonal-stripe
+/// field (a *directional* uv_mode wins). Every stripe band borders a SMOOTH band
+/// on its left, so a chroma block in a stripe band is exactly the "directional
+/// block whose above/left chroma neighbour is SMOOTH" case: C derives
+/// `filter_type = 1` there, while the pre-#26 frozen SB-level value was 0 — the
+/// two edge filters give different predicted chroma, hence different coded bytes.
+/// This is the byte-exact witness for the re-encode (pack) path the
+/// `partition_pick_diff` unit witness (search path) cannot reach.
+fn smooth_dir_bands_chroma(mask: u32) -> impl Fn(usize, usize) -> u16 {
+    move |r, cc| {
+        if (cc / 16) & 1 == 0 {
+            // Smooth bilinear gradient -> SMOOTH family (no high-frequency term).
+            (((r + cc) as u32 * mask / 128) & mask) as u16
+        } else {
+            // Strong diagonal stripes -> a directional uv_mode.
+            let s = ((r as u32).wrapping_add((cc as u32).wrapping_mul(3))) % 16;
+            ((s * mask / 15) & mask) as u16
+        }
+    }
+}
+
 /// Print the per-cell match grid and assert every cell byte-matched real aomenc.
 /// A mismatch fails loudly with the full grid and the failing cells — the
 /// per-cell first-diff byte offset is already printed by `run_case`.
@@ -581,4 +612,30 @@ fn encoder_gate_422_bd8_e2e() {
         }
     }
     report_and_assert("4:2:2 bd8", &results);
+}
+
+/// **Witness — per-block chroma intra edge filter (#26).** 4:4:4 bd8 ALLINTRA KEY
+/// with [`smooth_dir_bands_chroma`]: SMOOTH chroma bands abut strong directional
+/// chroma bands, so many directional chroma blocks border a SMOOTH above/left
+/// chroma neighbour — the case where C derives `get_intra_edge_filter_type(xd,
+/// plane=1) = 1`. Before #26 the port froze the SB-level chroma `filter_type` at
+/// 0 and predicted those blocks with the wrong intra edge filter, diverging the
+/// coded chroma bytes. With the per-block recompute wired through BOTH the UV RD
+/// search (`leaf_pick_sb_modes`) AND the pack re-encode (`encode_b_intra_dry`,
+/// via `LeafWinner::uv_edge_filter_type`), every cell is byte-identical to real
+/// aomenc. Sizes 64/128 (1×1 / 2×2 SB) × cq 12/32 keep partitions fine enough
+/// (high-quality qindex) that directional chroma modes actually win alongside the
+/// SMOOTH bands.
+#[test]
+fn encoder_gate_444_bd8_chroma_edge_filter_witness() {
+    let luma = witness_luma(0xff);
+    let chroma = smooth_dir_bands_chroma(0xff);
+    let mut results: Vec<(String, bool)> = Vec::new();
+    for &sz in &[64usize, 128] {
+        for &cq in &[12i32, 32] {
+            let res = run_case(sz, sz, false, 0, 0, 2, cq, 8, &luma, &chroma);
+            results.push((format!("444-edgefilter {sz}x{sz} cq{cq:>2}"), res.matched));
+        }
+    }
+    report_and_assert("4:4:4 chroma edge filter witness", &results);
 }

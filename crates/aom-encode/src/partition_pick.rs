@@ -314,6 +314,13 @@ pub fn fold_intra_sb_rdmult(rdmult: i32, modifier: i32) -> i32 {
 /// module docs). `stride` = frame `mi_cols`.
 pub struct ModeGrid {
     pub modes: Vec<u8>,
+    /// Per-mi winner `uv_mode` (UV_PREDICTION_MODE), stamped alongside `modes`.
+    /// Read for the per-block CHROMA intra-edge-filter type
+    /// (`get_intra_edge_filter_type(xd, plane=1)`, reconintra.c:974) — the
+    /// chroma analogue of the luma `modes` read. Dead (0) on non-chroma-ref
+    /// leaves, but the chroma-neighbour lookup addresses the chroma-reference
+    /// mi cell (base_mi + offsets), which always carries the real value.
+    pub uv_modes: Vec<u8>,
     pub stride: usize,
 }
 
@@ -322,6 +329,7 @@ impl ModeGrid {
     pub fn dc(mi_rows: usize, mi_cols: usize) -> Self {
         ModeGrid {
             modes: vec![0; mi_rows * mi_cols],
+            uv_modes: vec![0; mi_rows * mi_cols],
             stride: mi_cols,
         }
     }
@@ -331,6 +339,7 @@ impl ModeGrid {
         mi_col: i32,
         bsize: usize,
         mode: u8,
+        uv_mode: u8,
         mi_rows: i32,
         mi_cols: i32,
     ) {
@@ -339,10 +348,14 @@ impl ModeGrid {
         for r in 0..rows {
             let base = (mi_row as usize + r) * self.stride + mi_col as usize;
             self.modes[base..base + cols].fill(mode);
+            self.uv_modes[base..base + cols].fill(uv_mode);
         }
     }
     fn at(&self, mi_row: i32, mi_col: i32) -> u8 {
         self.modes[mi_row as usize * self.stride + mi_col as usize]
+    }
+    fn at_uv(&self, mi_row: i32, mi_col: i32) -> u8 {
+        self.uv_modes[mi_row as usize * self.stride + mi_col as usize]
     }
 }
 
@@ -651,6 +664,37 @@ fn leaf_pick_sb_modes(
     // `rd_pick_intra_mode_sb` (same inputs, same value).
     let uv_tx_size = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
     let uv_coeff_tables = env.coeff_costs_uv.tables(uv_tx_size);
+
+    // Per-block CHROMA intra-edge-filter type (`get_intra_edge_filter_type(xd,
+    // plane=1)`, reconintra.c:974): 1 iff the chroma above OR left neighbour's
+    // `uv_mode` is a SMOOTH mode (UV_SMOOTH_PRED=9 / UV_SMOOTH_V=10 /
+    // UV_SMOOTH_H=11). This is the chroma analogue of the luma
+    // `luma_edge_filter_type` recompute above (KB-2); the frozen SB-level
+    // `env.filter_type` (always 0) was the same pre-KB-2 bug on the chroma
+    // plane. The chroma neighbour mbmi is the chroma-reference mi of the
+    // above/left chroma unit (av1_common_int.h:1400-1416): from the block's
+    // top-left-most covered luma mi `base = (mi_row - (mi_row & ss_y),
+    // mi_col - (mi_col & ss_x))`, `above = base + (-1, +ss_x)` and
+    // `left = base + (+ss_y, -1)`. The `chroma_*_available` flags mirror C's
+    // NULL-neighbour guard; the in-frame check is a panic-safety net (a
+    // neighbour outside the frame reads as DC_PRED=0 = not smooth).
+    let is_smooth_uv = |uvm: u8| (9..=11).contains(&uvm);
+    let base_row = mi_row - (mi_row & env.ss_y as i32);
+    let base_col = mi_col - (mi_col & env.ss_x as i32);
+    let uv_mode_at = |r: i32, c: i32| -> u8 {
+        if r >= 0 && c >= 0 && r < env.mi_rows && c < env.mi_cols {
+            grid.at_uv(r, c)
+        } else {
+            0
+        }
+    };
+    let chroma_edge_filter_type = i32::from(
+        (chroma_up_available
+            && is_smooth_uv(uv_mode_at(base_row - 1, base_col + env.ss_x as i32)))
+            || (chroma_left_available
+                && is_smooth_uv(uv_mode_at(base_row + env.ss_y as i32, base_col - 1))),
+    );
+
     let mut uv_env = UvRdEnv {
         sb_size: env.sb_size,
         bsize,
@@ -672,7 +716,7 @@ fn leaf_pick_sb_modes(
         src_off: [ref_off_uv, ref_off_uv],
         src_stride: env.stride,
         disable_edge_filter: env.disable_edge_filter,
-        filter_type: env.filter_type,
+        filter_type: chroma_edge_filter_type,
         luma_mode: 0,
         luma_use_fi: false,
         luma_fi_mode: 0,
@@ -758,6 +802,7 @@ fn leaf_pick_sb_modes(
                 angle_delta_uv,
                 cfl_alpha_idx,
                 cfl_alpha_signs,
+                uv_edge_filter_type: chroma_edge_filter_type,
                 tx_type_map: best.tx_type_map,
                 skip_txfm: false,
                 raw_rdstats: stats,
@@ -1017,7 +1062,7 @@ fn rd_pick_4partition(
                 c,
                 partition_type,
             );
-            grid.stamp(r, c, subsize, wi.mode as u8, env.mi_rows, env.mi_cols);
+            grid.stamp(r, c, subsize, wi.mode as u8, wi.uv_mode as u8, env.mi_rows, env.mi_cols);
         }
     }
     // Calculate the total cost and update the best partition (:3962-3967).
@@ -1301,7 +1346,7 @@ fn rd_pick_ab_part(
                 c,
                 partition_type,
             );
-            grid.stamp(r, c, sz, wi.mode as u8, env.mi_rows, env.mi_cols);
+            grid.stamp(r, c, sz, wi.mode as u8, wi.uv_mode as u8, env.mi_rows, env.mi_cols);
         }
     }
     // Calculate the total cost and update the best partition (:3211-3218;
@@ -1882,6 +1927,7 @@ pub fn rd_pick_partition_real(
                 mi_col,
                 subsize,
                 w0.mode as u8,
+                w0.uv_mode as u8,
                 env.mi_rows,
                 env.mi_cols,
             );
@@ -2298,7 +2344,7 @@ fn stamp_grid_from_tree(
     }
     match tree {
         SbTree::Leaf(w) => {
-            grid.stamp(mi_row, mi_col, bsize, w.mode as u8, mi_rows, mi_cols);
+            grid.stamp(mi_row, mi_col, bsize, w.mode as u8, w.uv_mode as u8, mi_rows, mi_cols);
         }
         SbTree::Split(kids) => {
             let sub = split_subsize(bsize);
@@ -2318,13 +2364,14 @@ fn stamp_grid_from_tree(
         SbTree::Horz(subs) => {
             let sub = get_partition_subsize(bsize, 1) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, subs[0].uv_mode as u8, mi_rows, mi_cols);
             if mi_row + hbs < mi_rows {
                 grid.stamp(
                     mi_row + hbs,
                     mi_col,
                     sub,
                     subs[1].mode as u8,
+                    subs[1].uv_mode as u8,
                     mi_rows,
                     mi_cols,
                 );
@@ -2333,13 +2380,14 @@ fn stamp_grid_from_tree(
         SbTree::Vert(subs) => {
             let sub = get_partition_subsize(bsize, 2) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, subs[0].uv_mode as u8, mi_rows, mi_cols);
             if mi_col + hbs < mi_cols {
                 grid.stamp(
                     mi_row,
                     mi_col + hbs,
                     sub,
                     subs[1].mode as u8,
+                    subs[1].uv_mode as u8,
                     mi_rows,
                     mi_cols,
                 );
@@ -2356,7 +2404,7 @@ fn stamp_grid_from_tree(
                 if i > 0 && this_mi_row >= mi_rows {
                     break;
                 }
-                grid.stamp(this_mi_row, mi_col, sub, w.mode as u8, mi_rows, mi_cols);
+                grid.stamp(this_mi_row, mi_col, sub, w.mode as u8, w.uv_mode as u8, mi_rows, mi_cols);
             }
         }
         SbTree::Vert4(subs) => {
@@ -2369,7 +2417,7 @@ fn stamp_grid_from_tree(
                 if i > 0 && this_mi_col >= mi_cols {
                     break;
                 }
-                grid.stamp(mi_row, this_mi_col, sub, w.mode as u8, mi_rows, mi_cols);
+                grid.stamp(mi_row, this_mi_col, sub, w.mode as u8, w.uv_mode as u8, mi_rows, mi_cols);
             }
         }
         SbTree::HorzA(subs) => {
@@ -2379,12 +2427,13 @@ fn stamp_grid_from_tree(
             let bsize2 = split_subsize(bsize);
             let sub = get_partition_subsize(bsize, 4) as usize; // PARTITION_HORZ_A
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            grid.stamp(mi_row, mi_col, bsize2, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(mi_row, mi_col, bsize2, subs[0].mode as u8, subs[0].uv_mode as u8, mi_rows, mi_cols);
             grid.stamp(
                 mi_row,
                 mi_col + hbs,
                 bsize2,
                 subs[1].mode as u8,
+                subs[1].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );
@@ -2393,6 +2442,7 @@ fn stamp_grid_from_tree(
                 mi_col,
                 sub,
                 subs[2].mode as u8,
+                subs[2].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );
@@ -2401,12 +2451,13 @@ fn stamp_grid_from_tree(
             let bsize2 = split_subsize(bsize);
             let sub = get_partition_subsize(bsize, 5) as usize; // PARTITION_HORZ_B
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, subs[0].uv_mode as u8, mi_rows, mi_cols);
             grid.stamp(
                 mi_row + hbs,
                 mi_col,
                 bsize2,
                 subs[1].mode as u8,
+                subs[1].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );
@@ -2415,6 +2466,7 @@ fn stamp_grid_from_tree(
                 mi_col + hbs,
                 bsize2,
                 subs[2].mode as u8,
+                subs[2].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );
@@ -2423,12 +2475,13 @@ fn stamp_grid_from_tree(
             let bsize2 = split_subsize(bsize);
             let sub = get_partition_subsize(bsize, 6) as usize; // PARTITION_VERT_A
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            grid.stamp(mi_row, mi_col, bsize2, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(mi_row, mi_col, bsize2, subs[0].mode as u8, subs[0].uv_mode as u8, mi_rows, mi_cols);
             grid.stamp(
                 mi_row + hbs,
                 mi_col,
                 bsize2,
                 subs[1].mode as u8,
+                subs[1].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );
@@ -2437,6 +2490,7 @@ fn stamp_grid_from_tree(
                 mi_col + hbs,
                 sub,
                 subs[2].mode as u8,
+                subs[2].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );
@@ -2445,12 +2499,13 @@ fn stamp_grid_from_tree(
             let bsize2 = split_subsize(bsize);
             let sub = get_partition_subsize(bsize, 7) as usize; // PARTITION_VERT_B
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
-            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, mi_rows, mi_cols);
+            grid.stamp(mi_row, mi_col, sub, subs[0].mode as u8, subs[0].uv_mode as u8, mi_rows, mi_cols);
             grid.stamp(
                 mi_row,
                 mi_col + hbs,
                 bsize2,
                 subs[1].mode as u8,
+                subs[1].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );
@@ -2459,6 +2514,7 @@ fn stamp_grid_from_tree(
                 mi_col + hbs,
                 bsize2,
                 subs[2].mode as u8,
+                subs[2].uv_mode as u8,
                 mi_rows,
                 mi_cols,
             );

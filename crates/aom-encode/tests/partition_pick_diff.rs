@@ -88,6 +88,12 @@ fn c_split_sub(bsize: usize) -> usize {
 struct CPick<'a> {
     o: COracle<'a>,
     grid: Vec<u8>,
+    /// Parallel UV-mode grid (same stride as `grid`) — the C-recursion
+    /// reference for the per-block chroma intra edge filter
+    /// (`get_intra_edge_filter_type(xd, plane=1)`). Stamped with each winner's
+    /// `uv_mode` wherever `grid` is stamped with `mode`, so a chroma-ref
+    /// leaf's SMOOTH-UV-neighbour check mirrors production exactly.
+    uv_grid: Vec<u8>,
     grid_stride: usize,
     // Leaf-search tables (SHARED values with the Rust side — the tables are
     // fixture inputs; the DERIVED inputs are computed per side).
@@ -354,6 +360,27 @@ impl CPick<'_> {
         // partition_pick.rs::leaf_pick_sb_modes's fix).
         let uv_tx_size = av1_get_tx_size_uv(bsize, self.lossless, ss_x, ss_y);
         let uv_coeff_tables = self.coeff_costs_uv.tables(uv_tx_size);
+        // Per-block chroma intra edge filter type — the C-recursion analogue of
+        // the luma `luma_edge_filter_type` above, mirroring
+        // partition_pick.rs::leaf_pick_sb_modes exactly: 1 iff the available
+        // above/left chroma neighbour's `uv_mode` is SMOOTH (9/10/11). Chroma
+        // neighbour mi (av1_common_int.h:1400-1416): from `base = (mi_row -
+        // (mi_row & ss_y), mi_col - (mi_col & ss_x))`, above = base + (-1,+ss_x),
+        // left = base + (+ss_y,-1).
+        let is_smooth_uv = |uvm: u8| (9..=11).contains(&uvm);
+        let base_row = mi_row - (mi_row & ss_y as i32);
+        let base_col = mi_col - (mi_col & ss_x as i32);
+        let uv_mode_at = |r: i32, cc: i32| -> u8 {
+            if r >= 0 && cc >= 0 && r < self.o.mi_rows && cc < self.o.mi_cols {
+                self.uv_grid[r as usize * self.grid_stride + cc as usize]
+            } else {
+                0
+            }
+        };
+        let chroma_edge_filter_type = i32::from(
+            (c_up && is_smooth_uv(uv_mode_at(base_row - 1, base_col + ss_x as i32)))
+                || (c_left && is_smooth_uv(uv_mode_at(base_row + ss_y as i32, base_col - 1))),
+        );
         let mut uv_env = UvRdEnv {
             sb_size: self.sb_size,
             bsize,
@@ -375,7 +402,7 @@ impl CPick<'_> {
             src_off: [ref_off_uv, ref_off_uv],
             src_stride: STRIDE,
             disable_edge_filter: false,
-            filter_type: 0,
+            filter_type: chroma_edge_filter_type,
             luma_mode: 0,
             luma_use_fi: false,
             luma_fi_mode: 0,
@@ -447,6 +474,7 @@ impl CPick<'_> {
                     angle_delta_uv: ad_uv,
                     cfl_alpha_idx: ci,
                     cfl_alpha_signs: cs,
+                    uv_edge_filter_type: chroma_edge_filter_type,
                     tx_type_map: best.tx_type_map,
                     skip_txfm: false,
                     raw_rdstats: stats,
@@ -831,6 +859,7 @@ impl CPick<'_> {
                 for rr in 0..MI_HB[subsize] {
                     let base = (mi_row as usize + rr) * self.grid_stride + mi_col as usize;
                     self.grid[base..base + MI_WB[subsize]].fill(w0m.mode as u8);
+                    self.uv_grid[base..base + MI_WB[subsize]].fill(w0m.uv_mode as u8);
                 }
                 self.stats.rect_mid_encodes += 1;
                 // Sub-block 1 at the edge position (+ mi_step).
@@ -921,6 +950,7 @@ impl CPick<'_> {
                 );
                 stamp_grid(
                     &mut self.grid,
+                    &mut self.uv_grid,
                     self.grid_stride,
                     tree,
                     mi_row,
@@ -939,6 +969,7 @@ impl CPick<'_> {
 
 fn stamp_grid(
     grid: &mut [u8],
+    uv_grid: &mut [u8],
     stride: usize,
     tree: &SbTree,
     mi_row: i32,
@@ -950,6 +981,7 @@ fn stamp_grid(
             for r in 0..MI_HB[bsize] {
                 let base = (mi_row as usize + r) * stride + mi_col as usize;
                 grid[base..base + MI_WB[bsize]].fill(w.mode as u8);
+                uv_grid[base..base + MI_WB[bsize]].fill(w.uv_mode as u8);
             }
         }
         SbTree::Split(kids) => {
@@ -958,6 +990,7 @@ fn stamp_grid(
             for (idx, t) in kids.iter().enumerate() {
                 stamp_grid(
                     grid,
+                    uv_grid,
                     stride,
                     t,
                     mi_row + ((idx as i32) >> 1) * hbs,
@@ -974,6 +1007,7 @@ fn stamp_grid(
                 for rr in 0..MI_HB[sub] {
                     let base = (r as usize + rr) * stride + mi_col as usize;
                     grid[base..base + MI_WB[sub]].fill(w.mode as u8);
+                    uv_grid[base..base + MI_WB[sub]].fill(w.uv_mode as u8);
                 }
             }
         }
@@ -985,6 +1019,7 @@ fn stamp_grid(
                 for rr in 0..MI_HB[sub] {
                     let base = (mi_row as usize + rr) * stride + cc as usize;
                     grid[base..base + MI_WB[sub]].fill(w.mode as u8);
+                    uv_grid[base..base + MI_WB[sub]].fill(w.uv_mode as u8);
                 }
             }
         }
@@ -1021,6 +1056,10 @@ fn leaf_eq(
     assert_eq!(
         x.cfl_alpha_signs, y.cfl_alpha_signs,
         "leaf cfl signs: {tag}"
+    );
+    assert_eq!(
+        x.uv_edge_filter_type, y.uv_edge_filter_type,
+        "leaf uv edge filter: {tag}"
     );
     assert_eq!(x.tx_type_map, y.tx_type_map, "leaf map: {tag}");
 }
@@ -1323,7 +1362,14 @@ fn rd_pick_partition_real_matches_c_recursion() {
         for m in grid_rust.modes.iter_mut() {
             *m = (rng.next() % 13) as u8;
         }
+        // Randomize the pre-SB UV-neighbour context too (values 0..12 include
+        // the SMOOTH UV modes 9/10/11), so the per-block chroma edge filter is
+        // actually exercised as a differential witness — not left trivially 0.
+        for m in grid_rust.uv_modes.iter_mut() {
+            *m = (rng.next() % 13) as u8;
+        }
         let grid_c = grid_rust.modes.clone();
+        let uv_grid_c = grid_rust.uv_modes.clone();
         let tile0 = tile.clone();
 
         let env = SbEncodeEnv {
@@ -1471,6 +1517,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
                 left_t: tile0.left_tctx,
             },
             grid: grid_c,
+            uv_grid: uv_grid_c,
             grid_stride: 64,
             mode_costs: &mode_costs,
             tx_size_costs: &tx_size_costs,
@@ -1542,6 +1589,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
         assert_eq!(tile.above_tctx, cp.o.above_t, "above tctx: {tag}");
         assert_eq!(tile.left_tctx, cp.o.left_t, "left tctx: {tag}");
         assert_eq!(grid_rust.modes, cp.grid, "mode grid: {tag}");
+        assert_eq!(grid_rust.uv_modes, cp.uv_grid, "uv mode grid: {tag}");
 
         // Shape coverage accounting.
         fn count(t: &SbTree, none_n: &mut usize, split_n: &mut usize, rect_n: &mut [usize; 2]) {

@@ -158,6 +158,16 @@ pub struct LeafWinner {
     pub angle_delta_uv: i32,
     pub cfl_alpha_idx: i32,
     pub cfl_alpha_signs: i32,
+    /// Per-block chroma intra edge filter type (`get_intra_edge_filter_type`
+    /// on the UV plane, reconintra.c:974) — 1 iff an available above/left
+    /// chroma neighbour is a SMOOTH UV mode (9/10/11), else 0. Recomputed
+    /// from the chroma neighbours' UV modes during the search (where the mode
+    /// grid is live) and frozen onto the winner so the dry-run re-encode
+    /// (`encode_b_intra_dry`, which has no grid) predicts chroma with the SAME
+    /// edge filter the search's UV RD used. Replaces the frozen SB-level
+    /// `SbEncodeEnv::filter_type` on the chroma re-encode path (the KB-2 luma
+    /// fix's chroma analogue).
+    pub uv_edge_filter_type: i32,
     /// The block-local winner tx_type_map (stride `mi_size_wide[bsize]`),
     /// mutated in place by the luma re-encode's eob-0 resets (the state
     /// `ctx->tx_type_map` holds after the walk).
@@ -451,7 +461,12 @@ pub fn encode_b_intra_dry(
             src_off: [ref_off_uv, ref_off_uv],
             src_stride: env.stride,
             disable_edge_filter: env.disable_edge_filter,
-            filter_type: env.filter_type,
+            // Per-block chroma edge filter (`get_intra_edge_filter_type(xd,
+            // plane=1)`), recomputed at search time from the chroma
+            // neighbours' UV modes and carried on the winner — NOT the frozen
+            // SB-level `env.filter_type` (which only ever held 0 and mis-
+            // predicted chroma when an above/left UV neighbour was SMOOTH).
+            filter_type: winner.uv_edge_filter_type,
             // The luma-winner fields feed the RD tx-type MASK only — the
             // encode arm derives its tx type from uv_mode alone. Threaded
             // for completeness.
