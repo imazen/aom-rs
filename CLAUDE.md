@@ -114,15 +114,32 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
   - **CONCLUSION:** a plain **speed-0 coeff/partition/mode near-tie**, NOT screen-content-specific.
     Same content+generator as the cq**63** cell that byte-matches (strong_lf gate 5/5); cq62 → qidx
     249 tips a near-tie in a later SB. Class-identical to KB-1's "only very-high-qindex flips it".
-  - **NEXT (RD-dump plan, two-stage):** (1) PIN the diverging SB (16 SBs; first 60/100 tile bytes
-    match → a later SB). Cheapest: extend the sibling instrument's SB(0,0)-gated partition dump to
-    ALL SBs (print mi_row/mi_col + partition per node) AND add a matching port-side per-SB partition
-    dump (`pack_tile` returns `trees: Vec<SbTree>` row-major), diff to find the first SB whose
-    partition/mode differs. (`OdEcEnc` has no `tell()`, so byte-offset-per-SB isn't free.) (2) Dump
-    THAT SB's per-candidate RD in port + sibling C, diff. Sibling harness `/root/libaom-enc-instrument
-    /rd_harness.c` must be re-tailored for `diag+vbars16 256×256 cq62` (content = `lf_diag_vbars16
-    _ripple`; see `encoder_gate_e2e_byte_match.rs`). Same playbook as KB-3, but the target SB is
-    mid-frame, not SB(0,0).
+  - **RD-DUMP DONE (2026-07-15) — root-caused to a single 16×64 leaf's tx/coeff evaluation.**
+    Method: re-tailored sibling harness (`/root/libaom-enc-instrument/rd_harness.c`) for
+    `diag+vbars16 256×256 cq62 cpu0` and VALIDATED its output == real (117-byte stream, frame OBU
+    `32 69` payload = 5 hdr `44 f9 00 51 14` + 100 tile `ff 3b 14 51…`). Then per-SB partition dump
+    (port PSB vs sibling C CSB): **15/16 SBs match; SB (mi=32,32) diverges — C picks PARTITION_HORZ_A
+    (4), port picks PARTITION_VERT_4 (9).** Per-candidate RD at (32,32): port HORZ_A rate=33741
+    dist=8751216 **rdcost=1393344729 == C's HORZ_A EXACTLY**; port VERT_4 rate=23037 dist=8757376
+    **rdcost=1307466663 wins**. C's VERT_4 is INVALID: C's 4-way prune allows both HORZ4/VERT4
+    (`allowed=[1,1]`, `prune_ext_partition_types_search_level=1` so the level-2 partitioning gate at
+    partition_search.c:4202 does NOT fire — not a pruning diff), but C's VERT_4 sub-block search
+    **bails at strip 2** (`rd_try_subblock` returns 0: strip-2's own 16×64 mode RD exceeds the
+    remaining budget best−cum). **Per-strip VERT_4 at (32,32) (both mono, subsize=BLOCK_16X64=20):
+    strip0 (c=32) mode=9 cum_rate=7557 cum_dist=3946048 — MATCHES C exactly; strip1 (c=36) SAME
+    mode=1 (V_PRED) in both, but port Δrate=5614/Δdist=933472 vs C Δrate=9980/Δdist=1568992 — port
+    UNDER-COMPUTES both.** Same mode + same 16×64 block + strictly-lower rate AND dist ⇒ the port
+    finds a Pareto-better encoding of that leaf than C: a **transform-size / transform-type / skip
+    divergence in the port's 16×64 (1:4-aspect) intra leaf RD** (NOT partition pruning, NOT palette,
+    NOT screen-content, NOT #25's speed-1 bugs — this is speed-0). strip0 (also 16×64) matching rules
+    out a blanket 16×64 bug; it's content/context-specific to the (32,36) block.
+  - **NEXT (the fix):** dump the port's vs C's strip-1 (16×64 @ r=32,c=36, V_PRED) **tx-size,
+    tx-type, skip flag, and rate/dist breakdown** (port leaf: `rd_pick_rect_partition`→leaf search;
+    C: instrument `pick_sb_modes`/the tx path in the sibling, re-gated to that block). Most likely a
+    1:4-aspect (TX_16X64) tx-size or tx-type selection the port evaluates differently at qidx 249.
+    Temp instrumentation for all the above is in `git stash@{0}` ("kb2-temp-instrumentation-2026-07-15")
+    — PSB/PABDUMP/PAB/P4W/P4STRIP port dumps + the sibling's C4W/C4WEVAL/C4STRIP dumps (sibling
+    still built + gated to (32,32)). Restore with `git stash apply stash@{0}` to resume.
 
 ### KB-3 — Encoder: `vgrad 256x256 cq32` cpu-used=1 cell — FIXED (missing speed-1 `use_square_partition_only_threshold` rect-kill)
 - **FIXED** (commit pending on origin): the cell now byte-matches; promoted to an asserted winner
