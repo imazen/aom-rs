@@ -486,39 +486,78 @@ fn localize(w: usize, h: usize, cq_level: i32, content: impl Fn(usize, usize) ->
                 real_seq.len(),
                 ours_seq.len()
             );
+            // Compare every shared leaf's mode/tx fields AND its per-txb
+            // (eob, tx_type) records (`DecodedBlockKf.txbs`/`txbs_uv`, in
+            // raster order) -- the latter pins the divergence to the tx_type
+            // vs the coefficient VALUES (which don't appear in the record but
+            // show up in the reconstruction, compared below).
             let mut found = false;
             for rb in &t_real.blocks {
                 if let Some(ob) = t_ours
                     .blocks
                     .iter()
                     .find(|b| b.mi_row == rb.mi_row && b.mi_col == rb.mi_col)
-                    && (ob.bsize != rb.bsize
+                {
+                    let modes_differ = ob.bsize != rb.bsize
                         || ob.partition != rb.partition
                         || ob.info.y_mode != rb.info.y_mode
                         || ob.info.angle_delta_y != rb.info.angle_delta_y
                         || ob.info.use_filter_intra != rb.info.use_filter_intra
                         || ob.tx_size != rb.tx_size
-                        || ob.info.uv_mode != rb.info.uv_mode)
-                {
-                    eprintln!(
-                        ">>> FIRST LEAF MISMATCH at (mi_row={}, mi_col={}): \
-                         real bsize={} part={} y_mode={} adly={} use_fi={} tx_size={} uv_mode={} | \
-                         ours bsize={} part={} y_mode={} adly={} use_fi={} tx_size={} uv_mode={}",
-                        rb.mi_row, rb.mi_col, rb.bsize, rb.partition, rb.info.y_mode,
-                        rb.info.angle_delta_y, rb.info.use_filter_intra, rb.tx_size, rb.info.uv_mode,
-                        ob.bsize, ob.partition, ob.info.y_mode, ob.info.angle_delta_y,
-                        ob.info.use_filter_intra, ob.tx_size, ob.info.uv_mode
-                    );
-                    found = true;
-                    break;
+                        || ob.info.uv_mode != rb.info.uv_mode;
+                    let txbs_differ = ob.txbs != rb.txbs || ob.txbs_uv != rb.txbs_uv;
+                    if modes_differ || txbs_differ {
+                        eprintln!(
+                            ">>> FIRST LEAF MISMATCH at (mi_row={}, mi_col={}) [modes_differ={modes_differ} txbs_differ={txbs_differ}]: \
+                             real bsize={} part={} y_mode={} adly={} use_fi={} tx_size={} uv_mode={} txbs(eob,tt)={:?} txbs_uv={:?} | \
+                             ours bsize={} part={} y_mode={} adly={} use_fi={} tx_size={} uv_mode={} txbs(eob,tt)={:?} txbs_uv={:?}",
+                            rb.mi_row, rb.mi_col, rb.bsize, rb.partition, rb.info.y_mode,
+                            rb.info.angle_delta_y, rb.info.use_filter_intra, rb.tx_size, rb.info.uv_mode,
+                            rb.txbs, rb.txbs_uv,
+                            ob.bsize, ob.partition, ob.info.y_mode, ob.info.angle_delta_y,
+                            ob.info.use_filter_intra, ob.tx_size, ob.info.uv_mode, ob.txbs, ob.txbs_uv
+                        );
+                        found = true;
+                        break;
+                    }
                 }
             }
             if !found {
                 eprintln!(
-                    "no partition/leaf-field divergence found -- the byte divergence is in the \
-                     coefficient/tx-type layer (same partition + intra mode, different coded \
-                     coefficients or luma tx_type)"
+                    "no partition/leaf-field/txb (eob,tx_type) divergence found -- same partition, \
+                     intra mode, tx_size AND same per-txb eob+tx_type; the byte divergence is in \
+                     the coefficient VALUES (quantized-level/trellis choice) for identical \
+                     tx_type -- see the reconstruction diff below for the exact block."
                 );
+            }
+
+            // Reconstruction diff: identical dequantized coeffs <=> identical
+            // recon. First differing luma pixel localizes the exact block whose
+            // coefficient VALUES diverge (real vs ours).
+            let mut recon_div: Option<(usize, usize, u16, u16)> = None;
+            'rec: for row in 0..t_real.height.min(t_ours.height) {
+                for col in 0..t_real.width.min(t_ours.width) {
+                    let rv = t_real.recon[row * t_real.stride + col];
+                    let ovv = t_ours.recon[row * t_ours.stride + col];
+                    if rv != ovv {
+                        recon_div = Some((row, col, rv, ovv));
+                        break 'rec;
+                    }
+                }
+            }
+            match recon_div {
+                Some((row, col, rv, ov)) => eprintln!(
+                    ">>> FIRST RECON PIXEL DIVERGENCE at luma (row={row}, col={col}) -> \
+                     SB(mi_row={}, mi_col={}): real={rv} ours={ov} (coefficient-VALUE divergence \
+                     in that block's txb -- trellis/rounding, since modes+tx_size+eob+tx_type all \
+                     agree)",
+                    (row / 64) * 16,
+                    (col / 64) * 16,
+                ),
+                None => eprintln!(
+                    "reconstruction planes are IDENTICAL (real == ours) -- if bytes still differ \
+                     the divergence is purely in entropy coding of identical coeffs (unexpected)"
+                ),
             }
         }
     }
