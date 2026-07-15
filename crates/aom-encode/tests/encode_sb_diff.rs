@@ -156,9 +156,10 @@ fn gen_winner(rng: &mut Rng, bsize: usize, reduced: bool) -> LeafWinner {
         cfl_alpha_idx: rng.range(0, 256),
         cfl_alpha_signs: rng.range(1, 8),
         // This synthetic fixture drives encode_b_intra_dry with no smooth
-        // chroma neighbours set up (env.filter_type is 0), so 0 reproduces the
-        // pre-field behaviour exactly — the re-encode now reads this instead of
-        // env.filter_type.
+        // neighbours set up (env.filter_type is 0), so 0 reproduces the pre-field
+        // behaviour exactly — the re-encode now reads these per-block winner
+        // fields instead of env.filter_type (luma KB-6, chroma #26).
+        luma_edge_filter_type: 0,
         uv_edge_filter_type: 0,
         tx_type_map: map,
         skip_txfm: false,

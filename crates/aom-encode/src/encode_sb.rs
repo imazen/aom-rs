@@ -153,6 +153,17 @@ pub struct LeafWinner {
     pub filter_intra_mode: usize,
     /// `mbmi->tx_size` (the uniform luma winner size).
     pub tx_size: usize,
+    /// Per-block LUMA intra edge filter type (`get_intra_edge_filter_type` on
+    /// plane 0, reconintra.c:974) — 1 iff an available above/left neighbour is a
+    /// SMOOTH luma mode (SMOOTH_PRED=9/SMOOTH_V=10/SMOOTH_H=11), else 0.
+    /// Recomputed from the neighbour Y modes during the search (KB-2) and frozen
+    /// onto the winner so the dry-run re-encode (`encode_b_intra_dry`, which has
+    /// no grid) predicts LUMA with the SAME edge filter the search used. KB-2
+    /// fixed only the search; this closes the luma RE-ENCODE gap (KB-6) — the
+    /// exact luma analogue of `uv_edge_filter_type` (#26). Without it an angled
+    /// luma leaf with a SMOOTH neighbour re-encodes with filter_type 0 instead of
+    /// 1 → wrong residual → a per-txb eob flip in the coded bytes.
+    pub luma_edge_filter_type: i32,
     // Chroma winner (read only when the leaf is a chroma reference).
     pub uv_mode: usize,
     pub angle_delta_uv: i32,
@@ -389,7 +400,12 @@ pub fn encode_b_intra_dry(
         src_off: ref_off_y,
         src_stride: env.stride,
         disable_edge_filter: env.disable_edge_filter,
-        filter_type: env.filter_type,
+        // Per-block luma edge filter (`get_intra_edge_filter_type(xd, plane=0)`),
+        // recomputed at search time from the neighbour Y modes and carried on the
+        // winner (KB-6) — NOT the frozen SB-level `env.filter_type`. KB-2 fixed
+        // the luma SEARCH; this fixes the luma RE-ENCODE (the coded-bytes path),
+        // mirroring the #26 chroma fix.
+        filter_type: winner.luma_edge_filter_type,
         mode: winner.mode,
         angle_delta: winner.angle_delta_y,
         use_filter_intra: winner.use_filter_intra,

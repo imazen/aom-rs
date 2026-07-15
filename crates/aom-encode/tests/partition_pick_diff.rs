@@ -470,6 +470,7 @@ impl CPick<'_> {
                     use_filter_intra: best.y.use_filter_intra,
                     filter_intra_mode: best.y.filter_intra_mode,
                     tx_size: best.y.tx_size,
+                    luma_edge_filter_type,
                     uv_mode,
                     angle_delta_uv: ad_uv,
                     cfl_alpha_idx: ci,
@@ -1050,6 +1051,10 @@ fn leaf_eq(
         "leaf fi mode: {tag}"
     );
     assert_eq!(x.tx_size, y.tx_size, "leaf tx: {tag}");
+    assert_eq!(
+        x.luma_edge_filter_type, y.luma_edge_filter_type,
+        "leaf luma edge filter: {tag}"
+    );
     assert_eq!(x.uv_mode, y.uv_mode, "leaf uv_mode: {tag}");
     assert_eq!(x.angle_delta_uv, y.angle_delta_uv, "leaf uv angle: {tag}");
     assert_eq!(x.cfl_alpha_idx, y.cfl_alpha_idx, "leaf cfl idx: {tag}");

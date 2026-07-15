@@ -628,6 +628,9 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                     angle_delta: cy.1,
                     use_fi: cy.8,
                     fi_mode: cy.9,
+                    // Frozen 0: preserves this CFL-store re-encode's prior
+                    // hardcoded filt_type=0 (non-smooth-neighbour fixture).
+                    filter_type: 0,
                     skip_txfm: false,
                     use_trellis: true, // FULL_TRELLIS at any dry_run
                     load_ctx: true,

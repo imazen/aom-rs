@@ -272,6 +272,9 @@ fn encode_intra_block_plane_y_matches_c_walk() {
                 angle_delta,
                 use_fi,
                 fi_mode,
+                // Frozen 0: this plane-level fixture drives the port env with
+                // filter_type: 0 (above), so the C side matches at 0 too.
+                filter_type: 0,
                 skip_txfm,
                 use_trellis,
                 load_ctx: opt_type != TrellisOptType::NoTrellisOpt,

@@ -2313,6 +2313,14 @@ pub struct CEncPlaneArgs<'a> {
     pub angle_delta: i32,
     pub use_fi: bool,
     pub fi_mode: usize,
+    /// Per-block LUMA intra edge filter type (`get_intra_edge_filter_type(xd,
+    /// plane=0)`, reconintra.c:974) — the 9th arg (`filt_type`) of
+    /// `ref_hbd_predict_intra`. 1 iff an available above/left neighbour is a
+    /// SMOOTH luma mode. Mirrors the port's `LeafWinner::luma_edge_filter_type`
+    /// carried into `encode_b_intra_dry` (KB-6): the CPick propagation oracle
+    /// must re-predict with the SAME per-block filter the port uses, not a
+    /// frozen 0, or an angled leaf with a SMOOTH neighbour diverges.
+    pub filter_type: i32,
     pub skip_txfm: bool,
     /// `is_trellis_used(enable_optimize_b, dry_run)`.
     pub use_trellis: bool,
@@ -2404,7 +2412,7 @@ pub fn c_encode_intra_block_plane_y(
                 a.use_fi,
                 a.fi_mode,
                 false,
-                0,
+                a.filter_type,
                 a.tx_size,
                 txw,
                 txh,
@@ -2933,6 +2941,7 @@ impl COracle<'_> {
             angle_delta: w.angle_delta_y,
             use_fi: w.use_filter_intra,
             fi_mode: w.filter_intra_mode,
+            filter_type: w.luma_edge_filter_type,
             skip_txfm: w.skip_txfm,
             use_trellis: self.use_trellis,
             load_ctx: self.load_ctx,

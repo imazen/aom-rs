@@ -798,6 +798,7 @@ fn leaf_pick_sb_modes(
                 use_filter_intra: best.y.use_filter_intra,
                 filter_intra_mode: best.y.filter_intra_mode,
                 tx_size: best.y.tx_size,
+                luma_edge_filter_type,
                 uv_mode,
                 angle_delta_uv,
                 cfl_alpha_idx,
