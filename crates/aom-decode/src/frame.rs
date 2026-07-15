@@ -153,6 +153,10 @@ pub struct FrameDecode {
     /// decoded with (independently-decoded tiles when either exceeds 1).
     pub tile_cols: usize,
     pub tile_rows: usize,
+    /// `features.disable_cdf_update` as coded — when true the tile symbol
+    /// reader did NOT adapt CDFs (every `read_symbol` left its CDF at the
+    /// loaded value). For harness assertions.
+    pub disable_cdf_update: bool,
 }
 
 /// `av1_get_tile_limits` (av1/common/tile_common.c): the min/max tile log2
@@ -504,9 +508,17 @@ fn parse_frame_header(
     if !p.prefix.show_frame {
         return Err("unshown frame".into());
     }
-    if p.prefix.disable_cdf_update {
-        return Err("disable_cdf_update (driver always adapts)".into());
-    }
+    // `disable_cdf_update` IS in the envelope: when set (the encoder's
+    // `cdf_update_mode == 0`, and forced on by `error_resilient_mode` for
+    // reference frames), the tile symbol reader leaves every CDF at its
+    // loaded/initial value instead of adapting after each `read_symbol`. Carried
+    // as `cfg.disable_cdf_update` -> `dec.allow_update_cdf = !disable_cdf_update`
+    // in `decode_frame_tiles_kf`; the flag-off path stays byte-identical.
+    // `disable_frame_end_update_cdf` (which `error_resilient_mode` also forces)
+    // is decode-irrelevant here: it only governs whether this frame's END adapted
+    // CDFs are saved as a frame context for LATER frames that reference it, and
+    // this driver decodes exactly one shown KEY frame with no forward reference
+    // chain (`REFRESH_FRAME_CONTEXT` save is never read back).
     // `allow_screen_content_tools` gates BOTH screen-content tools that ARE in
     // the envelope: PALETTE mode and intra block copy. `p.allow_intrabc` (the
     // per-frame syntax flag the spec reads only when `allow_screen_content_tools`
@@ -958,6 +970,7 @@ fn decode_tile_payload(
         qm_y: p.quant.qmatrix_level_y as usize,
         qm_u: p.quant.qmatrix_level_u as usize,
         qm_v: p.quant.qmatrix_level_v as usize,
+        disable_cdf_update: p.prefix.disable_cdf_update,
     };
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
     let t = decode_frame_tiles_kf(&tiles, &cfg, 0);
@@ -1035,6 +1048,7 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
         },
         tile_cols: p.tile_info.cols,
         tile_rows: p.tile_info.rows,
+        disable_cdf_update: cfg.disable_cdf_update,
     }
 }
 

@@ -115,10 +115,13 @@
 //!   prediction only — the residual add is unaffected). A palette-neighbour
 //!   grid ([`PaletteNbrKf`], mirrors [`MiNbrKf`]) feeds the colour cache;
 //!   only allocated on screen-content frames.
+//! - **`disable_cdf_update` supported**: `cfg.disable_cdf_update` sets
+//!   `dec.allow_update_cdf = !disable_cdf_update`, so when the flag is set the
+//!   symbol reader ([`aom_entropy::read_symbol`]) leaves every CDF at its
+//!   loaded/initial value for the whole tile (no post-decode adaptation); the
+//!   flag-off path adapts unconditionally and stays byte-identical.
 //! - **Off / fixed in this cut**: intra block copy,
-//!   quantization matrices (flat dequant), CDF update always on
-//!   (`disable_cdf_update` unsupported — the mode-symbol readers adapt
-//!   unconditionally), and no in-tile loop filters (this driver returns the
+//!   quantization matrices (flat dequant), and no in-tile loop filters (this driver returns the
 //!   PRE-FILTER reconstruction, like C's tile decode; `frame.rs` applies
 //!   deblocking frame-wide afterwards — CDEF/restoration stay unapplied;
 //!   CDEF *strengths* are entropy-decoded, and delta-LF levels are carried
@@ -484,6 +487,16 @@ pub struct KfTileConfig {
     pub qm_y: usize,
     pub qm_u: usize,
     pub qm_v: usize,
+    /// `features.disable_cdf_update` (frame header uncompressed bit; the encoder
+    /// sets it under `cdf_update_mode == 0`, and it is forced on by
+    /// `error_resilient_mode` for reference frames). When true the tile symbol
+    /// reader does NOT adapt CDFs: every `read_symbol` leaves its CDF at the
+    /// loaded/initial value for the whole tile. Threaded to the reader as
+    /// `dec.allow_update_cdf = !disable_cdf_update`
+    /// (`av1/decoder/decodeframe.c`: `allow_update_cdf = !large_scale &&
+    /// !disable_cdf_update`). The single-tile KEY frame is never `large_scale`,
+    /// so the reader's flag is exactly `!disable_cdf_update`.
+    pub disable_cdf_update: bool,
 }
 
 /// `av1_calculate_segdata` (av1/common/seg_common.c) — the derived
@@ -3042,6 +3055,14 @@ pub fn decode_frame_tiles_kf(
     let mut t = TileKf::new(cfg, recon_init);
     for tb in tiles {
         let mut dec = OdEcDec::new(tb.bytes);
+        // `av1/decoder/decodeframe.c`: `r->allow_update_cdf = allow_update_cdf`
+        // where `allow_update_cdf = (!large_scale) && !disable_cdf_update`. The
+        // single-tile KEY frame is never `large_scale`, so the reader adapts
+        // CDFs iff `!disable_cdf_update`. Gates BOTH the mode-info symbol reads
+        // (partition/intra/mv/... via `read_symbol`) AND the coefficient reads
+        // (`aom_txb::read_coeffs_txb_full`, whose `rsym` delegates to
+        // `read_symbol`), since `read_symbol` is the sole `update_cdf` site.
+        dec.allow_update_cdf = !cfg.disable_cdf_update;
         let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
         t.start_tile(tb.bounds);
         t.decode_one_tile(&mut dec, &mut cdfs);

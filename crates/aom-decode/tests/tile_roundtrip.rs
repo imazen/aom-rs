@@ -1751,6 +1751,10 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         qm_y: 0,
         qm_u: 0,
         qm_v: 0,
+        // This mirror encoder always adapts (its `write_symbol` updates CDFs), so
+        // the decoder must adapt too — disable_cdf_update coverage is
+        // real_bitstream.rs's REAL-encoder gate.
+        disable_cdf_update: false,
     };
     let aligned_cols = (cfg.mi_cols as usize).div_ceil(16) * 16;
     let aligned_rows = (cfg.mi_rows as usize).div_ceil(16) * 16;

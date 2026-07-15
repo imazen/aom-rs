@@ -36,10 +36,18 @@ pub fn write_symbol(enc: &mut OdEcEnc, symb: i32, cdf: &mut [u16], nsymbs: usize
     update_cdf(cdf, symb, nsymbs);
 }
 
-/// `aom_read_symbol` with CDF adaptation enabled.
+/// `aom_read_symbol` (`aom_dsp/bitreader.h`): decode one symbol, then adapt the
+/// CDF *iff* `dec.allow_update_cdf` — the exact C gate
+/// `if (r->allow_update_cdf) update_cdf(cdf, ret, nsymbs);`. When the frame's
+/// `disable_cdf_update` is set the decoder clears the flag and every symbol read
+/// leaves its CDF at the loaded/initial value. With the flag set (the default)
+/// this is byte-identical to the always-adapting form plus one predictable,
+/// always-taken branch.
 pub fn read_symbol(dec: &mut OdEcDec, cdf: &mut [u16], nsymbs: usize) -> i32 {
     let ret = dec.decode_cdf_q15(&cdf[..nsymbs], nsymbs as i32);
-    update_cdf(cdf, ret, nsymbs);
+    if dec.allow_update_cdf {
+        update_cdf(cdf, ret, nsymbs);
+    }
     ret
 }
 

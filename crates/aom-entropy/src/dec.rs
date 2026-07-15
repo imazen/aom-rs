@@ -21,6 +21,15 @@ pub struct OdEcDec<'a> {
     dif: u32,
     rng: u16,
     cnt: i32,
+    /// `aom_reader.allow_update_cdf` (`aom_dsp/bitreader.h`): when false the
+    /// symbol reader ([`crate::read_symbol`]) skips the post-decode `update_cdf`
+    /// adaptation step, leaving every CDF at its loaded/initial value for the
+    /// whole tile. The decoder sets this to `!features.disable_cdf_update`
+    /// (`av1/decoder/decodeframe.c`: `r->allow_update_cdf = allow_update_cdf`,
+    /// where `allow_update_cdf = !large_scale && !disable_cdf_update`). Defaults
+    /// to `true` so the adapting path is byte-identical and overhead-free unless
+    /// a caller explicitly disables it.
+    pub allow_update_cdf: bool,
 }
 
 impl<'a> OdEcDec<'a> {
@@ -33,6 +42,7 @@ impl<'a> OdEcDec<'a> {
             dif: (1u32 << (OD_EC_WINDOW_SIZE - 1)) - 1,
             rng: 0x8000,
             cnt: -15,
+            allow_update_cdf: true,
         };
         d.refill();
         d
