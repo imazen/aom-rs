@@ -773,8 +773,67 @@ restoration.
 **Honest gaps**: single-tile-column only — multi-tile superres is rejected (needs
 `av1_upscale_normative_rows`' per-tile-column convolve loop; the AVIF-still / KEY
 superres path is single-tile). Superres is horizontal-only, so the vertical axis
-is untouched by construction. Envelope after this chunk: `disable_cdf_update`,
+is untouched by construction. Envelope after this chunk:
 4:2:2-chroma-deblock (nonzero chroma levels), mixed-lossless-segments,
+multi-tile-GROUP, and multi-tile superres still rejected
+(`disable_cdf_update` landed next — see below).
+
+## `disable_cdf_update` decode — rejection DROPPED (2026-07-15, decoder track)
+
+**Non-adapting symbol decode is in** (1dfbcc3): KEY streams whose uncompressed
+header carries `disable_cdf_update = 1` now decode in the envelope. When the flag
+is set the tile symbol reader does NOT adapt CDFs — every `read_symbol` leaves its
+CDF at the loaded/initial value for the whole tile, instead of applying the
+post-decode `update_cdf` step.
+
+- **Exact C mechanism reproduced**: `aom_dsp/bitreader.h`'s `aom_read_symbol_`
+  adapts only `if (r->allow_update_cdf) update_cdf(cdf, ret, nsymbs)`. The decoder
+  derives `allow_update_cdf = (!tiles.large_scale) && !features.disable_cdf_update`
+  (`av1/decoder/decodeframe.c:2893`) and stores it on the reader
+  (`r->allow_update_cdf = allow_update_cdf`, :1470). A single-tile KEY frame is
+  never `large_scale`, so the reader adapts iff `!disable_cdf_update`.
+- **Port** (exact mirror): `OdEcDec` gained `allow_update_cdf` (default `true`);
+  `aom_entropy::read_symbol` gates its `update_cdf` on it. `read_symbol` is the
+  SOLE `update_cdf` site — both the mode-info reads (partition/intra/mv/... in
+  `aom_entropy::partition`) AND the `aom_txb` coefficient reads (`rsym`'s
+  `upd=true` branch delegates to `read_symbol`) flow through it, so one field +
+  one branch covers every adapting read. `KfTileConfig.disable_cdf_update` threads
+  the parsed header flag; `decode_frame_tiles_kf` sets
+  `dec.allow_update_cdf = !disable_cdf_update` once per tile reader. The flag-off
+  path is byte-identical plus one predictable, always-taken branch.
+- `disable_frame_end_update_cdf` (which `error_resilient_mode` also forces on) is
+  decode-irrelevant here: it only governs whether this frame's END adapted CDFs
+  are SAVED as a frame context for LATER frames that reference it
+  (`REFRESH_FRAME_CONTEXT_BACKWARD`); this driver decodes exactly one shown KEY
+  frame with no forward reference chain, so the saved context is never read back.
+- Oracle (append-only): `dec_shim.c` `shim_encode_av1_kf_disable_cdf` +
+  `ref_encode_av1_kf_disable_cdf` — the REAL `aom_codec_av1_cx` encoder with
+  `AV1E_SET_CDF_UPDATE_MODE = 0` (`--cdf-update-mode=0`), which forces
+  `cm->features.disable_cdf_update = 1` for every frame (`encoder.c:4375`, the
+  `case 0:` arm). NOTE: `error_resilient_mode` does NOT set the flag in libaom's
+  encoder — traced to the `cdf_update_mode` switch; the control is the real path.
+
+**GATE (`disable_cdf_update_diff.rs`, byte-identical vs the C decoder):**
+- `disable_cdf_update_streams_decode_byte_identical_to_c` — **54 real cpu-used=0
+  KEY streams**: bd {8,10,12} x {4:2:0, 4:4:4, monochrome} x 3 sizes (incl.
+  non-8-multiple 96x80) x cq {20,48}, every plane byte-identical. Anti-vacuous per
+  stream: the port's OWN parse asserts `disable_cdf_update = 1` (both
+  `FrameDecode` and the parsed header/config), non-flat AC content present, and
+  the same image re-encoded WITHOUT the flag yields DIFFERENT bytes.
+- `disable_cdf_update_gate_is_load_bearing` — proves at the symbol layer that
+  flipping `allow_update_cdf` changes both the adapted CDF STATE and the decoded
+  symbol VALUES on an adapting-coded stream (flag-on reproduces + tracks the
+  encoder's adapted CDF; flag-off freezes the CDF and mis-decodes). The gate is
+  not a no-op.
+- **No regression**: the full decoder suite (`aom-decode` + `aom-entropy`, all
+  existing gates — real_bitstream / sb128 / multi-tile / film_grain / superres /
+  qm / palette / intrabc / lossless / tile_roundtrip) stays **0 failed**.
+
+**Honest gaps**: KEY frames only (the whole envelope is KEY-only); the flag is
+threaded through the single-tile reader construction, so a hypothetical
+large-scale-tile stream (which would force `allow_update_cdf=0` independently) is
+moot — `large_scale` tiles are out of envelope regardless. Envelope after this
+chunk: 4:2:2-chroma-deblock (nonzero chroma levels), mixed-lossless-segments,
 multi-tile-GROUP, and multi-tile superres still rejected.
 
 ## Perf gate honest number
