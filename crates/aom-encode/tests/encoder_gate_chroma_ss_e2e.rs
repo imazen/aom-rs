@@ -785,3 +785,75 @@ fn encoder_gate_real_image_e2e_kb6_repro() {
          (report_and_assert over all cells) and close KB-6 in CLAUDE.md."
     );
 }
+
+/// Print a per-cell map and assert an OPEN bug still reproduces. Shared by the
+/// KB-4 / KB-5 characterization repros below: a committed reproduction that is
+/// CI-green while the bug is open and FAILS (loudly, with a promote instruction)
+/// the moment a fix makes the cells byte-match — never a weakened or skipped test.
+fn assert_open_divergence(kb: &str, results: &[(String, bool)]) {
+    eprintln!("\n=== {kb} repro map (MATCH = byte-exact vs real aomenc) ===");
+    for (label, ok) in results {
+        eprintln!("  {label}: {}", if *ok { "MATCH" } else { "MISMATCH" });
+    }
+    let diverged: Vec<&String> = results
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(n, _)| n)
+        .collect();
+    eprintln!(
+        "{kb}: {}/{} cells diverge {:?}",
+        diverged.len(),
+        results.len(),
+        diverged
+    );
+    assert!(
+        !diverged.is_empty(),
+        "{kb} appears FIXED: all cells now byte-match real aomenc. Promote this repro \
+         to an asserting byte-match gate (report_and_assert) and close {kb} in CLAUDE.md."
+    );
+}
+
+/// **KB-4 repro (OPEN) — bd10 non-4:2:0 chroma RD divergence.** At bit depth 10
+/// the port's encoded bitstream diverges from real aomenc for 4:4:4 / 4:2:2 chroma
+/// (the non-4:2:0 subsamplings): a large-coefficient RD-decision (tx_type / eob /
+/// partition) near-tie at high bit depth — see KB-4 in CLAUDE.md. The byte-exact
+/// bd10 regime (mono + 4:2:0, moderate content) is covered green by
+/// `encoder_gate_bd10_diff`; this repro locks the DIVERGENT non-420 corner that
+/// was held out of the 4:2:2/4:4:4 e2e gate (which is bd8-only). Committed
+/// characterization: green while KB-4 is open, fails (promote) when it byte-matches.
+#[test]
+fn encoder_gate_bd10_non420_e2e_kb4_repro() {
+    // Full bd10-range textured luma+chroma (values 0..=1023), distinct so CfL
+    // cannot trivialize chroma — the large-coefficient regime KB-4 lives in.
+    let luma = tex_luma(0x3ff);
+    let chroma = tex_chroma(0x3ff);
+    let mut results: Vec<(String, bool)> = Vec::new();
+    for &(ss_x, ss_y, fmt) in &[(0usize, 0usize, "444"), (1usize, 0usize, "422")] {
+        for &sz in &[64usize, 128] {
+            let res = run_case(sz, sz, false, ss_x, ss_y, 2, 32, 10, &luma, &chroma, &chroma);
+            results.push((format!("bd10-{fmt} {sz}x{sz} cq32"), res.matched));
+        }
+    }
+    assert_open_divergence("KB-4", &results);
+}
+
+/// **KB-5 repro (OPEN) — lossless (cq0 / qindex 0) KEY encode divergence.** A
+/// lossless allintra KEY frame diverges badly: (1) `run_case`'s single-pass
+/// `read_uncompressed_header` skips the two-pass `coded_lossless` probe the parser
+/// contract requires, so `p.coded_lossless=false` → the port runs its NON-lossless
+/// encoder at qindex 0 (full DCT), and (2) there is no forward Walsh–Hadamard
+/// transform in the encode path (the decoder has the inverse WHT; the encoder
+/// applies `av1_fwd_txfm2d` unconditionally). Both must be fixed for byte-match —
+/// see KB-5 in CLAUDE.md. Committed characterization: green while KB-5 is open.
+#[test]
+fn encoder_gate_lossless_cq0_e2e_kb5_repro() {
+    let luma = tex_luma(0xff);
+    let chroma = tex_chroma(0xff);
+    let mut results: Vec<(String, bool)> = Vec::new();
+    for &(mono, ss_x, ss_y, fmt) in &[(true, 1, 1, "mono"), (false, 1, 1, "420")] {
+        // cq_level 0 → base_qindex 0 → coded_lossless.
+        let res = run_case(64, 64, mono, ss_x, ss_y, 2, 0, 8, &luma, &chroma, &chroma);
+        results.push((format!("lossless-{fmt} 64x64 cq0"), res.matched));
+    }
+    assert_open_divergence("KB-5", &results);
+}
