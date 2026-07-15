@@ -722,6 +722,61 @@ envelope); grain composed with CDEF/LR/segmentation/palette is orthogonal
 chunk: superres, `disable_cdf_update`, 4:2:2-chroma-deblock (nonzero chroma
 levels), mixed-lossless-segments, and multi-tile-GROUP still rejected.
 
+## Superres upscaling applied — `superres scaled` rejection DROPPED (2026-07-15, decoder track)
+
+**Normative superres is in** (3380a91): superres-scaled KEY streams
+(`SuperresDenom` in [9,16]) now decode in the envelope. The frame is coded at a
+reduced (downscaled) `FrameWidth = (UpscaledWidth*8 + Denom/2)/Denom` and
+upscaled back to the full `UpscaledWidth` **horizontally only**, as a normative
+post-CDEF stage (`av1_upscale_normative_rows`), spliced between CDEF and loop
+restoration.
+
+- `aom-decode::superres` ports the 8-tap 64-phase polyphase horizontal upscale
+  (`av1_convolve_horiz_rs` + `upscale_normative_rect` + `av1_get_upscale_convolve_step`
+  / `get_upscale_convolve_x0` + the `av1_resize_filter_normative` table). One
+  `u16` implementation covers 8/10/12-bit (`clip_pixel` / `clip_pixel_highbd` are
+  the same clamp on the shared store; the sum/round math is bit-depth
+  independent). Frame edges use an index clamp to the mi-aligned downscaled width
+  — byte-identical to libaom's save/`memset`/restore border extension for the
+  single tile column (both edges are frame edges).
+- Integration (`frame.rs`): the tile decode / deblock / CDEF run in the CODED
+  (downscaled) domain (mi grid sized to `FrameWidth`), so the tile-info syntax is
+  re-parsed over the downscaled MiCols (a two-phase parse, like coded-lossless);
+  the deblock crop is the coded width (was the upscaled width — that filtered the
+  mi-overhang columns the upscale then samples, corrupting the right edge);
+  `optimized_lr = !do_cdef && !do_superres` (superres always takes the
+  non-optimized LR path); the pre-CDEF deblock snapshot that feeds LR's internal
+  stripe boundaries is upscaled the same way (matching
+  `save_deblock_boundary_lines`, which runs the normative upscale on those rows),
+  so loop restoration runs entirely in the upscaled domain.
+- `aom-entropy::lr::lr_corners_in_sb` gained the superres arm of
+  `av1_loop_restoration_corners_in_sb`: the downscaled mi position maps into the
+  upscaled RU grid via `mi_to_num_x = mi_size_x*Denom`, `denom_x = size*8`.
+- Oracle (append-only): `dec_shim.c` `shim_encode_av1_kf_superres`
+  (`rc_superres_mode = AOM_SUPERRES_FIXED` + `rc_superres_kf_denominator = D`) +
+  `ref_encode_av1_kf_superres` binding — the REAL `aom_codec_av1_cx` encoder.
+
+**GATES (`superres_diff.rs`, byte-identical vs the C decoder `aom_codec_av1_dx`):**
+- `superres_luma_mono_byte_identical_to_c` — **24 streams**: 4 sizes (incl.
+  non-8-multiple 100x76) x 8/10-bit x denoms {9,12,16}, monochrome.
+- `superres_color_byte_identical_to_c` — **45 streams**: 3 sizes x
+  {4:2:0/4:4:4 8-bit, 4:2:0/4:4:4 10-bit, 4:2:0 12-bit} x denoms {9,12,16},
+  rotating GOOD/ALL_INTRA + CDEF on/off (chroma upscaled at its subsampled
+  width).
+- `superres_lr_composed_byte_identical_to_c` — **24 streams**: 2 sizes x
+  {4:2:0/4:4:4/mono, 8/10-bit} x denoms {9,12,16}, `--enable-restoration=1` with
+  restoration genuinely active (asserted floor) — the superres+LR composition.
+- **93 real cpu-used=0 KEY streams byte-identical.** Anti-vacuous per stream:
+  `SuperresDenom > 8`, coded `FrameWidth < UpscaledWidth` (steepest ~0.5x at
+  D=16), non-flat AC content. No regression: the full decoder suite is 0 failed.
+
+**Honest gaps**: single-tile-column only — multi-tile superres is rejected (needs
+`av1_upscale_normative_rows`' per-tile-column convolve loop; the AVIF-still / KEY
+superres path is single-tile). Superres is horizontal-only, so the vertical axis
+is untouched by construction. Envelope after this chunk: `disable_cdf_update`,
+4:2:2-chroma-deblock (nonzero chroma levels), mixed-lossless-segments,
+multi-tile-GROUP, and multi-tile superres still rejected.
+
 ## Perf gate honest number
 
 Like-for-like vs C's production AVX2 (`aom_sad64x64_avx2`): Rust AVX2 SAD is
