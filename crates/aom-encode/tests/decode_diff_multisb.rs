@@ -1,31 +1,30 @@
-//! Multi-SB DECODE-DIFF localizer (diagnostic). The multi-SB scale gate
-//! (`encoder_gate_e2e_byte_match.rs::encoder_gate_e2e_multi_sb_scale`) shows
-//! that at 256x256/512x512 the aggressive-quantization (cq48) and flat/
-//! two-tone cases byte-match real aomenc end-to-end, but the higher-quality
-//! (cq32) continuous-tone cases (smooth diagonal ramp / vertical gradient)
-//! diverge in the coded tile data. Since FLAT 256x256/512x512 byte-matches
-//! (so the multi-SB structural path -- cross-SB above/left context threading,
-//! shared adapting CDF, deblock/LF across SB boundaries -- is byte-exact),
-//! the cq32 divergence must be an RD *decision* difference on real content.
+//! Multi-SB DECODE-DIFF localizer (diagnostic). This test localized the
+//! steep-content cq32 divergence that the multi-SB scale gate
+//! (`encoder_gate_e2e_byte_match.rs::encoder_gate_e2e_multi_sb_scale`) once
+//! excluded -- now CLOSED. The tool encodes identical content with real aomenc
+//! AND with this port's own pipeline (the EXACT `attempt_case_content` config
+//! -- AB partitions ON, screen-content-tools from the real header), decodes
+//! BOTH with the (bit-exact vs C) decoder, then compares the decoded partition
+//! `tree`s node-for-node (`replay_tree`) to find the first divergent
+//! `(mi_row, mi_col, bsize)` partition decision; if the trees match, it walks
+//! every shared leaf's mode/tx fields and then the reconstruction pixels.
 //!
-//! This test localizes the FIRST such divergence STRUCTURALLY, the same way
-//! `decode_diff_noise_case.rs` did for the (now-fixed) 64x64 VERT_4 case:
-//! encode the identical content with real aomenc AND with this port's own
-//! pipeline (the EXACT `encoder_gate_e2e_byte_match.rs::attempt_case_content`
-//! config -- AB partitions ON, screen-content-tools from the real header),
-//! decode BOTH with the (bit-exact vs C) decoder, then compare the decoded
-//! partition `tree`s node-for-node (`replay_tree`) to find the first
-//! divergent `(mi_row, mi_col, bsize)` partition decision; if the trees match
-//! exactly, compare every shared leaf's mode/tx fields. Prints the exact
-//! divergent node so the next chunk can C-oracle-trace that one RD term.
+//! It was this tool that pinned the last two 512x512 diagonal cells to an
+//! intra-MODE divergence (real picked D45/PAETH where the port picked DC), and
+//! the per-mode C-oracle trace off it showed the root cause was the stale
+//! frame-init mode-rate tables (`av1_fill_mode_rates`): the port was missing
+//! the `INTERNAL_COST_UPD_SB` per-superblock mode-cost update that C applies at
+//! every SB, so on adapted later superblocks the RD rate for the directional
+//! modes was over-charged and DC won a near-tie it should have lost. Fixed by a
+//! per-SB `derive_real_costs(kf, ..)` in `pack_tile` (which now re-derives the
+//! coeff AND mode tables together); all 16 multi-SB cells byte-match.
 //!
-//! DIAGNOSTIC (not a hard byte-match gate): the divergence it localizes is
-//! OPEN, so this test asserts only the structural invariants it relies on
-//! (positions stay locked until the first partition-value divergence) and
-//! PRINTS the first divergence -- it is the localization tool the task's
-//! METHOD prescribes, promoted to an asserted regression gate once the term
-//! it points at is fixed (mirroring how `decode_diff_noise_case.rs` was
-//! promoted after the 4-way partition port closed its divergence).
+//! DIAGNOSTIC (not a hard byte-match gate -- that role is the scale gate's): it
+//! asserts only the structural invariants it relies on (positions stay locked
+//! until the first partition-value divergence) and PRINTS the first divergence;
+//! it stays in tree as the localization tool for any future multi-SB regression
+//! and now reports "reconstruction planes are IDENTICAL" on the cases it once
+//! flagged.
 
 use aom_encode::encode_intra::TrellisOptType;
 use aom_encode::encode_sb::SbEncodeEnv;
@@ -572,3 +571,4 @@ fn decode_diff_multisb_cq32() {
     eprintln!("=== vertical gradient 256x256 cq32 ===");
     localize(256, 256, 32, |_r, c| (32 + c * 190 / 256) as u8);
 }
+

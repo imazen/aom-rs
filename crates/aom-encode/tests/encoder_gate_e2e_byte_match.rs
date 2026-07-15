@@ -1244,19 +1244,21 @@ fn encoder_gate_e2e_nonzero_lf_chroma_sweep() {
 /// two-tone split, and a real continuous-tone gradient, across aggressive
 /// (cq48) and mid (cq32) quantization.
 ///
-/// **Coverage: 12 of 16 swept (w, content, cq) cells byte-match, ASSERTED
-/// here.** The 4 that diverge are all the STEEPEST content (the smooth
-/// diagonal ramp -- energy along both axes -- at every cq, plus the steep
-/// 256px vertical gradient) at the higher-quality cq32/cq48 end, where enough
-/// coefficients survive quantization to surface an RD *decision* divergence.
-/// It is NOT a structural multi-SB bug: FLAT 256x256/512x512 (which exercises
-/// the identical cross-SB structure) byte-matches, and the gentler gradients
-/// match. The divergence is localized structurally by
-/// `decode_diff_multisb.rs` (a committed diagnostic) to its first divergent
-/// `(mi_row, mi_col, bsize)` decision -- see STATUS.md for the exact node/term
-/// and the smallest next chunk. Those 4 cells are deliberately EXCLUDED from
-/// the asserted set (not silently non-asserting): they are the honest gap, and
-/// the decode-diff test documents exactly where they diverge.
+/// **Coverage: ALL 16 of 16 swept (w, content, cq) cells byte-match, ASSERTED
+/// here.** The 4 steepest-content cells that once diverged (smooth diagonal
+/// ramp -- energy along both axes -- at cq32/cq48, plus the 256px vertical
+/// gradient at cq32) are now byte-exact too: their divergence was the missing
+/// `INTERNAL_COST_UPD_SB` per-superblock cost update (speed 0's default). Real
+/// libaom re-derives BOTH the coefficient cost tables (`av1_fill_coeff_costs`)
+/// AND the mode-rate tables (`av1_fill_mode_rates`) from the adapting tile CDF
+/// at the start of every SB; the port now does the same via a per-SB
+/// `derive_real_costs(kf, ..)` in `pack_tile`. On the later superblocks of
+/// steep content -- whose CDFs have adapted enough to move the tables -- the
+/// stale frame-init costs had flipped near-tie coefficient (code-vs-skip) and
+/// intra-mode (DC vs directional/PAETH) RD decisions; the per-SB update tracks
+/// the adaptation and both flavors now match. `decode_diff_multisb.rs` (a
+/// committed diagnostic) confirms the decoded partition trees + every leaf's
+/// mode/tx fields are identical, not just the raw bytes.
 ///
 /// All content is continuous-tone or wide-flat and prints `screen_content=false`
 /// -- staying clear of the two other, size-independent divergence regimes the
@@ -1279,17 +1281,26 @@ fn encoder_gate_e2e_multi_sb_scale() {
         }
     }
 
-    // The confirmed multi-SB byte-matching set (256x256 = 16 SB64, 512x512 = 64
-    // SB64), empirically determined by the discovery sweep (see module doc).
-    // Excludes the 4 steep-content/high-quality divergences (documented above +
-    // in `decode_diff_multisb.rs`).
+    // The FULL multi-SB grid (256x256 = 16 SB64, 512x512 = 64 SB64): 4 content
+    // families x 2 sizes x cq32/cq48 = 16 cells, EVERY one byte-identical
+    // end-to-end. The 4 steep-content cq32/cq48 cells this gate once excluded
+    // (256x256 vgrad+diag cq32; 512x512 diag cq32+cq48) now match too, once the
+    // `INTERNAL_COST_UPD_SB` per-superblock cost update was ported for BOTH the
+    // coefficient tables (`av1_fill_coeff_costs`) AND the mode-rate tables
+    // (`av1_fill_mode_rates`) -- see `pack_tile`'s per-SB `derive_real_costs(kf,
+    // ..)` and `decode_diff_multisb.rs`. On steep diagonal/gradient content the
+    // stale frame-init tables had flipped near-tie coefficient (code-vs-skip) and
+    // intra-mode (DC vs directional/PAETH) decisions on the later superblocks,
+    // whose adapting CDFs the per-SB update tracks.
     let winners: &[(usize, usize, &str, i32)] = &[
         // 256x256 (16 SB64)
         (256, 256, "flat 128", 32),
         (256, 256, "flat 128", 48),
         (256, 256, "soft wide two-tone L/R split", 32),
         (256, 256, "soft wide two-tone L/R split", 48),
+        (256, 256, "smooth vertical gradient", 32),
         (256, 256, "smooth vertical gradient", 48),
+        (256, 256, "smooth diagonal ramp", 32),
         (256, 256, "smooth diagonal ramp", 48),
         // 512x512 (64 SB64)
         (512, 512, "flat 128", 32),
@@ -1298,6 +1309,8 @@ fn encoder_gate_e2e_multi_sb_scale() {
         (512, 512, "soft wide two-tone L/R split", 48),
         (512, 512, "smooth vertical gradient", 32),
         (512, 512, "smooth vertical gradient", 48),
+        (512, 512, "smooth diagonal ramp", 32),
+        (512, 512, "smooth diagonal ramp", 48),
     ];
     let mut matched = 0usize;
     for &(w, h, name, cq) in winners {
@@ -1314,9 +1327,10 @@ fn encoder_gate_e2e_multi_sb_scale() {
     assert_eq!(
         matched,
         winners.len(),
-        "every confirmed multi-SB case (256x256 + 512x512, flat / two-tone / gradient, cq32 + \
-         cq48) must byte-match real aomenc end-to-end -- a mismatch here is a genuine regression \
-         (the 4 known steep-content cq32/cq48 divergences are excluded + localized by \
-         decode_diff_multisb.rs; see this fn's module doc + STATUS.md)"
+        "every multi-SB case (256x256 + 512x512, flat / two-tone / gradient / diagonal, cq32 + \
+         cq48 -- all 16) must byte-match real aomenc end-to-end -- a mismatch here is a genuine \
+         regression (the steep-content cq32/cq48 cells that once diverged are fixed by the per-SB \
+         `INTERNAL_COST_UPD_SB` coeff+mode cost update in `pack_tile`; see this fn's module doc + \
+         STATUS.md)"
     );
 }
