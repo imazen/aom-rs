@@ -237,6 +237,14 @@ impl CPick<'_> {
             None
         };
 
+        // Luma intra edge filter type (reconintra.c get_intra_edge_filter_type):
+        // 1 iff the above OR left neighbour is a SMOOTH mode (9/10/11). Mirrors
+        // partition_pick.rs's production recompute so this C-recursion reference
+        // stays faithful to C (which re-derives it per block from the live grid).
+        let is_smooth_luma = |m: Option<i32>| m.is_some_and(|md| (9..=11).contains(&md));
+        let luma_edge_filter_type =
+            i32::from(is_smooth_luma(above_mode) || is_smooth_luma(left_mode));
+
         // REAL get_tx_size_context over the C-side live txfm arrays
         // (KEY intra: no inter neighbours).
         let tx_size_ctx = c::ref_get_tx_size_context(
@@ -271,7 +279,7 @@ impl CPick<'_> {
             src_off: ref_off_y,
             src_stride: STRIDE,
             disable_edge_filter: false,
-            filter_type: 0,
+            filter_type: luma_edge_filter_type,
             mode: 0,
             angle_delta: 0,
             use_filter_intra: false,

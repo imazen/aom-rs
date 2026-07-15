@@ -78,15 +78,34 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
 - **Range matters:** q62/q63 is the aggressive end of the quantizer range — exactly the
   web-compression regime this port targets.
 
-### KB-2 — Encoder: `diag+vbars16 256x256 cq62` strong cell does not e2e byte-match
-- **Symptom:** in `encoder_gate_e2e_rich_content_strong_lf`, one strong cell (`diag+vbars16`
-  256×256 at cq62, real header `[1,17]`) does not match aomenc end-to-end — a residual
-  **non-LF coeff/partition near-tie** (the port picks a marginally different coeff/partition
-  decision than C). Analogous in kind to the already-fixed partition-RDO 26-bit palette-flag
-  bug and the INTERNAL_COST_UPD_SB coeff-trellis bug. See `STATUS.md:2275`, commit `4940315`.
-- **Status:** encoder track; NOT excluded from any gate (the asserted `strong_lf` gate uses the
-  cq**63** neighbour, which matches; the cq62 variant is documented-only, never asserted — so no
-  relaxation to revert). Must be closed for Gate 2.
+### KB-2 — Encoder: `diag+vbars16 256x256 cq62` strong cell — FIXED ✅ (per-block intra edge filter type)
+- **FIXED 2026-07-15.** Root cause: the port **never re-derived the intra edge filter type
+  (`get_intra_edge_filter_type`, reconintra.c:974) per block** — it carried a frozen SB-level
+  `filter_type` (always 0) down into every leaf's `TxfmYrdEnv`/`UvRdEnv`. C re-derives it per
+  block from the live mode-info grid: `1` iff the above **or** left neighbour is a SMOOTH mode
+  (SMOOTH_PRED=9 / SMOOTH_V_PRED=10 / SMOOTH_H_PRED=11). For the diverging cell, SB(32,32)'s
+  VERT_4 strip-1 (16×64 @ mi(32,36)) has a **SMOOTH left neighbour** (strip-0, mode 9), so C
+  computes `filter_type=1` while the port used `0`. That flips the intra-edge-filter strength for
+  **angled** directional predictions (adj≠0; pure-vertical adj=0 skips the edge filter, which is
+  why adj=0 matched exactly and only angled deltas diverged). The port's worse angled prediction
+  raised V_PRED adj=−1's **model RD** to 25930 vs C's 24704; the `prune_intra_y_mode`
+  `THRESH_BEST=1.5×best_model_rd` (=1.5×17236=25854) then **over-pruned adj=−1** in the port
+  (25930>25854, margin 76) where C keeps it (24704<25854). C fully evaluates adj=−1, the ALLINTRA
+  variance factor reorders it ahead of adj=0, and C picks adj=−1 → strip winner differs → HORZ_A
+  vs VERT_4 → byte divergence. **Fix:** recompute `filter_type` per block from `above_mode`/
+  `left_mode` (already read from the grid for the mode-cost context) in `partition_pick.rs`'s
+  leaf search, mirroring `get_intra_edge_filter_type`; the `CPick` C-recursion reference in
+  `partition_pick_diff.rs` got the identical recompute so the differential stays faithful.
+- **Verified:** the cq62 cell now achieves TRUE END-TO-END BYTE MATCH vs real aomenc and is an
+  **asserted** case in `encoder_gate_e2e_rich_content_strong_lf` (6/6); full `aom-encode` suite
+  green; the port's angled prediction matches C pixel-for-pixel (per-tx-block SATDs identical).
+- **Latent follow-up (documented, not KB-2):** the **chroma** `filter_type` (UvRdEnv, both the
+  production `partition_pick.rs:673` and `CPick`) is still frozen at 0 — C's
+  `get_intra_edge_filter_type(xd, 1)` uses chroma neighbours' `uv_mode` smoothness, which the port
+  does not yet track. Dormant here (KB-2 is monochrome/luma); would only bite a 4:2:0 cell with a
+  smooth chroma neighbour + angled chroma prediction. Fixing it needs a chroma-neighbour uv_mode
+  grid. Flagged for the cpu-used sweep (#10) / a dedicated chroma cell.
+- **Historical isolation trail (how it was root-caused) below:**
 - **Re-verified 2026-07-15 (still diverges), with much sharper isolation:**
   - Facts: qindex **249**, `screen_content=true` (auto-detected — the ONLY screen-content cell in
     the whole encoder suite), port tile **95 bytes vs real 100** (port codes FEWER symbols), port
@@ -141,13 +160,14 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
     wins in C. (NOT partition pruning, NOT palette, NOT screen-content, NOT tx-size/type/skip, NOT
     #25's speed-1 bugs — this is speed-0.) strip0 (also 16×64, mode=9=D67_PRED-ish non-vertical)
     matching rules out a blanket 16×64 bug — it's specific to V_PRED angle_delta on this leaf.
-  - **NEXT (the fix):** dump the port's PER-DELTA RD for the strip-1 block (mode=V_PRED,
-    delta=-3..+3) vs C's, at (r=32,c=36). Compare the directional predictor output + the
-    `angle_delta_cost` term for adj=0 vs adj=-1. Likely a directional-intra predictor edge/neighbor
-    or angle-cost bug for 1:4 rect blocks. Temp instrumentation is in `git stash` (kb2-temp-instr,
-    incl. the tx-extended P4STRIP) + the sibling `/root/libaom-enc-instrument` still built and gated
-    to (32,32) with C4STRIP dumping mode/adj/tx_size/skip. Re-apply the stash + add per-delta dumps
-    on both sides to resume.
+  - **RESOLVED (see the FIXED block at the top of this entry).** The per-delta dump above was
+    slightly mis-framed: adj=0 was **not** under-costed — it matched C exactly. The real mechanism
+    is that the port never even *evaluated* adj=−1's full RD: it **model-pruned** adj=−1 at
+    `prune_intra_y_mode` because its **model** RD (25930) was inflated by the wrong (0 instead of 1)
+    intra edge filter type on the angled prediction, tipping it over `1.5×best_model_rd` (25854).
+    The "directional-intra predictor edge/neighbour" guess was on target — it was the per-block
+    `get_intra_edge_filter_type` recompute the port was missing. All temp instrumentation and the
+    sibling `/root/libaom-enc-instrument` have been removed.
 
 ### KB-3 — Encoder: `vgrad 256x256 cq32` cpu-used=1 cell — FIXED (missing speed-1 `use_square_partition_only_threshold` rect-kill)
 - **FIXED** (commit pending on origin): the cell now byte-matches; promoted to an asserted winner

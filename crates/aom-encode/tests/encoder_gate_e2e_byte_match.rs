@@ -1196,6 +1196,15 @@ fn encoder_gate_e2e_rich_content_strong_lf() {
         ("hstripes4+vstripes12 (vert~15)", 128, 128, 58, lf_hstripes4_vstripes12),
         ("hstripes6+vstripes16+grad (both axes)", 128, 128, 58, lf_hstripes6_vstripes16_grad),
         ("plaid v4/h12+grad (horz~15)", 128, 128, 60, lf_plaid_v4_h12_grad),
+        // KB-2: same generator as the cq63 case below, at cq62 (qindex 249,
+        // screen_content auto-detected, real LF [1,17]). This cell exposed the
+        // frozen-`filter_type` bug — the port never re-derived the intra edge
+        // filter type (get_intra_edge_filter_type) per block, so a SMOOTH
+        // VERT_4 strip-0 neighbour did not raise strip-1's angled-prediction
+        // edge-filter strength; the resulting model-RD over-pruned V_PRED
+        // angle_delta=-1 and flipped the SB(32,32) partition. Fixed in
+        // partition_pick.rs (per-block filter_type recompute).
+        ("diag+vbars16+ripple cq62 (KB-2)", 256, 256, 62, lf_diag_vbars16_ripple),
         ("diag+vbars16+ripple (horz~25)", 256, 256, 63, lf_diag_vbars16_ripple),
         ("radial+diagbars+noise (vert~26)", 256, 256, 63, lf_radial_diagbars_noise),
     ];

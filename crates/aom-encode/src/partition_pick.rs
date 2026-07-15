@@ -504,6 +504,15 @@ fn leaf_pick_sb_modes(
         None
     };
 
+    // Luma intra edge filter type (reconintra.c get_intra_edge_filter_type):
+    // 1 iff the above OR left neighbour is a SMOOTH mode (SMOOTH_PRED=9,
+    // SMOOTH_V_PRED=10, SMOOTH_H_PRED=11). C re-derives this per block from
+    // the live mode-info grid; the frozen SB-level `env.filter_type` misses
+    // sub-block neighbours committed during the partition search (e.g. a
+    // SMOOTH VERT_4 strip-0 feeding strip-1's angled prediction).
+    let is_smooth_luma = |m: Option<i32>| m.is_some_and(|md| (9..=11).contains(&md));
+    let luma_edge_filter_type = i32::from(is_smooth_luma(above_mode) || is_smooth_luma(left_mode));
+
     // skip ctx: every KEY intra neighbour has skip_txfm == 0 => ctx 0.
     let skip_ctx = 0usize;
     let tx_size_ctx = get_tx_size_context(
@@ -536,7 +545,7 @@ fn leaf_pick_sb_modes(
         src_off: ref_off_y,
         src_stride: env.stride,
         disable_edge_filter: env.disable_edge_filter,
-        filter_type: env.filter_type,
+        filter_type: luma_edge_filter_type,
         mode: 0,
         angle_delta: 0,
         use_filter_intra: false,
