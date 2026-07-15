@@ -1608,3 +1608,68 @@ void shim_nn_predict(const float *features, int num_inputs, int num_outputs,
   cfg.bias[num_hidden_layers] = bp;
   av1_nn_predict_c(features, &cfg, reduce_prec, output);
 }
+
+/* RTCD-dispatched inner convolve of the CNN (av1_rtcd.h) + its scalar variant.
+ * av1_cnn_predict is a plain #define to av1_cnn_predict_c, so this pointer is
+ * the ONLY SIMD in the CNN path. Overriding it lets the shim expose the pure
+ * C-scalar CNN result as the bit-exact transcription oracle for the Rust port,
+ * distinct from the dispatched (AVX2) path the encoder actually runs. */
+extern void (*av1_cnn_convolve_no_maxpool_padding_valid)(
+    const float **input, int in_width, int in_height, int in_stride,
+    const CNN_LAYER_CONFIG *layer_config, float **output, int out_stride,
+    int start_idx, int cstep, int channel_step);
+void av1_cnn_convolve_no_maxpool_padding_valid_c(
+    const float **input, int in_width, int in_height, int in_stride,
+    const CNN_LAYER_CONFIG *layer_config, float **output, int out_stride,
+    int start_idx, int cstep, int channel_step);
+
+/* Runs av1_cnn_predict_img_multi_out on the 65x65 luma window `win` (stride 65)
+ * with the intra-CNN config, and copies the raw multi-out buffer (CNN_OUT_BUF_
+ * SIZE floats: branch_0[20] | branch_1[16] | branch_2[320] | branch_3[1280]) to
+ * `out_cnn_buffer`. If `force_cscalar`, the inner convolve is forced to the
+ * scalar `_c` variant (bit-exact transcription target); otherwise the dispatched
+ * (AVX2 on this host) variant runs (what the encoder used). NOT thread-safe when
+ * force_cscalar toggles the global -- call from a single test thread. */
+void shim_intra_cnn_run(const uint8_t *win, int force_cscalar,
+                        float *out_cnn_buffer) {
+  const CNN_CONFIG *cnn_config = &av1_intra_mode_cnn_partition_cnn_config;
+  const CNN_THREAD_DATA thread_data = { .num_workers = 1, .workers = NULL };
+  const int num_outputs = 4;
+  const int output_dims[4] = { 1, 2, 4, 8 };
+  const int out_chs[4] = { CNN_BRANCH_0_OUT_CH, CNN_BRANCH_1_OUT_CH,
+                           CNN_BRANCH_2_OUT_CH, CNN_BRANCH_3_OUT_CH };
+  float cnn_buffer[CNN_OUT_BUF_SIZE];
+  float *output_buffer[CNN_TOT_OUT_CH];
+  float **cur_output_buf = output_buffer;
+  float *curr_buf_ptr = cnn_buffer;
+  for (int output_idx = 0; output_idx < num_outputs; output_idx++) {
+    const int num_chs = out_chs[output_idx];
+    const int ch_size = output_dims[output_idx] * output_dims[output_idx];
+    for (int ch = 0; ch < num_chs; ch++) {
+      cur_output_buf[ch] = curr_buf_ptr;
+      curr_buf_ptr += ch_size;
+    }
+    cur_output_buf += num_chs;
+  }
+  CNN_MULTI_OUT output = {
+    .num_outputs = 4,
+    .output_channels = out_chs,
+    .output_strides = output_dims,
+    .output_buffer = output_buffer,
+  };
+  uint8_t *image[1] = { (uint8_t *)win };
+  if (force_cscalar) {
+    void (*saved)(const float **, int, int, int, const CNN_LAYER_CONFIG *,
+                  float **, int, int, int, int) =
+        av1_cnn_convolve_no_maxpool_padding_valid;
+    av1_cnn_convolve_no_maxpool_padding_valid =
+        av1_cnn_convolve_no_maxpool_padding_valid_c;
+    av1_cnn_predict_img_multi_out(image, 65, 65, 65, cnn_config, &thread_data,
+                                  &output);
+    av1_cnn_convolve_no_maxpool_padding_valid = saved;
+  } else {
+    av1_cnn_predict_img_multi_out(image, 65, 65, 65, cnn_config, &thread_data,
+                                  &output);
+  }
+  memcpy(out_cnn_buffer, cnn_buffer, CNN_OUT_BUF_SIZE * sizeof(float));
+}

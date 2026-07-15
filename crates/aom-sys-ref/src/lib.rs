@@ -8974,6 +8974,26 @@ extern "C" {
         reduce_prec: i32,
         output: *mut f32,
     );
+    fn shim_intra_cnn_run(win: *const u8, force_cscalar: i32, out_cnn_buffer: *mut f32);
+}
+
+/// `CNN_OUT_BUF_SIZE` (partition_cnn_weights.h) — the intra-CNN multi-out buffer
+/// length: branch_0[20] + branch_1[16] + branch_2[320] + branch_3[1280].
+pub const INTRA_CNN_OUT_BUF_SIZE: usize = 1636;
+
+/// Runs `av1_cnn_predict_img_multi_out` with the intra-CNN config on the 65×65
+/// luma window `win` (stride 65, replicated-border origin) and returns the raw
+/// multi-out buffer (`INTRA_CNN_OUT_BUF_SIZE` floats). `force_cscalar` forces the
+/// inner convolve to the scalar `_c` variant (the bit-exact transcription oracle
+/// for the Rust port); otherwise the dispatched (AVX2) variant runs, matching the
+/// encoder. Not thread-safe when `force_cscalar` — call from one test thread.
+pub fn ref_intra_cnn_run(win: &[u8], force_cscalar: bool) -> Vec<f32> {
+    assert!(win.len() >= 65 * 65, "CNN window must be at least 65x65");
+    let mut out = vec![0.0f32; INTRA_CNN_OUT_BUF_SIZE];
+    unsafe {
+        shim_intra_cnn_run(win.as_ptr(), i32::from(force_cscalar), out.as_mut_ptr());
+    }
+    out
 }
 
 /// Oracle for `av1/encoder/ml.c` `av1_nn_predict_c` (+ `av1_nn_output_prec_reduce`

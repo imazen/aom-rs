@@ -12,7 +12,11 @@
 //!
 //! Structure (built up in chunks, each diffed against the real C):
 //! - [`nn`] — `av1_nn_predict` + `prec_reduce` (the branch DNN forward pass).
-//! - (next) the CNN conv engine, weight tables, feature assembly + decision,
-//!   then integration into `rd_pick_partition_real`.
+//! - [`weights`] — CNN + branch-DNN weight tables + thresholds (generated).
+//! - [`cnn`] — the 5-layer VALID-conv cascade (`av1_cnn_predict_c` path).
+//! - (next) feature assembly + decision, then integration into
+//!   `rd_pick_partition_real`.
 
+pub mod cnn;
 pub mod nn;
+pub mod weights;
