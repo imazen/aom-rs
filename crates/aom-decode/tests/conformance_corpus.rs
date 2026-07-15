@@ -249,33 +249,41 @@ enum Scope {
     AllIntra,
     /// First `n` frames are KEY; the rest need inter tooling — excluded here.
     FirstKey(usize),
+    /// The whole vector is out of the current envelope (inter / cross-frame CDF
+    /// carry); documented reason, contributes zero in-scope frames.
+    OutOfEnvelope(&'static str),
 }
 
-struct Vector {
-    name: &'static str,
-    w: usize,
-    h: usize,
-    bd: i32,
-    ss_x: usize,
-    ss_y: usize,
-    scope: Scope,
+/// Caller-visible family classification. Every vector name a fetch can produce
+/// is classified EXPLICITLY here (verified from the bitstream frame types).
+/// A present vector whose family is not listed FAILS LOUD — new families must
+/// be classified deliberately, never silently skipped.
+fn scope_for(name: &str) -> Option<Scope> {
+    if name.contains("-02-allintra") {
+        Some(Scope::AllIntra) // every frame KEY (SB128 + CDEF + LR)
+    } else if name.contains("-16-intra_only") {
+        Some(Scope::AllIntra) // KEY frames using intrabc
+    } else if name.contains("-00-quantizer-") {
+        Some(Scope::FirstKey(1)) // KEY,INTER — frame 0 only
+    } else if name.contains("-01-size-") {
+        Some(Scope::FirstKey(1)) // KEY,INTER — frame 0 only
+    } else if name.contains("-05-mv") || name.contains("-06-mfmv") || name.contains("-22-svc") {
+        Some(Scope::OutOfEnvelope("inter: motion compensation / multi-ref"))
+    } else if name.contains("-04-cdfupdate") {
+        Some(Scope::OutOfEnvelope("cross-frame CDF carry (stateless single-frame decode)"))
+    } else {
+        None
+    }
 }
 
-/// The Gate-1 single-frame / all-intra / single-shown-KEY corpus. Scope per
-/// vector is fixed here from the verified bitstream frame types.
-const CORPUS: &[Vector] = &[
-    // 39-frame 8-bit all-intra (SB128 + CDEF + LR), every frame KEY.
-    Vector { name: "av1-1-b8-02-allintra", w: 352, h: 288, bd: 8, ss_x: 1, ss_y: 1, scope: Scope::AllIntra },
-    // 8-bit intra-only intrabc "extreme DV" (SB64), both frames KEY.
-    Vector { name: "av1-1-b8-16-intra_only-intrabc-extreme-dv", w: 1920, h: 1080, bd: 8, ss_x: 1, ss_y: 1, scope: Scope::AllIntra },
-    // 10-bit 00-quantizer (SB128 + CDEF + LR): KEY,INTER -> frame 0 only.
-    Vector { name: "av1-1-b10-00-quantizer-00", w: 640, h: 360, bd: 10, ss_x: 1, ss_y: 1, scope: Scope::FirstKey(1) },
-    Vector { name: "av1-1-b10-00-quantizer-01", w: 640, h: 360, bd: 10, ss_x: 1, ss_y: 1, scope: Scope::FirstKey(1) },
-    Vector { name: "av1-1-b10-00-quantizer-02", w: 640, h: 360, bd: 10, ss_x: 1, ss_y: 1, scope: Scope::FirstKey(1) },
-    Vector { name: "av1-1-b10-00-quantizer-03", w: 640, h: 360, bd: 10, ss_x: 1, ss_y: 1, scope: Scope::FirstKey(1) },
-    Vector { name: "av1-1-b10-00-quantizer-04", w: 640, h: 360, bd: 10, ss_x: 1, ss_y: 1, scope: Scope::FirstKey(1) },
-    Vector { name: "av1-1-b10-00-quantizer-05", w: 640, h: 360, bd: 10, ss_x: 1, ss_y: 1, scope: Scope::FirstKey(1) },
-];
+/// IVF display dimensions (header bytes 12..16, little-endian). Verified to
+/// match the coded frame size across the whole `01-size` family.
+fn ivf_hdr_dims(data: &[u8]) -> (usize, usize) {
+    (
+        u16::from_le_bytes([data[12], data[13]]) as usize,
+        u16::from_le_bytes([data[14], data[15]]) as usize,
+    )
+}
 
 fn corpus_dir() -> PathBuf {
     if let Ok(d) = std::env::var("AOM_CONFORMANCE_DIR") {
@@ -305,19 +313,35 @@ fn md5_self_test() {
     );
 }
 
+/// Enumerate the `av1-1-*.ivf` conformance vectors present in `dir`, sorted.
+fn present_vectors(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|n| {
+                n.strip_prefix("")
+                    .and_then(|n| n.strip_suffix(".ivf"))
+                    .filter(|n| n.starts_with("av1-1-"))
+                    .map(str::to_owned)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort();
+    names
+}
+
 #[test]
 fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
     let dir = corpus_dir();
+    let names = present_vectors(&dir);
 
     // Presence is caller-visible: FAIL LOUD if nothing is fetched (never a
     // silent pass). Which subset is present is a corpus-management fact; the
-    // decoder SCOPE (KEY-only) is fixed in CORPUS above.
-    let present: Vec<&Vector> = CORPUS
-        .iter()
-        .filter(|v| dir.join(format!("{}.ivf", v.name)).exists())
-        .collect();
+    // decoder SCOPE (KEY-only) is fixed per-family in `scope_for`.
     assert!(
-        !present.is_empty(),
+        !names.is_empty(),
         "no conformance vectors found in {}\n\
          fetch them first:  python3 xtask/conformance.py --fetch --scope intra\n\
          (or point AOM_CONFORMANCE_DIR at a populated corpus dir)",
@@ -327,42 +351,61 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
     let mut report = String::new();
     let mut failures: Vec<String> = Vec::new();
     let mut frames_checked = 0usize;
-    let mut vectors_checked = 0usize;
+    let mut vectors_in_scope = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
     // Coverage witnesses (anti-vacuous: the corpus must genuinely exercise
-    // high bit depth, SB128, CDEF, loop restoration, and intrabc).
+    // high bit depth, CDEF, loop restoration, intrabc, and odd frame sizes).
     let (mut saw_bd10, mut saw_cdef, mut saw_lr, mut saw_intrabc) = (false, false, false, false);
+    let mut saw_odd_size = false;
 
-    for v in &present {
-        vectors_checked += 1;
-        let ivf = std::fs::read(dir.join(format!("{}.ivf", v.name))).unwrap();
-        let golden_txt =
-            std::fs::read_to_string(dir.join(format!("{}.ivf.md5", v.name))).unwrap();
+    for name in &names {
+        let scope = match scope_for(name) {
+            Some(s) => s,
+            None => {
+                // Unknown family present in the corpus dir — do NOT guess a
+                // scope. Force explicit classification.
+                failures.push(format!(
+                    "{name}: unclassified conformance family — add it to scope_for()"
+                ));
+                continue;
+            }
+        };
+        if let Scope::OutOfEnvelope(reason) = scope {
+            skipped.push(format!("{name} ({reason})"));
+            continue;
+        }
+        vectors_in_scope += 1;
+
+        let ivf = std::fs::read(dir.join(format!("{name}.ivf"))).unwrap();
+        let golden_txt = std::fs::read_to_string(dir.join(format!("{name}.ivf.md5"))).unwrap();
         let golden = parse_golden(&golden_txt);
         let tus = ivf_temporal_units(&ivf);
         assert_eq!(
             tus.len(),
             golden.len(),
-            "{}: {} temporal units but {} golden md5 lines",
-            v.name,
+            "{name}: {} temporal units but {} golden md5 lines",
             tus.len(),
             golden.len()
         );
+        let (w, h) = ivf_hdr_dims(&ivf);
 
-        let in_scope: Vec<usize> = match v.scope {
+        let in_scope: Vec<usize> = match scope {
             Scope::AllIntra => (0..tus.len()).collect(),
             Scope::FirstKey(n) => (0..n.min(tus.len())).collect(),
+            Scope::OutOfEnvelope(_) => unreachable!(),
         };
 
         for &i in &in_scope {
             let tu = &tus[i];
-            let where_ = format!("{} frame {}", v.name, i);
+            let where_ = format!("{name} frame {i}");
 
-            // (2) C reference decode + golden layout/corpus validation.
-            let cref = c::ref_decode_av1_kf(tu, v.w, v.h);
-            assert_eq!(cref.info[0], v.bd, "{where_}: C bit depth");
-            let md5_c = image_md5(
-                &cref.y, &cref.u, &cref.v, v.w, v.h, v.bd, v.ss_x, v.ss_y, cref.info[1] != 0,
-            );
+            // (2) C reference decode -> derive (bd, mono, ss) and validate the
+            // golden layout + corpus integrity from the ground-truth decoder.
+            let cref = c::ref_decode_av1_kf(tu, w, h);
+            let bd = cref.info[0];
+            let mono = cref.info[1] != 0;
+            let (ss_x, ss_y) = (cref.info[2] as usize, cref.info[3] as usize);
+            let md5_c = image_md5(&cref.y, &cref.u, &cref.v, w, h, bd, ss_x, ss_y, mono);
             if md5_c != golden[i] {
                 failures.push(format!(
                     "{where_}: C-decoder MD5 {md5_c} != golden {} (corpus/layout mismatch)",
@@ -382,22 +425,22 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
             let mut frame_ok = true;
             if rust.y != cref.y {
                 let n = rust.y.iter().zip(&cref.y).take_while(|(a, b)| a == b).count();
-                let (x, yy) = (n % v.w, n / v.w);
+                let (x, yy) = (n % w, n / w);
                 failures.push(format!(
-                    "{where_}: LUMA differs at pixel {n} (x={x}, y={yy}) port={} c={}",
+                    "{where_} ({w}x{h} bd{bd}): LUMA differs at pixel {n} (x={x}, y={yy}) port={} c={}",
                     rust.y.get(n).copied().unwrap_or(0),
                     cref.y.get(n).copied().unwrap_or(0)
                 ));
                 frame_ok = false;
             }
-            if !rust.monochrome && rust.u != cref.u {
+            if !mono && rust.u != cref.u {
                 let n = rust.u.iter().zip(&cref.u).take_while(|(a, b)| a == b).count();
-                failures.push(format!("{where_}: U differs at chroma sample {n}"));
+                failures.push(format!("{where_} ({w}x{h} bd{bd}): U differs at chroma sample {n}"));
                 frame_ok = false;
             }
-            if !rust.monochrome && rust.v != cref.v {
+            if !mono && rust.v != cref.v {
                 let n = rust.v.iter().zip(&cref.v).take_while(|(a, b)| a == b).count();
-                failures.push(format!("{where_}: V differs at chroma sample {n}"));
+                failures.push(format!("{where_} ({w}x{h} bd{bd}): V differs at chroma sample {n}"));
                 frame_ok = false;
             }
             if !frame_ok {
@@ -405,9 +448,7 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
             }
 
             // (3) Port planes reproduce the golden MD5 independently.
-            let md5_r = image_md5(
-                &rust.y, &rust.u, &rust.v, v.w, v.h, v.bd, v.ss_x, v.ss_y, rust.monochrome,
-            );
+            let md5_r = image_md5(&rust.y, &rust.u, &rust.v, w, h, bd, ss_x, ss_y, rust.monochrome);
             if md5_r != golden[i] {
                 failures.push(format!("{where_}: port MD5 {md5_r} != golden {}", golden[i]));
                 continue;
@@ -419,19 +460,26 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
                 || rust.cdef_strengths[0] != 0
                 || rust.cdef_uv_strengths[0] != 0;
             saw_lr |= rust.lr_frame_restoration_type.iter().any(|&t| t != 0);
-            // The intrabc vector is 8-bit SB64 1920x1080; witness it by name +
-            // successful decode (intrabc syntax isn't surfaced on FrameDecode).
-            saw_intrabc |= v.name.contains("intrabc");
+            saw_intrabc |= name.contains("intrabc");
+            saw_odd_size |= w % 8 != 0 || h % 8 != 0;
 
             frames_checked += 1;
-            report.push_str(&format!("  OK  {where_}  ({}x{} bd{})\n", v.w, v.h, v.bd));
+            report.push_str(&format!("  OK  {where_}  ({w}x{h} bd{bd})\n"));
         }
     }
 
     eprintln!(
-        "conformance: {} vectors present, {} in-scope frames byte-identical (port==C==golden)\n{}",
-        vectors_checked, frames_checked, report
+        "conformance: {} in-scope vectors, {} frames byte-identical (port==C==golden); {} out-of-envelope vectors skipped{}",
+        vectors_in_scope,
+        frames_checked,
+        skipped.len(),
+        if skipped.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", skipped.join(", "))
+        }
     );
+    eprint!("{report}");
 
     assert!(
         failures.is_empty(),
@@ -443,19 +491,21 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
     // Anti-vacuous floors: prove the run actually exercised the tools the
     // corpus carries. These fire only when the relevant vectors are present.
     assert!(frames_checked > 0, "no in-scope frames were checked");
-    if present.iter().any(|v| v.bd >= 10) {
+    let has = |sub: &str| names.iter().any(|n| n.contains(sub));
+    if has("-b10-") {
         assert!(saw_bd10, "10-bit vectors present but no bd>=10 frame verified");
     }
-    if present.iter().any(|v| v.name.contains("intrabc")) {
+    if has("intrabc") {
         assert!(saw_intrabc, "intrabc vector present but not verified");
     }
-    // allintra + b10-quantizer both carry CDEF and LR in the sequence header;
-    // if either family is present, at least one frame must have applied them.
-    if present
-        .iter()
-        .any(|v| v.name.contains("allintra") || v.name.contains("quantizer"))
-    {
+    if has("-02-allintra") || has("-00-quantizer") {
         assert!(saw_cdef, "CDEF-carrying vectors present but no CDEF frame verified");
         assert!(saw_lr, "LR-carrying vectors present but no LR frame verified");
+    }
+    if has("-01-size-") {
+        assert!(
+            saw_odd_size,
+            "size vectors present but no non-8-multiple frame verified"
+        );
     }
 }
