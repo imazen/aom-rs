@@ -528,6 +528,37 @@ fn localize_mono(w: usize, h: usize, bd: u8, cq_level: i32, content: impl Fn(usi
     if decisions_match {
         return true;
     }
+
+    // DECISIVE prediction-vs-encoder-decision test: decode C's stream with BOTH
+    // the port decoder (full decode) AND the C decoder, and compare. If they
+    // agree, the port's intra-prediction/reconstruction path is bit-exact vs C
+    // for this exact directional/high-bd/high-gradient corner -> the divergence
+    // is a pure ENCODER RD decision (coeff/quant/trellis/assembly). If they
+    // DISagree, the port's prediction itself diverges from C (the residual is
+    // NOT identical), which would be the root cause.
+    let port_full = aom_decode::frame::decode_frame_obus(&bytes)
+        .unwrap_or_else(|e| panic!("port full-decode of C stream failed: {e}"));
+    let c_full = c::ref_decode_av1_kf(&bytes, w, h);
+    let mut dec_div: Option<(usize, usize, u16, u16)> = None;
+    'd: for row in 0..h {
+        for col in 0..w {
+            let pv = port_full.y[row * port_full.width + col];
+            let cv = c_full.y[row * w + col];
+            if pv != cv {
+                dec_div = Some((row, col, pv, cv));
+                break 'd;
+            }
+        }
+    }
+    match dec_div {
+        Some((row, col, pv, cv)) => eprintln!(
+            "  [DECODER CHECK] port-decode(C-stream) != C-decode(C-stream) at ({row},{col}): port={pv} C={cv}  <== PORT DECODER/PREDICTION diverges from C (residual NOT identical)"
+        ),
+        None => eprintln!(
+            "  [DECODER CHECK] port-decode(C-stream) == C-decode(C-stream): port prediction/recon is bit-exact vs C for this stream -> divergence is a pure ENCODER RD decision"
+        ),
+    }
+
     if let Some((mi_row, mi_col, bsize, pr, po)) = partition_div {
         eprintln!(
             "  >>> FIRST PARTITION DIVERGENCE at (mi_row={mi_row}, mi_col={mi_col}, bsize={bsize}): \
