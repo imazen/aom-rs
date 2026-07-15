@@ -88,7 +88,30 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
   closed for Gate 2, not excluded. Verify whether any gate currently *excludes* this cell (a
   relaxation to be reverted on fix) vs merely documenting it.
 
-### KB-3 — Encoder: `vgrad 256x256 cq32` cpu-used=1 cell — partition RD near-tie (isolation COMPLETE, not a learned-model prune)
+### KB-3 — Encoder: `vgrad 256x256 cq32` cpu-used=1 cell — FIXED (missing speed-1 `use_square_partition_only_threshold` rect-kill)
+- **FIXED** (commit pending on origin): the cell now byte-matches; promoted to an asserted winner
+  in `encoder_gate_speed1_textured_allintra` (14/14 cpu-used=1 content cells). Root-caused via
+  **isolated sibling-libaom encoder instrumentation** (`/root/libaom-enc-instrument`, a throwaway
+  copy — never the shared `reference/libaom`) dumping C's per-candidate RD at SB(0,0) 64×64 for
+  the exact vgrad-256-cq32 encode. Findings: C's NONE and SPLIT RD matched the port **exactly**
+  (NONE rate 36745 / dist 19456 / rdcost 7427690, rdmult 68796); C **never evaluated** the
+  rectangular partitions, but the port did, and the port's HORZ (rdcost 7058801) beat NONE → port
+  wrongly picked `PARTITION_HORZ`. C disables rect via the "square-partition-only" rect kill
+  (`partition_search.c:5749`): `if (bsize > use_square_partition_only_threshold) {
+  partition_rect_allowed[HORZ] &= !has_rows; [VERT] &= !has_cols; }`. That threshold is a
+  framesize-DEPENDENT ALLINTRA speed feature: sub-480p it is `BLOCK_64X64` at speed 0 (so
+  `bsize > 64X64` never holds in a ≤64 SB — why speed-0 never needed it) but drops to
+  `BLOCK_32X32` at speed ≥ 1, killing rect on the 64X64 SB. **Fix:** wired the rect-kill into
+  `rd_pick_partition_real` (`use_square_partition_only_threshold_allintra`, framesize+speed
+  dependent), placed after `partition_rect_allowed` init and before the CNN prune (matching C's
+  order). Speed-0 unaffected (threshold `BLOCK_64X64` → no-op); full `cargo test -p aom-encode`
+  = 89 passed, 0 failed. NOT a learned-model prune (the CNN/prune_2d/etc. elimination below stands).
+- **KB-2 is a SEPARATE root** (do NOT conflate): KB-2's cell runs at **cpu-used=0**, where this
+  fix is a no-op (threshold `BLOCK_64X64`). KB-2 needs its own speed-0 root-cause pass.
+
+<details><summary>Original isolation notes (superseded by the fix above)</summary>
+
+Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-converging.
 - **Symptom:** in `encoder_gate_speed1_textured_allintra`, the `vgrad 256×256 cq32`
   (base_qindex 128) cell does not e2e byte-match aomenc. Diverges at **byte 5** (first
   tile-data byte) and **never re-converges** (`last_common_idx = 4` = last header byte) — an

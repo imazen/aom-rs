@@ -1340,6 +1340,37 @@ fn extract_intra_cnn_window(env: &SbEncodeEnv, mi_row: i32, mi_col: i32) -> Vec<
     win
 }
 
+/// `use_square_partition_only_threshold` for the ALLINTRA path
+/// (`set_allintra_speed_feature_framesize_dependent`, speed_features.c:175-316).
+/// Returns the BLOCK_SIZE enum value; the caller disables rect for inner blocks
+/// with `bsize > threshold`. Framesize tiers: `is_480p_or_larger` = min(w,h) >=
+/// 480, `is_720p_or_larger` = min(w,h) >= 720 — bucketed exactly as C.
+fn use_square_partition_only_threshold_allintra(speed: i32, w: i32, h: i32) -> usize {
+    let min_dim = w.min(h);
+    let is_480p_or_larger = min_dim >= 480;
+    let is_720p_or_larger = min_dim >= 720;
+    // Base, all speeds (:175-182): 128X128 (>=480p) / 64X64 (sub-480p).
+    let mut t: usize = if is_480p_or_larger { 15 } else { 12 };
+    if speed >= 1 {
+        // :211-217: 128X128 (720p+) / 64X64 (480p+) / 32X32 (sub-480p).
+        t = if is_720p_or_larger {
+            15
+        } else if is_480p_or_larger {
+            12
+        } else {
+            9
+        };
+    }
+    if speed >= 2 {
+        // :238-242: 64X64 (720p+) / 32X32 (else).
+        t = if is_720p_or_larger { 12 } else { 9 };
+    }
+    if speed >= 6 {
+        t = 6; // 16X16 (:315).
+    }
+    t
+}
+
 pub fn rd_pick_partition_real(
     env: &SbEncodeEnv,
     cfg: &PickFrameCfg,
@@ -1398,6 +1429,28 @@ pub fn rd_pick_partition_real(
             has_cols && get_plane_block_size(horz_subsize, env.ss_x, env.ss_y) != 255;
         partition_rect_allowed[1] =
             has_rows && get_plane_block_size(vert_subsize, env.ss_x, env.ss_y) != 255;
+    }
+
+    // "Disable rectangular partitions for inner blocks when the current block
+    // is forced to only use square partitions" (partition_search.c:5749, run
+    // after init + the edge-block handling, BEFORE av1_prune_partitions_before
+    // _search / the CNN). `use_square_partition_only_threshold` is a
+    // framesize-DEPENDENT ALLINTRA speed feature: sub-480p it is BLOCK_64X64 at
+    // speed 0 (so `bsize > 64X64` never holds in a <=64X64 SB — a no-op, which
+    // is why speed-0 never needed this) but drops to BLOCK_32X32 at speed >= 1,
+    // so a 64X64 inner block (has_rows && has_cols) gets its rect partitions
+    // killed. `&= !has_rows` (HORZ) / `&= !has_cols` (VERT) leaves the fitting
+    // rect on true frame-edge blocks, matching C.
+    if cfg.allintra {
+        let sq_only_thresh = use_square_partition_only_threshold_allintra(
+            cfg.speed,
+            env.mi_cols * 4,
+            env.mi_rows * 4,
+        );
+        if bsize > sq_only_thresh {
+            partition_rect_allowed[0] &= !has_rows;
+            partition_rect_allowed[1] &= !has_cols;
+        }
     }
     // prune_rect_part (:3385) / terminate_partition_search (:3380): no live
     // writer in the speed-0 KEY envelope (module docs).

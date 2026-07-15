@@ -1560,36 +1560,22 @@ fn encoder_gate_speed1_textured_allintra() {
         (256, 256, "two-tone", 48),
         (256, 256, "vgrad", 48),
         (256, 256, "diag", 48),
-        // NOTE: (256, 256, "vgrad", 32) remains EXCLUDED — and the isolation is
-        // now COMPLETE (see KB-3 in CLAUDE.md). The divergence is NOT an
-        // unported learned-model prune:
-        //   * The intra CNN partition prune (intra_cnn_based_part_prune_level
-        //     0->2) is fully ported + wired into rd_pick_partition_real; its 4
-        //     flags are bit-exact vs C (cnn_partition_decision_diff). For this
-        //     cell the CNN fires and sets square_split_disabled=true at every
-        //     64×64 SB root (logit0 ~ -5..-9.5) — IDENTICALLY to C, so it
-        //     constrains port and C the same way and does NOT create a
-        //     divergence. Wiring it in left byte-5 (157 vs 8) UNCHANGED.
-        //   * prune_2d_txfm_mode PRUNE_1->PRUNE_2: does not affect intra at
-        //     speed 1 (prune_txk_type is gated on prune_tx_type_est_rd, which is
-        //     speed>=4; prune_tx_2D is is_inter-only).
-        //   * model_based_prune_tx / ml_predict_breakout / ml_early_term_after
-        //     _split / ml_prune_rect / simple_motion_search_*: all !frame_is
-        //     _intra_only (inter-only). ml_predict_var_partitioning: nonrd-only.
-        //   * ml_4_partition_search_level_index 0->1 and intra_tx_size_search
-        //     _init_depth_rect 0->1 (two real speed-1 values the port hardcodes
-        //     to their speed-0 value — see KB-3): forcing each to the speed-1
-        //     value leaves THIS cell byte-identical (no effect) and keeps the 7
-        //     winners green.
-        // Root: a partition-search RD NEAR-TIE. The port picks PARTITION_HORZ
-        // for SB(0,0) (two 64×32 DC / TX_64X32 blocks); C picks a different
-        // partition. Diverges at byte 5 and never re-converges (last_common_idx
-        // = 4 = last header byte) — an early partition/mode cascade, KB-2 class
-        // (a residual RD near-tie), not a missing prune. Next step: dump the
-        // port's per-candidate RD (NONE/HORZ/VERT) at the SB(0,0) 64×64 node vs
-        // the C reference (needs an encode-side RD-dump shim, which currently
-        // lives in the decoder-owned dec_shim.c). See
-        // isolate_vgrad256_cq32_cnn_partition_prune + KB-3.
+        // PROMOTED — the last excluded cpu-used=1 cell now byte-matches (KB-3
+        // FIXED). Root cause (found via isolated sibling-libaom RD instrumentation
+        // dumping C's per-candidate RD at SB(0,0) 64×64): a missing speed-1
+        // partition prune, NOT a learned-model prune. C's NONE/SPLIT RD matched
+        // the port EXACTLY (NONE rdcost 7427690), but C never evaluated the
+        // rectangular partitions while the port did — and the port's HORZ
+        // (rdcost 7058801) beat NONE, so the port wrongly picked PARTITION_HORZ.
+        // C disables rect here via the "square-partition-only" rect kill
+        // (partition_search.c:5749): `if (bsize > use_square_partition_only
+        // _threshold) { partition_rect_allowed[HORZ] &= !has_rows; [VERT] &=
+        // !has_cols; }`. That threshold is a framesize-DEPENDENT ALLINTRA speed
+        // feature = BLOCK_64X64 sub-480p at speed 0 (so `bsize>64X64` never holds
+        // in a <=64X64 SB — the reason speed-0 never needed it) but BLOCK_32X32
+        // at speed >= 1, which kills rect on the 64X64 SB. Now wired in
+        // rd_pick_partition_real (use_square_partition_only_threshold_allintra).
+        (256, 256, "vgrad", 32),
     ];
     let mut matched = 0usize;
     for &(w, h, name, cq) in winners {
@@ -1631,8 +1617,11 @@ fn encoder_gate_speed1_textured_allintra() {
 /// left this cell's byte-5 value (157 vs 8) UNCHANGED. The other candidate,
 /// `prune_2d_txfm_mode` PRUNE_1->PRUNE_2, does not affect intra at speed 1
 /// (see the NOTE on the excluded cell in `encoder_gate_speed1_textured_allintra`
-/// and KB-3 in CLAUDE.md for the full elimination). The real cause is a
-/// partition-search RD near-tie (KB-2 class), documented in KB-3.
+/// and KB-3 in CLAUDE.md for the full elimination). The real cause — since FIXED
+/// — was a missing speed-1 `use_square_partition_only_threshold` rect kill: C
+/// disables rectangular partitions on the 64x64 SB sub-480p at speed>=1 (thresh
+/// drops to BLOCK_32X32) while the port evaluated HORZ and wrongly won on it.
+/// Root-caused via isolated sibling-libaom RD instrumentation; see KB-3.
 ///
 /// This test is retained as a DIAGNOSTIC of the CNN's decisions on SB(0,0):
 /// it runs the REAL libaom CNN + DNN inference (via

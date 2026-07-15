@@ -2396,7 +2396,7 @@ at speed>=4 → NOT needed for speed 1. `intra_pruning_with_hog` (stays 1 at s1,
 - sf-delta fields modeled in `SpeedFeatures`: 15 of 15 intra-still-relevant (values transcribed + unit-asserted vs source; `speed1_allintra_deltas_match_source`).
 - **e2e harness wired to source from `SpeedFeatures::set_allintra(speed)`** — `encoder_gate_e2e_byte_match.rs` `attempt_case_content_uv` now takes `(cpu_used, speed)`; speed-0 callers pass `(0,0)` → byte-identical (all speed-0 gates green). The all-intra path sources `pol` / `speed` / `intra_pruning_with_hog` / `less_rectangular_check_level` from the scaffold.
 - sf-deltas WIRED + BYTE-MATCHED at cpu-used=1: **5 of 15** — the tx-policy group #7 `adaptive_txb_search_level` 1→2, #12 `skip_tx_search` 0→1, #13 `perform_coeff_opt` 1→2, #14 `tx_domain_dist_level` 0→1, #15 `tx_domain_dist_thres_level` 0→1. #14 additionally required implementing `calc_pixel_domain_distortion_final` (tx_search.rs:2378-2381 recompute of the winner's pixel-domain distortion) — was a speed-0 `debug_assert` stub, now ported; guarded so speed-0 is byte-identical.
-- content cases byte-identical at cpu-used=1: **13 of 14** — all 6 flat (64/128/256², cq32/cq48) + 7 of 8 gentle-slope textured (two-tone/vgrad/diag @128²+256² cq48, vgrad@128² cq32). Asserted in `encoder_gate_speed1_flat_allintra` + `encoder_gate_speed1_textured_allintra`.
+- content cases byte-identical at cpu-used=1: **14 of 14** (was 13/14; the vgrad-256-cq32 holdout is now FIXED — see KB-3 resolution below) — all 6 flat (64/128/256², cq32/cq48) + all 8 gentle-slope textured (two-tone/vgrad/diag @128²+256² cq48, vgrad@128² cq32, **vgrad@256² cq32**). Asserted in `encoder_gate_speed1_flat_allintra` + `encoder_gate_speed1_textured_allintra`.
 
 NEXT LOCALIZATION TARGET (1 diverging cell): **vgrad 256×256 cq32** at speed 1
 (byte-matches at speed 0 — an asserted `encoder_gate_e2e_multi_sb_scale` winner —
@@ -2497,13 +2497,43 @@ recorded in KB-3 for a future threaded fix + new RECT-partition speed-1 validati
 `get_search_init_depth_intra_speed0` hardcodes rect init-depth 0 (C: `intra_tx_size_search
 _init_depth_rect=1` at speed≥1).
 
-**Next step** (blocked on tooling ownership): dump the port's per-candidate RD (NONE/HORZ/VERT) at
-the SB(0,0) 64×64 node vs the C reference. Needs an encode-side RD-dump shim, but `shim_encode
-_av1_kf` lives in the decoder-owned `dec_shim.c` and drives the opaque `aom_codec` API (no
-`cpi->sf` hook) — a coordinated new shim entry point is required to bisect the remaining speed-1
-RD deltas (`perform_coeff_opt=2`, `tx_domain_dist_level/thres_level=1`, `adaptive_txb_search
-_level=2`, `top_intra_model_count_allowed=3`).
+### KB-3 RESOLVED — missing speed-1 `use_square_partition_only_threshold` rect-kill (2026-07-15)
 
-**cpu-used=1 all-intra coverage: 13 of 14 content cells byte-identical** (all 6 flat + 7 of 8
-gentle-slope textured); the 1 holdout (vgrad-256-cq32) is the RD near-tie above (KB-3), now fully
-isolated as NOT a learned-model prune. Full `cargo test -p aom-encode`: 89 passed, 0 failed.
+Root-caused with an **isolated sibling-libaom encoder instrument** (a throwaway copy at
+`/root/libaom-enc-instrument`, mirroring the decoder's `/root/libaom-dbg` playbook — NEVER the
+shared `reference/libaom`). Instrumented C's `av1_rd_pick_partition` to `fprintf` per-candidate RD
+at SB(0,0) 64×64, drove it with a standalone `rd_harness.c` replicating `shim_encode_av1_kf`'s
+exact config, and **validated the harness bitstream byte-for-byte against the e2e real_payload**
+before trusting the dump. Findings at SB(0,0):
+
+| candidate | C rate | C dist | C rdcost | port |
+|---|---|---|---|---|
+| NONE | 36745 | 19456 | 7427690 | **identical** (rdmult 68796) |
+| SPLIT | — | — | (matched) | **identical** |
+| HORZ / VERT | **never evaluated by C** | | | port evaluated HORZ → rdcost 7058801 < NONE → picked PARTITION_HORZ |
+
+C's NONE and SPLIT RD matched the port **exactly** — the only divergence was that **C never
+evaluated the rectangular partitions**. C disables them via the "square-partition-only" rect kill
+(`partition_search.c:5749`): `if (bsize > use_square_partition_only_threshold) {
+partition_rect_allowed[HORZ] &= !has_rows; [VERT] &= !has_cols; }`. That threshold is a
+framesize-DEPENDENT ALLINTRA speed feature: **sub-480p it is `BLOCK_64X64` at speed 0** (so
+`bsize > 64X64` is false on a ≤64 SB — which is why speed-0 never needed it) **but drops to
+`BLOCK_32X32` at speed ≥ 1**, so the 64×64 SB gets rect disabled. The port had no such kill →
+evaluated HORZ → wrong pick.
+
+**Fix** (`partition_pick.rs`): added `use_square_partition_only_threshold_allintra(speed, w, h)`
+(framesize+speed dependent, transcribed from `set_allintra_speed_feature_framesize_dependent`)
+and wired the rect kill into `rd_pick_partition_real` immediately after `partition_rect_allowed`
+init and before the CNN prune (matching C's order). Speed-0 unaffected (threshold `BLOCK_64X64` →
+no-op). vgrad-256-cq32 now byte-matches (45/45); promoted to an asserted winner. `less_rectangular
+_check_level` stays 1 at speed 1 (C: `speed>=3`) — verified in the sibling, not a latent bug.
+
+**KB-2 is a SEPARATE root** (do NOT conflate): its cell runs at cpu-used=**0**, where this fix is
+a no-op. KB-2 needs its own speed-0 root-cause pass.
+
+**Still-latent (unrelated to this cell)**: the two speed-1 bugs recorded above (`part4_prune.rs`
+`LEVEL_INDEX=0`; `tx_search.rs` rect init-depth 0) remain — forcing each leaves all 14 cells
+byte-identical, so no current cell distinguishes them; queued as #25.
+
+**cpu-used=1 all-intra coverage: 14 of 14 content cells byte-identical** (all 6 flat + all 8
+gentle-slope textured). Full `cargo test -p aom-encode`: 89 passed, 0 failed.
