@@ -2242,17 +2242,40 @@ machinery + tile-group assembly. Fix needed in aom-entropy: thread
 site (`header.rs:1511`), mirroring libaom's `write_tile_info`
 (`cm->context_update_tile_id`, `cm->tile_size_bytes - 1`).
 
-**HONEST GAP #2 (encoder track, LF-level search on strong filters):** a
-combined-content probe (gradient + hard edges + texture in one frame, task-3's
-"richer content") drives real aomenc to STRONG nonzero loop-filter levels
-(e.g. `[15,6]`/`[16,5]`) where this port's `pick_filter_level` disagrees, even at
-cq60/cq63. The existing `encoder_gate_lf_level_bit_exact_vs_real` only covers the
-AB-probe checkerboard levels (`[8,8]`/`[8,3]`/`[7,16]`); the strong-filter regime
-is unverified. This blocks the combined-in-one-frame content case (its high
-texture also feeds the coeff-trellis gap -> our recon differs -> our LF search
-sees different pixels). Smallest next chunk: extend the LF-level gate to
-strong-filter content (fed real's own reconstruction, as that gate already does)
-and C-trace the first divergent `pick_filter_level` term at a high level.
+**HONEST GAP #2 — RESOLVED (2026-07-15, encoder track): strong-LF was NEVER an
+LF-search bug; it was reconstruction, now fixed.** The prior finding — a
+combined-content probe (gradient + hard edges + texture in one frame) drove real
+aomenc to STRONG loop-filter levels (`[15,6]`/`[16,5]`) where the port appeared
+to disagree — was tested on the END-TO-END path, where the port's OWN
+reconstruction (then lacking coeff-trellis + partition-RDO + `INTERNAL_COST_UPD_SB`)
+differed from real's, so the port's LF search saw different pixels.
+
+Isolated properly (feed real aomenc's OWN decoded pre-filter reconstruction + mi
+grid to the port's `pick_filter_level`, via `lf_derived_vs_real_on_real_recon`),
+the strong-LF SEARCH is **bit-exact**. A discovery sweep of 8 combined
+high-texture generators × {128,256} × {40..63} found **16 strong (level >= 12)
+cells — `[0,25]`, `[26,0]`, `[6,20]` (both axes), `[15,0]`, `[0,15]`, ... — and
+the port derived real's coded level EXACTLY on real's own recon in ALL of them
+(0 mismatches)**. So the earlier honest-stop was reconstruction, not the LF
+search; the trellis/partition/`INTERNAL_COST_UPD_SB` fixes have since made recon
+accurate enough that **15/16 of those strong cells ALSO byte-match END-TO-END**
+(port's own recon + own LF derivation → identical bytes), including with
+`screen_content=true`.
+
+Landed as two asserted gates in `encoder_gate_e2e_byte_match.rs`:
+- `encoder_gate_lf_level_bit_exact_vs_real` — EXTENDED to the strong regime:
+  5 strong cases (`[15,0]`/`[6,20]`/`[0,15]`/`[0,25]`/`[26,0]`, on real's recon)
+  alongside the 4 weak AB cases, with a `saw_strong` (level >= 12) anti-vacuous
+  guard next to the existing `saw_nonzero`.
+- `encoder_gate_e2e_rich_content_strong_lf` — NEW: the SAME 5 rich strong-LF
+  generators byte-match real aomenc end-to-end (5/5), the promotion of the
+  honest-stopped rich-content variant. Shared `fn` generators keep the two gates
+  in lockstep (a flat regression fails the LF gate; a recon drift fails this one).
+
+The only strong cell that did NOT e2e-match (`diag+vbars16 256x256 cq62`, real
+`[1,17]`) is a residual non-LF coeff/partition near-tie, unrelated to the LF
+search. Commit `4940315`. Full `aom-encode` suite green (49 test binaries, 0
+failed); every guardrail gate unaffected.
 
 ## Multi-SB e2e byte match at 16/16 — `INTERNAL_COST_UPD_SB` per-SB cost update ported (2026-07-15, encoder track)
 
