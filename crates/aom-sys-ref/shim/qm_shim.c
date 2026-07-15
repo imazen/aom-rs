@@ -25,3 +25,14 @@ int shim_qm_gqmatrix(int q, int c, int t, uint8_t *out, int out_cap) {
   for (int i = 0; i < len; ++i) out[i] = (uint8_t)m[i];
   return len;
 }
+
+// The qindex -> QM-level mappings the encoder uses to set qmatrix_level_{y,u,v}
+// (av1_set_quantizer). Both are `static inline` in quant_common.h; the wrappers
+// call them so the differential exercises the genuine C formulas.
+int shim_get_qmlevel(int qindex, int first, int last) {
+  return aom_get_qmlevel(qindex, first, last);
+}
+
+int shim_get_qmlevel_allintra(int qindex, int first, int last) {
+  return aom_get_qmlevel_allintra(qindex, first, last);
+}

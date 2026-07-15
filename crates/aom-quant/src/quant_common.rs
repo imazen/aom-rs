@@ -241,3 +241,41 @@ pub fn av1_get_qindex(seg: &Segmentation, segment_id: usize, base_qindex: i32) -
         base_qindex
     }
 }
+
+/// `QINDEX_RANGE` (`av1/common/quant_common.h`): the qindex table size (256).
+const QINDEX_RANGE: i32 = 256;
+
+/// `aom_get_qmlevel` (`av1/common/quant_common.h`) — the DEFAULT-tune mapping
+/// from qindex to QM level, linearly interpolated across `[first, last]`. Used
+/// by the encoder for tunes other than all-intra / SSIMULACRA2. Bit-exact with
+/// the C `static inline`.
+#[inline]
+pub fn aom_get_qmlevel(qindex: i32, first: i32, last: i32) -> i32 {
+    first + (qindex * (last + 1 - first)) / QINDEX_RANGE
+}
+
+/// `aom_get_qmlevel_allintra` (`av1/common/quant_common.h`) — the ALL-INTRA QM
+/// level from qindex, then clamped to `[first, last]` (the `qm_min`/`qm_max`
+/// range, `4`/`10` by the allintra defaults). This is the mapping the allintra
+/// path (`av1_set_quantizer`, usage=2) uses to set `qmatrix_level_{y,u,v}` — a
+/// decreasing step function of qindex (empirically SSIMULACRA2-tuned on CID22;
+/// higher level = flatter matrix). Bit-exact with the C `static inline`.
+#[inline]
+pub fn aom_get_qmlevel_allintra(qindex: i32, first: i32, last: i32) -> i32 {
+    let qm_level = if qindex <= 40 {
+        10
+    } else if qindex <= 100 {
+        9
+    } else if qindex <= 160 {
+        8
+    } else if qindex <= 200 {
+        7
+    } else if qindex <= 220 {
+        6
+    } else if qindex <= 240 {
+        5
+    } else {
+        4
+    };
+    qm_level.clamp(first, last)
+}

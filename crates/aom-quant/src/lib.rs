@@ -17,8 +17,8 @@ pub use build_quantizer::{
 };
 pub use qm::{qmatrix, NUM_QM_LEVELS};
 pub use quant_common::{
-    av1_ac_quant_qtx, av1_dc_quant_qtx, av1_get_qindex, Segmentation, MAX_SEGMENTS, SEG_LVL_ALT_Q,
-    SEG_LVL_MAX, SEG_LVL_SKIP,
+    aom_get_qmlevel, aom_get_qmlevel_allintra, av1_ac_quant_qtx, av1_dc_quant_qtx, av1_get_qindex,
+    Segmentation, MAX_SEGMENTS, SEG_LVL_ALT_Q, SEG_LVL_MAX, SEG_LVL_SKIP,
 };
 
 /// `ROUND_POWER_OF_TWO(value, n)` from `aom_ports/mem.h` — bit-exact.
