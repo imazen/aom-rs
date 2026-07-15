@@ -7787,6 +7787,30 @@ extern "C" {
         out: *mut u8,
         out_cap: usize,
     ) -> i64;
+    /// disable_cdf_update variant of `shim_encode_av1_kf` (decoder-track
+    /// disable_cdf_update gate, append-only addition — every function above is
+    /// untouched): single-pass KEY encode with `AV1E_SET_CDF_UPDATE_MODE=0`
+    /// (`--cdf-update-mode=0`), which forces `disable_cdf_update=1` in the
+    /// emitted uncompressed header for every frame.
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_av1_kf_disable_cdf(
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        enable_cdef: i32,
+        enable_restoration: i32,
+        usage: i32,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
     /// SB128 variant of `shim_encode_av1_kf` (decoder-track SB128 work,
     /// append-only addition — `shim_encode_av1_kf` above is untouched):
     /// same params plus explicit `sb_size_128` (0 = --sb-size=64, nonzero =
@@ -8339,6 +8363,63 @@ pub fn ref_encode_av1_kf(
         )
     };
     assert!(n > 0, "shim_encode_av1_kf failed ({n})");
+    out.truncate(n as usize);
+    out
+}
+
+/// disable_cdf_update variant of [`ref_encode_av1_kf`] (decoder-track
+/// disable_cdf_update gate, append-only addition — `ref_encode_av1_kf` above is
+/// untouched): a single-pass GOOD/ALLINTRA KEY encode with
+/// `AV1E_SET_CDF_UPDATE_MODE=0` (`--cdf-update-mode=0`). That control forces
+/// `cm->features.disable_cdf_update = 1` for every frame
+/// (`av1/encoder/encoder.c` `case 0:`), so the emitted shown-KEY uncompressed
+/// header carries `disable_cdf_update = 1`. Returns the real libaom bitstream.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_av1_kf_disable_cdf(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    enable_cdef: bool,
+    enable_restoration: bool,
+    usage: u32,
+) -> Vec<u8> {
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+    };
+    assert_eq!(y.len(), w * h);
+    assert!(mono || (u.len() == cw * ch && v.len() == cw * ch));
+    let mut out = vec![0u8; w * h * 8 + 65536];
+    let n = unsafe {
+        shim_encode_av1_kf_disable_cdf(
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            enable_cdef as i32,
+            enable_restoration as i32,
+            usage as i32,
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    };
+    assert!(n > 0, "shim_encode_av1_kf_disable_cdf failed ({n})");
     out.truncate(n as usize);
     out
 }

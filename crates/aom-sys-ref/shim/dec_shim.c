@@ -709,6 +709,135 @@ long shim_encode_av1_kf_qm(const uint16_t *y, const uint16_t *u,
                             out_cap);
 }
 
+/* Single-pass KEY encode with AV1E_SET_CDF_UPDATE_MODE=0 (decoder-track
+ * disable_cdf_update gate; append-only — no existing function is modified).
+ * cdf_update_mode == 0 is the aomenc `--cdf-update-mode=0` control ("No CDF
+ * update for any frames"), which forces cm->features.disable_cdf_update = 1 for
+ * EVERY frame (av1/encoder/encoder.c:4375, the `case 0:` arm), so the emitted
+ * shown-KEY uncompressed header carries disable_cdf_update = 1 regardless of
+ * frame type. Self-contained clone of encode_av1_kf_impl's cfg/image setup +
+ * the single-pass GOOD/ALLINTRA controls (the same CLI-equivalent knobs); the
+ * ONLY added control is AV1E_SET_CDF_UPDATE_MODE. One-frame FORCE_KF encode.
+ * The differential gate validates the bytes (port decode == C decode of the
+ * SAME bytes) and asserts disable_cdf_update==1 in the parsed header, so this
+ * encoder path is checked end-to-end. Returns the bitstream length or a
+ * negative error code. */
+long shim_encode_av1_kf_disable_cdf(const uint16_t *y, const uint16_t *u,
+                                    const uint16_t *v, int w, int h, int bd,
+                                    int mono, int ss_x, int ss_y, int cq_level,
+                                    int cpu_used, int enable_cdef,
+                                    int enable_restoration, int usage,
+                                    uint8_t *out, size_t out_cap) {
+  aom_codec_iface_t *iface = aom_codec_av1_cx();
+  aom_codec_enc_cfg_t cfg;
+  if (aom_codec_enc_config_default(iface, &cfg, (unsigned int)usage)) return -1;
+  cfg.g_w = w;
+  cfg.g_h = h;
+  cfg.g_limit = 1;
+  cfg.g_lag_in_frames = 0;
+  cfg.g_threads = 1;
+  cfg.g_pass = AOM_RC_ONE_PASS;
+  cfg.rc_end_usage = AOM_Q;
+  cfg.monochrome = mono;
+  cfg.g_input_bit_depth = bd;
+  if (bd == 8) {
+    cfg.g_bit_depth = AOM_BITS_8;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else if (bd == 10) {
+    cfg.g_bit_depth = AOM_BITS_10;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else {
+    cfg.g_bit_depth = AOM_BITS_12;
+    cfg.g_profile = 2;
+  }
+  if (!mono && ss_x == 1 && ss_y == 0) cfg.g_profile = 2; /* 4:2:2 */
+
+  aom_img_fmt_t fmt;
+  if (mono || (ss_x == 1 && ss_y == 1))
+    fmt = AOM_IMG_FMT_I420;
+  else if (ss_x == 1)
+    fmt = AOM_IMG_FMT_I422;
+  else
+    fmt = AOM_IMG_FMT_I444;
+  if (bd > 8) fmt |= AOM_IMG_FMT_HIGHBITDEPTH;
+  aom_image_t *img = aom_img_alloc(NULL, fmt, w, h, 32);
+  if (!img) return -4;
+  img->monochrome = mono;
+  img->bit_depth = bd;
+  const int cw = mono ? 0 : (w + ss_x) >> ss_x;
+  const int ch = mono ? 0 : (h + ss_y) >> ss_y;
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    const uint16_t *src = plane == 0 ? y : (plane == 1 ? u : v);
+    const int pw = plane == 0 ? w : cw;
+    const int ph = plane == 0 ? h : ch;
+    for (int r = 0; r < ph; r++) {
+      if (bd > 8) {
+        uint16_t *row =
+            (uint16_t *)(img->planes[plane] + (size_t)r * img->stride[plane]);
+        for (int c = 0; c < pw; c++) row[c] = src[(size_t)r * pw + c];
+      } else {
+        uint8_t *row = img->planes[plane] + (size_t)r * img->stride[plane];
+        for (int c = 0; c < pw; c++) row[c] = (uint8_t)src[(size_t)r * pw + c];
+      }
+    }
+  }
+
+  aom_codec_ctx_t ctx;
+  aom_codec_flags_t flags = bd > 8 ? AOM_CODEC_USE_HIGHBITDEPTH : 0;
+  if (aom_codec_enc_init(&ctx, iface, &cfg, flags)) {
+    aom_img_free(img);
+    return -2;
+  }
+#define TRYCTRL2(id, val)                       \
+  do {                                          \
+    if (aom_codec_control(&ctx, (id), (val))) { \
+      aom_codec_destroy(&ctx);                  \
+      aom_img_free(img);                        \
+      return -3;                                \
+    }                                           \
+  } while (0)
+  TRYCTRL2(AOME_SET_CPUUSED, cpu_used);
+  TRYCTRL2(AOME_SET_CQ_LEVEL, cq_level);
+  TRYCTRL2(AV1E_SET_ENABLE_CDEF, enable_cdef);
+  TRYCTRL2(AV1E_SET_ENABLE_RESTORATION, enable_restoration);
+  TRYCTRL2(AV1E_SET_SUPERBLOCK_SIZE, AOM_SUPERBLOCK_SIZE_64X64);
+  TRYCTRL2(AV1E_SET_TILE_COLUMNS, 0);
+  TRYCTRL2(AV1E_SET_TILE_ROWS, 0);
+  TRYCTRL2(AV1E_SET_DELTAQ_MODE, 0);
+  TRYCTRL2(AV1E_SET_AQ_MODE, 0);
+  /* The disable_cdf_update knob: "No CDF update for any frames." */
+  TRYCTRL2(AV1E_SET_CDF_UPDATE_MODE, 0);
+#undef TRYCTRL2
+
+  /* Drain frame packets after EACH encode call (img, then flush) — the same
+   * proven pattern as encode_kf_pass; the frame may be emitted on either. */
+  long total = 0;
+  int rc = 0;
+  for (int pass = 0; pass < 2 && rc == 0; pass++) {
+    if (aom_codec_encode(&ctx, pass == 0 ? img : NULL, 0, 1,
+                         pass == 0 ? AOM_EFLAG_FORCE_KF : 0)) {
+      rc = -5;
+      break;
+    }
+    aom_codec_iter_t iter = NULL;
+    const aom_codec_cx_pkt_t *pkt;
+    while ((pkt = aom_codec_get_cx_data(&ctx, &iter)) != NULL) {
+      if (pkt->kind != AOM_CODEC_CX_FRAME_PKT) continue;
+      const void *buf = pkt->data.frame.buf;
+      size_t sz = pkt->data.frame.sz;
+      if ((size_t)total + sz > out_cap) {
+        rc = -6;
+        break;
+      }
+      memcpy(out + total, buf, sz);
+      total += (long)sz;
+    }
+  }
+  aom_codec_destroy(&ctx);
+  aom_img_free(img);
+  return rc ? rc : total;
+}
+
 /* Decode AV1 bytes through the REAL aom_codec_av1_dx public API and copy the
  * (cropped) planes out as u16 row-major with tight strides. info_out:
  *   [0]=bit_depth [1]=monochrome [2]=ss_x [3]=ss_y [4]=d_w [5]=d_h.
