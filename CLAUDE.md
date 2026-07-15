@@ -223,13 +223,28 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   cells byte-identical, so no current test exercises them; documented for a future fix + new
   validation cells):**
   1. `part4_prune.rs:234` hardcodes `LEVEL_INDEX = 0`, but C's `ml_4_partition_search_level
-     _index` is `min(speed,3)` (1 at speed-1) → the 4-way DNN prune uses the wrong
-     `SEARCH_THRESH`/`NOT_SEARCH_THRESH` row at speed≥1 (partition_strategy.c:1508-1510).
+     _index = min(speed,3)` (set 0/1/2/3 at `if(speed>=1/2/3)`, speed_features.c:210/237/271;
+     default 0 at :2305). Index expr `(LEVEL*3+res_idx)*5+bsize_idx` uses LEVEL **directly**
+     (no −1) — the port's `LEVEL_INDEX` == the level. Usage: `av1_ml_prune_4_partition`,
+     partition_strategy.c:1507-1510. **CRITICAL caveat (verified 2026-07-15):** at level **3**
+     (speed≥3) C flips `ml_model_index = (level<3) == 0` (partition_strategy.c:1359) → a
+     **different NN model, no threshold table** (`:1472-1497`, scores vs `max_score−{500,500,200}`).
+     So the port's table path is correct ONLY for speeds 0/1/2 (LEVEL 0/1/2). Fix = pass
+     `level=min(speed,3)` from `cfg.speed` into `predict_4partition_prune` (caller
+     partition_pick.rs:2173) and use it as the table row **only when level<3**; speed≥3 needs the
+     alternate (old-NN, tableless) branch = a #10 item, NOT #25. Feeding LEVEL=3 into the table
+     would be wrong (that path never runs in C).
   2. `tx_search.rs:1305` `get_search_init_depth_intra_speed0` hardcodes the speed-0
-     `intra_tx_size_search_init_depth_rect = 0`, but C uses 1 at speed≥1 (speed_features.c:409)
-     → rect intra tx-size search starts at the wrong depth at speed≥1.
-  Both should be threaded from the (already-correct) `SpeedFeatures` fields; needs new speed-1
-  RECT-partition test cells to validate the fix (the 7 current winners don't distinguish).
+     `intra_tx_size_search_init_depth_rect = 0`, but C uses 1 at speed≥1 (speed_features.c:409);
+     `_sqr = 1` for ALL speeds (unconditional at :367). So at speed≥1 BOTH rect and sqr return 1.
+     `get_search_init_depth` (tx_search.c:363-383) returns `_rect` when w≠h, `_sqr` when w==h.
+     Fix = thread `speed` into `choose_tx_size_type_from_rd_intra` (caller of the init-depth fn,
+     tx_search.rs:1356; `TxfmYrdEnv` has no `speed` field yet — add it or pass a param) and return
+     `rect = (speed>=1) as i32`, `sqr = 1`.
+  Both preserve speed-0 exactly (min(0,3)=0; rect=0 at speed 0). Needs new speed-1 RECT-partition
+  test cells to validate — the current speed-1 gates pass WITH the bugs (they don't reach a
+  divergent 4-way-prune / rect-tx decision), so exercising cells must be discovered (a speed-1
+  e2e harness exists: `encoder_gate_speed1_textured_allintra`).
 
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
@@ -257,10 +272,13 @@ bootstrapped from the real parse (qindex, tile info, cdf-update, ...) — only L
 port-derived.
 
 **Remaining for single-frame-PRIMARY exactness (blocks "all single frame exactly"):**
-- **KB-2 (#22) cq62 speed-0 V_PRED angle_delta near-tie** — port picks adj=0, C picks adj=−1 at
-  16×64; encoder actively root-causing in `intra_rd.rs`. Speed-0 default-config hole.
+- **KB-2 (#22) cq62 speed-0 — FIXED ✅ (74fb582)**: per-block `get_intra_edge_filter_type`
+  recompute in `partition_pick.rs` (a SMOOTH neighbour was not raising the angled-prediction edge
+  filter → model-RD over-pruned V_PRED adj=−1 → flipped SB(32,32) partition). cq62 byte-matches +
+  asserted in `encoder_gate_e2e_rich_content_strong_lf`. See the KB-2 FIXED block above.
 - **#25 two latent speed-1 bugs** — `part4_prune.rs:234` LEVEL_INDEX, `tx_search.rs:1305` rect
-  init-depth; need speed-1 RECT-partition test cells to validate.
+  init-depth; need speed-1 RECT-partition test cells to validate. (C mappings now fully worked
+  out — see the enriched #25 block above.)
 - **#10 cpu-used 0..9 speed-feature sweep** (Gate 2) — the large remaining item.
   (#8 qindex-from-cq and #21 decoder q62/q63 are DONE + CI-green — no longer remaining.)
 
