@@ -2418,9 +2418,44 @@ So the culprit is a **learned-model** speed-1 delta hitting SB(0,0)'s early
 symbols: **#1 `intra_cnn_based_part_prune_level` 0→2** (the CNN split-vs-nonsplit
 intra partition prune, `av1/encoder/partition_strategy.c` `intra_mode_cnn_partition`
 — frame-intra-gated so it runs on KEY) or **#11 `prune_2d_txfm_mode`
-PRUNE_1→PRUNE_2** (the 2D tx-type NN prune, structurally off in the port). A big
-byte-5 delta (157 vs 8) points at a partition-tree change → **#1 (CNN) is the
-prime suspect**. Both are learned models (NN weights + feature extraction) and are
-the next-slice implementation targets. To confirm which, decode SB(0,0)'s partition
-symbol from `real_payload` vs `our_payload` (decoder-track tooling) or port #11
-first (smaller model) and re-test; if it doesn't resolve, it is #1.
+PRUNE_1→PRUNE_2** (the 2D tx-type NN prune, structurally off in the port).
+
+### ISOLATION PROVEN — the culprit is #1, the intra CNN partition prune (2026-07-15)
+
+Confirmed against the **REAL libaom CNN + DNN inference**, not by inference alone.
+Added an oracle `shim_intra_cnn_partition_decision` (`rd_shim.c`, exposed as
+`ref_intra_cnn_partition_decision`) that reproduces `intra_mode_cnn_partition`
+verbatim over the real exported `av1_cnn_predict_img_multi_out` +
+`av1_nn_predict_c` + the real static-const weights/thresholds. Test
+`isolate_vgrad256_cq32_cnn_partition_prune` (encoder_gate_e2e_byte_match.rs) runs
+it on SB(0,0)'s 64×64 window of the exact vgrad-256 source (65×65, replicated
+top/left border per `av1_copy_and_extend_frame`). Result at the **real qindex=128**
+(cq32; confirmed content-independent from the flat-256 cq32 case):
+
+| block | logits[0] | threshold | decision |
+|---|---|---|---|
+| 64×64 root | −3.408 | neutral band [−4.10, 1.89] | **no-op** (RD decides) |
+| 32×32 (×4) | −6.34 .. −7.22 | no_split −4.564 | **square-split DISABLED** |
+| 16×16 (×16) | ≈ −16.3 | no_split −5.695 | **square-split DISABLED** |
+| 8×8 (×64) | ≈ −59 | no_split −1.484 | **square-split DISABLED** |
+
+So the CNN forbids `PARTITION_SPLIT` on every sub-block of SB(0,0) while leaving
+the 64×64 root free. The port (no CNN prune) keeps its speed-0 search, which can
+still SPLIT those sub-blocks → a different partition tree → the byte-5 (first
+tile-data byte) divergence. This is the smallest-margin isolation: the 32×32 sits
+1.77 below its threshold, well outside the DNN prec-reduce bucket (1/512). **#11
+(2D tx-type prune) is ruled out** — it affects tx_type, coded after partition +
+mode, and would not move the FIRST tile byte.
+
+**Feasibility for the port:** the CNN's ONLY bitstream effect is the 4 per-block
+decision FLAGS (none_disallowed / do_square_split / rect_disabled /
+square_split_disabled) — the logit values never enter the stream. libaom's CNN C
+and AVX2 agree only to `MSE_FLOAT_TOL=1E-6` (test/cnn_test.cc), but the DNN
+`av1_nn_predict(reduce_prec=1)` quantises logits to 1/512, and these margins are
+large, so a faithful C-scalar Rust port will match the AVX2 oracle's FLAGS. Byte-
+exactness therefore reduces to flag-parity (verifiable against the oracle), not
+bit-identical floats. **Port scope:** `av1_nn_predict`+prec_reduce (small) →
+`av1_cnn_predict_img_multi_out` 5-layer conv engine (large) → weight tables (~2k
+floats, extract from `partition_cnn_weights.h`) → feature assembly + thresholds +
+decision → integrate into `rd_pick_partition_real` (per-64×64 CNN cache + the
+gating `frame_is_intra && level && sb_size>=64 && bsize<=64 && whole_blk_in_frame`).

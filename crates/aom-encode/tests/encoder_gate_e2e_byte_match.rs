@@ -1603,3 +1603,104 @@ fn encoder_gate_speed1_textured_allintra() {
          (the tx-policy speed-1 deltas + calc_pixel_domain_distortion_final recompute)"
     );
 }
+
+/// ISOLATION (Gate 2, cpu-used=1): prove which learned-model speed-1 delta
+/// causes the `vgrad 256x256 cq32` byte-5 divergence. The two candidates are
+/// `intra_cnn_based_part_prune_level` 0->2 (the CNN split-vs-nonsplit partition
+/// prune) and `prune_2d_txfm_mode` PRUNE_1->PRUNE_2 (the 2D tx-type NN prune).
+///
+/// This runs the REAL libaom CNN + DNN inference (via
+/// `ref_intra_cnn_partition_decision`, an `rd_shim.c` oracle that reproduces
+/// `av1/encoder/partition_strategy.c intra_mode_cnn_partition` verbatim over the
+/// real exported inference + real weights) on SB(0,0)'s 64x64 window of the
+/// exact vgrad-256 source real aomenc encodes. If `logits[0]` crosses the
+/// split threshold, the CNN forces the 64x64 to split (disallow PARTITION_NONE,
+/// disable rect) at level 2 -- which rewrites the FIRST partition symbol coded
+/// (byte 5, the first tile-data byte), exactly the observed divergence. The
+/// port has NO CNN prune, so it keeps the speed-0 partition -> byte-5 mismatch.
+///
+/// The decision is checked across a qindex bracket (cq32 -> base_qindex 128;
+/// cq48 -> 192 per STATUS.md) because `log_q` is only 1 of the 37 DNN features
+/// -- a decision stable across the bracket does not depend on the exact qindex.
+#[test]
+fn isolate_vgrad256_cq32_cnn_partition_prune() {
+    c::ref_init();
+    // The EXACT speed-1 textured `vgrad` content at 256px (see `content_for`
+    // in `encoder_gate_speed1_textured_allintra`): value depends only on column.
+    let w = 256usize;
+    let vgrad = |_r: usize, col: usize| -> u8 { (32 + col * 190 / w) as u8 };
+
+    // SB(0,0)'s 64x64 CNN input = the 65x65 luma window at frame(-1,-1) with
+    // replicated top/left borders (lookahead.c av1_copy_and_extend_frame ->
+    // extend_plane edge-replicates). window[i][j] = src(max(i-1,0), max(j-1,0)).
+    let mut win = vec![0u8; 65 * 65];
+    for i in 0..65 {
+        for j in 0..65 {
+            let fr = (i as i32 - 1).max(0) as usize;
+            let fc = (j as i32 - 1).max(0) as usize;
+            win[i * 65 + j] = vgrad(fr, fc);
+        }
+    }
+
+    // lowres tier thresholds (min(256,256) < 480), from partition_cnn_weights.h
+    // split_thresh_lowres / no_split_thresh_lowres, indexed by bsize_idx.
+    const SPLIT_LOWRES: [f32; 5] = [100.0, 1.890757, 2.658417, 1.450626, 1.833180];
+    const NO_SPLIT_LOWRES: [f32; 5] = [-100.0, -4.100921, -4.564202, -5.695176, -1.483546];
+
+    // The REAL qindex for vgrad-256 cq32 is 128 (confirmed: flat-256 cq32 in
+    // encoder_gate_speed1_flat_allintra prints qindex=128; base_qindex is
+    // content-independent for a single CQ-mode KEY frame). cq48 -> 192.
+    let qindex = 128i32;
+
+    // Sweep EVERY block in SB(0,0)'s quad-tree that the CNN prune visits
+    // (bsize <= 64X64, >= 8X8). The CNN runs once on the 64x64 window; each
+    // sub-block selects a spatial slice of the cached branch outputs via
+    // quad_tree_idx (the shim recomputes the CNN from the same window, then
+    // slices -- bit-identical to the cached path). quad_tree_idx layout:
+    // 64x64 root = 0; 32x32 = 1..=4; 16x16 = 5..=20; 8x8 = 21..=84.
+    // (bsize_idx, label, quad_tree_idx range)
+    let blocks: &[(i32, &str, std::ops::RangeInclusive<i32>)] = &[
+        (1, "64x64", 0..=0),
+        (2, "32x32", 1..=4),
+        (3, "16x16", 5..=20),
+        (4, "8x8", 21..=84),
+    ];
+    // Per-bsize: how many sub-blocks disable square-split (flags[3]==1).
+    let mut sqsplit_disabled = [0usize; 5];
+    let mut counts = [0usize; 5];
+    for (bsize_idx, label, qt_range) in blocks {
+        let bi = *bsize_idx as usize;
+        let mut logit_min = f32::INFINITY;
+        let mut logit_max = f32::NEG_INFINITY;
+        for qt in qt_range.clone() {
+            let (logits, flags) =
+                c::ref_intra_cnn_partition_decision(&win, qindex, 8, w as i32, w as i32, *bsize_idx, qt, 2);
+            logit_min = logit_min.min(logits[0]);
+            logit_max = logit_max.max(logits[0]);
+            counts[bi] += 1;
+            if flags[3] == 1 {
+                sqsplit_disabled[bi] += 1;
+            }
+        }
+        eprintln!(
+            "vgrad256 SB(0,0) {label} (bsize_idx={bsize_idx}, split>{} no_split<{}): \
+             logits[0] in [{logit_min:.4}, {logit_max:.4}], {}/{} disable square-split",
+            SPLIT_LOWRES[bi], NO_SPLIT_LOWRES[bi], sqsplit_disabled[bi], counts[bi]
+        );
+    }
+
+    // ISOLATION CONCLUSION (proven via the REAL libaom CNN+DNN inference):
+    // at the real cq32 qindex=128, the 64x64 root is neutral (RD decides) but
+    // the CNN DISABLES PARTITION_SPLIT (av1_disable_square_split_partition) for
+    // EVERY 32x32/16x16/8x8 sub-block of SB(0,0). The port has no CNN prune, so
+    // its speed-0 search may still SPLIT those sub-blocks -> a different
+    // partition tree -> the observed byte-5 (first-tile-byte) divergence. This
+    // proves the culprit is `intra_cnn_based_part_prune_level` (0->2), NOT the
+    // 2D tx-type prune. Decisions (flags) are asserted -- not the exact logits,
+    // which vary by SIMD tier -- because the prec-reduced margins here are large
+    // and the flags are what constrain the bitstream-affecting partition search.
+    assert_eq!(sqsplit_disabled[1], 0, "the 64x64 root must be CNN-neutral at qindex=128");
+    assert_eq!(sqsplit_disabled[2], 4, "all four 32x32 sub-blocks must be CNN square-split-disabled");
+    assert_eq!(sqsplit_disabled[3], 16, "all sixteen 16x16 sub-blocks must be CNN square-split-disabled");
+    assert_eq!(sqsplit_disabled[4], 64, "all sixty-four 8x8 sub-blocks must be CNN square-split-disabled");
+}

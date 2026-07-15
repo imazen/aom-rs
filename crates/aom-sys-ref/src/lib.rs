@@ -8949,6 +8949,58 @@ extern "C" {
         out_dist: *mut i64,
         out_sse: *mut i64,
     );
+    #[allow(clippy::too_many_arguments)]
+    fn shim_intra_cnn_partition_decision(
+        win: *const u8,
+        qindex: i32,
+        bit_depth: i32,
+        frame_w: i32,
+        frame_h: i32,
+        bsize_idx: i32,
+        quad_tree_idx: i32,
+        level: i32,
+        out_logits: *mut f32,
+        out_flags: *mut i32,
+    );
+}
+
+/// Oracle for `av1/encoder/partition_strategy.c` `intra_mode_cnn_partition`
+/// (the speed>=1 intra CNN split-vs-nonsplit partition prune). `win` is the
+/// 65x65 luma window (stride 65, row-major) = the block's `frame(-1,-1)` origin
+/// with replicated top/left borders. `bsize_idx` is `convert_bsize_to_idx`
+/// (1=64X64 .. 4=8X8); `quad_tree_idx` is `x->part_search_info.quad_tree_idx`;
+/// `level` is `intra_cnn_based_part_prune_level` (1 or 2). Returns
+/// `(logits[4], flags[4])` where flags are
+/// `[none_disallowed, do_square_split, rect_disabled, square_split_disabled]`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_intra_cnn_partition_decision(
+    win: &[u8],
+    qindex: i32,
+    bit_depth: i32,
+    frame_w: i32,
+    frame_h: i32,
+    bsize_idx: i32,
+    quad_tree_idx: i32,
+    level: i32,
+) -> ([f32; 4], [i32; 4]) {
+    assert!(win.len() >= 65 * 65, "CNN window must be at least 65x65");
+    let mut logits = [0.0f32; 4];
+    let mut flags = [0i32; 4];
+    unsafe {
+        shim_intra_cnn_partition_decision(
+            win.as_ptr(),
+            qindex,
+            bit_depth,
+            frame_w,
+            frame_h,
+            bsize_idx,
+            quad_tree_idx,
+            level,
+            logits.as_mut_ptr(),
+            flags.as_mut_ptr(),
+        );
+    }
+    (logits, flags)
 }
 
 /// Reference `av1_compute_rd_mult_based_on_qindex` (rd.c). Enum args are passed

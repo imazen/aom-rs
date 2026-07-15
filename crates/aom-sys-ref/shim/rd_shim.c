@@ -30,6 +30,20 @@
 #include "av1/encoder/ratectrl.h" /* av1_convert_qindex_to_q */
 #include "av1/encoder/rd.h" /* av1_set_error_per_bit */
 #include "aom_ports/mem.h" /* RIGHT_SIGNED_SHIFT */
+#include <math.h> /* log1pf, for the intra-CNN partition-prune oracle */
+#include "av1/encoder/cnn.h" /* CNN_CONFIG/CNN_MULTI_OUT, av1_cnn_predict_img_multi_out */
+#include "av1/encoder/ml.h" /* NN_CONFIG */
+/* Pulls the static-const CNN config + weights + branch DNN configs + the
+ * res-tier split/no-split threshold tables + mean/std + quad_to_linear maps
+ * used by av1/encoder/partition_strategy.c intra_mode_cnn_partition. Every
+ * symbol here is file-local (static const) so there is no clash with libaom.a. */
+#include "av1/encoder/partition_cnn_weights.h"
+/* av1_nn_predict is RTCD-dispatched; av1_nn_predict_c is the scalar reference.
+ * intra_mode_cnn_partition calls it with reduce_prec=1, which quantises the
+ * logits to 1/512 -- libaom's own mechanism to keep C and SIMD identical, so
+ * the _c path reproduces whatever variant the encoder dispatched. */
+void av1_nn_predict_c(const float *input_nodes, const NN_CONFIG *const nn_config,
+                      int reduce_prec, float *const output);
 
 /* Exported (RTCD `_c`) transform-domain distortion primitives; hand-declared
  * (they live in the generated av1_rtcd.h, not a plain header the shim pulls). */
@@ -1407,4 +1421,159 @@ void shim_fill_coeff_costs(int qindex, int txs_ctx, int plane,
   free(costs);
   free(fc);
   free(cm);
+}
+
+/* Oracle for av1/encoder/partition_strategy.c `intra_mode_cnn_partition`
+ * (the speed>=1 intra CNN split-vs-nonsplit partition prune). Reproduces that
+ * function VERBATIM against the REAL exported inference (av1_cnn_predict_img_
+ * multi_out + av1_nn_predict_c) and the REAL static-const weights/thresholds,
+ * so any misreading of the model shows up as a logit/decision mismatch.
+ *
+ * `win` is the 65x65 luma window (stride 65, row-major) = the block's
+ * frame(-1,-1) origin with replicated top/left borders (see lookahead.c
+ * av1_copy_and_extend_frame -> extend_plane, edge-replicated). `bsize_idx` is
+ * convert_bsize_to_idx (1=64X64, 2=32X32, 3=16X16, 4=8X8); `quad_tree_idx` is
+ * x->part_search_info.quad_tree_idx. `frame_w/frame_h` pick the res tier.
+ *
+ * out_logits[0..4) = the DNN logits (post prec-reduce). out_flags[0..4):
+ *   [0] partition_none_disallowed  (logits[0] > split_thresh && level != 1)
+ *   [1] do_square_split            (logits[0] > split_thresh)
+ *   [2] rect_partitions_disabled   (logits[0] > split_thresh)
+ *   [3] square_split_disabled      (logits[0] < no_split_thresh)
+ * `level` is intra_cnn_based_part_prune_level (1 or 2) -- only [0] depends on it.
+ */
+void shim_intra_cnn_partition_decision(const uint8_t *win, int qindex,
+                                       int bit_depth, int frame_w, int frame_h,
+                                       int bsize_idx, int quad_tree_idx,
+                                       int level, float *out_logits,
+                                       int *out_flags) {
+  out_flags[0] = out_flags[1] = out_flags[2] = out_flags[3] = 0;
+  for (int i = 0; i < 4; i++) out_logits[i] = 0.0f;
+  /* BLOCK_128X128 (bsize_idx 0) returns before any decision. */
+  if (bsize_idx <= 0 || bsize_idx > 4) return;
+
+  /* ---- run the CNN into a local multi-out buffer (same wiring as C) ---- */
+  const CNN_CONFIG *cnn_config = &av1_intra_mode_cnn_partition_cnn_config;
+  const CNN_THREAD_DATA thread_data = { .num_workers = 1, .workers = NULL };
+  const int num_outputs = 4;
+  const int output_dims[4] = { 1, 2, 4, 8 };
+  const int out_chs[4] = { CNN_BRANCH_0_OUT_CH, CNN_BRANCH_1_OUT_CH,
+                           CNN_BRANCH_2_OUT_CH, CNN_BRANCH_3_OUT_CH };
+  float cnn_buffer[CNN_OUT_BUF_SIZE];
+  float *output_buffer[CNN_TOT_OUT_CH];
+  float **cur_output_buf = output_buffer;
+  float *curr_buf_ptr = cnn_buffer;
+  for (int output_idx = 0; output_idx < num_outputs; output_idx++) {
+    const int num_chs = out_chs[output_idx];
+    const int ch_size = output_dims[output_idx] * output_dims[output_idx];
+    for (int ch = 0; ch < num_chs; ch++) {
+      cur_output_buf[ch] = curr_buf_ptr;
+      curr_buf_ptr += ch_size;
+    }
+    cur_output_buf += num_chs;
+  }
+  CNN_MULTI_OUT output = {
+    .num_outputs = 4,
+    .output_channels = out_chs,
+    .output_strides = output_dims,
+    .output_buffer = output_buffer,
+  };
+  uint8_t *image[1] = { (uint8_t *)win };
+  av1_cnn_predict_img_multi_out(image, 65, 65, 65, cnn_config, &thread_data,
+                                &output);
+
+  /* ---- log_q normalisation (verbatim) ---- */
+  const int dc_q =
+      av1_dc_quant_QTX(qindex, 0, (aom_bit_depth_t)bit_depth) >> (bit_depth - 8);
+  float log_q = log1pf((float)(dc_q * dc_q) / 256.0f);
+  log_q = (log_q - av1_intra_mode_cnn_partition_mean[0]) /
+          av1_intra_mode_cnn_partition_std[0];
+
+  /* ---- assemble per-bsize DNN features (verbatim) ---- */
+  const NN_CONFIG *dnn_configs[5] = {
+    NULL,
+    &av1_intra_mode_cnn_partition_branch_0_dnn_config,
+    &av1_intra_mode_cnn_partition_branch_1_dnn_config,
+    &av1_intra_mode_cnn_partition_branch_2_dnn_config,
+    &av1_intra_mode_cnn_partition_branch_3_dnn_config,
+  };
+  const NN_CONFIG *dnn_config = dnn_configs[bsize_idx];
+  float dnn_features[100];
+  float logits[4] = { 0.0f };
+  const float *branch_0 = cnn_buffer;
+  const float *branch_1 = branch_0 + CNN_BRANCH_0_OUT_SIZE;
+  const float *branch_2 = branch_1 + CNN_BRANCH_1_OUT_SIZE;
+  const float *branch_3 = branch_2 + CNN_BRANCH_2_OUT_SIZE;
+
+  if (bsize_idx == 1) { /* BLOCK_64X64 */
+    int f_idx = 0;
+    for (int ch_idx = 0; ch_idx < CNN_BRANCH_0_OUT_CH; ch_idx++)
+      dnn_features[f_idx++] = branch_0[ch_idx];
+    const int spa_stride = 2 * 2;
+    for (int lin_idx = 0; lin_idx < spa_stride; lin_idx++)
+      for (int ch_idx = 0; ch_idx < CNN_BRANCH_1_OUT_CH; ch_idx++)
+        dnn_features[f_idx++] = branch_1[lin_idx + ch_idx * spa_stride];
+    dnn_features[f_idx++] = log_q;
+  } else if (bsize_idx == 2) { /* BLOCK_32X32 */
+    int f_idx = 0;
+    for (int idx = 0; idx < CNN_BRANCH_0_OUT_CH; idx++)
+      dnn_features[f_idx++] = branch_0[idx];
+    const int curr_lin_idx = quad_to_linear_1[quad_tree_idx - 1];
+    const int spa_stride = 2 * 2;
+    for (int ch_idx = 0; ch_idx < CNN_BRANCH_1_OUT_CH; ch_idx++)
+      dnn_features[f_idx++] = branch_1[curr_lin_idx + ch_idx * spa_stride];
+    dnn_features[f_idx++] = log_q;
+  } else if (bsize_idx == 3) { /* BLOCK_16X16 */
+    int f_idx = 0;
+    const int prev_quad_idx = (quad_tree_idx - 1) / 4;
+    const int prev_lin_idx = quad_to_linear_1[prev_quad_idx - 1];
+    const int prev_spa_stride = 2 * 2;
+    for (int ch_idx = 0; ch_idx < CNN_BRANCH_1_OUT_CH; ch_idx++)
+      dnn_features[f_idx++] = branch_1[prev_lin_idx + ch_idx * prev_spa_stride];
+    const int curr_lin_idx = quad_to_linear_2[quad_tree_idx - 5];
+    const int spa_stride = 4 * 4;
+    for (int ch_idx = 0; ch_idx < CNN_BRANCH_2_OUT_CH; ch_idx++)
+      dnn_features[f_idx++] = branch_2[curr_lin_idx + ch_idx * spa_stride];
+    dnn_features[f_idx++] = log_q;
+  } else { /* BLOCK_8X8 (bsize_idx == 4) */
+    int f_idx = 0;
+    const int prev_quad_idx = (quad_tree_idx - 1) / 4;
+    const int prev_lin_idx = quad_to_linear_2[prev_quad_idx - 5];
+    const int prev_spa_stride = 4 * 4;
+    for (int ch_idx = 0; ch_idx < CNN_BRANCH_2_OUT_CH; ch_idx++)
+      dnn_features[f_idx++] = branch_2[prev_lin_idx + ch_idx * prev_spa_stride];
+    const int curr_lin_idx = quad_to_linear_3[quad_tree_idx - 21];
+    const int spa_stride = 8 * 8;
+    for (int ch_idx = 0; ch_idx < CNN_BRANCH_3_OUT_CH; ch_idx++)
+      dnn_features[f_idx++] = branch_3[curr_lin_idx + ch_idx * spa_stride];
+    dnn_features[f_idx++] = log_q;
+  }
+
+  av1_nn_predict_c(dnn_features, dnn_config, 1, logits);
+  for (int i = 0; i < 4; i++) out_logits[i] = logits[i];
+
+  /* ---- thresholds by res tier (verbatim) ---- */
+  const int mind = frame_w < frame_h ? frame_w : frame_h;
+  const int is_720p_or_larger = mind >= 720;
+  const int is_480p_or_larger = mind >= 480;
+  float split_only_thresh, no_split_thresh;
+  if (is_720p_or_larger) {
+    split_only_thresh = av1_intra_mode_cnn_partition_split_thresh_hdres[bsize_idx];
+    no_split_thresh = av1_intra_mode_cnn_partition_no_split_thresh_hdres[bsize_idx];
+  } else if (is_480p_or_larger) {
+    split_only_thresh = av1_intra_mode_cnn_partition_split_thresh_midres[bsize_idx];
+    no_split_thresh = av1_intra_mode_cnn_partition_no_split_thresh_midres[bsize_idx];
+  } else {
+    split_only_thresh = av1_intra_mode_cnn_partition_split_thresh_lowres[bsize_idx];
+    no_split_thresh = av1_intra_mode_cnn_partition_no_split_thresh_lowres[bsize_idx];
+  }
+
+  if (logits[0] > split_only_thresh) {
+    if (level != 1) out_flags[0] = 1; /* partition_none_allowed = 0 */
+    out_flags[1] = 1;                 /* do_square_split = 1 */
+    out_flags[2] = 1;                 /* av1_disable_rect_partitions */
+  }
+  if (logits[0] < no_split_thresh) {
+    out_flags[3] = 1; /* av1_disable_square_split_partition */
+  }
 }
