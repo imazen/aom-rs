@@ -128,18 +128,26 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
     remaining budget best−cum). **Per-strip VERT_4 at (32,32) (both mono, subsize=BLOCK_16X64=20):
     strip0 (c=32) mode=9 cum_rate=7557 cum_dist=3946048 — MATCHES C exactly; strip1 (c=36) SAME
     mode=1 (V_PRED) in both, but port Δrate=5614/Δdist=933472 vs C Δrate=9980/Δdist=1568992 — port
-    UNDER-COMPUTES both.** Same mode + same 16×64 block + strictly-lower rate AND dist ⇒ the port
-    finds a Pareto-better encoding of that leaf than C: a **transform-size / transform-type / skip
-    divergence in the port's 16×64 (1:4-aspect) intra leaf RD** (NOT partition pruning, NOT palette,
-    NOT screen-content, NOT #25's speed-1 bugs — this is speed-0). strip0 (also 16×64) matching rules
-    out a blanket 16×64 bug; it's content/context-specific to the (32,36) block.
-  - **NEXT (the fix):** dump the port's vs C's strip-1 (16×64 @ r=32,c=36, V_PRED) **tx-size,
-    tx-type, skip flag, and rate/dist breakdown** (port leaf: `rd_pick_rect_partition`→leaf search;
-    C: instrument `pick_sb_modes`/the tx path in the sibling, re-gated to that block). Most likely a
-    1:4-aspect (TX_16X64) tx-size or tx-type selection the port evaluates differently at qidx 249.
-    Temp instrumentation for all the above is in `git stash@{0}` ("kb2-temp-instrumentation-2026-07-15")
-    — PSB/PABDUMP/PAB/P4W/P4STRIP port dumps + the sibling's C4W/C4WEVAL/C4STRIP dumps (sibling
-    still built + gated to (32,32)). Restore with `git stash apply stash@{0}` to resume.
+    UNDER-COMPUTES both.**
+  - **EXACT ROOT CAUSE — angle_delta divergence on the strip-1 16×64 V_PRED leaf.** Both pick
+    identical `tx_size=TX_16X64 (17)`, `skip=0`, `tt0=DCT_DCT`; the ONLY difference is the intra
+    **angle_delta**: **C picks V_PRED `angle_delta=-1`, the port picks V_PRED `angle_delta=0`.** The
+    port's adj=0 (rate 5614 / dist 933472) is strictly cheaper on BOTH axes than C's adj=-1 (rate
+    9980 / dist 1568992) — so C's OWN adj=0 evaluation must be *worse* than the port's adj=0 (else C
+    would pick 0). Both search the full delta range (`use_angle_delta` matches C exactly:
+    `bsize>=BLOCK_8X8`, and 16×64=20 qualifies; port `enable_angle_delta=true` at speed 0). ⇒ the
+    port's **directional-intra prediction and/or angle-delta RD for this 16×64 (1:4-aspect) leaf is
+    wrong** — its adj=0 (or the delta search) is under-costed, so adj=0 wins in the port where adj=-1
+    wins in C. (NOT partition pruning, NOT palette, NOT screen-content, NOT tx-size/type/skip, NOT
+    #25's speed-1 bugs — this is speed-0.) strip0 (also 16×64, mode=9=D67_PRED-ish non-vertical)
+    matching rules out a blanket 16×64 bug — it's specific to V_PRED angle_delta on this leaf.
+  - **NEXT (the fix):** dump the port's PER-DELTA RD for the strip-1 block (mode=V_PRED,
+    delta=-3..+3) vs C's, at (r=32,c=36). Compare the directional predictor output + the
+    `angle_delta_cost` term for adj=0 vs adj=-1. Likely a directional-intra predictor edge/neighbor
+    or angle-cost bug for 1:4 rect blocks. Temp instrumentation is in `git stash` (kb2-temp-instr,
+    incl. the tx-extended P4STRIP) + the sibling `/root/libaom-enc-instrument` still built and gated
+    to (32,32) with C4STRIP dumping mode/adj/tx_size/skip. Re-apply the stash + add per-delta dumps
+    on both sides to resume.
 
 ### KB-3 — Encoder: `vgrad 256x256 cq32` cpu-used=1 cell — FIXED (missing speed-1 `use_square_partition_only_threshold` rect-kill)
 - **FIXED** (commit pending on origin): the cell now byte-matches; promoted to an asserted winner
