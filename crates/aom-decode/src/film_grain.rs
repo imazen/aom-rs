@@ -137,7 +137,8 @@ fn generate_luma_grain_block(
     for i in 0..block_y {
         for j in 0..block_x {
             let g = GAUSSIAN_SEQUENCE[rng.get_random_number(GAUSS_BITS) as usize];
-            block[(i * stride + j) as usize] = (g + ((1 << gauss_sec_shift) >> 1)) >> gauss_sec_shift;
+            block[(i * stride + j) as usize] =
+                (g + ((1 << gauss_sec_shift) >> 1)) >> gauss_sec_shift;
         }
     }
 
@@ -382,7 +383,8 @@ fn add_noise_to_block(
     for i in 0..(half_luma_height << (1 - ss_y)) {
         for j in 0..(half_luma_width << (1 - ss_x)) {
             let average_luma = if ss_x != 0 {
-                let base = luma_base + ((i << ss_y) as usize) * luma_stride + ((j << ss_x) as usize);
+                let base =
+                    luma_base + ((i << ss_y) as usize) * luma_stride + ((j << ss_x) as usize);
                 (luma[base] as i32 + luma[base + 1] as i32 + 1) >> 1
             } else {
                 luma[luma_base + ((i << ss_y) as usize) * luma_stride + j as usize] as i32
@@ -397,7 +399,8 @@ fn add_noise_to_block(
                     index_max,
                 );
                 let s = scale_lut(&scaling_lut.cb, sidx, bit_depth);
-                let grain = cb_grain[cb_grain_base + (i as usize) * chroma_grain_stride + j as usize];
+                let grain =
+                    cb_grain[cb_grain_base + (i as usize) * chroma_grain_stride + j as usize];
                 cb[cpix_idx] = clamp_i32(
                     cpix + ((s * grain + rounding_offset) >> p.scaling_shift),
                     min_chroma,
@@ -414,7 +417,8 @@ fn add_noise_to_block(
                     index_max,
                 );
                 let s = scale_lut(&scaling_lut.cr, sidx, bit_depth);
-                let grain = cr_grain[cr_grain_base + (i as usize) * chroma_grain_stride + j as usize];
+                let grain =
+                    cr_grain[cr_grain_base + (i as usize) * chroma_grain_stride + j as usize];
                 cr[cpix_idx] = clamp_i32(
                     cpix + ((s * grain + rounding_offset) >> p.scaling_shift),
                     min_chroma,
@@ -507,9 +511,16 @@ fn ver_boundary_overlap(
             let l = left_base + r * left_stride;
             let ri = right_base + r * right_stride;
             let d = dst_base + r * dst_stride;
-            dst[d] = clamp_i32((27 * left[l] + 17 * right[ri] + 16) >> 5, grain_min, grain_max);
-            dst[d + 1] =
-                clamp_i32((17 * left[l + 1] + 27 * right[ri + 1] + 16) >> 5, grain_min, grain_max);
+            dst[d] = clamp_i32(
+                (27 * left[l] + 17 * right[ri] + 16) >> 5,
+                grain_min,
+                grain_max,
+            );
+            dst[d + 1] = clamp_i32(
+                (17 * left[l + 1] + 27 * right[ri + 1] + 16) >> 5,
+                grain_min,
+                grain_max,
+            );
         }
     }
 }
@@ -543,7 +554,8 @@ fn hor_boundary_overlap(
                 grain_max,
             );
             dst[dst_base + dst_stride + c] = clamp_i32(
-                (17 * top[top_base + top_stride + c] + 27 * bottom[bottom_base + bottom_stride + c]
+                (17 * top[top_base + top_stride + c]
+                    + 27 * bottom[bottom_base + bottom_stride + c]
                     + 16)
                     >> 5,
                 grain_min,
@@ -686,10 +698,8 @@ fn add_film_grain_run(
             let luma_offset_y = left_pad + 2 * ar_padding + (offset_y << 1);
             let luma_offset_x = top_pad + 2 * ar_padding + (offset_x << 1);
 
-            let chroma_offset_y =
-                top_pad + (2 >> ss_y) * ar_padding + offset_y * (2 >> ss_y);
-            let chroma_offset_x =
-                left_pad + (2 >> ss_x) * ar_padding + offset_x * (2 >> ss_x);
+            let chroma_offset_y = top_pad + (2 >> ss_y) * ar_padding + offset_y * (2 >> ss_y);
+            let chroma_offset_x = left_pad + (2 >> ss_x) * ar_padding + offset_x * (2 >> ss_x);
 
             if overlap && x != 0 {
                 ver_boundary_overlap(
@@ -709,8 +719,8 @@ fn add_film_grain_run(
                 );
 
                 let cver_w = 2 >> ss_x;
-                let cver_h = (chroma_subblock_size_y + (2 >> ss_y))
-                    .min((height - (y << 1)) >> ss_y);
+                let cver_h =
+                    (chroma_subblock_size_y + (2 >> ss_y)).min((height - (y << 1)) >> ss_y);
                 ver_boundary_overlap(
                     &cb_col_buf.clone(),
                     0,
@@ -926,7 +936,8 @@ fn add_film_grain_run(
                 luma_stride,
                 chroma_stride,
                 &luma_grain_block,
-                ((luma_offset_y + (i << 1)) * luma_grain_stride + luma_offset_x + (j << 1)) as usize,
+                ((luma_offset_y + (i << 1)) * luma_grain_stride + luma_offset_x + (j << 1))
+                    as usize,
                 &cb_grain_block,
                 ((chroma_offset_y + (i << (1 - ss_y))) * chroma_grain_stride
                     + chroma_offset_x

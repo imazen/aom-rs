@@ -90,7 +90,21 @@ fn run_superres(
 
     // REAL encoder bytes with fixed-denominator superres (cpu-used=0).
     let bytes = c::ref_encode_av1_kf_superres(
-        &y, &u, &v, w, h, bd, mono, ss.0, ss.1, cq, 0, cdef, restoration, usage, denom,
+        &y,
+        &u,
+        &v,
+        w,
+        h,
+        bd,
+        mono,
+        ss.0,
+        ss.1,
+        cq,
+        0,
+        cdef,
+        restoration,
+        usage,
+        denom,
     );
     assert!(bytes.len() > 50, "suspiciously small superres stream");
 
@@ -204,7 +218,9 @@ fn superres_luma_mono_byte_identical_to_c() {
         min_ratio < 0.55,
         "steepest downscale too mild (min coded/upscaled = {min_ratio:.3})"
     );
-    eprintln!("superres luma/mono: {n} streams byte-identical, min coded/upscaled ratio {min_ratio:.3}");
+    eprintln!(
+        "superres luma/mono: {n} streams byte-identical, min coded/upscaled ratio {min_ratio:.3}"
+    );
 }
 
 /// CHROMA chunk: colour superres streams (4:2:0 + 4:4:4, 8/10/12-bit) decode

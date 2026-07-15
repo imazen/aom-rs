@@ -149,7 +149,11 @@ fn run_cell(cell: &Cell) {
     assert!(
         header.prefix.disable_cdf_update && cfg.disable_cdf_update,
         "{} {}x{} bd{} cq{}: parsed header/config must carry disable_cdf_update=1",
-        cell.fmt, cell.w, cell.h, cell.bd, cell.cq
+        cell.fmt,
+        cell.w,
+        cell.h,
+        cell.bd,
+        cell.cq
     );
     assert!(rust.base_qindex > 0, "not coded-lossless (base_qindex > 0)");
     assert_eq!((rust.width, rust.height), (cell.w, cell.h));
@@ -160,7 +164,11 @@ fn run_cell(cell: &Cell) {
     assert!(
         has_ac_content(&rust.y, cell.w, cell.h),
         "{} {}x{} bd{} cq{}: decoded luma has no AC content (degenerate stream)",
-        cell.fmt, cell.w, cell.h, cell.bd, cell.cq
+        cell.fmt,
+        cell.w,
+        cell.h,
+        cell.bd,
+        cell.cq
     );
 
     // MAIN GATE: byte-identical to the REAL C decoder on every plane.
@@ -253,7 +261,10 @@ fn disable_cdf_update_streams_decode_byte_identical_to_c() {
     // Coverage floors: every bit depth and every format actually ran, and the
     // stream count is well above the 8-stream minimum.
     assert!(bd_seen.iter().all(|&b| b), "all bit depths 8/10/12 covered");
-    assert!(fmt_seen.iter().all(|&f| f), "all formats 420/444/mono covered");
+    assert!(
+        fmt_seen.iter().all(|&f| f),
+        "all formats 420/444/mono covered"
+    );
     assert_eq!(n, 3 * 3 * 3 * 2, "cell count");
     assert!(n >= 8, "at least 8 real streams");
 }
@@ -295,7 +306,10 @@ fn disable_cdf_update_gate_is_load_bearing() {
     let out_on: Vec<i32> = (0..seq.len())
         .map(|_| read_symbol(&mut d_on, &mut cdf_on, N))
         .collect();
-    assert_eq!(out_on, seq, "flag-on decode must reproduce the adapting stream");
+    assert_eq!(
+        out_on, seq,
+        "flag-on decode must reproduce the adapting stream"
+    );
     assert_eq!(
         cdf_on, cdf_e,
         "flag-on decoder CDF must track the encoder's adapted CDF"

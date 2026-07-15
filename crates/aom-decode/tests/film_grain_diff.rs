@@ -179,14 +179,37 @@ fn chroma_sweep(seed: u64, cfl: bool) {
                     let p = rand_params_chroma(&mut rng, cfl);
                     let mc_identity = rng.boolean();
                     let (y, u, v) = rand_recon(&mut rng, bd, mono, ss_x, ss_y, d_w, d_h);
-                    assert!(has_ac(&u) && has_ac(&v), "recon chroma must have AC content");
+                    assert!(
+                        has_ac(&u) && has_ac(&v),
+                        "recon chroma must have AC content"
+                    );
                     let blob = pack_blob(&p, bd);
 
                     let (cy, cu, cv) = ref_add_film_grain(
-                        &blob, bd, mono, ss_x, ss_y, mc_identity, d_w, d_h, &y, &u, &v,
+                        &blob,
+                        bd,
+                        mono,
+                        ss_x,
+                        ss_y,
+                        mc_identity,
+                        d_w,
+                        d_h,
+                        &y,
+                        &u,
+                        &v,
                     );
                     let (ry, ru, rv) = aom_decode::film_grain::add_film_grain(
-                        &p, bd, mono, ss_x, ss_y, mc_identity, d_w, d_h, &y, &u, &v,
+                        &p,
+                        bd,
+                        mono,
+                        ss_x,
+                        ss_y,
+                        mc_identity,
+                        d_w,
+                        d_h,
+                        &y,
+                        &u,
+                        &v,
                     );
 
                     assert_eq!(
@@ -221,7 +244,10 @@ fn chroma_sweep(seed: u64, cfl: bool) {
         chroma_changed * 10 >= total * 7,
         "chroma grain changed pixels in only {chroma_changed}/{total} trials (cfl={cfl})"
     );
-    assert!(total >= 400, "expected a broad chroma sweep, got {total} trials");
+    assert!(
+        total >= 400,
+        "expected a broad chroma sweep, got {total} trials"
+    );
     eprintln!(
         "film_grain chroma cfl={cfl}: {total} trials byte-identical, {chroma_changed} chroma-altered"
     );
@@ -276,10 +302,10 @@ fn has_ac(plane: &[u16]) -> bool {
 
 /// (mono, ss_x, ss_y) format tuples the decoder envelope covers.
 const FORMATS: &[(bool, i32, i32)] = &[
-    (true, 1, 1),   // monochrome
-    (false, 1, 1),  // 4:2:0
-    (false, 0, 0),  // 4:4:4
-    (false, 1, 0),  // 4:2:2
+    (true, 1, 1),  // monochrome
+    (false, 1, 1), // 4:2:0
+    (false, 0, 0), // 4:4:4
+    (false, 1, 0), // 4:2:2
 ];
 
 // A couple of sizes, including odd dims to exercise `extend_even` + edge clamps.
@@ -302,10 +328,30 @@ fn film_grain_y_only_matches_c() {
                     let blob = pack_blob(&p, bd);
 
                     let (cy, cu, cv) = ref_add_film_grain(
-                        &blob, bd, mono, ss_x, ss_y, mc_identity, d_w, d_h, &y, &u, &v,
+                        &blob,
+                        bd,
+                        mono,
+                        ss_x,
+                        ss_y,
+                        mc_identity,
+                        d_w,
+                        d_h,
+                        &y,
+                        &u,
+                        &v,
                     );
                     let (ry, ru, rv) = aom_decode::film_grain::add_film_grain(
-                        &p, bd, mono, ss_x, ss_y, mc_identity, d_w, d_h, &y, &u, &v,
+                        &p,
+                        bd,
+                        mono,
+                        ss_x,
+                        ss_y,
+                        mc_identity,
+                        d_w,
+                        d_h,
+                        &y,
+                        &u,
+                        &v,
                     );
 
                     assert_eq!(
@@ -417,10 +463,8 @@ fn ungrained_planes(
     let mut u = vec![0u16; cw * ch];
     let mut v = vec![0u16; cw * ch];
     for r in 0..ch {
-        u[r * cw..(r + 1) * cw]
-            .copy_from_slice(&t.recon_u[r * t.stride_uv..r * t.stride_uv + cw]);
-        v[r * cw..(r + 1) * cw]
-            .copy_from_slice(&t.recon_v[r * t.stride_uv..r * t.stride_uv + cw]);
+        u[r * cw..(r + 1) * cw].copy_from_slice(&t.recon_u[r * t.stride_uv..r * t.stride_uv + cw]);
+        v[r * cw..(r + 1) * cw].copy_from_slice(&t.recon_v[r * t.stride_uv..r * t.stride_uv + cw]);
     }
     (y, u, v)
 }

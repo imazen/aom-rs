@@ -1058,7 +1058,10 @@ fn deblocked_422_chroma_nonzero_levels_byte_identical() {
     };
     // run_config asserts full-frame Y/U/V byte-identity vs the C decoder.
     let f = run_config(&cfg);
-    println!("422 nonzero-chroma arm: filter_level = {:?}", f.filter_level);
+    println!(
+        "422 nonzero-chroma arm: filter_level = {:?}",
+        f.filter_level
+    );
     assert!(
         f.filter_level[2] != 0 && f.filter_level[3] != 0,
         "expected NONZERO U and V chroma deblock levels on this arm, got {:?}",
@@ -1100,23 +1103,23 @@ fn deblocked_422_chroma_byte_identical_to_c() {
         (10, 96, 80, 56),
         (10, 128, 128, 44),
         (10, 128, 128, 60),
-        (10, 130, 96, 44),  // non-8-multiple width (chroma 65, odd)
+        (10, 130, 96, 44), // non-8-multiple width (chroma 65, odd)
         (10, 130, 96, 56),
-        (10, 100, 76, 44),  // non-8-multiple width (chroma 50)
+        (10, 100, 76, 44), // non-8-multiple width (chroma 50)
         (10, 100, 76, 60),
         (10, 256, 192, 52),
-        (10, 66, 64, 48),   // small + non-8-multiple width (chroma 33, odd)
+        (10, 66, 64, 48), // small + non-8-multiple width (chroma 33, odd)
         // 8-bit — needs the high-cq arms for nonzero chroma levels.
         (8, 96, 80, 60),
         (8, 128, 128, 60),
-        (8, 100, 76, 60),   // non-8-multiple width
+        (8, 100, 76, 60), // non-8-multiple width
         (8, 256, 192, 60),
         // 12-bit — closes the 12-bit 4:2:2 chroma-deblock gap (seq profile 2).
         (12, 96, 80, 44),
         (12, 96, 80, 60),
         (12, 128, 128, 52),
-        (12, 130, 96, 56),  // non-8-multiple width (chroma 65, odd)
-        (12, 100, 76, 60),  // non-8-multiple width (chroma 50)
+        (12, 130, 96, 56), // non-8-multiple width (chroma 65, odd)
+        (12, 100, 76, 60), // non-8-multiple width (chroma 50)
         (12, 256, 192, 52),
     ];
 
@@ -1194,8 +1197,9 @@ fn deblocked_422_chroma_byte_identical_to_c() {
         }
         println!(
             "422gate {w}x{h} bd{bd} cq{cq}: lvl={:?} u_act={u_active} v_act={v_active} \
-             chroma_pixels_changed={this_changed} distinct_u={distinct_u}"
-        , f.filter_level);
+             chroma_pixels_changed={this_changed} distinct_u={distinct_u}",
+            f.filter_level
+        );
     }
 
     println!(
