@@ -354,6 +354,70 @@ pub(crate) const TXS_H: [usize; 19] = [
     4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
 ];
 
+/// `sqrt_tx_pixels_2d[TX_SIZES_ALL]` (tx_search.c:78) — ~sqrt(pel count) per tx.
+const SQRT_TX_PIXELS_2D: [i64; 19] = [
+    4, 8, 16, 32, 32, 6, 6, 12, 12, 23, 23, 32, 32, 8, 8, 16, 16, 23, 23,
+];
+
+/// `av1_get_tx_scale` (idct.c:24): `(pels > 256) + (pels > 1024)` where
+/// `pels = tx_size_2d[tx_size]` (0 for ≤256-pel, 1 for 512/1024, 2 for >1024).
+#[inline]
+fn av1_get_tx_scale(tx_size: usize) -> i32 {
+    let pels = TX_SIZE_2D_TBL[tx_size];
+    i32::from(pels > 256) + i32::from(pels > 1024)
+}
+
+/// `av1_get_max_eob` (blockd.h:1601): the coefficient count `aom_satd` sums.
+/// 64-point transforms preserve only the top-left area (capped at 1024 / 512).
+#[inline]
+fn av1_get_max_eob(tx_size: usize) -> usize {
+    match tx_size {
+        4 | 11 | 12 => 1024, // TX_64X64 / TX_32X64 / TX_64X32
+        17 | 18 => 512,      // TX_16X64 / TX_64X16
+        _ => TX_SIZE_2D_TBL[tx_size] as usize,
+    }
+}
+
+/// `skip_trellis_opt_based_on_satd` (tx_search.c:1980), specialized to the
+/// all-intra path where `dc_only_blk` is ALWAYS 0: allintra `dc_blk_pred_level`
+/// stays 0 until speed≥6 (speed_features.c — the `=1` at :563 is the speed≥6
+/// block), so `predict_dc_level = predict_dc_levels[0] = {0,0,0}` at every
+/// MODE_EVAL_TYPE ⇒ `predict_dc_block = false` ⇒ `dc_only_blk = 0`. Hence the
+/// SATD is always taken over all `av1_get_max_eob` coefficients (never the
+/// `abs(coeff[0])` DC-only branch), and `av1_xform` (not `av1_xform_dc_only`)
+/// runs. Forward-transforms `residual` for `tx_type`, sums |coeff|
+/// (== `aom_satd_c`), scales by `RIGHT_SIGNED_SHIFT(satd, MAX_TX_SCALE −
+/// av1_get_tx_scale)` then `>> (bd−8)`, and returns whether that EXCEEDS
+/// `satd_threshold * qstep * sqrt_tx_pixels_2d[tx_size]` (⇒ SKIP trellis for
+/// this block). The `skip_trellis || threshold == UINT_MAX` early return
+/// (tx_search.c:1986) is applied by the caller before this runs.
+fn skip_trellis_opt_based_on_satd(
+    residual: &[i16],
+    tx_size: usize,
+    tx_type: usize,
+    bd: u8,
+    qstep: u32,
+    satd_threshold: u32,
+) -> bool {
+    // av1_xform: forward transform into a full TX_W*TX_H buffer (64-point sizes
+    // repack their valid area into the first av1_get_max_eob entries in-place;
+    // TXS_W/TXS_H == the crate's TX_W/TX_H the quant path uses).
+    let full = TXS_W[tx_size] * TXS_H[tx_size];
+    let mut coeff = vec![0i32; full];
+    aom_transform::txfm2d::av1_fwd_txfm2d(residual, &mut coeff, TXS_W[tx_size], tx_type, tx_size);
+    let n_coeffs = av1_get_max_eob(tx_size);
+    // aom_satd: Σ|coeff| over the first n_coeffs (aom_dist::hadamard::satd is
+    // proven byte-identical to aom_satd_c — aom-dist/tests/hadamard_diff.rs).
+    let mut satd = i64::from(aom_dist::hadamard::satd(&coeff[..n_coeffs]));
+    // RIGHT_SIGNED_SHIFT(satd, MAX_TX_SCALE − tx_scale): MAX_TX_SCALE = 1, so the
+    // shift is 1/0/−1 (a negative shift is a LEFT shift). Widened to i64 so the
+    // 64-point left-shift can't overflow C's `int` domain on this path.
+    let shift = 1i32 - av1_get_tx_scale(tx_size);
+    satd = if shift < 0 { satd << (-shift) } else { satd >> shift };
+    satd >>= i64::from(bd) - 8; // bd == 8 ⇒ no-op
+    (satd as u64) > u64::from(satd_threshold) * u64::from(qstep) * (SQRT_TX_PIXELS_2D[tx_size] as u64)
+}
+
 /// `ROUND_POWER_OF_TWO` for i64.
 #[inline]
 fn round_power_of_two_i64(value: i64, n: i32) -> i64 {
@@ -656,12 +720,23 @@ pub fn search_tx_type_intra(
         }
         evaluated_mask |= 1 << tx_type;
 
-        // SATD-based trellis skip: short-circuited at speed 0
-        // (skip_trellis || threshold == UINT_MAX). The SATD body is unported.
+        // SATD-based trellis skip (tx_search.c:2217, skip_trellis_opt_based_on
+        // _satd): short-circuited when skip_trellis || threshold == UINT_MAX
+        // (:1986 — the speed 0..=3 DEFAULT_EVAL path, coeff_opt_satd_threshold is
+        // always UINT_MAX there, so this is a no-op below speed 4). At speed>=4
+        // perform_coeff_opt=5 gives a finite satd threshold; the body forward-
+        // transforms + Σ|coeff| and may skip trellis for large residuals.
         let skip_trellis_this = if skip_trellis || pol.coeff_opt_satd_threshold == u32::MAX {
             skip_trellis
         } else {
-            unimplemented!("SATD trellis-skip body (coeff_opt_satd_threshold < UINT_MAX)")
+            skip_trellis_opt_based_on_satd(
+                inp.residual,
+                tx_size,
+                tx_type,
+                inp.bd,
+                qstep,
+                pol.coeff_opt_satd_threshold,
+            )
         };
 
         // Forward transform + quantize (+ trellis + rate).
@@ -1609,4 +1684,106 @@ pub fn intra_model_rd_y(env: &TxfmYrdEnv, recon: &mut [u16], tx_size: usize) -> 
         blk_row += txh_unit;
     }
     satd_cost
+}
+
+#[cfg(test)]
+mod satd_skip_tests {
+    use super::*;
+    use aom_sys_ref as c;
+
+    /// `av1_get_tx_scale` (idct.c:24) + `av1_get_max_eob` (blockd.h:1601) match
+    /// the C definitions for every one of the 19 `TX_SIZES_ALL`.
+    #[test]
+    fn tx_scale_and_max_eob_match_c_defs() {
+        for ts in 0..19usize {
+            let pels = TX_SIZE_2D_TBL[ts];
+            assert_eq!(
+                av1_get_tx_scale(ts),
+                i32::from(pels > 256) + i32::from(pels > 1024),
+                "av1_get_tx_scale ts={ts}"
+            );
+            let want_eob = match ts {
+                4 | 11 | 12 => 1024,
+                17 | 18 => 512,
+                _ => TX_SIZE_2D_TBL[ts] as usize,
+            };
+            assert_eq!(av1_get_max_eob(ts), want_eob, "av1_get_max_eob ts={ts}");
+        }
+        // sqrt_tx_pixels_2d spot-checks (tx_search.c:78).
+        assert_eq!(SQRT_TX_PIXELS_2D[0], 4); // TX_4X4
+        assert_eq!(SQRT_TX_PIXELS_2D[4], 32); // TX_64X64
+        assert_eq!(SQRT_TX_PIXELS_2D[9], 23); // TX_16X32 (sqrt(512)≈23)
+    }
+
+    /// The full `skip_trellis_opt_based_on_satd` decision matches a REAL-C
+    /// reference across tx sizes, residual magnitudes, and thresholds straddling
+    /// the boundary. The satd anchor is `c::ref_satd` (= the exported
+    /// `aom_satd_c`); the test also asserts the port's `aom_dist::hadamard::satd`
+    /// equals it on the same coeffs, so the decision is validated end-to-end
+    /// against real C (satd leaf) + the transcribed tx_search.c:1993-2000 scale
+    /// / compare arithmetic.
+    #[test]
+    fn satd_skip_decision_matches_c() {
+        let bd = 8u8;
+        // Deterministic xorshift residual generator.
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        // Representative tx sizes across all three scales + rect + 64-point.
+        for &ts in &[0usize, 1, 2, 3, 4, 7, 9, 11, 12, 17, 18] {
+            let full = TXS_W[ts] * TXS_H[ts];
+            for mag in [1i16, 7, 40, 300] {
+                let mut residual = vec![0i16; full];
+                for r in residual.iter_mut() {
+                    *r = (next() % (2 * mag as u32 + 1)) as i16 - mag;
+                }
+                // Real-C reference satd over the forward transform (DCT_DCT).
+                let mut coeff = vec![0i32; full];
+                aom_transform::txfm2d::av1_fwd_txfm2d(&residual, &mut coeff, TXS_W[ts], 0, ts);
+                let n = av1_get_max_eob(ts);
+                assert_eq!(
+                    aom_dist::hadamard::satd(&coeff[..n]),
+                    c::ref_satd(&coeff[..n]),
+                    "port satd != aom_satd_c (ts={ts} mag={mag})"
+                );
+                let satd_c = i64::from(c::ref_satd(&coeff[..n]));
+                let shift = 1i32 - av1_get_tx_scale(ts);
+                let scaled = if shift < 0 { satd_c << (-shift) } else { satd_c >> shift };
+                let scaled = (scaled >> (i64::from(bd) - 8)) as u64;
+                let sqrt_px = SQRT_TX_PIXELS_2D[ts] as u64;
+                for qstep in [4u32, 20, 100] {
+                    let denom = (qstep as u64 * sqrt_px).max(1);
+                    let base = scaled / denom;
+                    for dt in [-1i64, 0, 1, 2] {
+                        let thr = (base as i64 + dt).max(0) as u32;
+                        let want = scaled > u64::from(thr) * u64::from(qstep) * sqrt_px;
+                        let got =
+                            skip_trellis_opt_based_on_satd(&residual, ts, 0, bd, qstep, thr);
+                        assert_eq!(got, want, "ts={ts} mag={mag} qstep={qstep} thr={thr}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Below speed 4 the satd threshold is `UINT_MAX`, so the caller's early
+    /// return path holds `skip_trellis` unchanged — the body never runs. Assert
+    /// the boundary contract the call site relies on (tx_search.c:1986): with a
+    /// finite threshold the body CAN return true (skip) for a large residual,
+    /// and a tiny residual under a large threshold never skips.
+    #[test]
+    fn satd_skip_boundary_contract() {
+        let full = TXS_W[2] * TXS_H[2]; // TX_16X16
+        // Large residual, threshold 0 => satd>0 => skip.
+        let big = vec![200i16; full];
+        assert!(skip_trellis_opt_based_on_satd(&big, 2, 0, 8, 20, 0));
+        // Small residual, huge threshold => never skip.
+        let mut small = vec![0i16; full];
+        small[0] = 1;
+        assert!(!skip_trellis_opt_based_on_satd(&small, 2, 0, 8, 20, u32::MAX - 1));
+    }
 }
