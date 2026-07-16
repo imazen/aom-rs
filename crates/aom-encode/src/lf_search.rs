@@ -7,7 +7,11 @@
 //! only overrides `lpf_pick` at `speed >= 4` (`NON_DUAL`) / `speed >= 6`
 //! (`FROM_Q`), never at speed 0; `set_good_speed_features_framesize_independent`
 //! likewise only touches it at `speed >= 5`/`speed >= 7` — verified by
-//! grepping every `lpf_pick =` assignment site in speed_features.c).
+//! grepping every `lpf_pick =` assignment site in speed_features.c). The
+//! `LPF_PICK_FROM_FULL_IMAGE_NON_DUAL` variant (allintra speed 4/5) is handled
+//! via the `non_dual` flag on [`pick_filter_level`] (it skips the two Y
+//! single-direction refine passes — picklpf.c:376); `FROM_Q` (speed>=6) is out
+//! of the current cpu-used 0..=5 gate scope.
 //!
 //! # Envelope simplifications (each individually verified against the C, not
 //! assumed)
@@ -371,17 +375,24 @@ pub fn pick_filter_level(
     f: &LfSearchFrame,
     allintra: bool,
     sharpness_cfg: i32,
+    non_dual: bool,
 ) -> LoopFilterLevels {
     let sharpness = if allintra { sharpness_cfg } else { 0 };
 
-    // Y: combined search first (both directions equal), then refine vertical
-    // alone (horizontal held at the combined winner), then horizontal alone
-    // (vertical held at the just-refined value) -- exactly
-    // av1_pick_filter_level's dir=2 -> dir=0 -> dir=1 sequence.
+    // Y: combined search first (both directions equal), then -- for the DUAL
+    // methods (`LPF_PICK_FROM_FULL_IMAGE`, the speed 0..=3 allintra default) --
+    // refine vertical alone (horizontal held at the combined winner) then
+    // horizontal alone (vertical held at the just-refined value): exactly
+    // av1_pick_filter_level's dir=2 -> dir=0 -> dir=1 sequence (picklpf.c:373-383).
+    // `LPF_PICK_FROM_FULL_IMAGE_NON_DUAL` (allintra speed>=4, speed_features.c:496)
+    // SKIPS the two refine passes (`method != ..._NON_DUAL` guard, picklpf.c:376)
+    // and leaves both luma levels equal to the combined dir=2 winner.
     let combined = search_filter_level(f, 0, 2, 0, 0, sharpness);
     let mut filter_level = [combined, combined];
-    filter_level[0] = search_filter_level(f, 0, 0, 0, filter_level[1], sharpness);
-    filter_level[1] = search_filter_level(f, 0, 1, filter_level[0], 0, sharpness);
+    if !non_dual {
+        filter_level[0] = search_filter_level(f, 0, 0, 0, filter_level[1], sharpness);
+        filter_level[1] = search_filter_level(f, 0, 1, filter_level[0], 0, sharpness);
+    }
 
     let (filter_level_u, filter_level_v) = if f.monochrome {
         (0, 0)

@@ -27,13 +27,18 @@
 //! loop-restoration search disabled (the current e2e harness envelope). The
 //! speed cascade is transcribed faithfully for **speeds 0..=3** (the intra-still
 //! deltas at each level; inert inter/motion/CDEF/loop-restoration fields are
-//! documented per-block below, not carried as struct fields). Speed >= 4
-//! introduces the winner-mode two-pass subsystem (`enable_winner_mode_for_*`,
-//! speed_features.c:502-506) plus `prune_filter_intra_level = 2`,
-//! `prune_chroma_modes_using_luma_winner`, tx-type PRUNE_3, etc. that are **not
-//! yet modeled** — do not treat a `set_allintra(n>=4)` result as complete. The
-//! `lpf_sf` fields are carried for provenance but do not yet affect bytes (the
-//! harness encodes the reference with CDEF + restoration off).
+//! documented per-block below, not carried as struct fields). **Speed 4 is a
+//! PARTIAL port**: the `prune_chroma_modes_using_luma_winner` chroma prune
+//! (:480) and the `LPF_PICK_FROM_FULL_IMAGE_NON_DUAL` loop-filter search (:496,
+//! wired via `lf_search::pick_filter_level`'s `non_dual` flag, not an sf field)
+//! ARE modeled, but the winner-mode two-pass subsystem
+//! (`enable_winner_mode_for_*`, speed_features.c:502-505), `perform_coeff_opt=5`
+//! (needs the unported SATD trellis-skip), the tx-type PRUNE_3 / est-RD deltas,
+//! and `prune_ext_part_using_split_info=2` are **not yet modeled** (tracked as
+//! KB-8) — do not treat a `set_allintra(4)` result as complete. Speed >= 5
+//! (`prune_filter_intra_level = 2` at :529, `chroma_intra_pruning_with_hog = 3`
+//! at :515, etc.) is entirely unmodeled. The `lpf_sf` CDEF/restoration fields
+//! are carried for provenance but do not affect bytes (CDEF + restoration off).
 //!
 //! Source line citations are against libaom v3.14.1 (git 03087864).
 
@@ -129,6 +134,15 @@ pub struct SpeedFeatures {
     /// (indexed by `level-1`), so level 2 -> -1.2. Prunes UV_V_PRED..UV_D67_PRED
     /// from the chroma-mode search when the U-plane HOG score <= threshold.
     pub chroma_intra_pruning_with_hog: i32,
+    /// `intra_sf.prune_chroma_modes_using_luma_winner` — default 0
+    /// (init_intra_sf); allintra speed>=4 -> 1 (speed_features.c:480). Prunes any
+    /// chroma `uv_mode` not flagged in
+    /// `av1_derived_chroma_intra_mode_used_flag[luma_winner_mode]`
+    /// (intra_mode_search.c:939-941). Consumed in the uv mode loop
+    /// (intra_uv_rd.rs:1497). Wired per-block from `cfg.speed` in
+    /// `partition_pick.rs` (mirroring the inline `chroma_intra_pruning_with_hog`
+    /// level derivation there); this field documents + unit-asserts the value.
+    pub prune_chroma_modes_using_luma_winner: bool,
     /// `intra_sf.disable_smooth_intra` — default 0 (init_intra_sf:2438); allintra
     /// speed>=2 -> 1 (speed_features.c:429). Prunes SMOOTH_H_PRED / SMOOTH_V_PRED
     /// from the luma intra-mode search (intra_mode_search.c:1564-1567); SMOOTH_PRED
@@ -233,6 +247,7 @@ impl SpeedFeatures {
             // intra_sf
             intra_pruning_with_hog: 1, // allintra base (speed_features.c:360)
             chroma_intra_pruning_with_hog: 0, // init_intra_sf default (off)
+            prune_chroma_modes_using_luma_winner: false, // init_intra_sf default (off)
             disable_smooth_intra: false, // init_intra_sf:2438
             prune_filter_intra_level: 0, // init_intra_sf:2440
             prune_palette_search_level: 0, // init_intra_sf:2431
@@ -360,6 +375,73 @@ impl SpeedFeatures {
             // intra_sf (:456) — palette-search prune (inert: palette off on
             // non-screen cells); carried for source faithfulness.
             sf.prune_palette_search_level = 2;
+        }
+
+        // ---- if (speed >= 4) { ... } (speed_features.c:471-506 independent,
+        //      :292-302 dependent). PARTIAL PORT — the intra-still-relevant deltas
+        //      split into (A) wired now, (B) LIVE-but-unported (KB-8), (C) inert.
+        //
+        //   (A) WIRED on the bd8 4:2:0 allintra KEY path:
+        //     - `prune_chroma_modes_using_luma_winner = 1` (:480): chroma-mode
+        //       prune keyed on the luma winner (below; consumer intra_uv_rd.rs:1497,
+        //       wired per-block via cfg.speed in partition_pick.rs).
+        //     - `lpf_pick = LPF_PICK_FROM_FULL_IMAGE_NON_DUAL` (:496): the Y
+        //       loop-filter-level search drops the two single-direction refine
+        //       passes (picklpf.c:376). NOT an sf struct field here — wired via the
+        //       `non_dual` flag on `lf_search::pick_filter_level` (the harness
+        //       passes `speed >= 4`). Byte-affecting on nonzero-LF cells.
+        //
+        //   (B) LIVE but NOT YET PORTED (tracked as KB-8; the residual speed-4
+        //       divergences on this grid are exactly these):
+        //     - The WINNER-MODE two-pass subsystem for the LUMA intra search
+        //       (`multi_winner_mode_type = MULTI_WINNER_MODE_DEFAULT` :504,
+        //       `enable_winner_mode_for_coeff_opt` :502, `_for_use_tx_domain_dist`
+        //       :503, `_for_tx_size_srch` :505): av1_rd_pick_intra_sby_mode runs the
+        //       mode loop with MODE_EVAL params (intra_mode_search.c:1515) then
+        //       re-evaluates the top-`winner_mode_count_allowed[..]=3` winners with
+        //       WINNER_MODE_EVAL params (:1689-1737). The port's luma search is
+        //       single-pass (intra_rd.rs:888). Governs the mono cells that diverge.
+        //     - `perform_coeff_opt = 5` (:493): its DEFAULT_EVAL column is
+        //       `[864, 97]` — the satd threshold 97 (< UINT_MAX) requires the SATD
+        //       trellis-skip body, which is unimplemented (tx_search.rs:664). Feeds
+        //       both the winner-mode luma passes AND the DEFAULT_EVAL chroma search.
+        //     - `tx_domain_dist_thres_level = 3` (:494) — chroma/winner tx-domain
+        //       dist threshold; part of the same eval-param set.
+        //     - tx-type: `fast_intra_tx_type_search = 2` (:489, MODE_EVAL uses the
+        //       default tx type only), `prune_2d_txfm_mode = TX_TYPE_PRUNE_3` (:490),
+        //       `prune_tx_type_est_rd = 1` (:491), `winner_mode_tx_type_pruning = 2`
+        //       (:488) — the tx-type search changes, coupled to the two-pass.
+        //     - `top_intra_model_count_allowed = 2` (:150 note; was 3) — luma
+        //       model-prune count; only meaningful inside the (unported) two-pass
+        //       luma search, so deferred with it.
+        //     - `prune_ext_part_using_split_info = 2` (:476): turns on the AB
+        //       `evaluate_ab_partition_based_on_split` prune (partition_strategy.c:
+        //       2009-2028) that the port omits as dead at <=speed3 (partition_pick
+        //       .rs:1203).
+        //
+        //   (C) INERT on this path (byte no-op, verified):
+        //     - `early_term_after_none_split = 1` (:477): only fires when NONE and
+        //       SPLIT rd are BOTH INT64_MAX and `bsize != sb_size`
+        //       (partition_search.c:5851) — NONE always yields a valid rd on
+        //       textured content, so it never triggers here.
+        //     - `ml_predict_breakout_level = 3` (:478): at bd8 the field is already
+        //       3 from speed 0/1 (`use_hbd ? .. : 3`, :357/396), so speed 4 is a
+        //       no-op at this bit depth.
+        //     - Motion/MV (`subpel_search_method`, `simple_motion_search_prune_agg
+        //       = LVL4`, `simple_motion_search_reduce_search_steps`,
+        //       `simple_motion_subpel_force_stop`, `reduce_search_range`,
+        //       `hash_max_8x8_intrabc_blocks`) — inter/motion/intrabc, none run on
+        //       the all-intra KEY path.
+        //     - TPL (`prune_starting_mv`, `subpel_force_stop`, `search_method`) — no
+        //       TPL stage for a single all-intra KEY frame.
+        //     - `cdef_pick_method = CDEF_FAST_SEARCH_LVL3` (:497) — CDEF off in the
+        //       allintra envelope.
+        //     - framesize-DEPENDENT (:292-302): `partition_search_breakout_dist_thr`
+        //       (INTER), `prune_tx_type_using_stats = 2` (needs is_480p_or_larger —
+        //       false on the {64,128}^2 grid).
+        if speed >= 4 {
+            // intra_sf (:480) — LIVE, consumer wired (see (A) above).
+            sf.prune_chroma_modes_using_luma_winner = true;
         }
 
         sf
@@ -496,6 +578,35 @@ mod tests {
         // (winner-mode DEFAULT_EVAL column holds through speed 3).
         let pol = sf.tx_type_search_policy(false, 0);
         assert_eq!(pol.coeff_opt_dist_threshold, 864); // coeff_opt_thresholds[3][0][0]
+        assert_eq!(pol.coeff_opt_satd_threshold, u32::MAX);
+    }
+
+    /// The speed-4 all-intra deltas THIS PARTIAL PORT models (see the module doc
+    /// + the `if speed >= 4` block for the full LIVE/inert/unported breakdown).
+    /// Only `prune_chroma_modes_using_luma_winner` is carried as an sf struct
+    /// field (the NON_DUAL loop-filter delta lives in `lf_search`, and the
+    /// winner-mode two-pass / coeff-opt-5 / tx-type deltas are unported KB-8).
+    #[test]
+    fn speed4_allintra_deltas_match_source() {
+        let sf = SpeedFeatures::set_allintra(4, false, false);
+        // NEW-and-WIRED at speed 4 (:480).
+        assert!(sf.prune_chroma_modes_using_luma_winner);
+        // Carried from speed 3 (unchanged at speed 4 on this path).
+        assert_eq!(sf.chroma_intra_pruning_with_hog, 2); // :454 (bumps to 3 only at speed>=5)
+        assert_eq!(sf.intra_pruning_with_hog, 3); // :455
+        assert_eq!(sf.less_rectangular_check_level, 2); // :444
+        assert!(sf.disable_smooth_intra); // speed>=2 :429
+        assert_eq!(sf.prune_filter_intra_level, 1); // speed>=2 :431 (bumps to 2 only at speed>=5)
+        // The pol-affecting speed-4 deltas (perform_coeff_opt=5,
+        // tx_domain_dist_thres_level=3) are UNPORTED (KB-8): the winner-mode
+        // two-pass that governs them on the luma path is not modeled, so the sf
+        // deliberately leaves these at their speed-3 DEFAULT_EVAL values. Asserting
+        // that here guards against a naive bump that would silently mis-apply the
+        // speed-4 DEFAULT_EVAL pol to the (unported-two-pass) luma search.
+        assert_eq!(sf.perform_coeff_opt, 3); // speed-3 value retained (KB-8)
+        assert_eq!(sf.tx_domain_dist_thres_level, 1); // speed-3 value retained (KB-8)
+        let pol = sf.tx_type_search_policy(false, 0);
+        assert_eq!(pol.coeff_opt_dist_threshold, 864);
         assert_eq!(pol.coeff_opt_satd_threshold, u32::MAX);
     }
 

@@ -694,7 +694,9 @@ fn attempt_case_content_uv(
         mi_rows,
         mi_cols,
     };
-    let derived_lf = pick_filter_level(&lf_frame, allintra, 0);
+    // allintra `lpf_pick` is DUAL (`LPF_PICK_FROM_FULL_IMAGE`) for speed 0..=3
+    // and NON_DUAL for speed 4/5 (speed_features.c:496) -- see lf_search docs.
+    let derived_lf = pick_filter_level(&lf_frame, allintra, 0, allintra && speed >= 4);
     eprintln!(
         "{ctx}: DERIVED lf_level={:?} lf_u={} lf_v={} sharpness={} -- REAL(bootstrapped) \
          lf_level={:?} lf_u={} lf_v={} sharpness={} -- {}",
@@ -1078,7 +1080,7 @@ fn lf_derived_vs_real_on_real_recon(
         mi_rows: cfg_real.mi_rows,
         mi_cols: cfg_real.mi_cols,
     };
-    let d = pick_filter_level(&lf, allintra, 0);
+    let d = pick_filter_level(&lf, allintra, 0, false);
     (
         (d.filter_level, d.filter_level_u, d.filter_level_v),
         (
@@ -2055,5 +2057,128 @@ fn encoder_gate_speed3_textured_allintra() {
         "cpu-used=3 divergence set changed: got {residual:?}. If a cell now MATCHES, the \
          KB-6 chroma-RD near-tie was fixed -> promote it into the byte-match claim; if a NEW \
          cell diverges, a speed-3 regression was introduced -> investigate."
+    );
+}
+
+/// Gate 2 (`aomenc --cpu-used=4`) — the all-intra KEY **speed-4** path. Reuses
+/// the full e2e derivation with `ref_encode_av1_kf(cpu_used=4)` +
+/// `SpeedFeatures::set_allintra(4)`, over the same grid as the speed-2/3 gates:
+/// 64/128 × cq{12,32,48,63} × {flat, two-tone, vgrad, diag} × {mono, 4:2:0} —
+/// **51/64 cells byte-identical** vs real aomenc `--cpu-used=4`.
+///
+/// This is a PARTIAL speed-4 port (see `speed_features.rs`'s `if speed >= 4`
+/// block). Two speed-4 deltas are LIVE and wired here; the rest are KB-8:
+///   1. `prune_chroma_modes_using_luma_winner = 1` (:480) — chroma-mode prune
+///      keyed on the luma winner (`av1_derived_chroma_intra_mode_used_flag`,
+///      consumer intra_uv_rd.rs:1497).
+///   2. `lpf_pick = LPF_PICK_FROM_FULL_IMAGE_NON_DUAL` (:496) — the Y
+///      loop-filter search drops the two single-direction refine passes
+///      (lf_search::pick_filter_level `non_dual`).
+///
+/// Anti-vacuous witness (BOTH deltas are load-bearing): starting from
+/// `set_allintra(4)` == the speed-3 sf (i.e. neither delta applied), 35/64 cells
+/// matched — exactly the cells where aomenc itself emits identical bytes at
+/// `--cpu-used=3` and `--cpu-used=4` (env-gated bisect during development). The
+/// chroma prune then fixed 10 cells that byte-matched at `--cpu-used=3` but
+/// diverged at 4 pre-fix (e.g. `flat 128x128 420 cq32/48/63`, `diag 128x128 420
+/// cq32/48` — pure-chroma, their mono siblings never diverged) AND resolved the
+/// KB-7 `two-tone 128x128 420 cq12` residual; the NON_DUAL loop-filter fixed 6
+/// more (`vgrad 128x128 cq32/48`, `diag 128x128 cq63`, each mono AND 420 — the
+/// divergence there was a header-only LF-level byte, tile data byte-identical).
+/// Reverting either delta re-diverges its cells, so this gate's byte-match
+/// assertion on them is the witness.
+///
+/// The 13 pinned residuals are the UNPORTED speed-4 deltas (KB-8), split:
+///   - **10 cells need the LUMA winner-mode two-pass** (`multi_winner_mode_type`
+///     / `enable_winner_mode_for_*`, speed_features.c:502-505 + `perform_coeff_opt
+///     =5`): every cell whose MONO sibling also diverges (the luma coding itself
+///     changes, tile bytes differ) — `flat 64x64 cq12`, `two-tone 64x64 cq12`,
+///     `two-tone 64x64 cq32`, `flat 128x128 cq12`, `two-tone 128x128 cq48`, each
+///     mono + 420.
+///   - **3 pure-chroma cq12 cells** (`vgrad 64x64`, `vgrad 128x128`, `diag
+///     128x128`, all 420 cq12 = qindex 48): mono byte-matches, so the divergence
+///     is chroma-only, driven by the unported chroma DEFAULT_EVAL speed-4 params
+///     (`perform_coeff_opt = 5`, needing the SATD trellis-skip body, tx_search
+///     .rs:664) — same aggressive-web low-q regime as the KB-6/KB-7 near-ties.
+/// Pinned EXACTLY: if a KB-8 fix makes one match this FAILS -> promote it; if a
+/// NEW cell diverges a speed-4 regression was introduced -> investigate.
+#[test]
+fn encoder_gate_speed4_textured_allintra() {
+    fn content_for(w: usize, h: usize, name: &str) -> Box<dyn Fn(usize, usize) -> u8> {
+        match name {
+            "two-tone" => Box::new(move |_r, c| if c < w / 2 { 72 } else { 168 }),
+            "vgrad" => Box::new(move |_r, c| (32 + c * 190 / w) as u8),
+            "diag" => Box::new(move |r, c| (32 + (r + c) * 190 / (w + h)) as u8),
+            "flat" => Box::new(move |_r, _c| 128u8),
+            other => panic!("unknown {other:?}"),
+        }
+    }
+    let mut results: Vec<(String, bool)> = Vec::new();
+    for &(w, h) in &[(64usize, 64usize), (128usize, 128usize)] {
+        for &name in &["flat", "two-tone", "vgrad", "diag"] {
+            for &cq in &[12i32, 32, 48, 63] {
+                for &mono in &[true, false] {
+                    let content = content_for(w, h, name);
+                    let ok = attempt_case_content_uv(
+                        w,
+                        h,
+                        mono,
+                        1,
+                        1,
+                        2,
+                        cq,
+                        4,
+                        4,
+                        |r, c| content(r, c),
+                        |r, c| (60 + (r * 7 + c * 3) % 80) as u8,
+                    );
+                    let fmt = if mono { "mono" } else { "420" };
+                    eprintln!(
+                        "speed4 {name} {w}x{h} {fmt} cq{cq}: {}",
+                        if ok { "MATCH" } else { "DIFF" }
+                    );
+                    results.push((format!("{name} {w}x{h} {fmt} cq{cq}"), ok));
+                }
+            }
+        }
+    }
+
+    let mut residual: Vec<String> = results
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(n, _)| n.clone())
+        .collect();
+    residual.sort();
+    // The exact UNPORTED-speed-4 (KB-8) residual set — see the gate doc.
+    let expected_residual = [
+        // 3 pure-chroma cq12 (unported chroma DEFAULT_EVAL / low-q near-tie):
+        "diag 128x128 420 cq12".to_string(),
+        // 10 luma winner-mode two-pass (mono sibling also diverges):
+        "flat 128x128 420 cq12".to_string(),
+        "flat 128x128 mono cq12".to_string(),
+        "flat 64x64 420 cq12".to_string(),
+        "flat 64x64 mono cq12".to_string(),
+        "two-tone 128x128 420 cq48".to_string(),
+        "two-tone 128x128 mono cq48".to_string(),
+        "two-tone 64x64 420 cq12".to_string(),
+        "two-tone 64x64 420 cq32".to_string(),
+        "two-tone 64x64 mono cq12".to_string(),
+        "two-tone 64x64 mono cq32".to_string(),
+        "vgrad 128x128 420 cq12".to_string(),
+        "vgrad 64x64 420 cq12".to_string(),
+    ];
+    let matched = results.iter().filter(|(_, ok)| *ok).count();
+    eprintln!(
+        "encoder_gate_speed4_textured_allintra: {matched}/{} cells byte-identical vs aomenc \
+         --cpu-used=4 (13 UNPORTED-speed-4 KB-8 residuals pinned: 10 luma winner-mode + 3 \
+         pure-chroma cq12)",
+        results.len()
+    );
+    assert_eq!(
+        residual, expected_residual,
+        "cpu-used=4 divergence set changed: got {residual:?}. If a cell now MATCHES, a KB-8 \
+         speed-4 delta (luma winner-mode two-pass, or the chroma DEFAULT_EVAL coeff-opt) was \
+         ported -> promote it into the byte-match claim; if a NEW cell diverges, a speed-4 \
+         regression was introduced -> investigate."
     );
 }

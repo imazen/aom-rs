@@ -602,7 +602,7 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
         mi_rows,
         mi_cols,
     };
-    let derived_lf = pick_filter_level(&lf_frame, allintra, 0);
+    let derived_lf = pick_filter_level(&lf_frame, allintra, 0, false);
     eprintln!(
         "{name}: DERIVED lf_level={:?} -- REAL(bootstrapped) lf_level={:?} -- {}",
         derived_lf.filter_level,

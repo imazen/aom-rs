@@ -450,7 +450,7 @@ fn run_case(
         mi_rows,
         mi_cols,
     };
-    let derived_lf = pick_filter_level(&lf_frame, allintra, 0);
+    let derived_lf = pick_filter_level(&lf_frame, allintra, 0, false);
     let mut p = p;
     p.loopfilter.filter_level = derived_lf.filter_level;
     p.loopfilter.filter_level_u = derived_lf.filter_level_u;

@@ -789,6 +789,13 @@ fn leaf_pick_sb_modes(
     // non-monochrome frame — where the uv mode search actually evaluates modes.
     // (Level derived inline from cfg.speed, mirroring the luma HOG level above.)
     let chroma_hog_level = if cfg.allintra && cfg.speed >= 3 { 2 } else { 0 };
+    // `intra_sf.prune_chroma_modes_using_luma_winner` (speed_features.c:480) —
+    // default 0; allintra speed>=4 -> 1. Prunes chroma modes not in
+    // `av1_derived_chroma_intra_mode_used_flag[luma_winner_mode]`
+    // (intra_mode_search.c:939-941). The consumer already lives in the uv loop
+    // (intra_uv_rd.rs:1497); this turns it on. Only the LUMA winner mode is read,
+    // so it is fully determined by the (already-decided) luma search.
+    let prune_chroma_luma_winner = cfg.allintra && cfg.speed >= 4;
     let chroma_hog_lp;
     let uv_lp: &UvLoopPolicy = if chroma_hog_level > 0 && !env.monochrome && is_chroma_ref {
         let mut mask = [false; 13];
@@ -811,6 +818,7 @@ fn leaf_pick_sb_modes(
         );
         chroma_hog_lp = UvLoopPolicy {
             chroma_hog_skip_mask: Some(mask),
+            prune_chroma_modes_using_luma_winner: prune_chroma_luma_winner,
             ..cfg.uv_lp.clone()
         };
         &chroma_hog_lp

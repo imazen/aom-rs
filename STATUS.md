@@ -2572,3 +2572,30 @@ correct chroma HOG — localized to a SB-root partition flip (real BLOCK_64X64 N
 pinned exactly in the gate (fails if a KB-6 fix makes one match → promote, or a regression breaks a
 new cell). See KB-7. New gate `encoder_gate_speed3_textured_allintra`; full `cargo test -p
 aom-encode` green.
+
+## Gate 2 — `--cpu-used=4` (speed-4) all-intra KEY byte-match (PARTIAL)
+
+Ported the two speed≥4 `set_allintra_speed_features_*` deltas that are LIVE + tractable on the bd8
+4:2:0 all-intra KEY path, on top of the speed-3 baseline (e18772c). **51 of 64 cells byte-identical**
+vs real aomenc `--cpu-used=4` ({64,128}² × cq{12,32,48,63} × {flat,two-tone,vgrad,diag} × {mono,420}),
+up from a 35/64 baseline (`set_allintra(4)` == the speed-3 sf — exactly the cells where aomenc emits
+identical bytes at cpu-used 3 and 4). New gate `encoder_gate_speed4_textured_allintra`.
+
+- **`prune_chroma_modes_using_luma_winner = 1`** (speed_features.c:480) — prunes any chroma `uv_mode`
+  not in `av1_derived_chroma_intra_mode_used_flag[luma_winner_mode]` (intra_mode_search.c:939-941).
+  The consumer already existed (intra_uv_rd.rs:1497); wired per-block via `cfg.speed >= 4` in
+  `partition_pick.rs` + a new `prune_chroma_modes_using_luma_winner` sf field
+  (`speed4_allintra_deltas_match_source`). Fixes **10 cells** (incl. resolving KB-7's `two-tone
+  128x128 420 cq12`).
+- **`lpf_pick = LPF_PICK_FROM_FULL_IMAGE_NON_DUAL`** (speed_features.c:496) — the Y loop-filter-level
+  search drops the two single-direction refine passes, leaving both luma levels at the combined
+  `dir=2` winner (picklpf.c:376). Wired via a `non_dual` flag on `lf_search::pick_filter_level`.
+  Fixes **6 cells** whose divergence was a header-only LF byte (tile data already byte-identical:
+  `vgrad 128x128 cq32/48`, `diag 128x128 cq63`, each mono + 420).
+
+**Anti-vacuous witness:** both deltas are load-bearing — reverting either re-diverges its cells, and
+the gate asserts them byte-identical. **13 residuals pinned (KB-8):** 10 need the LUMA winner-mode
+two-pass (`multi_winner_mode_type`/`enable_winner_mode_for_*` + `perform_coeff_opt=5`, which needs the
+unported SATD trellis-skip at tx_search.rs:664) — every cell whose mono sibling also diverges; 3 are
+pure-chroma cq12 (unported chroma DEFAULT_EVAL coeff-opt-5). `diag 64x64 cq63` byte-matches at speed 4
+(NOT pinned). Full `cargo test -p aom-encode` green.
