@@ -292,7 +292,7 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   nested sub-block reuse) — all 4 bd10 non-420 cells (444/422 × 64²/128² cq32) byte-match,
   asserted by `encoder_gate_bd10_non420_e2e_kb4_repro`.
 
-### KB-5 — Encoder: lossless (cq0 / qindex 0) KEY encode — MONO FIXED ✅ (byte-exact, hard-asserted); 420 chroma RD near-tie remains
+### KB-5 — Encoder: lossless (cq0 / qindex 0) KEY encode — FIXED ✅ (mono + 4:2:0 both byte-exact, hard-asserted; #32 closed)
 - **MONO FIXED 2026-07-16.** Mono 64² cq0 (coded-lossless allintra KEY) is now an end-to-end BYTE
   MATCH vs real aomenc, hard-asserted in `encoder_gate_lossless_cq0_e2e_kb5_repro`
   (encoder_gate_chroma_ss_e2e.rs). THREE fixes were required (the two originally localized below,
@@ -317,16 +317,30 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
      trellis was on; coded-lossless runs trellis-OFF (USE_B_QUANT_NO_TRELLIS), so a block with a
      coded left neighbour wrote ctx 1/0 instead of the real 3/1 and desynced the decoder. Fix:
      always seed ta/tl from the real neighbour context.
-- **REMAINING (open, do not close KB-5 yet):** 4:2:0 cq0 diverges via a **≤1-rdcost-unit chroma RD
-  near-tie** at the first 16×16 partition node (real picks SPLIT, port picks NONE; the port's child-3
-  rdcost 63759 EXACTLY equals the budget, strict-< keeps NONE). KB-2/KB-6 class. Verified correct so
-  far: chroma `cost_coeffs_txb` for large lossless coeffs (up to 3000), real-context usage, dist=0
-  accumulation. Coverage gap: `txfm_uvrd_diff` never tests qindex 0 — a lossless chroma UV-RD
-  differential (extending it to qindex 0, with the common/mod.rs UvRdEnv oracle path taught
-  WHT-for-lossless like the yrd path was) is the next localization step, or C-side per-partition RD
-  instrumentation ala KB-2. The gate keeps the 420 cell as an open characterization
-  (`assert_open_divergence`) and hard-asserts mono — it FAILS the moment 420 starts matching
-  (→ promote to full byte-match) or mono regresses.
+- **420 FIXED 2026-07-16 (mono landed as ba560eb; 420 this landing) — CfL banned at coded-lossless
+  in the SEARCH.** The former "≤1-unit chroma RD near-tie" was a search-SPACE gap, not RD math:
+  `partition_pick.rs`'s leaf `cfl_allowed` was `!lossless && w<=32 && h<=32`, but C's
+  `is_cfl_allowed` (blockd.h) allows CfL at LOSSLESS whenever the partition size equals the
+  transform size — `get_plane_block_size(bsize, ssx, ssy) == BLOCK_4X4` (at 420: every
+  8×8-and-below chroma-ref leaf). Measured mechanism (instrumented-sibling-C vs port partition
+  dumps, faithfulness-gated byte-identical first): at the first 16×16 node NONE matches EXACTLY
+  (both 235604, rdmult 52, dist=0 everywhere at lossless) but C's 8×8 SPLIT children pick
+  **UV_CFL_PRED** (~16k cheaper rate per chroma-carrying leaf; luma-only 4×4 subs byte-identical)
+  → C SPLIT 235256 beats NONE by 348; the port's missing CfL candidates inflated its children and
+  starved SPLIT child-3 at the 63759 remaining budget → NONE → desync. **Fix:** route the leaf
+  gate through the shared (already-correct, pack.rs already used it) helper
+  `aom_entropy::partition::is_cfl_allowed(bsize, env.lossless, ss_x, ss_y)` — expression-identical
+  at !lossless, so non-lossless gates are untouched (verified: all chroma-ss/KB-4/KB-6 gates
+  unchanged-green). The `CPick` reference in `partition_pick_diff.rs` carried the SAME transcribed
+  gate (a shared bug that differential structurally could not catch) — also routed through the
+  helper. **Refuted en route (do not re-chase):** the chroma UV RD math at qindex 0 is CLEAN — the
+  new `txfm_uvrd_matches_c_walk_lossless_q0` differential (txfm_uvrd_diff.rs; UvRdEnv oracle
+  winner-recon taught IWHT-for-lossless in common/mod.rs to match hybrid_fwd_txfm/inverse
+  dispatch) proves port==C at qindex 0 across 14 chroma-ref shapes × 8 iters for rate/dist(=0,
+  physics-asserted)/sse/winners/recon PLUS strict-`>` budget-boundary agreement at
+  min_rd−1/min_rd/min_rd+1. **Gate:** `encoder_gate_lossless_cq0_e2e_kb5_repro` hard-asserts BOTH
+  mono AND 420 byte-match (promotion from `assert_open_divergence` per its designed contract).
+  The full lossless envelope (coded-lossless cq0 KEY, mono + 4:2:0) is byte-exact; #32 closed.
 
 ### KB-6 — Encoder: REAL-content RD divergence at bd8 4:2:0 (PRIMARY config) — FIXED ✅ (all roots landed; real-content map 30/30)
 - **FIX #1 LANDED 2026-07-15 (ca2826f) — luma re-encode intra edge filter.** The luma analogue of

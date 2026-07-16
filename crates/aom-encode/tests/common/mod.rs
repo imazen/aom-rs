@@ -1152,7 +1152,16 @@ pub fn c_txfm_rd_in_plane_uv(
             );
             if weob > 0 {
                 let mut tight = pred.clone();
-                c::ref_inv_txfm2d_add(tx_size, &wdqc, &mut tight, txw, wtype, env.bd as i32);
+                // Coded-lossless TX_4X4 reconstructs through the inverse
+                // Walsh–Hadamard (av1_highbd_iwht4x4_add — C's
+                // av1_inverse_transform_block dispatches on xd->lossless),
+                // mirroring the c_search_tx_type_p / c_uniform_txfm_yrd
+                // lossless recon arms above.
+                if env.lossless {
+                    c::ref_highbd_iwht4x4_add(&wdqc, &mut tight, txw, weob as usize, env.bd as i32);
+                } else {
+                    c::ref_inv_txfm2d_add(tx_size, &wdqc, &mut tight, txw, wtype, env.bd as i32);
+                }
                 for r in 0..txh {
                     recon[txb_off + r * env.stride..txb_off + r * env.stride + txw]
                         .copy_from_slice(&tight[r * txw..r * txw + txw]);

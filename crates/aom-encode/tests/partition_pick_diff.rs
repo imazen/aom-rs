@@ -356,12 +356,12 @@ impl CPick<'_> {
         let left_u: Vec<i8> = self.o.left_e[1][lu..lu + pmh].to_vec();
         let above_v: Vec<i8> = self.o.above_e[2][au..au + pmw].to_vec();
         let left_v: Vec<i8> = self.o.left_e[2][lu..lu + pmh].to_vec();
-        let cfl_allowed = !self.lossless && BLK_1D[bsize] <= 32 && BLK_1D[bsize] <= 32 && {
-            const BLK_H: [usize; 22] = [
-                4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
-            ];
-            BLK_H[bsize] <= 32
-        };
+        // `is_cfl_allowed(xd)` (blockd.h) — including the LOSSLESS arm
+        // (plane_bsize == BLOCK_4X4). The reference used to transcribe the
+        // same `!lossless && w<=32 && h<=32` simplification as the port (a
+        // shared bug this differential therefore couldn't catch — KB-5).
+        let cfl_allowed =
+            aom_entropy::partition::is_cfl_allowed(bsize, self.lossless, ss_x, ss_y);
         // Chroma has no tx-size depth search -- pre-select the ONE real
         // per-txs_ctx table THIS leaf's uv_tx_size uses (mirrors
         // partition_pick.rs::leaf_pick_sb_modes's fix).

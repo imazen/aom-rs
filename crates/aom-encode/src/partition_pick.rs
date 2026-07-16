@@ -195,8 +195,8 @@ use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TxTypeSearchPolicy, TxfmY
 use aom_dist::highbd_variance;
 use aom_entropy::partition::{
     allow_palette, get_partition_subsize, get_plane_block_size, get_tx_size_context,
-    palette_bsize_ctx, palette_mode_ctx, partition_gather_horz_alike, partition_gather_vert_alike,
-    partition_plane_context,
+    is_cfl_allowed, palette_bsize_ctx, palette_mode_ctx, partition_gather_horz_alike,
+    partition_gather_vert_alike, partition_plane_context,
 };
 use aom_intra::cfl::CflCtx;
 use aom_txb::{TxTypeCosts, cost_symbol, cost_tokens_from_cdf};
@@ -811,13 +811,14 @@ fn leaf_pick_sb_modes(
     let left_u: Vec<i8> = tile.left_ectx[1][lu..lu + pmh].to_vec();
     let above_v: Vec<i8> = tile.above_ectx[2][au..au + pmw].to_vec();
     let left_v: Vec<i8> = tile.left_ectx[2][lu..lu + pmh].to_vec();
-    const BLK_W: [usize; 22] = [
-        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
-    ];
-    const BLK_H: [usize; 22] = [
-        4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
-    ];
-    let cfl_allowed = !env.lossless && BLK_W[bsize] <= 32 && BLK_H[bsize] <= 32;
+    // `is_cfl_allowed(xd)` (blockd.h): non-lossless => w/h <= 32; LOSSLESS =>
+    // CfL is still allowed when the partition size equals the transform size,
+    // i.e. `get_plane_block_size(bsize, ssx, ssy) == BLOCK_4X4` (a 420 8x8 or
+    // sub-8x8 chroma-ref leaf). The previous `!env.lossless && w<=32 && h<=32`
+    // banned CfL outright at coded-lossless, so every 8x8-and-below chroma-ref
+    // leaf lost the CfL candidate real aomenc picks (~16k rate on the KB-5
+    // 420 cq0 cell's 8x8 leaves) and the 16x16 NONE-vs-SPLIT near-tie flipped.
+    let cfl_allowed = is_cfl_allowed(bsize, env.lossless, env.ss_x, env.ss_y);
     // Chroma has no tx-size depth search (av1_get_tx_size_uv is a pure
     // function of bsize/lossless/subsampling) -- pre-select the ONE real
     // per-txs_ctx table this leaf's whole UV search+encode lifetime uses,

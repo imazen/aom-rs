@@ -1266,15 +1266,19 @@ fn encoder_gate_lossless_cq0_e2e_kb5_repro() {
         mono.matched,
         "KB-5 mono lossless cq0 regressed — the forward-WHT + entropy-context fix must keep it byte-exact"
     );
-    // 4:2:0 lossless: a residual chroma RD near-tie remains — the first 16×16 node
-    // splits PARTITION_SPLIT in aomenc but PARTITION_NONE in the port, SPLIT losing by
-    // ≤1 rdcost unit on the chroma cost (child-3 lands exactly at its remaining budget).
-    // Tracked OPEN in KB-5 (CLAUDE.md). Kept as a characterization that FAILS (prompting
-    // promotion to a byte-match gate) once the chroma near-tie is closed.
+    // 4:2:0 lossless: FIXED — byte-exact vs real aomenc. The former "chroma RD
+    // near-tie" was the search banning CfL outright at coded-lossless
+    // (partition_pick.rs `cfl_allowed`): C's `is_cfl_allowed` (blockd.h) allows
+    // CfL in lossless when plane_bsize == BLOCK_4X4, so real aomenc picks CfL on
+    // 8x8-and-below 420 chroma-ref leaves (~16k cheaper rate per 8x8 leaf here),
+    // making SPLIT beat NONE at the first 16x16 node; the port's missing CfL
+    // candidates flipped it to NONE and desynced from there. Hard-assert as a
+    // regression guard — 420 lossless must stay byte-exact. Closes KB-5 (#32).
     let c420 = run_case(64, 64, false, 1, 1, 2, 0, 8, &luma, &chroma, &chroma, 0, 0);
-    assert_open_divergence(
-        "KB-5 (4:2:0 residual)",
-        &[("lossless-420 64x64 cq0".to_string(), c420.matched)],
+    assert!(
+        c420.matched,
+        "KB-5 420 lossless cq0 regressed — the lossless-CfL allowance (is_cfl_allowed \
+         plane_bsize==4x4 arm) must keep it byte-exact"
     );
 }
 

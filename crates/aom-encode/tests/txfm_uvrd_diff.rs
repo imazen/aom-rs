@@ -395,6 +395,271 @@ fn txfm_uvrd_matches_c_walk() {
     );
 }
 
+/// KB-5 (#32): coded-lossless (qindex 0) chroma UV RD differential. The 4:2:0
+/// cq0 e2e near-tie (port NONE vs real SPLIT at the first 16x16 node; the
+/// port's SPLIT child-3 rdcost EXACTLY equals the remaining budget) implicates
+/// the chroma RD at qindex 0 — which no other differential exercised. Sweeps
+/// the chroma-ref shapes at qindex=0 / all-zero plane q-deltas (the real
+/// coded_lossless condition) / lossless=true on BOTH sides: TX_4X4 is forced
+/// (multi-txb walks everywhere above 4x4), the forward/inverse pair is the
+/// Walsh–Hadamard, and per-txb dist must be exactly 0 (WHT∘IWHT at identity
+/// quant is lossless — asserted as a physics witness). After each MAX-budget
+/// pass, re-runs BOTH sides at ref_best_rd = min_rd-1 / min_rd / min_rd+1
+/// (min_rd = min(this_rd, skip_rd) of the full result): every budget gate in
+/// C is strict `>`, and the e2e near-tie sits ON that boundary, so port and C
+/// must agree (same validity, same values) at the exact edge and one unit to
+/// either side.
+#[test]
+fn txfm_uvrd_matches_c_walk_lossless_q0() {
+    c::ref_init();
+    let mut rng = Rng(0x0a11_ab0a_00d1_ff02);
+    let cases: [(usize, usize, usize, i32, i32); 14] = [
+        (3, 1, 1, 8, 8),  // 8x8 @420 -> plane 4x4 (single WHT txb)
+        (6, 1, 1, 8, 8),  // 16x16 @420 -> 8x8 = 4 WHT txbs
+        (9, 1, 1, 8, 8),  // 32x32 @420 -> 16x16 = 16 WHT txbs
+        (5, 1, 1, 8, 8),  // 16x8 @420 -> 8x4
+        (4, 1, 1, 8, 8),  // 8x16 @420 -> 4x8
+        (12, 1, 1, 8, 8), // 64x64 @420 -> 32x32 = 64 WHT txbs (the e2e shape)
+        (0, 1, 1, 9, 9),  // 4x4 @420 sub-8x8 chroma-ref (odd mi both)
+        (1, 1, 1, 9, 9),  // 4x8 @420 (odd col)
+        (2, 1, 1, 9, 9),  // 8x4 @420 (odd row)
+        (6, 1, 0, 8, 8),  // 16x16 @422
+        (2, 1, 0, 8, 8),  // 8x4 @422
+        (6, 0, 0, 8, 8),  // 16x16 @444
+        (12, 0, 0, 8, 8), // 64x64 @444
+        (0, 0, 0, 9, 9),  // 4x4 @444
+    ];
+    let mut multi_txb_hits = 0usize;
+    let mut edge_some_hits = 0usize;
+    let mut edge_none_hits = 0usize;
+
+    for (ci, &(bsize, ss_x, ss_y, mi_row, mi_col)) in cases.iter().enumerate() {
+        assert!(
+            is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y),
+            "case {ci} must be a chroma-ref block",
+        );
+        // Lossless forces TX_4X4 on chroma regardless of shape.
+        assert_eq!(av1_get_tx_size_uv(bsize, true, ss_x, ss_y), 0);
+        for iter in 0..8 {
+            let pol = if iter % 2 == 0 {
+                TxTypeSearchPolicy::speed0_allintra()
+            } else {
+                TxTypeSearchPolicy::speed0_good()
+            };
+            let mut sc = build_scenario(&mut rng, bsize, ss_x, ss_y, mi_row, mi_col, ci + iter);
+            // Coded-lossless: base_qindex == 0 AND all plane q-deltas == 0.
+            sc.qindex = 0;
+            let t = gen_tables(&mut rng);
+            let coeff_costs = CoeffCostTables {
+                txb_skip: &t.txb_skip,
+                base_eob: &t.base_eob,
+                base: &t.base,
+                eob_extra: &t.eob_extra,
+                dc_sign: &t.dc_sign,
+                lps: &t.lps,
+                eob: &t.eob_tbl,
+            };
+            let mut quants = Quants::zeroed();
+            let mut deq = Dequants::zeroed();
+            av1_build_quantizer(sc.bd, 0, 0, 0, 0, 0, &mut quants, &mut deq, 0);
+            let rows_u = set_q_index(&quants, &deq, 0, 1);
+            let rows_v = set_q_index(&quants, &deq, 0, 2);
+            let rows_c = c::ref_set_q_index(sc.bd as i32, 0, 0, 0, 0, 0, 0, 0);
+            let (rows_u_c, rows_v_c) = (&rows_c[56..112], &rows_c[112..168]);
+            let dequant_u = [rows_u_c[48], rows_u_c[49]];
+            let dequant_v = [rows_v_c[48], rows_v_c[49]];
+
+            let uv_mode = (rng.next() % 13) as usize;
+            let im = aom_entropy::partition::get_uv_mode(uv_mode);
+            let angle_delta_uv = if (1..=8).contains(&im) {
+                rng.range(-3, 4)
+            } else {
+                0
+            };
+
+            let env = UvRdEnv {
+                sb_size: 12,
+                bsize: sc.bsize,
+                mi_row: sc.mi_row,
+                mi_col: sc.mi_col,
+                chroma_up_available: true,
+                chroma_left_available: true,
+                tile_col_end: 1 << 16,
+                tile_row_end: 1 << 16,
+                partition: 0,
+                mi_cols: 512,
+                mi_rows: 512,
+                ss_x: sc.ss_x,
+                ss_y: sc.ss_y,
+                ref_off: sc.ref_off,
+                ref_stride: STRIDE,
+                src_u: &sc.src_u,
+                src_v: &sc.src_v,
+                src_off: sc.ref_off,
+                src_stride: STRIDE,
+                disable_edge_filter: false,
+                filter_type: 0,
+                luma_mode: sc.luma_mode,
+                luma_use_fi: sc.luma_use_fi,
+                luma_fi_mode: sc.luma_fi_mode,
+                lossless: true,
+                reduced_tx_set_used: sc.reduced,
+                bd: sc.bd,
+                rows_u: &rows_u,
+                rows_v: &rows_v,
+                rdmult: sc.rdmult,
+                coeff_costs: &coeff_costs,
+                tx_type_costs: &t.tx_type_costs,
+                above_ctx: [&sc.above_u, &sc.above_v],
+                left_ctx: [&sc.left_u, &sc.left_v],
+                qm_levels: None,
+            };
+            let cenv = CUvEnv {
+                partition: 0,
+                bsize: sc.bsize,
+                mi_row: sc.mi_row,
+                mi_col: sc.mi_col,
+                ss_x: sc.ss_x,
+                ss_y: sc.ss_y,
+                ref_off: sc.ref_off,
+                src_off: sc.ref_off,
+                stride: STRIDE,
+                src_u: &sc.src_u,
+                src_v: &sc.src_v,
+                luma_mode: sc.luma_mode,
+                luma_use_fi: sc.luma_use_fi,
+                luma_fi_mode: sc.luma_fi_mode,
+                lossless: true,
+                reduced: sc.reduced,
+                bd: sc.bd,
+                rows_u_c,
+                rows_v_c,
+                dequant_u,
+                dequant_v,
+                above_ctx: [&sc.above_u, &sc.above_v],
+                left_ctx: [&sc.left_u, &sc.left_v],
+                rdmult: sc.rdmult,
+                coeff_tbls: (
+                    &t.txb_skip,
+                    &t.base_eob,
+                    &t.base,
+                    &t.eob_extra,
+                    &t.dc_sign,
+                    &t.lps,
+                    &t.eob_tbl,
+                ),
+                ttc_tables: (&t.ttc_intra, &t.ttc_inter),
+                use_chroma_trellis_rd_mult: pol.use_chroma_trellis_rd_mult,
+            };
+            let ctx = format!(
+                "LOSSLESS case={ci} iter={iter} bsize={bsize} ss=({ss_x},{ss_y}) uv={uv_mode} ad={angle_delta_uv} bd={} rdmult={}",
+                sc.bd, sc.rdmult,
+            );
+
+            // Pass 1: MAX budget — full-value differential.
+            let mut recon_u = sc.recon_u0.clone();
+            let mut recon_v = sc.recon_v0.clone();
+            let rust = txfm_uvrd(
+                &env,
+                &mut recon_u,
+                &mut recon_v,
+                uv_mode,
+                angle_delta_uv,
+                i64::MAX,
+                &pol,
+            );
+            let mut recon_u_c = sc.recon_u0.clone();
+            let mut recon_v_c = sc.recon_v0.clone();
+            let cres = c_txfm_uvrd(
+                &cenv,
+                &mut recon_u_c,
+                &mut recon_v_c,
+                uv_mode,
+                angle_delta_uv,
+                i64::MAX,
+            );
+            let (stats, wu, wv) = rust.expect("MAX budget must be valid (port)");
+            let (crate_, cdist, csse, cwu, cwv) = cres.expect("MAX budget must be valid (C)");
+            assert_eq!(stats.rate, crate_, "{ctx} rate");
+            assert_eq!(stats.dist, cdist, "{ctx} dist");
+            assert_eq!(stats.sse, csse, "{ctx} sse");
+            // Physics witness: WHT∘IWHT at identity quant reconstructs
+            // exactly — coded-lossless chroma distortion is ZERO.
+            assert_eq!(cdist, 0, "{ctx} lossless dist must be 0");
+            assert!(!stats.skip_txfm, "{ctx} skip");
+            let wu_t: Vec<(usize, u16, u8)> =
+                wu.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+            let wv_t: Vec<(usize, u16, u8)> =
+                wv.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+            assert_eq!(wu_t, cwu, "{ctx} winners U");
+            assert_eq!(wv_t, cwv, "{ctx} winners V");
+            // Lossless pins DCT_DCT (signalled; coded as WHT).
+            for (i, w) in wu_t.iter().chain(wv_t.iter()).enumerate() {
+                assert_eq!(w.0, 0, "{ctx} txb{i} tx_type must be DCT_DCT");
+            }
+            assert_eq!(recon_u, recon_u_c, "{ctx} recon U");
+            assert_eq!(recon_v, recon_v_c, "{ctx} recon V");
+            if wu_t.len() > 1 {
+                multi_txb_hits += 1;
+            }
+
+            // Pass 2: budget-edge probes at the strict-`>` boundary the e2e
+            // near-tie sits on: ref_best_rd = min_rd-1 / min_rd / min_rd+1
+            // where min_rd = min(this_rd, skip_rd) of the full result. Port
+            // and C must agree on validity AND values at every probe.
+            let this_rd = c::ref_rdcost(sc.rdmult, stats.rate, stats.dist);
+            let skip_rd = c::ref_rdcost(sc.rdmult, 0, stats.sse);
+            let min_rd = this_rd.min(skip_rd);
+            for probe in [min_rd - 1, min_rd, min_rd + 1] {
+                if probe < 0 {
+                    continue;
+                }
+                let mut pru = sc.recon_u0.clone();
+                let mut prv = sc.recon_v0.clone();
+                let pr = txfm_uvrd(&env, &mut pru, &mut prv, uv_mode, angle_delta_uv, probe, &pol);
+                let mut pcu = sc.recon_u0.clone();
+                let mut pcv = sc.recon_v0.clone();
+                let pc = c_txfm_uvrd(&cenv, &mut pcu, &mut pcv, uv_mode, angle_delta_uv, probe);
+                match (pr, pc) {
+                    (None, None) => edge_none_hits += 1,
+                    (Some((ps, pwu, pwv)), Some((pcr, pcd, pcs, pcwu, pcwv))) => {
+                        assert_eq!(ps.rate, pcr, "{ctx} probe={probe} rate");
+                        assert_eq!(ps.dist, pcd, "{ctx} probe={probe} dist");
+                        assert_eq!(ps.sse, pcs, "{ctx} probe={probe} sse");
+                        let pwu_t: Vec<(usize, u16, u8)> =
+                            pwu.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+                        let pwv_t: Vec<(usize, u16, u8)> =
+                            pwv.iter().map(|w| (w.tx_type, w.eob, w.txb_ctx)).collect();
+                        assert_eq!(pwu_t, pcwu, "{ctx} probe={probe} winners U");
+                        assert_eq!(pwv_t, pcwv, "{ctx} probe={probe} winners V");
+                        assert_eq!(pru, pcu, "{ctx} probe={probe} recon U");
+                        assert_eq!(prv, pcv, "{ctx} probe={probe} recon V");
+                        edge_some_hits += 1;
+                    }
+                    (r, c_) => panic!(
+                        "{ctx} probe={probe} validity split: rust={:?} c={:?}",
+                        r.is_some(),
+                        c_.is_some()
+                    ),
+                }
+            }
+        }
+    }
+    assert!(
+        multi_txb_hits > 20,
+        "lossless multi-txb UV walk under-exercised: {multi_txb_hits}"
+    );
+    // The probe sweep must exercise BOTH sides of the budget boundary.
+    assert!(
+        edge_some_hits > 20,
+        "budget-edge valid arm under-exercised: {edge_some_hits}"
+    );
+    assert!(
+        edge_none_hits > 20,
+        "budget-edge invalidation arm under-exercised: {edge_none_hits}"
+    );
+}
+
 /// CfL fixed-alpha full-RD evaluation (`cfl_compute_rd` fast_mode=0 inner):
 /// `txfm_rd_in_plane_uv` with `CflPredict` vs the C walk over the REAL
 /// `av1_cfl_predict_block`, threading one CfL context (loaded from a luma
