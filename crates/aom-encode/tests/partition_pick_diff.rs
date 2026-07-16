@@ -298,6 +298,7 @@ impl CPick<'_> {
             reduced_tx_set_used: self.o.reduced,
             bd: self.o.bd,
             rows: self.rows_y,
+            qindex: self.qindex_cfg,
             rdmult: self.o.rdmult,
             coeff_costs: self.coeff_costs_y,
             tx_type_costs: self.tx_type_costs_y,

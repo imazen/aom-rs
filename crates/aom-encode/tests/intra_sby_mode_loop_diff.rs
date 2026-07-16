@@ -264,6 +264,7 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                 reduced_tx_set_used: reduced,
                 bd,
                 rows: &rows,
+                qindex: qindex as i32,
                 rdmult,
                 coeff_costs: &coeff_costs,
                 tx_type_costs: &tx_type_costs,

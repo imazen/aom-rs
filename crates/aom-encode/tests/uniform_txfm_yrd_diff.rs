@@ -175,6 +175,7 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
                 reduced_tx_set_used: reduced,
                 bd,
                 rows: &rows,
+                qindex: qindex as i32,
                 rdmult,
                 coeff_costs: &coeff_costs,
                 tx_type_costs: &tx_type_costs,
@@ -189,7 +190,7 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
             };
             let mut recon_rust = recon0.clone();
             let (rd_rust, stats_rust) =
-                uniform_txfm_yrd_intra(&env, &mut recon_rust, tx_size, ref_best_rd, &pol);
+                uniform_txfm_yrd_intra(&env, &mut recon_rust, tx_size, ref_best_rd, &pol, None);
 
             // ---- C-side walk ----
             let tx_size_rate = c::ref_tx_size_cost(
@@ -547,6 +548,7 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                 reduced_tx_set_used: reduced,
                 bd,
                 rows: &rows,
+                qindex: qindex as i32,
                 rdmult,
                 coeff_costs: &coeff_costs,
                 tx_type_costs: &tx_type_costs,

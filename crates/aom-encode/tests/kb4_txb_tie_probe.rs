@@ -120,6 +120,7 @@ fn kb4_txb_tie_probe_bd10_cq12() {
             visible_cols: 4,
             visible_rows: 4,
             qm_level: None,
+            predict_skip_zero_blk_rate: 0,
         };
         let win = search_tx_type_intra(&inp, &pol, i64::MAX).expect("winner");
         eprintln!(

@@ -128,6 +128,7 @@ fn intra_model_rd_matches_c_chain() {
                 reduced_tx_set_used: false,
                 bd,
                 rows: &rows,
+                qindex: 64,
                 rdmult: 1,
                 coeff_costs: &coeff_costs,
                 tx_type_costs: &tx_type_costs,

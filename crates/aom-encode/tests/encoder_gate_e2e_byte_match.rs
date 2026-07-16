@@ -628,8 +628,21 @@ fn attempt_case_content_uv(
         } else {
             i32::from(allintra)
         },
-        max_partition_size: 15, // BLOCK_64X64 == sb_size for this envelope
-        min_partition_size: 0,  // BLOCK_4X4: the true aomenc default (unset --min-partition-size)
+        // set_max_min_partition_size (partition_strategy.h:214): AOMMIN(sf
+        // default_max, CLI cap BLOCK_128X128 (unset --max-partition-size),
+        // sb_size). Through speed 5 this resolves to BLOCK_64X64 == SB — the
+        // same consumer outcomes as the former hardcoded 15 on this 64-SB
+        // envelope (nothing exceeds SB; the pc_index==3 equality arm needs
+        // bsize == max, impossible at 12 and 15 alike for sub-root nodes).
+        // At allintra speed>=6, `default_max_partition_size = BLOCK_32X32`
+        // (:546) makes av1_prune_partitions_by_max_min_bsize force
+        // square-split-only at the 64x64 SB root.
+        max_partition_size: if allintra {
+            sf.default_max_partition_size.min(15).min(SB)
+        } else {
+            15
+        },
+        min_partition_size: 0, // BLOCK_4X4: the true aomenc default (unset --min-partition-size)
         enable_1to4_partitions: true, // the true aomenc default (unset --enable-1to4-partitions)
         enable_ab_partitions: true, // the true aomenc default (unset --disable-ab-partition-type)
         allow_screen_content_tools: p.allow_screen_content_tools,
@@ -697,9 +710,16 @@ fn attempt_case_content_uv(
         mi_rows,
         mi_cols,
     };
-    // allintra `lpf_pick` is DUAL (`LPF_PICK_FROM_FULL_IMAGE`) for speed 0..=3
-    // and NON_DUAL for speed 4/5 (speed_features.c:496) -- see lf_search docs.
-    let derived_lf = pick_filter_level(&lf_frame, allintra, 0, allintra && speed >= 4);
+    // allintra `lpf_pick` is DUAL (`LPF_PICK_FROM_FULL_IMAGE`) for speed 0..=3,
+    // NON_DUAL for speed 4/5 (speed_features.c:496), and the closed-form
+    // LPF_PICK_FROM_Q at speed >= 6 (:559 -- `pick_filter_level_from_q`,
+    // oracle-validated vs real cpu-6 header levels by
+    // `speed6_prep_lf_from_q_matches_real_aomenc`). See lf_search docs.
+    let derived_lf = if allintra && speed >= 6 {
+        pick_filter_level_from_q(qindex, bd, allintra, 0)
+    } else {
+        pick_filter_level(&lf_frame, allintra, 0, allintra && speed >= 4)
+    };
     eprintln!(
         "{ctx}: DERIVED lf_level={:?} lf_u={} lf_v={} sharpness={} -- REAL(bootstrapped) \
          lf_level={:?} lf_u={} lf_v={} sharpness={} -- {}",
@@ -2306,6 +2326,205 @@ fn encoder_gate_speed5_vs_speed4_sf_witness() {
              speed-5 features (it does in the full gate)"
         );
     }
+}
+
+/// Gate 2 (`aomenc --cpu-used=6`) — the all-intra KEY **speed-6** path.
+/// {64,128}² × cq{12,32,48,63} × {flat,two-tone,vgrad,diag} × {mono,4:2:0}
+/// vs REAL `aomenc --cpu-used=6`: **64/64 cells byte-identical** (asserted).
+///
+/// Speed 6 is NEW MACHINERY on top of speed 5 (speed_features.c:527-564 +
+/// framesize-dep :304-316 + qindex-dep aggr=4; the KB-10 chunk series):
+/// - `lpf_pick = LPF_PICK_FROM_Q` (:559): closed-form LF levels
+///   (`pick_filter_level_from_q`) replace the reconstruction search.
+/// - Partition: `default_max_partition_size = BLOCK_32X32` (:546, square-
+///   split-only at the 64² root), `use_square_partition_only_threshold =
+///   BLOCK_16X16` (:315), `ext_partition_eval_thresh = BLOCK_128X128` for
+///   ALL sizes (aggr=4), `prune_rectangular_split_based_on_qidx = 2`
+///   (:537), `prune_rect_part_using_{4x4_var_deviation,none_pred_mode}`
+///   (:539-540), `prune_sub_8x8_partition_level = 1` (:541).
+/// - Intra: `top_intra_model_count_allowed = 2` (:533) +
+///   `adapt_top_model_rd_count_using_neighbors` (:534),
+///   `prune_luma_odd_delta_angles_in_intra` (:535, evens-first sweep + RD
+///   prune), `intra_pruning_with_hog = 4` (:531, thresh 0.4),
+///   `prune_filter_intra_level = 2` (:529, no filter-intra search),
+///   `prune_smooth_intra_mode_for_chroma` (:528), `cfl_search_range = 1`
+///   (:532).
+/// - Tx: `prune_intra_tx_depths_using_nn` (:553, the 8x8 NN depth prune),
+///   `dc_blk_pred_level = 1` (:563, skip-block prediction in DEFAULT/MODE
+///   eval), `perform_coeff_opt = 6` + `tx_domain_dist_level = 3` (:555-556,
+///   the winner pass moves to tx-domain distortion),
+///   `winner_mode_tx_type_pruning = 3` + `prune_tx_type_est_rd = 0`
+///   (:551-552, the est-rd prune turns OFF again).
+/// - Winner mode: `multi_winner_mode_type = OFF` (:561, single best_mbmi
+///   re-eval), `prune_winner_mode_eval_level = 1` (:562, source-variance
+///   bypass).
+#[test]
+fn encoder_gate_speed6_textured_allintra() {
+    fn content_for(w: usize, h: usize, name: &str) -> Box<dyn Fn(usize, usize) -> u8> {
+        match name {
+            "two-tone" => Box::new(move |_r, c| if c < w / 2 { 72 } else { 168 }),
+            "vgrad" => Box::new(move |_r, c| (32 + c * 190 / w) as u8),
+            "diag" => Box::new(move |r, c| (32 + (r + c) * 190 / (w + h)) as u8),
+            "flat" => Box::new(move |_r, _c| 128u8),
+            other => panic!("unknown {other:?}"),
+        }
+    }
+    let mut failures: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for &(w, h) in &[(64usize, 64usize), (128usize, 128usize)] {
+        for &name in &["flat", "two-tone", "vgrad", "diag"] {
+            for &cq in &[12i32, 32, 48, 63] {
+                for &mono in &[true, false] {
+                    let content = content_for(w, h, name);
+                    let ok = attempt_case_content_uv(
+                        w,
+                        h,
+                        mono,
+                        1,
+                        1,
+                        2,
+                        cq,
+                        6,
+                        6,
+                        |r, c| content(r, c),
+                        |r, c| (60 + (r * 7 + c * 3) % 80) as u8,
+                    );
+                    let fmt = if mono { "mono" } else { "420" };
+                    eprintln!(
+                        "speed6 {name} {w}x{h} {fmt} cq{cq}: {}",
+                        if ok { "MATCH" } else { "DIFF" }
+                    );
+                    if !ok {
+                        failures.push(format!("{name} {w}x{h} {fmt} cq{cq}"));
+                    }
+                    total += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "encoder_gate_speed6_textured_allintra: {}/{total} cells byte-identical vs aomenc \
+         --cpu-used=6",
+        total - failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "every cpu-used=6 all-intra cell must byte-match real aomenc; diverging: {failures:?}"
+    );
+}
+
+/// Anti-vacuous witness for [`encoder_gate_speed6_textured_allintra`]: the
+/// port runs with the **speed-5** feature set against REAL `aomenc
+/// --cpu-used=6` reference bytes and must DIVERGE — proving the speed-6
+/// deltas are load-bearing (the gate is not vacuously matching a
+/// speed-5-equivalent search). The paired speed-6 run on the same cells
+/// re-asserts the true match so this witness can never "pass" via a harness
+/// that ignores `speed`.
+#[test]
+fn encoder_gate_speed6_vs_speed5_sf_witness() {
+    let vgrad_64 = |_r: usize, c: usize| (32 + c * 190 / 64) as u8;
+    let uv = |r: usize, c: usize| (60 + (r * 7 + c * 3) % 80) as u8;
+    for &(mono, cq) in &[(true, 32i32), (false, 32)] {
+        let fmt = if mono { "mono" } else { "420" };
+        let cross = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 6, 5, vgrad_64, uv);
+        assert!(
+            !cross,
+            "vgrad 64x64 {fmt} cq{cq}: port with SPEED-5 features unexpectedly byte-matched \
+             aomenc --cpu-used=6 — the speed-6 witness cell has gone sf-equivalent; pick a new \
+             witness cell (or a speed-5 delta leaked into the speed-6 derivation)"
+        );
+        let true_match = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 6, 6, vgrad_64, uv);
+        assert!(
+            true_match,
+            "vgrad 64x64 {fmt} cq{cq}: the speed-6 witness cell must byte-match with the \
+             speed-6 features (it does in the full gate)"
+        );
+    }
+}
+
+/// Speed-6 coverage extension beyond the textured grid: content engineered
+/// to reach speed-6 machinery the {flat,two-tone,vgrad,diag} cells never
+/// exercise (probe-verified):
+/// - **pseudo-random noise luma** forces small partitions so the WINNER-pass
+///   depth sweep runs on 8x8 blocks — the `prune_intra_tx_depths_using_nn`
+///   NN's only live shape (bd8 / TX_8X8 / whole-block; 96 live Split
+///   verdicts measured on these cells, byte-exact at cq32/48 — the model is
+///   additionally pinned by `intra_tx_nn_diff`'s 4000-decision REAL-C
+///   differential);
+/// - **flat chroma** (constant 128: per-pixel variance 0 < 20) arms
+///   `prune_smooth_intra_mode_for_chroma` (its uv-loop consumer stays
+///   unreached even here — UV_SMOOTH only survives the speed>=4 luma-winner
+///   mask when the LUMA winner is SMOOTH-family, which noise content never
+///   yields — carried as transcription-faithful) and drives the CHROMA
+///   `predict_dc_only_block` skip predictor (plane-1/2 fires measured).
+///
+/// cq32/cq48 (mono + 4:2:0) must BYTE-MATCH real `aomenc --cpu-used=6` —
+/// hard-asserted like the main gate.
+///
+/// **KB-10 OPEN CHARACTERIZATION — cq63 (both mono + 4:2:0) DIVERGES**, and
+/// this test asserts the divergence is still PRESENT (it FAILS the moment
+/// the cells start matching → promote to a full byte-match assert).
+/// Localized 2026-07-16 (decode-both + search-tree + sweep-rd probes):
+/// - the port's SEARCH partition tree matches real exactly (forced SPLIT of
+///   the 64² root — `default_max_partition_size = BLOCK_32X32` — plus four
+///   32×32 DC NONE leaves);
+/// - the divergence is the (mi 8,0) leaf's WINNER-pass uniform tx-size
+///   sweep: the port picks TX_16X16 (rd 3048875660) over TX_32X32
+///   (rd 3054700138) — a 0.19% margin — where real aomenc keeps TX_32X32;
+///   the tx-plan difference desyncs the coded coefficients (the frame codes
+///   tx_mode LARGEST post-hoc via encodeframe.c:2797's txb_split_count==0
+///   collapse, so the parse derives 32×32 txbs).
+/// - NOT closed by single-feature reverts (NN off / predict_dc off / rd
+///   tables at speed-5 values / winner-OFF arm at speed-5 shape / intra-loop
+///   prunes off / partition prunes off — each still diverges) ⇒ a
+///   multi-feature near-tie interaction at qindex 255 (KB-2 class), not one
+///   missing delta. The same content byte-matches at speed 5 and at speed-6
+///   cq32/cq48.
+/// - Next step: sibling-C RD dump (KB-2/KB-3/KB-7 method) of the
+///   winner-pass 16-vs-32 sweep at (8,0) — per-depth rd, the MODE_EVAL
+///   best_rd, and `intra_block_yrd`'s unfactored-vs-factored comparison.
+#[test]
+fn encoder_gate_speed6_noise_flatuv_allintra() {
+    let noise = |r: usize, c: usize| {
+        let mut x = (r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (c as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        x ^= x >> 33;
+        (64 + (x % 129)) as u8
+    };
+    let flat_uv = |_r: usize, _c: usize| 128u8;
+    let mut failures: Vec<String> = Vec::new();
+    let mut open_matches: Vec<String> = Vec::new();
+    for &cq in &[32i32, 48, 63] {
+        for &mono in &[true, false] {
+            let ok = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 6, 6, noise, flat_uv);
+            let fmt = if mono { "mono" } else { "420" };
+            eprintln!(
+                "speed6-noise-flatuv 64x64 {fmt} cq{cq}: {}",
+                if ok { "MATCH" } else { "DIFF" }
+            );
+            if cq == 63 {
+                // The pinned-open KB-10 near-tie cells (docs above).
+                if ok {
+                    open_matches.push(format!("64x64 {fmt} cq{cq}"));
+                }
+            } else if !ok {
+                failures.push(format!("64x64 {fmt} cq{cq}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "every asserted speed-6 noise/flat-uv cell must byte-match real aomenc; \
+         diverging: {failures:?}"
+    );
+    assert!(
+        open_matches.is_empty(),
+        "the pinned-open KB-10 cq63 near-tie cells started BYTE-MATCHING real aomenc \
+         ({open_matches:?}) — promote this characterization to a full byte-match assert \
+         and close the KB-10 open item"
+    );
 }
 
 /// **Speed-6 prep (chunk 1 building block):** `pick_filter_level_from_q`

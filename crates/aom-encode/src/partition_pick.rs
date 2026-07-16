@@ -323,6 +323,13 @@ pub struct ModeGrid {
     /// leaves, but the chroma-neighbour lookup addresses the chroma-reference
     /// mi cell (base_mi + offsets), which always carries the real value.
     pub uv_modes: Vec<u8>,
+    /// Per-mi winner `bsize` (BLOCK_SIZE), stamped alongside `modes`. Read by
+    /// the speed>=6 neighbour-bsize prunes: `is_neighbor_blk_larger_than_cur_
+    /// blk` (partition_search.c:4352 — the `prune_rect_part_using_none_pred_
+    /// mode` DC/SMOOTH arm) and the `prune_sub_8x8_partition_level` gate
+    /// (partition_strategy.c:1760-1773) — both `xd->left_mbmi->bsize` /
+    /// `xd->above_mbmi->bsize` reads off the live mi grid.
+    pub bsizes: Vec<u8>,
     pub stride: usize,
 }
 
@@ -332,6 +339,7 @@ impl ModeGrid {
         ModeGrid {
             modes: vec![0; mi_rows * mi_cols],
             uv_modes: vec![0; mi_rows * mi_cols],
+            bsizes: vec![0; mi_rows * mi_cols],
             stride: mi_cols,
         }
     }
@@ -351,6 +359,7 @@ impl ModeGrid {
             let base = (mi_row as usize + r) * self.stride + mi_col as usize;
             self.modes[base..base + cols].fill(mode);
             self.uv_modes[base..base + cols].fill(uv_mode);
+            self.bsizes[base..base + cols].fill(bsize as u8);
         }
     }
     fn at(&self, mi_row: i32, mi_col: i32) -> u8 {
@@ -359,6 +368,44 @@ impl ModeGrid {
     fn at_uv(&self, mi_row: i32, mi_col: i32) -> u8 {
         self.uv_modes[mi_row as usize * self.stride + mi_col as usize]
     }
+    fn bsize_at(&self, mi_row: i32, mi_col: i32) -> usize {
+        self.bsizes[mi_row as usize * self.stride + mi_col as usize] as usize
+    }
+}
+
+/// `is_neighbor_blk_larger_than_cur_blk` (partition_search.c:4352): whether
+/// an AVAILABLE left/above neighbour block's pixel AREA exceeds the current
+/// block's. The neighbour bsizes are the mi-grid stamps at `(mi_row,
+/// mi_col-1)` / `(mi_row-1, mi_col)` (`xd->left_mbmi` / `xd->above_mbmi` —
+/// the same live-grid reads as the mode-context / edge-filter neighbours).
+fn is_neighbor_blk_larger_than_cur_blk(
+    grid: &ModeGrid,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    up_available: bool,
+    left_available: bool,
+) -> bool {
+    const BLK_W: [usize; 22] = [
+        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+    ];
+    const BLK_H: [usize; 22] = [
+        4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+    ];
+    let cur_blk_area = BLK_W[bsize] * BLK_H[bsize];
+    if left_available {
+        let left = grid.bsize_at(mi_row, mi_col - 1);
+        if BLK_W[left] * BLK_H[left] > cur_blk_area {
+            return true;
+        }
+    }
+    if up_available {
+        let above = grid.bsize_at(mi_row - 1, mi_col);
+        if BLK_W[above] * BLK_H[above] > cur_blk_area {
+            return true;
+        }
+    }
+    false
 }
 
 /// The frame-level leaf-search configuration (`pick_sb_modes` +
@@ -506,15 +553,17 @@ fn leaf_pick_sb_modes(
         let mb_right = (env.mi_cols - mi_w as i32 - mi_col) * 4 * 8;
         let mb_bottom = (env.mi_rows - mi_h as i32 - mi_row) * 4 * 8;
         // `intra_sf.intra_pruning_with_hog` level (allintra: base 1, speed>=2 ->
-        // 2, speed>=3 -> 3; SpeedFeatures::set_allintra, speed_features.c:360/
-        // 430/455). The C threshold table `{-1.2,-1.2,-0.6,0.4}` (intra_mode_
-        // search.c:1505, indexed by `level-1`) maps levels 1,2 -> -1.2 and
-        // level 3 -> -0.6, so the prune only sharpens at speed>=3. GOOD
-        // (non-allintra) runs at speed 0 in this envelope -> level 1 -> -1.2.
+        // 2, speed>=3 -> 3, speed>=6 -> 4; SpeedFeatures::set_allintra,
+        // speed_features.c:360/430/455/531). The C threshold table
+        // `{-1.2,-1.2,-0.6,0.4}` (intra_mode_search.c:1505, indexed by
+        // `level-1`) maps levels 1,2 -> -1.2, level 3 -> -0.6, level 4 -> 0.4.
+        // GOOD (non-allintra) runs at speed 0 in this envelope -> level 1.
         // (Derived inline from cfg.speed, mirroring `disable_smooth_intra` /
         // `top_intra_model_count_allowed` below.)
         let luma_hog_level = if cfg.allintra {
-            if cfg.speed >= 3 {
+            if cfg.speed >= 6 {
+                4
+            } else if cfg.speed >= 3 {
                 3
             } else if cfg.speed >= 2 {
                 2
@@ -547,8 +596,18 @@ fn leaf_pick_sb_modes(
     // port's envelope, always runs at speed 0.
     if cfg.allintra && cfg.speed >= 2 {
         gates.disable_smooth_intra = true;
-        // C: 1 at speed>=2, 2 at speed>=4 (unmodeled). 1 covers speed 2/3.
-        gates.prune_filter_intra_level = 1;
+        // C: 1 at speed>=2 (:431), 2 at speed>=6 (:529 — level 2 disables the
+        // filter-intra search entirely, rd_pick_filter_intra_sby_y's first
+        // gate). Speeds 4/5 stay at 1 (no assignment between :431 and :529).
+        gates.prune_filter_intra_level = if cfg.speed >= 6 { 2 } else { 1 };
+    }
+    // `intra_sf.prune_luma_odd_delta_angles_in_intra` (speed_features.c:535)
+    // — allintra speed>=6: evens-first delta sweep (`set_y_mode_and_delta_
+    // angle` reorder) + the even-neighbour full-RD odd-delta prune
+    // (`prune_luma_odd_delta_angles_using_rd_cost`, both already modelled in
+    // intra_rd.rs and driven off this gate flag).
+    if cfg.allintra && cfg.speed >= 6 {
+        gates.prune_luma_odd_delta_angles_in_intra = true;
     }
 
     // Neighbour winner modes (module docs: the mi-grid reads).
@@ -613,6 +672,7 @@ fn leaf_pick_sb_modes(
         reduced_tx_set_used: env.reduced_tx_set_used,
         bd: env.bd,
         rows: env.rows_y,
+        qindex: cfg.qindex,
         rdmult: env.rdmult,
         coeff_costs: env.coeff_costs_y,
         tx_type_costs: cfg.tx_type_costs_y,
@@ -647,7 +707,9 @@ fn leaf_pick_sb_modes(
     let wm_parts = (cfg.allintra && cfg.speed >= 4).then(|| {
         let sf =
             SpeedFeatures::set_allintra(cfg.speed, cfg.allow_screen_content_tools, env.bd > 8);
-        debug_assert_ne!(sf.multi_winner_mode_type, 0);
+        // multi_winner_mode_type: DEFAULT(2)/FAST(1) at speed 4/5 → the
+        // winner-stats loop; OFF(0) at speed >= 6 → count 1 = the
+        // single-best re-eval arm with no stats stored (intra_rd.rs).
         (
             sf.tx_type_search_policy_for_stage(MODE_EVAL, cfg.pol.skip_trellis, cfg.pol.sharpness),
             sf.tx_type_search_policy_for_stage(
@@ -658,28 +720,41 @@ fn leaf_pick_sb_modes(
             sf.tx_size_search_method_for_stage(MODE_EVAL),
             sf.tx_size_search_method_for_stage(WINNER_MODE_EVAL),
             sf.winner_mode_count_allowed(),
+            sf.prune_winner_mode_eval_level,
         )
     });
-    let wm_cfg = wm_parts.as_ref().map(|(me, win, me_m, win_m, count)| WinnerModeCfg {
-        mode_eval_pol: me,
-        winner_pol: win,
-        mode_eval_tx_size_method: *me_m,
-        winner_tx_size_method: *win_m,
-        max_winner_count: *count,
-    });
+    let wm_cfg = wm_parts
+        .as_ref()
+        .map(|(me, win, me_m, win_m, count, prune_lvl)| WinnerModeCfg {
+            mode_eval_pol: me,
+            winner_pol: win,
+            mode_eval_tx_size_method: *me_m,
+            winner_tx_size_method: *win_m,
+            max_winner_count: *count,
+            prune_winner_mode_eval_level: *prune_lvl,
+        });
     let sby_cfg = IntraSbySearchCfg {
         gates: &gates,
         // `intra_sf.top_intra_model_count_allowed` (speed_features.c:2443 default
-        // TOP_INTRA_MODEL_COUNT=4; :404 -> 3 at allintra speed>=1; the -> 2 drop
-        // is the speed>=5 block, :533 — NOT speed 4). Drives the
-        // `top_intra_model_rd[]` slot `prune_intra_y_mode` compares against
-        // (index = count-1). At speed 0/1 the byte-match gates were inert to
-        // 4-vs-3 (the mode set kept fewer than 4 competitive models); the
-        // speed-2 `disable_smooth_intra` prune shrinks the mode set enough that
-        // the 4-vs-3 slot difference tips the winner, so this must be the
-        // correct 3 at speed>=1 to byte-match.
-        top_intra_model_count_allowed: if cfg.allintra && cfg.speed >= 1 { 3 } else { 4 },
-        adapt_top_model_rd_count_using_neighbors: false,
+        // TOP_INTRA_MODEL_COUNT=4; :404 -> 3 at allintra speed>=1; -> 2 at
+        // speed>=6, :533). Drives the `top_intra_model_rd[]` slot
+        // `prune_intra_y_mode` compares against (index = count-1, adjusted by
+        // `get_model_rd_index_for_pruning` when the speed>=6
+        // adapt_top_model_rd_count_using_neighbors sf is on). At speed 0/1 the
+        // byte-match gates were inert to 4-vs-3 (the mode set kept fewer than 4
+        // competitive models); the speed-2 `disable_smooth_intra` prune shrinks
+        // the mode set enough that the 4-vs-3 slot difference tips the winner,
+        // so this must be the correct 3 at speed>=1 to byte-match.
+        top_intra_model_count_allowed: if cfg.allintra && cfg.speed >= 6 {
+            2
+        } else if cfg.allintra && cfg.speed >= 1 {
+            3
+        } else {
+            4
+        },
+        // speed_features.c:534 — allintra speed>=6 (see get_model_rd_index_for
+        // _pruning; reads the SAME above/left neighbour modes threaded below).
+        adapt_top_model_rd_count_using_neighbors: cfg.allintra && cfg.speed >= 6,
         above_mode,
         left_mode,
         qindex: cfg.qindex,
@@ -852,8 +927,30 @@ fn leaf_pick_sb_modes(
     } else {
         0
     };
+    // `should_prune_chroma_smooth_pred_based_on_source_variance`
+    // (intra_mode_search.c:850-862, gated by the speed>=6 sf
+    // `prune_smooth_intra_mode_for_chroma`, :528): prune UV_SMOOTH_PRED when
+    // the per-pixel SOURCE variance of BOTH chroma planes is < 20
+    // (`av1_get_perpixel_variance_facade` per plane over the PLANE bsize;
+    // short-circuit — V only measured when U passes, matching C's loop).
+    // Deterministic per block, so precomputed here and carried on the
+    // UvLoopPolicy (the loop consumer at intra_uv_rd.rs reads the flag on
+    // the non-directional arm exactly where C calls the helper).
+    let prune_smooth_for_chroma = cfg.allintra
+        && cfg.speed >= 6
+        && !env.monochrome
+        && is_chroma_ref
+        && perpixel_variance_y(env.src_u, ref_off_uv, env.stride, plane_bsize, env.bd) < 20
+        && perpixel_variance_y(env.src_v, ref_off_uv, env.stride, plane_bsize, env.bd) < 20;
+    // `intra_sf.cfl_search_range`: 3 (init default) through speed 5; 1 at
+    // speed>=6 (:532) — est-only CfL refinement with the range-1
+    // invalid/overhead early-outs (`cfl_rd_pick_alpha`, intra_uv_rd.rs).
+    let cfl_search_range = if cfg.allintra && cfg.speed >= 6 { 1 } else { 3 };
     let chroma_hog_lp;
-    let uv_lp: &UvLoopPolicy = if (chroma_hog_level > 0 || prune_chroma_luma_winner)
+    let uv_lp: &UvLoopPolicy = if (chroma_hog_level > 0
+        || prune_chroma_luma_winner
+        || prune_smooth_for_chroma
+        || cfl_search_range != 3)
         && !env.monochrome
         && is_chroma_ref
     {
@@ -885,6 +982,8 @@ fn leaf_pick_sb_modes(
         chroma_hog_lp = UvLoopPolicy {
             chroma_hog_skip_mask: mask,
             prune_chroma_modes_using_luma_winner: prune_chroma_luma_winner,
+            prune_smooth_for_chroma,
+            cfl_search_range,
             ..cfg.uv_lp.clone()
         };
         &chroma_hog_lp
@@ -1784,8 +1883,10 @@ pub fn rd_pick_partition_real(
         }
     }
     // prune_rect_part (:3385) / terminate_partition_search (:3380): no live
-    // writer in the speed-0 KEY envelope (module docs).
-    let prune_rect_part = [false; 2];
+    // writer in the speed 0..=5 KEY envelope (module docs); at allintra
+    // speed>=6 the post-NONE `prune_rect_part_using_none_pred_mode`
+    // (partition_search.c:4488) sets the flags off the NONE winner's mode.
+    let mut prune_rect_part = [false; 2];
     let terminate_partition_search = false;
 
     // ---- intra CNN partition prune (av1_prune_partitions_before_search ->
@@ -1803,6 +1904,47 @@ pub fn rd_pick_partition_real(
     // speed >= 5, :512-513 — only the screen arm moves). Derived from the
     // existing cfg fields so speed-0 (and GOOD) stay frozen — the level is 0
     // there, making this whole block a no-op.
+    // ---- av1_prune_partitions_before_search, the speed>=6 arms
+    //      (partition_strategy.c:1736-1773 — run BEFORE the CNN prune :1779
+    //      and before av1_prune_partitions_by_max_min_bsize, matching C's
+    //      intra-function order). The :1735 `rect_partition_eval_thresh` arm
+    //      stays a no-op here (no live setter on boosted KEY frames — module
+    //      docs). Both arms below are `allow_screen_content_tools ? 0 : ...`
+    //      sfs (speed_features.c:537-542), so screen frames skip them. ----
+    if cfg.allintra && cfg.speed >= 6 && !cfg.allow_screen_content_tools {
+        // `prune_rectangular_split_based_on_qidx == 2` (:1742-1757): disable
+        // rect partitions for bsize < max_prune_bsize, where max_prune_bsize
+        // steps down from BLOCK_32X32 by one square size per qindex third
+        // (qidx 0-85: prune below 32X32; 86-170: below 16X16; 171-255: below
+        // 8X8). sqr_bsize_step = BLOCK_32X32 - BLOCK_16X16 = 3.
+        let max_bsize = (9 - (cfg.qindex * 3 / 256) * 3).max(0); // QINDEX_RANGE = 256
+        let max_prune_bsize = max_bsize.min(9) as usize;
+        if bsize < max_prune_bsize {
+            // av1_disable_rect_partitions (encodeframe_utils.h:253).
+            do_rectangular_split = false;
+            partition_rect_allowed = [false, false];
+        }
+        // `prune_sub_8x8_partition_level == 1` (:1760-1773): at BLOCK_8X8,
+        // disable all splits when BOTH neighbours are available and either
+        // neighbour block is larger than 8x8 (bsize ENUM compare in C —
+        // `left_mbmi->bsize > BLOCK_8X8`).
+        if bsize == 3 {
+            let up_avail = mi_row > env.tile_row_start;
+            let left_avail = mi_col > env.tile_col_start;
+            let prune_sub_8x8 = left_avail
+                && up_avail
+                && (grid.bsize_at(mi_row, mi_col - 1) > 3
+                    || grid.bsize_at(mi_row - 1, mi_col) > 3);
+            if prune_sub_8x8 {
+                // av1_disable_all_splits (encodeframe_utils.h:261): square +
+                // rect off; partition_none_allowed untouched.
+                do_square_split = false;
+                do_rectangular_split = false;
+                partition_rect_allowed = [false, false];
+            }
+        }
+    }
+
     let intra_cnn_based_part_prune_level = if cfg.allintra && cfg.speed >= 1 {
         if cfg.allow_screen_content_tools {
             i32::from(cfg.speed >= 5)
@@ -1915,22 +2057,34 @@ pub fn rd_pick_partition_real(
     // av1_save_context (:5754).
     let saved = save_context(tile, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
 
-    // The per-node ALLINTRA variance arm (:5791-5827; module docs): at
-    // speed 0 only the >= BLOCK_16X16 force-split branch is live (the
-    // rect-prune sibling needs the speed >= 6
-    // prune_rect_part_using_4x4_var_deviation sf).
-    if cfg.allintra && bsize >= 6 {
+    // The per-node ALLINTRA variance arm (:5791-5827; module docs): two
+    // branches over the SAME log_sub_block_var stats. Arm 1 (>= BLOCK_16X16
+    // force-split, speed-independent) is live at every speed; arm 2 (rect
+    // prune when the 4x4 variance deviation is LOW) needs the speed>=6
+    // `prune_rect_part_using_4x4_var_deviation` sf (:539) — which ALSO
+    // widens the stats computation to sub-16x16 blocks (`bsize_at_least_
+    // 16x16 || prune_rect...`, :5797). `!x->must_find_valid_partition`
+    // (:5795) is always true in this interior envelope (the flag only rises
+    // on a no-valid-partition retry, which structurally can't happen here —
+    // same established simplification as the AB stage's handling).
+    let prune_rect_part_using_4x4_var_deviation = cfg.allintra && cfg.speed >= 6;
+    if cfg.allintra && (bsize >= 6 || prune_rect_part_using_4x4_var_deviation) {
         let ref_off_y = env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
         let mb_right = (env.mi_cols - mi_w as i32 - mi_col) * 4 * 8;
         let mb_bottom = (env.mi_rows - MI_SIZE_HIGH_B[bsize] as i32 - mi_row) * 4 * 8;
         let (var_min, var_max) = log_sub_block_var(
             env.src_y, ref_off_y, env.stride, bsize, mb_right, mb_bottom, env.bd,
         );
-        if var_min < 0.272 && (var_max - var_min) > 3.0 {
+        if bsize >= 6 && var_min < 0.272 && (var_max - var_min) > 3.0 {
             partition_none_allowed = false;
             // terminate_partition_search = 0 (:5817): already false — no
             // live setter in the envelope.
             do_square_split = true;
+        } else if prune_rect_part_using_4x4_var_deviation && (var_max - var_min) < 3.0 {
+            // "Prune rectangular partitions if the variance deviation of 4x4
+            // sub-blocks within the block is less than a threshold" (:5819).
+            // NOTE: only do_rectangular_split — partition_rect_allowed stays.
+            do_rectangular_split = false;
         }
     }
 
@@ -1995,6 +2149,7 @@ pub fn rd_pick_partition_real(
         // (pick_sb_modes normalized INT_MAX already; av1_rd_cost_update at
         // the stage is folded into the leaf's returned rdcost.)
         if this_rdc.rate != i32::MAX {
+            let none_winner_mode = winner.as_ref().map(|w| w.mode);
             if bsize_at_least_8x8 {
                 this_rdc.rate += pt_cost;
                 this_rdc.rdcost = crate::rd::rdcost(env.rdmult, this_rdc.rate, this_rdc.dist);
@@ -2004,6 +2159,31 @@ pub fn rd_pick_partition_real(
                 found = true;
                 pc_tree_partitioning = 0; // PARTITION_NONE
                 best_tree = Some(SbTree::Leaf(winner.expect("valid rate has a winner")));
+            }
+            // `prune_rect_part_using_none_pred_mode` (partition_search.c:
+            // 4488-4489, allintra speed>=6 sf :540): reads the NONE winner's
+            // luma mode (`pc_tree->none->mic.mode`) — NOT gated on the NONE
+            // candidate actually beating best_rdc, only on a valid rate.
+            if cfg.allintra && cfg.speed >= 6 {
+                let mode = none_winner_mode.expect("valid rate has a winner");
+                if mode == 0 || mode == 9 {
+                    // DC_PRED / SMOOTH_PRED: low variation — prune both rects
+                    // when a left/above neighbour block is LARGER (pixel
+                    // area) than this block (:4375-4382).
+                    let up_avail = mi_row > env.tile_row_start;
+                    let left_avail = mi_col > env.tile_col_start;
+                    if is_neighbor_blk_larger_than_cur_blk(
+                        grid, mi_row, mi_col, bsize, up_avail, left_avail,
+                    ) {
+                        prune_rect_part = [true, true];
+                    }
+                } else if mode == 8 || mode == 1 || mode == 5 {
+                    // D67 / V / D113: near-vertical pattern — prune HORZ.
+                    prune_rect_part[0] = true;
+                } else if mode == 6 || mode == 2 || mode == 7 {
+                    // D157 / H / D203: near-horizontal pattern — prune VERT.
+                    prune_rect_part[1] = true;
+                }
             }
         }
         // av1_restore_context at the NONE-stage tail (:4492).
@@ -2534,10 +2714,14 @@ pub fn rd_pick_partition_real(
         && bsize > ext_partition_eval_thresh // > BLOCK_8X8 through speed 4
         && has_rows
         && has_cols;
-    // prune_part4_search == 2 at speed 0 both usages (verified): disables
-    // 4-way when the block's pixel width is below
-    // `min_partition_size_1d << 2`.
-    let width_ok = BLK_1D[bsize] >= (BLK_1D[cfg.min_partition_size] << 2);
+    // prune_part4_search (partition_search.c:4152): disables 4-way when the
+    // block's pixel width is below `min_partition_size_1d <<
+    // prune_part4_search`. Allintra base 2 (speed_features.c:355, both
+    // usages, verified); speed>=6 -> 3 (:543 — inert there: the
+    // BLOCK_128X128 ext threshold above already kills 4-way outright, but
+    // carried for source faithfulness).
+    let prune_part4_search = if cfg.allintra && cfg.speed >= 6 { 3 } else { 2 };
+    let width_ok = BLK_1D[bsize] >= (BLK_1D[cfg.min_partition_size] << prune_part4_search);
     let mut part4_allowed = [false, false]; // [HORZ4, VERT4]
     // Interior-envelope simplification (module docs on rd_pick_4partition):
     // this port only attempts a 4-way type when ALL 4 quarter-strips are

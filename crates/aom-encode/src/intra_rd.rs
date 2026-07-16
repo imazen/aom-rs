@@ -838,8 +838,40 @@ pub struct WinnerModeCfg<'a> {
     /// Second-pass method: `[WINNER_MODE_EVAL]` = `USE_FULL_RD` at speed 4.
     pub winner_tx_size_method: usize,
     /// `winner_mode_count_allowed[multi_winner_mode_type]` (rdopt_utils.h:236):
-    /// 3 for MULTI_WINNER_MODE_DEFAULT (speed 4), 2 for FAST (speed 5).
+    /// 3 for MULTI_WINNER_MODE_DEFAULT (speed 4), 2 for FAST (speed 5), **1
+    /// for MULTI_WINNER_MODE_OFF (speed >= 6)** — count 1 ⇔ OFF, selecting
+    /// C's `else` re-eval arm (one `intra_block_yrd` on `best_mbmi`,
+    /// intra_mode_search.c:1727-1737) instead of the winner-stats loop, with
+    /// `store_winner_mode_stats` a hard no-op (rdopt_utils.h:688).
     pub max_winner_count: usize,
+    /// sf `winner_mode_sf.prune_winner_mode_eval_level` — 0 through speed 5,
+    /// 1 at allintra speed >= 6. Feeds [`bypass_winner_mode_processing`]
+    /// inside the re-eval's `is_winner_mode_processing_enabled` gate.
+    pub prune_winner_mode_eval_level: i32,
+}
+
+/// `bypass_winner_mode_processing` (rdopt_utils.h:403), the allintra-KEY
+/// subset: level 1 skips the winner-mode re-eval for low-source-variance
+/// blocks — `src_var_thresh = 64 - 48 * qindex / (MAXQ + 1)` (integer
+/// division), bypass when `source_variance < src_var_thresh`. Levels 2/3
+/// (txfm-skip based) and >= 4 are speed-7+ / realtime arms — modelled as
+/// unreachable (no allintra speed <= 6 sets them). The mbmi-dependent inputs
+/// (`use_txfm_skip`/`actual_txfm_skip`/`best_mode`) only reach the level-2+
+/// arms and `have_newmv_in_inter_mode` (always false for intra), so they are
+/// not parameters here.
+pub fn bypass_winner_mode_processing(
+    source_variance: u32,
+    qindex: i32,
+    prune_winner_mode_eval_level: i32,
+) -> bool {
+    match prune_winner_mode_eval_level {
+        0 => false,
+        1 => {
+            let src_var_thresh = 64 - 48 * qindex / 256; // MAXQ + 1 = 256
+            source_variance < src_var_thresh as u32
+        }
+        other => unreachable!("prune_winner_mode_eval_level {other} outside the allintra<=6 scope"),
+    }
 }
 
 /// One stored winner (`WinnerModeStats`, block.h): the mbmi fields the
@@ -855,18 +887,26 @@ pub struct WinnerModeEntry {
 }
 
 /// `store_winner_mode_stats` (rdopt_utils.h:679), intra-frame scope (the
-/// inter rate bookkeeping and palette color-map copy are out of scope; the
-/// `multi_winner_mode_type == OFF` early return is modelled by the caller
-/// only invoking this when the two-pass is configured). Insertion sort by
-/// ascending `rd` with C's exact semantics: the insert position is the FIRST
-/// index whose stored rd is STRICTLY greater (ties keep earlier entries
-/// ahead); a full list whose entries are all <= this_rd rejects the
-/// candidate; insertion shifts the tail and drops the overflow.
+/// inter rate bookkeeping and palette color-map copy are out of scope). The
+/// `multi_winner_mode_type == OFF` early return (rdopt_utils.h:688) is the
+/// `max_count == 1` arm — `winner_mode_count_allowed[OFF] = 1` and OFF is
+/// the only type with count 1, so the C type check and the count check are
+/// equivalent; at OFF (allintra speed >= 6) nothing is ever stored and the
+/// re-eval runs on `best_mbmi` instead. Insertion sort by ascending `rd`
+/// with C's exact semantics: the insert position is the FIRST index whose
+/// stored rd is STRICTLY greater (ties keep earlier entries ahead); a full
+/// list whose entries are all <= this_rd rejects the candidate; insertion
+/// shifts the tail and drops the overflow.
 pub fn store_winner_mode_stats(
     list: &mut Vec<WinnerModeEntry>,
     max_count: usize,
     entry: WinnerModeEntry,
 ) {
+    if max_count == 1 {
+        // MULTI_WINNER_MODE_OFF: "Mode stat is not required when multiwinner
+        // mode processing is disabled" (rdopt_utils.h:688).
+        return;
+    }
     if entry.rd == i64::MAX {
         return;
     }
@@ -1179,8 +1219,14 @@ pub fn rd_pick_intra_sby_mode_y(
     // tx-type set + full-RD tx-size sweep + always-on trellis). Gated on
     // `beat_best_rd` (C returns INT64_MAX before this when nothing beat the
     // caller's best_rd — `best.is_some()` here). `is_winner_mode_processing_
-    // enabled` is 1 unconditionally on this path at speed>=4 (fast_intra_tx_
-    // type_search=2, use_intra_{dct_only,default_tx_only}=0, bypass level 0).
+    // enabled` is 1 on this path at speed 4/5 (fast_intra_tx_type_search=2,
+    // use_intra_{dct_only,default_tx_only}=0, bypass level 0); at speed >= 6
+    // the level-1 [`bypass_winner_mode_processing`] source-variance gate can
+    // turn the whole re-eval off (its inputs are block-level, so the C
+    // per-winner check hoists losslessly out of the loop). At
+    // MULTI_WINNER_MODE_OFF (`max_winner_count == 1`, speed >= 6) the stats
+    // list is empty (store is a no-op) and C's `else` arm re-evaluates
+    // `best_mbmi` once (:1727-1737) — including a filter-intra winner.
     // NOTE the C asymmetry: the re-eval rd (intra_block_yrd :1216) gets NO
     // ALLINTRA variance factor, yet compares against the factored first-pass
     // best_rd.
@@ -1189,7 +1235,25 @@ pub fn rd_pick_intra_sby_mode_y(
             // WINNER pass: USE_FULL_RD ⇒ TX_MODE_SELECT (non-lossless).
             env.tx_mode_is_select =
                 select_default && wm.winner_tx_size_method != crate::tx_search::USE_LARGESTALL;
-            for entry in winner_stats.iter() {
+            let reeval: Vec<WinnerModeEntry> = if bypass_winner_mode_processing(
+                cfg.source_variance,
+                cfg.qindex,
+                wm.prune_winner_mode_eval_level,
+            ) {
+                Vec::new()
+            } else if wm.max_winner_count > 1 {
+                std::mem::take(&mut winner_stats)
+            } else {
+                let b = best.as_ref().expect("gated on best.is_some()");
+                vec![WinnerModeEntry {
+                    mode: b.mode,
+                    angle_delta: b.angle_delta,
+                    use_filter_intra: b.use_filter_intra,
+                    filter_intra_mode: b.filter_intra_mode,
+                    rd: b.best_rd,
+                }]
+            };
+            for entry in reeval.iter() {
                 // *mbmi = x->winner_mode_stats[mode_idx].mbmi (:1697).
                 env.mode = entry.mode;
                 env.angle_delta = entry.angle_delta;
@@ -1530,11 +1594,15 @@ mod winner_stats_tests {
         // Best-so-far inserts at the head.
         store_winner_mode_stats(&mut l, max, e(8, 5));
         assert_eq!(rds(&l), [(8, 5), (2, 10), (6, 20)]);
-        // max_count = 1 degenerates to strict-best tracking.
+        // max_count = 1 ⇔ MULTI_WINNER_MODE_OFF (winner_mode_count_allowed[OFF]
+        // = 1, and OFF is the only type with count 1): C's store returns
+        // immediately — "Mode stat is not required when multiwinner mode
+        // processing is disabled" (rdopt_utils.h:688) — so NOTHING is ever
+        // stored; the speed>=6 re-eval runs on `best_mbmi` instead
+        // (intra_mode_search.c:1727-1737).
         let mut one = Vec::new();
         store_winner_mode_stats(&mut one, 1, e(1, 100));
-        store_winner_mode_stats(&mut one, 1, e(2, 100)); // tie: rejected
         store_winner_mode_stats(&mut one, 1, e(3, 99));
-        assert_eq!(rds(&one), [(3, 99)]);
+        assert!(one.is_empty());
     }
 }

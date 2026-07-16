@@ -535,6 +535,18 @@ pub fn txfm_rd_in_plane_uv(
     // av1_get_entropy_contexts: working copies of the neighbour contexts.
     let mut t_above: Vec<i8> = env.above_ctx[pi][..max_blocks_wide].to_vec();
     let mut t_left: Vec<i8> = env.left_ctx[pi][..max_blocks_high].to_vec();
+    // predict_dc_only_block's zero_blk_rate ctx (tx_search.c:2055-2063): the
+    // BLOCK-ORIGIN skip ctx from the PERSISTENT (pre-walk) entropy arrays,
+    // shared by every txb of this chroma block — same quirk as the luma walk
+    // (see `TxTypeSearchInputs::predict_skip_zero_blk_rate`). Computed before
+    // the walk stamps t_above/t_left.
+    let predict_skip_zero_blk_rate = if pol.predict_dc_level >= 1 {
+        let (origin_skip_ctx, _) =
+            aom_txb::get_txb_ctx(plane_bsize, tx_size, plane, &t_above, &t_left);
+        env.coeff_costs.txb_skip[origin_skip_ctx as usize * 2 + 1]
+    } else {
+        0
+    };
 
     let mut stats = RdStats::zero();
     let mut winners: Vec<TxbWinner> = Vec::new();
@@ -626,6 +638,7 @@ pub fn txfm_rd_in_plane_uv(
                 visible_cols: vis_c,
                 visible_rows: vis_r,
                 qm_level: env.qm_levels.map(|l| l[plane]),
+                predict_skip_zero_blk_rate,
             };
             // Same unguarded C subtraction as `txfm_rd_in_plane_intra`'s luma
             // walk (tx_search.c `block_rd_txfm` is plane-generic) -- replicate

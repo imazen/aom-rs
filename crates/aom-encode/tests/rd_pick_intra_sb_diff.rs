@@ -394,6 +394,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 reduced_tx_set_used: reduced,
                 bd,
                 rows: &rows_y,
+                qindex: qindex as i32,
                 rdmult,
                 coeff_costs: &coeff_costs_y,
                 tx_type_costs: &tx_type_costs,

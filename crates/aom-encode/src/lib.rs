@@ -20,6 +20,7 @@ pub mod encode_intra;
 pub mod encode_sb;
 pub mod hog;
 pub mod intra_rd;
+pub mod intra_tx_nn_weights;
 pub mod intra_uv_rd;
 pub mod lf_search;
 pub mod mode_costs;

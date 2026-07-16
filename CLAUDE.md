@@ -577,6 +577,108 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   `default_max_partition_size=BLOCK_32X32`!), framesize-dep :304-316 (`use_square_partition_only_
   threshold=BLOCK_16X16` etc.). Substantially new machinery (LPF-from-Q, NN tx-depth prune,
   DC-block prediction, odd-delta-angle prune) — NOT a pure re-parameterization like speed 5 was.
+  **All of the above LANDED — see KB-10.**
+
+### KB-10 — Encoder: `--cpu-used=6` speed-6 deltas — PORTED ✅ (64/64 byte-identical on the canon grid; ONE pinned-open near-tie class on the noise extension)
+- **Status (2026-07-16): the canon gate is 64/64 byte-identical** vs real aomenc
+  (`encoder_gate_speed6_textured_allintra`, {64,128}² × cq{12,32,48,63} ×
+  {flat,two-tone,vgrad,diag} × {mono,420}) + the anti-vacuous witness
+  (`encoder_gate_speed6_vs_speed5_sf_witness`: port with FULL speed-5 features vs
+  `aomenc --cpu-used=6` DIVERGES on `vgrad 64² cq32` mono+420; with speed-6 features it
+  matches). Speed 0-5 gates all re-verified byte-unchanged. Speed 6 is NEW MACHINERY
+  (speed_features.c:527-564 + framesize-dep :304-316 + qindex-dep aggr=4), not a
+  re-parameterization — landed as one chunk after the KB-9 prep-facts series:
+  1. **`lpf_pick = LPF_PICK_FROM_Q`** (:559): the closed-form KEY LF derivation
+     (`lf_search::pick_filter_level_from_q`, chunk-1 building block 5935250,
+     oracle-validated vs real cpu-6 headers) replaces the reconstruction search —
+     wired in the harness LF derivation at `speed >= 6` (the `non_dual` flag's shape).
+  2. **Partition prunes** (bisect: baseline chunks-2+3 took the map 0→54/64):
+     `default_max_partition_size = BLOCK_32X32` (:546 — `set_max_min_partition_size`
+     min(sf, CLI cap, sb) forces square-split-only at the 64² root),
+     `use_square_partition_only_threshold = BLOCK_16X16` (framesize-dep :315),
+     `ext_partition_eval_thresh = BLOCK_128X128` for ALL sizes (qindex-dep aggr=4
+     else-arm :2963), `prune_rectangular_split_based_on_qidx = 2` (:537, the
+     qindex-thirds rect kill), `prune_rect_part_using_4x4_var_deviation` (:539 — arm 2
+     of the ALLINTRA var block, `do_rectangular_split = 0` when `var_max - var_min <
+     3.0`; also WIDENS the stats computation to sub-16x16 nodes),
+     `prune_rect_part_using_none_pred_mode` (:540 — post-NONE mode-class rect prune;
+     needs the new `ModeGrid::bsizes` neighbour-bsize stamps for
+     `is_neighbor_blk_larger_than_cur_blk`), `prune_sub_8x8_partition_level = 1`
+     (:541 — disable splits at 8x8 when either neighbour block is larger),
+     `prune_part4_search = 3` (:543 — inert: 4-way is off via the ext threshold).
+  3. **Intra mode loop**: `top_intra_model_count_allowed = 2` (:533) +
+     `adapt_top_model_rd_count_using_neighbors` (:534 — the neighbour-mode-adaptive
+     prune slot; machinery pre-existed in intra_rd.rs, now threaded),
+     `prune_luma_odd_delta_angles_in_intra` (:535 — evens-first delta order
+     `{-2,2,-3,-1,1,3}` + the even-neighbour rd_thresh prune; pre-existed, now gated
+     on), `intra_pruning_with_hog = 4` (:531, luma HOG threshold 0.4),
+     `prune_filter_intra_level = 2` (:529 — no filter-intra search,
+     intra_mode_search.c:239).
+  4. **predict_dc skip-block prediction** (`dc_blk_pred_level = 1`, :563 → per-stage
+     `predict_dc_levels[1] = {1,1,0}`): `predict_dc_only_block` (tx_search.c:2011) in
+     the DEFAULT_EVAL + MODE_EVAL tx-type searches — `pixel_diff_stats` (DOUBLE-norm
+     mse/mean/var over the visible txb) + the low-var/low-mean eob-0 skip fast path.
+     KEY QUIRK ported: the skip path's `zero_blk_rate` reads `get_txb_ctx` at the
+     BLOCK ORIGIN from the PERSISTENT entropy arrays (C re-derives ctxa/ctxl via
+     `av1_get_entropy_contexts` and passes UN-offset pointers — every txb of the block
+     shares the origin ctx; threaded as
+     `TxTypeSearchInputs::predict_skip_zero_blk_rate`). Bisect: flips 4 canon cells
+     (diag 128² mono+420 cq32/48 — mono proves it luma-side); 2384 luma fires on the
+     canon grid, chroma fires on the flat-uv extension cells.
+  5. **8x8 NN intra-tx-depth prune** (`prune_intra_tx_depths_using_nn`, :553):
+     `ml_predict_intra_tx_depth_prune` (tx_search.c:2823) — transcribed weights
+     (`xtask/transcribe_intra_tx_nn.py` → `intra_tx_nn_weights.rs`),
+     `get_mean_dev_features` (14 features incl. log1pf(source_variance) +
+     log1pf(dc_q²/256)), 16-node ReLU + prec-reduce, thresholds ±0.405465 →
+     TX_PRUNE_SPLIT (skip smaller depths) / TX_PRUNE_LARGEST (abort largest eval).
+     Threaded into `choose_tx_size_type_from_rd_intra`'s largest-depth walk via
+     `NnDepthPruneCtx` (needs `TxfmYrdEnv::qindex`, new field). **Differential:
+     `intra_tx_nn_diff` — 4000/4000 randomized decisions identical to the REAL
+     `av1_nn_predict_c` (ref_nn_predict) on the same tables, all three verdicts
+     exercised.** Byte-inert on the canon grid (no 8x8 leaf searches there — probes
+     measured 0 calls); LIVE on the noise extension (96 Split verdicts, byte-exact at
+     cq32/48).
+  6. **Winner-mode restructure**: `multi_winner_mode_type = OFF` (:561) —
+     `store_winner_mode_stats` returns immediately (rdopt_utils.h:688; count-1 arm in
+     intra_rd.rs) and the re-eval runs ONCE on `best_mbmi` (C's else-arm,
+     intra_mode_search.c:1727-1737 — including a filter-intra winner);
+     `prune_winner_mode_eval_level = 1` (:562) — `bypass_winner_mode_processing`
+     skips the re-eval when `source_variance < 64 - 48*qindex/256`.
+  7. **Chroma narrowing**: `cfl_search_range = 1` (:532 — est-only CfL refinement +
+     the range-1 invalid/overhead early-outs; machinery pre-existed in intra_uv_rd,
+     now threaded via UvLoopPolicy). Bisect: flips 8 canon cells (all 4:2:0 gradient —
+     vgrad/diag 64²+128² cq12-48). `prune_smooth_intra_mode_for_chroma` (:528 — prune
+     UV_SMOOTH when BOTH chroma planes' per-pixel source variance < 20,
+     intra_mode_search.c:850) — consumer wired (pre-existed), currently UNREACHED on
+     all grids (the speed>=4 luma-winner mask only admits UV_SMOOTH when the luma
+     winner is SMOOTH-family; carried transcription-faithful).
+  8. **rd tables**: `perform_coeff_opt = 6` (:555, columns {432,97}/{86,16}) and
+     `tx_domain_dist_level = 3` (:556 — types row {2,2,2}: the WINNER pass moves to
+     tx-domain distortion); `winner_mode_tx_type_pruning = 3` + `prune_tx_type_est_rd
+     = 0` (:551-552 — the est-rd prune turns OFF again; the PRUNE_5/PRUNE_2 stage rows
+     are carried but inert on intra with est-rd off).
+- **Verified INERT on the allintra KEY envelope:** `mv_sf.use_bsize_dependent_search_
+  method = 3` (:548, motion) and `intrabc_search_level = 1` (:549, screen-only intrabc);
+  `cdef_pick_method = CDEF_FAST_SEARCH_LVL4` (:558, CDEF off); qindex-dep
+  `rect_partition_eval_thresh` (boosted-gated, KEY is boosted); the qindex-dep
+  speed>=5 screen sub-8x8 re-zero (screen arm). `chroma_intra_pruning_with_hog = 4`
+  (:530) is still zeroed by the :608-616 tail (chroma HOG stays OFF at speed>=4).
+- **PINNED OPEN (near-tie class, KB-2 family):** `noise 64² cq63` (mono + 420) on the
+  NEW `encoder_gate_speed6_noise_flatuv_allintra` extension diverges — localized to
+  the (mi 8,0) 32×32 leaf's WINNER-pass tx-size sweep picking TX_16X16 over TX_32X32
+  by a 0.19% rd margin where real keeps 32 (the search partition tree matches real
+  EXACTLY; the frame codes tx_mode LARGEST post-hoc so the tx-plan difference desyncs
+  the parse). Not closed by any single-feature revert (NN / predict_dc / rd tables /
+  winner arm / intra-loop / partition prunes — each still diverges) ⇒ multi-feature
+  interaction at qindex 255. The test asserts the divergence PRESENT (fails on match →
+  promote). Next step: sibling-C RD dump of the winner sweep at (8,0). cq32/48 noise
+  cells (mono+420) are hard-asserted byte-match.
+- **Unit locks:** `speed6_allintra_deltas_match_source` (the full sf-block field set +
+  stage policies incl. predict_dc columns + the speed-5 regression guard);
+  `store_winner_mode_stats_matches_c_semantics` (the OFF count-1 no-store arm);
+  `intra_tx_nn_diff` (REAL-C NN differential). The harness `max_partition_size` is now
+  sf-driven (`min(default_max, CLI cap, SB)` — BLOCK_64X64 through speed 5, unchanged
+  consumer outcomes; BLOCK_32X32 at 6).
 
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
@@ -614,7 +716,9 @@ port-derived.
   `intra_tx_size_init_depth_rect` field — and the asserted per-feature-revert witness
   `encoder_gate_speed1_rect_and_4way_25` (in `encoder_gate_e2e_byte_match.rs`) re-diverges if either
   fix is reverted. (Earlier "need test cells to validate" note was stale.)
-- **#10 cpu-used 0..9 speed-feature sweep** (Gate 2) — the large remaining item.
+- **#10 cpu-used 0..9 speed-feature sweep** (Gate 2) — speeds 0-6 DONE (KB-8/KB-9/KB-10;
+  6 = 64/64 canon + one pinned-open noise-cq63 near-tie pair). Remaining: speeds 7-9
+  (VAR_BASED_PARTITION + nonrd machinery — see the KB-10 speed-7 prep note).
   (#8 qindex-from-cq and #21 decoder q62/q63 are DONE + CI-green — no longer remaining.)
 
 **Confirmed NON-divergences (ruled out — do not re-chase):**

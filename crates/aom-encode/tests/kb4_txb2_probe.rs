@@ -121,6 +121,7 @@ fn kb4_txb2_real_c_leaf_probe() {
         visible_cols: 4,
         visible_rows: 4,
         qm_level: None,
+        predict_skip_zero_blk_rate: 0,
     };
     let pol = TxTypeSearchPolicy::speed0_allintra();
     let got = search_tx_type_intra(&inp, &pol, i64::MAX);

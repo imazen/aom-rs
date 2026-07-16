@@ -36,10 +36,14 @@
 //! FAST :524) and disables the AB/4-way extended partitions on sub-480p frames
 //! via `ext_partition_eval_thresh` (:510 + the qindex-dependent :2947-2963
 //! aggr=3 arm; NOT a struct field here — framesize+qindex dependent, resolved
-//! by `partition_pick::ext_partition_eval_thresh_allintra_key`). Speed >= 6
-//! (`prune_filter_intra_level = 2` at :529, `top_intra_model_count_allowed = 2`
-//! at :533, `multi_winner_mode_type = OFF` at :561, LPF_PICK_FROM_Q at :559,
-//! etc.) is unmodeled. The `lpf_sf` CDEF/restoration fields are carried for
+//! by `partition_pick::ext_partition_eval_thresh_allintra_key`). Speed 6 is
+//! new machinery (the `if speed >= 6` block below documents the full
+//! LIVE/inert split): the closed-form LF (`lf_search::pick_filter_level_from_
+//! q`), the 8x8 NN tx-depth prune, skip-block prediction
+//! (`predict_dc_level`), the odd-delta-angle prune, the neighbour-adaptive
+//! top-model prune, the chroma smooth/CfL narrowing, and five partition
+//! prunes. Speeds 7-9 (:566-604) remain unmodeled (VAR_BASED_PARTITION /
+//! nonrd machinery). The `lpf_sf` CDEF/restoration fields are carried for
 //! provenance but do not affect bytes (CDEF + restoration off).
 //!
 //! Source line citations are against libaom v3.14.1 (git 03087864).
@@ -128,6 +132,49 @@ pub struct SpeedFeatures {
     /// default 0 (init_part_sf:2305); speed>=1 -> 1 (speed_features.c:210).
     /// Indexes the HORZ4/VERT4 ML-prune thresholds; not frame-gated.
     pub ml_4_partition_search_level_index: i32,
+    /// `part_sf.prune_rectangular_split_based_on_qidx` — default 0
+    /// (init_part_sf:2316); allintra speed>=6 -> `allow_screen_content_tools ?
+    /// 0 : 2` (speed_features.c:537-538). At level 2 the
+    /// `av1_prune_partitions_before_search` arm (partition_strategy.c:1742-1757)
+    /// disables rect partitions for `bsize < max_prune_bsize` where
+    /// `max_prune_bsize = clamp(BLOCK_32X32 - (qindex*3/QINDEX_RANGE)*3, 4X4,
+    /// 32X32)` (qidx 0-85: rect off below 32X32; 86-170: below 16X16;
+    /// 171-255: below 8X8).
+    pub prune_rectangular_split_based_on_qidx: i32,
+    /// `part_sf.prune_rect_part_using_4x4_var_deviation` — default false
+    /// (init_part_sf:2317); allintra speed>=6 -> true (:539). The SECOND arm of
+    /// rd_pick_partition's ALLINTRA var block (partition_search.c:5793-5825):
+    /// when `var_max - var_min < 3.0` over the block's 4x4 log-variances (and
+    /// the >=16X16 NONE-kill arm did not fire), `do_rectangular_split = 0`.
+    /// (Arm 1, the >=16X16 NONE-kill, is speed-independent and already live.)
+    pub prune_rect_part_using_4x4_var_deviation: bool,
+    /// `part_sf.prune_rect_part_using_none_pred_mode` — default false
+    /// (init_part_sf:2318); allintra speed>=6 -> true (:540). After the NONE
+    /// leaf search (partition_search.c:4488): DC/SMOOTH winner + a larger
+    /// left/above neighbour -> prune both rects; near-vertical winner
+    /// (V/D67/D113) -> prune HORZ; near-horizontal (H/D157/D203) -> prune VERT.
+    pub prune_rect_part_using_none_pred_mode: bool,
+    /// `part_sf.prune_sub_8x8_partition_level` — default 0 (init_part_sf:2321);
+    /// allintra speed>=6 -> `allow_screen_content_tools ? 0 : 1` (:541-542).
+    /// At level 1 (partition_strategy.c:1760-1773): at bsize == BLOCK_8X8,
+    /// disable all splits when BOTH neighbours are available and either
+    /// neighbour bsize > BLOCK_8X8. (The qindex-dependent speed>=5 screen arm
+    /// :3070-3077 re-zeroes it for low-q sub-480p screen — screen is already
+    /// 0 here.)
+    pub prune_sub_8x8_partition_level: i32,
+    /// `part_sf.prune_part4_search` — allintra base 2 (:355); speed>=6 -> 3
+    /// (:543). The 4-way width gate `width < min_partition_size_1d <<
+    /// prune_part4_search` (partition_search.c:4152-4157). INERT at speed 6 on
+    /// the KEY path: `ext_partition_eval_thresh = BLOCK_128X128` (qindex-dep
+    /// aggr=4 arm) already disables the 4-way search outright.
+    pub prune_part4_search: i32,
+    /// `part_sf.default_max_partition_size` — default BLOCK_LARGEST
+    /// (= BLOCK_128X128, init_part_sf:2286); allintra speed>=6 -> BLOCK_32X32
+    /// (:546). `set_max_min_partition_size` (partition_strategy.h:214) takes
+    /// `AOMMIN` with the oxcf CLI cap (BLOCK_128X128 default) and the sb size;
+    /// `av1_prune_partitions_by_max_min_bsize` then forces square-split-only
+    /// where `bsize_1d > max_partition_size_1d`. BLOCK_SIZE enum value.
+    pub default_max_partition_size: usize,
 
     // ---- intra_sf --------------------------------------------------------
     /// `intra_sf.intra_pruning_with_hog` — allintra base 1
@@ -175,8 +222,36 @@ pub struct SpeedFeatures {
     pub prune_luma_palette_size_search_level: i32,
     /// `intra_sf.top_intra_model_count_allowed` — default
     /// [`TOP_INTRA_MODEL_COUNT`] (=4, init_intra_sf:2443); speed>=1 -> 3
-    /// (speed_features.c:404), speed>=4 -> 2. Top luma modes taken to full RD.
+    /// (speed_features.c:404), speed>=6 -> 2 (:533). Top luma modes taken to
+    /// full RD.
     pub top_intra_model_count_allowed: i32,
+    /// `intra_sf.adapt_top_model_rd_count_using_neighbors` — default 0
+    /// (init_intra_sf:2444); allintra speed>=6 -> 1 (:534). When on,
+    /// `get_model_rd_index_for_pruning` (intra_mode_search.c:421) lowers the
+    /// compared `top_intra_model_rd[]` slot by one when the current mode
+    /// differs from EITHER available neighbour's luma mode (qindex <= 127) /
+    /// from BOTH (qindex >= 128).
+    pub adapt_top_model_rd_count_using_neighbors: bool,
+    /// `intra_sf.prune_luma_odd_delta_angles_in_intra` — default 0
+    /// (init_intra_sf:2447); allintra speed>=6 -> 1 (:535). Reorders the
+    /// directional delta-angle sweep to evens-first (`luma_delta_angles_order`)
+    /// and prunes an odd delta when both even-neighbour full RDs exceed
+    /// `best_rd + best_rd/8` (intra_mode_search.c:1443-1466).
+    pub prune_luma_odd_delta_angles_in_intra: bool,
+    /// `intra_sf.prune_smooth_intra_mode_for_chroma` — default 0
+    /// (init_intra_sf:2439); allintra speed>=6 -> 1 (:528). Prunes
+    /// UV_SMOOTH_PRED from the chroma mode loop when the per-pixel source
+    /// variance of BOTH chroma planes is < 20
+    /// (`should_prune_chroma_smooth_pred_based_on_source_variance`,
+    /// intra_mode_search.c:850-862).
+    pub prune_smooth_intra_mode_for_chroma: bool,
+    /// `intra_sf.cfl_search_range` — default 3 (init_intra_sf:2442); allintra
+    /// speed>=6 -> 1 (:532). The full-RD refinement radius around the
+    /// SATD-estimated best CfL alpha index (`cfl_rd_pick_alpha`,
+    /// intra_mode_search.c:747): at 1, only the estimated index is fully
+    /// evaluated, with an early bail when both plane estimates are
+    /// CFL_INDEX_ZERO or the signaling-rate rdcost already exceeds ref_best_rd.
+    pub cfl_search_range: i32,
 
     // ---- tx_sf -----------------------------------------------------------
     /// `tx_sf.adaptive_txb_search_level` — allintra base 1
@@ -273,6 +348,28 @@ pub struct SpeedFeatures {
     /// the row of `tx_size_search_methods[4][MODE_EVAL_TYPES]`. Stays 0 on the
     /// all-intra path through speed 8 (the allintra cascade never bumps it).
     pub tx_size_search_level: i32,
+    /// `winner_mode_sf.prune_winner_mode_eval_level` — default 0 (init:2517);
+    /// allintra speed>=6 -> 1 (:562). Level 1
+    /// (`bypass_winner_mode_processing`, rdopt_utils.h:403-417): skip the
+    /// winner-mode re-eval entirely when `x->source_variance <
+    /// 64 - 48*qindex/(MAXQ+1)`.
+    pub prune_winner_mode_eval_level: i32,
+    /// `winner_mode_sf.dc_blk_pred_level` — default 0 (init:2515); allintra
+    /// speed>=6 -> 1 (:563). Indexes `predict_dc_levels[4][MODE_EVAL_TYPES]`
+    /// (speed_features.c:137-139) = the per-stage `txfm_params->
+    /// predict_dc_level` copied by `set_mode_eval_params`; level 1 row is
+    /// {1,1,0} — skip-block prediction (`predict_dc_only_block`,
+    /// tx_search.c:2011-2076) in the DEFAULT_EVAL + MODE_EVAL stages, off in
+    /// the WINNER re-eval.
+    pub dc_blk_pred_level: i32,
+    // ---- tx_sf (speed>=6 additions) ---------------------------------------
+    /// `tx_sf.prune_intra_tx_depths_using_nn` — default false (init_tx_sf);
+    /// allintra speed>=6 -> true (:553). In `choose_tx_size_type_from_rd`
+    /// (tx_search.c:3016-3023): evaluate the 8x8-block NN
+    /// (`ml_predict_intra_tx_depth_prune`) on the largest-tx residual;
+    /// TX_PRUNE_LARGEST aborts the largest-depth eval, TX_PRUNE_SPLIT skips
+    /// the smaller depths.
+    pub prune_intra_tx_depths_using_nn: bool,
 
     // ---- rd_sf -----------------------------------------------------------
     /// `rd_sf.perform_coeff_opt` — allintra base 1 (speed_features.c:383);
@@ -320,6 +417,12 @@ impl SpeedFeatures {
             intra_cnn_based_part_prune_level: 0, // init_part_sf:2311
             reuse_best_prediction_for_part_ab: 0, // init_part_sf:2324
             ml_4_partition_search_level_index: 0, // init_part_sf:2305
+            prune_rectangular_split_based_on_qidx: 0, // init_part_sf:2316
+            prune_rect_part_using_4x4_var_deviation: false, // init_part_sf:2317
+            prune_rect_part_using_none_pred_mode: false, // init_part_sf:2318
+            prune_sub_8x8_partition_level: 0, // init_part_sf:2321
+            prune_part4_search: 2, // allintra base (:355; init default 0)
+            default_max_partition_size: 15, // BLOCK_LARGEST = BLOCK_128X128 (init_part_sf:2286)
             // intra_sf
             intra_pruning_with_hog: 1, // allintra base (speed_features.c:360)
             chroma_intra_pruning_with_hog: 0, // init_intra_sf default (off)
@@ -329,6 +432,10 @@ impl SpeedFeatures {
             prune_palette_search_level: 0, // init_intra_sf:2431
             prune_luma_palette_size_search_level: 1, // allintra base (:362)
             top_intra_model_count_allowed: TOP_INTRA_MODEL_COUNT, // init_intra_sf:2443
+            adapt_top_model_rd_count_using_neighbors: false, // init_intra_sf:2444
+            prune_luma_odd_delta_angles_in_intra: false, // init_intra_sf:2447
+            prune_smooth_intra_mode_for_chroma: false, // init_intra_sf:2439
+            cfl_search_range: 3, // init_intra_sf:2442
             // tx_sf
             adaptive_txb_search_level: 1, // allintra base (:366)
             intra_tx_size_search_init_depth_rect: 0, // init_tx_sf:2453
@@ -344,12 +451,15 @@ impl SpeedFeatures {
             fast_intra_tx_type_search: 0, // init_tx_sf:2461
             winner_mode_tx_type_pruning: 0, // init_tx_sf:2466
             prune_tx_type_est_rd: false, // init_tx_sf:2465
+            prune_intra_tx_depths_using_nn: false, // init_tx_sf default (off)
             // winner_mode_sf (all off until speed>=4 — KB-8 chunk 2d wires these)
             enable_winner_mode_for_coeff_opt: false, // init:2511
             enable_winner_mode_for_use_tx_domain_dist: false, // init:2513
             enable_winner_mode_for_tx_size_srch: false, // init:2512
             multi_winner_mode_type: 0, // init:2514 (MULTI_WINNER_MODE_OFF)
             tx_size_search_level: 0, // init:2510
+            prune_winner_mode_eval_level: 0, // init:2517
+            dc_blk_pred_level: 0, // init:2515
             // rd_sf
             perform_coeff_opt: 1, // allintra base (:383)
             tx_domain_dist_level: 0, // init_rd_sf:2501
@@ -610,6 +720,88 @@ impl SpeedFeatures {
             sf.multi_winner_mode_type = 1; // MULTI_WINNER_MODE_FAST (:524) → top-2 re-eval
         }
 
+        // ---- if (speed >= 6) { ... } (speed_features.c:527-564 independent;
+        //      framesize-DEPENDENT :304-316; qindex-DEPENDENT aggr=4 arm).
+        //      Substantially NEW machinery, not a re-parameterization — each
+        //      LIVE delta has its own ported consumer (KB-10 chunk series):
+        //
+        //   LIVE on the allintra KEY path:
+        //     - intra_sf (:528-535): `prune_smooth_intra_mode_for_chroma`,
+        //       `prune_filter_intra_level = 2` (no filter-intra search at all —
+        //       rd_pick_filter_intra_sby returns 0, intra_mode_search.c:244),
+        //       `intra_pruning_with_hog = 4` (luma HOG threshold 0.4),
+        //       `cfl_search_range = 1`, `top_intra_model_count_allowed = 2`,
+        //       `adapt_top_model_rd_count_using_neighbors`,
+        //       `prune_luma_odd_delta_angles_in_intra`.
+        //     - part_sf (:537-546): the qidx rect prune, both rect-part prunes,
+        //       the sub-8x8 prune, `default_max_partition_size = BLOCK_32X32`;
+        //       plus the framesize-dep `use_square_partition_only_threshold =
+        //       BLOCK_16X16` (:315, resolved in partition_pick) and the
+        //       qindex-dep `ext_partition_eval_thresh = BLOCK_128X128` for ALL
+        //       frame sizes (aggr = AOMMIN(4, speed-2) = 4 else-arm,
+        //       :2963-2964; also resolved in partition_pick).
+        //     - tx_sf (:551-553): `winner_mode_tx_type_pruning = 3` (MODE_EVAL
+        //       prune row {PRUNE_5, PRUNE_2} — both inert on intra while
+        //       `prune_tx_type_est_rd = 0` turns the est-rd prune OFF; the
+        //       PRUNE_2 winner column is carried faithfully),
+        //       `prune_intra_tx_depths_using_nn` (the 8x8 NN depth prune).
+        //     - rd_sf (:555-556): `perform_coeff_opt = 6` (columns {432,97} /
+        //       {86,16}), `tx_domain_dist_level = 3` (types row {2,2,2} — the
+        //       WINNER pass now also uses tx-domain distortion).
+        //     - lpf_sf (:559): `lpf_pick = LPF_PICK_FROM_Q` — the closed-form
+        //       LF derivation (`lf_search::pick_filter_level_from_q`, landed
+        //       chunk 1); wired via the harness LF derivation, not a struct
+        //       field (same shape as the speed-4/5 `non_dual` flag).
+        //     - winner_mode_sf (:561-563): `multi_winner_mode_type = OFF`
+        //       (store_winner_mode_stats returns immediately — the re-eval
+        //       runs once on best_mbmi, intra_mode_search.c:1727-1737),
+        //       `prune_winner_mode_eval_level = 1` (source-variance bypass),
+        //       `dc_blk_pred_level = 1` (skip-block prediction in the
+        //       DEFAULT/MODE_EVAL tx-type searches).
+        //
+        //   INERT on this path (verified against source):
+        //     - `mv_sf.use_bsize_dependent_search_method = 3` (:548) — motion
+        //       search method select; no motion search on all-intra KEY.
+        //     - `mv_sf.intrabc_search_level = 1` (:549) — intrabc hash search;
+        //       intrabc is screen-content-only and outside this envelope.
+        //     - `lpf_sf.cdef_pick_method = CDEF_FAST_SEARCH_LVL4` (:558) —
+        //       CDEF off in the allintra default envelope (carried for
+        //       provenance like the earlier cdef levels).
+        //     - qindex-dep `rect_partition_eval_thresh` (:2980, aggr=1) —
+        //       gated `!boosted` + >=480p; KEY is boosted.
+        //     - qindex-dep speed>=5 screen sub-8x8 re-zero (:3070) — screen
+        //       arm only; the non-screen value stands.
+        if speed >= 6 {
+            // intra_sf (:528-535)
+            sf.prune_smooth_intra_mode_for_chroma = true;
+            sf.prune_filter_intra_level = 2;
+            sf.chroma_intra_pruning_with_hog = 4; // :530 (zeroed below)
+            sf.intra_pruning_with_hog = 4;
+            sf.cfl_search_range = 1;
+            sf.top_intra_model_count_allowed = 2;
+            sf.adapt_top_model_rd_count_using_neighbors = true;
+            sf.prune_luma_odd_delta_angles_in_intra = true;
+            // part_sf (:537-546)
+            sf.prune_rectangular_split_based_on_qidx =
+                if allow_screen_content_tools { 0 } else { 2 };
+            sf.prune_rect_part_using_4x4_var_deviation = true;
+            sf.prune_rect_part_using_none_pred_mode = true;
+            sf.prune_sub_8x8_partition_level = if allow_screen_content_tools { 0 } else { 1 };
+            sf.prune_part4_search = 3;
+            sf.default_max_partition_size = 9; // BLOCK_32X32
+            // tx_sf.tx_type_search (:551-553)
+            sf.winner_mode_tx_type_pruning = 3;
+            sf.prune_tx_type_est_rd = false;
+            sf.prune_intra_tx_depths_using_nn = true;
+            // rd_sf (:555-556)
+            sf.perform_coeff_opt = 6;
+            sf.tx_domain_dist_level = 3;
+            // winner_mode_sf (:561-563)
+            sf.multi_winner_mode_type = 0; // MULTI_WINNER_MODE_OFF
+            sf.prune_winner_mode_eval_level = 1;
+            sf.dc_blk_pred_level = 1;
+        }
+
         // The unconditional tail of set_allintra_speed_features_framesize_
         // independent (speed_features.c:608-616, AFTER every speed block):
         // "As the speed feature prune_chroma_modes_using_luma_winner already
@@ -726,6 +918,15 @@ impl SpeedFeatures {
                     self.prune_2d_txfm_mode
                 }
             },
+            // set_mode_eval_params (rdopt_utils.h:564/588/616): the per-stage
+            // predict_dc_level copy — the raw stage column, no enable gate
+            // (predict_dc_levels[4][MODE_EVAL_TYPES], speed_features.c:137-139).
+            predict_dc_level: {
+                const PREDICT_DC_LEVELS: [[u32; 3]; 4] =
+                    [[0, 0, 0], [1, 1, 0], [2, 2, 0], [2, 2, 2]];
+                PREDICT_DC_LEVELS[self.dc_blk_pred_level as usize][stage]
+            },
+            prune_intra_tx_depths_using_nn: self.prune_intra_tx_depths_using_nn,
         }
     }
 
@@ -982,6 +1183,118 @@ mod tests {
             assert_eq!(sf.tx_size_search_method_for_stage(stage), sf4.tx_size_search_method_for_stage(stage));
         }
         assert_eq!(sf4.winner_mode_count_allowed(), 3);
+    }
+
+    /// The speed-6 all-intra deltas, asserted against the source values
+    /// (`set_allintra_*` speed>=6 block :527-564 + the :608-616 final
+    /// override). The framesize-dep `use_square_partition_only_threshold =
+    /// BLOCK_16X16` (:315) and qindex-dep `ext_partition_eval_thresh =
+    /// BLOCK_128X128` (aggr=4 else-arm :2963) live in `partition_pick`
+    /// (tested there); `lpf_pick = LPF_PICK_FROM_Q` lives in `lf_search`.
+    #[test]
+    fn speed6_allintra_deltas_match_source() {
+        let sf = SpeedFeatures::set_allintra(6, false, false);
+        // intra_sf (:528-535).
+        assert!(sf.prune_smooth_intra_mode_for_chroma); // :528
+        assert_eq!(sf.prune_filter_intra_level, 2); // :529 (1 -> 2: no filter-intra search)
+        assert_eq!(sf.chroma_intra_pruning_with_hog, 0); // :530 sets 4, :608-616 zeroes it
+        assert_eq!(sf.intra_pruning_with_hog, 4); // :531 (3 -> 4, thresh 0.4)
+        assert_eq!(sf.cfl_search_range, 1); // :532 (3 -> 1)
+        assert_eq!(sf.top_intra_model_count_allowed, 2); // :533 (3 -> 2)
+        assert!(sf.adapt_top_model_rd_count_using_neighbors); // :534
+        assert!(sf.prune_luma_odd_delta_angles_in_intra); // :535
+        // part_sf (:537-546); the screen arms zero the first + fourth.
+        assert_eq!(sf.prune_rectangular_split_based_on_qidx, 2); // :537-538
+        assert!(sf.prune_rect_part_using_4x4_var_deviation); // :539
+        assert!(sf.prune_rect_part_using_none_pred_mode); // :540
+        assert_eq!(sf.prune_sub_8x8_partition_level, 1); // :541-542
+        assert_eq!(sf.prune_part4_search, 3); // :543 (2 -> 3; inert: 4-way off)
+        assert_eq!(sf.default_max_partition_size, 9); // BLOCK_32X32 (:546)
+        let screen = SpeedFeatures::set_allintra(6, true, false);
+        assert_eq!(screen.prune_rectangular_split_based_on_qidx, 0);
+        assert_eq!(screen.prune_sub_8x8_partition_level, 0);
+        // tx_sf (:551-553).
+        assert_eq!(sf.winner_mode_tx_type_pruning, 3); // :551 (2 -> 3)
+        assert!(!sf.prune_tx_type_est_rd); // :552 (1 -> 0: est-rd prune OFF again)
+        assert!(sf.prune_intra_tx_depths_using_nn); // :553
+        // rd_sf (:555-556).
+        assert_eq!(sf.perform_coeff_opt, 6); // :555 (5 -> 6)
+        assert_eq!(sf.tx_domain_dist_level, 3); // :556 (1 -> 3: types row {2,2,2})
+        // winner_mode_sf (:561-563).
+        assert_eq!(sf.multi_winner_mode_type, 0); // MULTI_WINNER_MODE_OFF (:561)
+        assert_eq!(sf.winner_mode_count_allowed(), 1);
+        assert_eq!(sf.prune_winner_mode_eval_level, 1); // :562
+        assert_eq!(sf.dc_blk_pred_level, 1); // :563
+        // Carried from speed 4/5 (no speed-6 line touches these).
+        assert!(sf.prune_chroma_modes_using_luma_winner);
+        assert_eq!(sf.tx_domain_dist_thres_level, 3);
+        assert_eq!(sf.fast_intra_tx_type_search, 2);
+        assert!(sf.enable_winner_mode_for_coeff_opt);
+        assert!(sf.enable_winner_mode_for_use_tx_domain_dist);
+        assert!(sf.enable_winner_mode_for_tx_size_srch);
+        assert!(sf.use_rd_based_breakout_for_intra_tx_search);
+        assert_eq!(sf.intra_cnn_based_part_prune_level, 2);
+        // Derived stage policies. DEFAULT_EVAL: coeff row 6 col 0 = {432, 97};
+        // tx-domain types[3] = {2,2,2} with thresholds[3] = {0,0,0}; predict_dc
+        // row 1 = {1,1,0}.
+        let def = sf.tx_type_search_policy_for_stage(DEFAULT_EVAL, false, 0);
+        assert_eq!(
+            (def.coeff_opt_dist_threshold, def.coeff_opt_satd_threshold),
+            (432, 97)
+        );
+        assert_eq!(
+            (def.use_transform_domain_distortion, def.tx_domain_dist_threshold),
+            (2, 0)
+        );
+        assert_eq!(def.predict_dc_level, 1);
+        assert!(!def.prune_tx_type_est_rd);
+        let me = sf.tx_type_search_policy_for_stage(MODE_EVAL, false, 0);
+        assert_eq!(
+            (me.coeff_opt_dist_threshold, me.coeff_opt_satd_threshold),
+            (86, 16)
+        );
+        assert_eq!(
+            (me.use_transform_domain_distortion, me.tx_domain_dist_threshold),
+            (2, 0)
+        );
+        assert_eq!(me.predict_dc_level, 1);
+        assert!(me.use_default_intra_tx_type);
+        assert_eq!(me.prune_2d_txfm_mode, 5); // prune_mode[2][0] = TX_TYPE_PRUNE_5 (inert: est_rd off)
+        let win = sf.tx_type_search_policy_for_stage(WINNER_MODE_EVAL, false, 0);
+        assert_eq!(
+            (win.coeff_opt_dist_threshold, win.coeff_opt_satd_threshold),
+            (u32::MAX, u32::MAX)
+        );
+        // The WINNER pass now ALSO runs tx-domain distortion (types[3][2]=2) —
+        // the big speed-6 rd_sf change vs speed 4/5's pixel-domain winner pass.
+        assert_eq!(
+            (win.use_transform_domain_distortion, win.tx_domain_dist_threshold),
+            (2, 0)
+        );
+        assert_eq!(win.predict_dc_level, 0); // predict_dc_levels[1][WINNER] = 0
+        assert_eq!(win.prune_2d_txfm_mode, 2); // prune_mode[2][1] = TX_TYPE_PRUNE_2 (inert: est_rd off)
+        // Tx-size methods unchanged from speed 4/5 (level 0 row).
+        assert_eq!(sf.tx_size_search_method_for_stage(MODE_EVAL), 2); // USE_LARGESTALL
+        assert_eq!(sf.tx_size_search_method_for_stage(WINNER_MODE_EVAL), 0); // USE_FULL_RD
+        // Speed 5 (regression guard): every speed-6-only field at its speed-5 value.
+        let sf5 = SpeedFeatures::set_allintra(5, false, false);
+        assert!(!sf5.prune_smooth_intra_mode_for_chroma);
+        assert_eq!(sf5.cfl_search_range, 3);
+        assert!(!sf5.adapt_top_model_rd_count_using_neighbors);
+        assert!(!sf5.prune_luma_odd_delta_angles_in_intra);
+        assert_eq!(sf5.prune_rectangular_split_based_on_qidx, 0);
+        assert!(!sf5.prune_rect_part_using_4x4_var_deviation);
+        assert!(!sf5.prune_rect_part_using_none_pred_mode);
+        assert_eq!(sf5.prune_sub_8x8_partition_level, 0);
+        assert_eq!(sf5.prune_part4_search, 2);
+        assert_eq!(sf5.default_max_partition_size, 15);
+        assert!(!sf5.prune_intra_tx_depths_using_nn);
+        assert_eq!(sf5.prune_winner_mode_eval_level, 0);
+        assert_eq!(sf5.dc_blk_pred_level, 0);
+        assert_eq!(
+            sf5.tx_type_search_policy_for_stage(DEFAULT_EVAL, false, 0).predict_dc_level,
+            0
+        );
     }
 
     /// KB-8 chunk 2a: the stage-aware [`SpeedFeatures::tx_type_search_policy_for_stage`]

@@ -417,6 +417,53 @@ pub fn av1_pixel_diff_dist(
     (sse, mse_q8)
 }
 
+/// `dc_coeff_scale[TX_SIZES_ALL]` (encodemb.h:168): 12-bit fixed-point
+/// DCT_DCT forward-transform normalization per tx size — sqrt(2) for 1:2/2:1,
+/// 2 for 1:4/4:1, an extra 2 for <=8x8; 64-point sizes unsupported (0).
+const DC_COEFF_SCALE: [u16; 19] = [
+    1024, 2048, 4096, 4096, 0, 1448, 1448, 2896, 2896, 2896, 2896, 0, 0, 2048, 2048, 4096, 4096,
+    0, 0,
+];
+
+/// `pixel_diff_stats` (tx_search.c:151): the residual block's SSE, mean and
+/// variance over the VISIBLE 4x4s of the txb — the `predict_dc_only_block`
+/// inputs. Returns `(sse, block_mse_q8, per_px_mean, block_var)` with C's
+/// exact DOUBLE `norm_factor` arithmetic (the mse here can differ by one
+/// q8 unit from [`av1_pixel_diff_dist`]'s integer division — when the
+/// predict-dc path is live the DOUBLE form feeds the trellis/tx-domain
+/// gates, so it must be this form, not the integer one). `per_px_mean` is
+/// the transform-domain (<<7) signed mean; `block_var = sse - norm*sum²`
+/// (double-truncated).
+fn pixel_diff_stats(
+    diff: &[i16],
+    diff_stride: usize,
+    visible_cols: usize,
+    visible_rows: usize,
+) -> (u64, u32, i64, u64) {
+    // aom_sum_sse_2d_i16: sum + sum-of-squares over the visible region.
+    let mut sse = 0u64;
+    let mut sum = 0i32;
+    for r in 0..visible_rows {
+        let base = r * diff_stride;
+        for &d in &diff[base..base + visible_cols] {
+            sum += i32::from(d);
+            sse += (i64::from(d) * i64::from(d)) as u64;
+        }
+    }
+    if visible_cols > 0 && visible_rows > 0 {
+        let norm_factor = 1.0f64 / (visible_cols * visible_rows) as f64;
+        let sign_sum: i64 = if sum > 0 { 1 } else { -1 };
+        // Conversion to transform domain (C truncating double->int64 cast).
+        let per_px_mean = sign_sum * (((norm_factor * f64::from(sum.abs())) as i64) << 7);
+        let block_mse_q8 = (norm_factor * (256 * sse) as f64) as u32;
+        // (uint64_t)(norm_factor * sum * sum) — left-to-right double eval.
+        let block_var = sse - (norm_factor * f64::from(sum) * f64::from(sum)) as u64;
+        (sse, block_mse_q8, per_px_mean, block_var)
+    } else {
+        (sse, u32::MAX, i64::MAX, u64::MAX)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // search_tx_type (tx_search.c) — the per-txb tx-type RD search, luma intra,
 // speed-0 policy (see module docs), interior txbs (visible == full).
@@ -760,6 +807,23 @@ pub struct TxTypeSearchPolicy {
     /// (the 2D-NN prune `prune_tx_2D` is inter-only, tx_search.c:1935). Inert
     /// while `prune_tx_type_est_rd` is false.
     pub prune_2d_txfm_mode: i32,
+    /// `txfm_params->predict_dc_level` — the STAGE-resolved skip/DC-block
+    /// prediction level (`set_mode_eval_params` copies
+    /// `predict_dc_levels[dc_blk_pred_level][stage]`, rdopt_utils.h:564/588/
+    /// 616; table at speed_features.c:137-139). 0 through speed 5 on every
+    /// stage (`dc_blk_pred_level = 0` -> row {0,0,0}); at allintra speed>=6
+    /// (`dc_blk_pred_level = 1` -> row {1,1,0}) the DEFAULT_EVAL + MODE_EVAL
+    /// tx-type searches run `predict_dc_only_block` (tx_search.c:2011): a
+    /// residual-mean/variance skip-block predictor that short-circuits the
+    /// whole per-txb search with an eob-0 skip result. Level 1 never sets
+    /// `dc_only_blk` (that needs level > 1).
+    pub predict_dc_level: u32,
+    /// sf `tx_sf.prune_intra_tx_depths_using_nn` — default 0; allintra
+    /// speed>=6 -> 1 (speed_features.c:553). Enables the 8x8-block NN
+    /// tx-depth prune in `choose_tx_size_type_from_rd`'s largest-depth walk
+    /// (stage-independent — copied from the raw sf like
+    /// `prune_tx_type_est_rd`); gates the [`NnDepthPruneCtx`] threading.
+    pub prune_intra_tx_depths_using_nn: bool,
 }
 
 impl TxTypeSearchPolicy {
@@ -782,6 +846,8 @@ impl TxTypeSearchPolicy {
             use_rd_based_breakout_for_intra_tx_search: false,
             prune_tx_type_est_rd: false,
             prune_2d_txfm_mode: 1, // TX_TYPE_PRUNE_1 (init_tx_sf:2457); inert while est_rd off
+            predict_dc_level: 0, // predict_dc_levels[0][*] (dc_blk_pred_level 0 through speed 5)
+            prune_intra_tx_depths_using_nn: false, // default off (speed>=6 only)
         }
     }
 
@@ -854,6 +920,18 @@ pub struct TxTypeSearchInputs<'a> {
     /// (`av1_setup_qmatrix`) — so QM shapes the tx-type/tx-size RD exactly as
     /// C, not just the final coefficients.
     pub qm_level: Option<usize>,
+    /// The `zero_blk_rate` of `predict_dc_only_block`'s skip fast path
+    /// (tx_search.c:2055-2063): `txb_skip_cost[origin_skip_ctx][1]` where
+    /// `origin_skip_ctx` is `get_txb_ctx` at the **block origin** computed
+    /// from the PERSISTENT (block-entry) entropy arrays — C re-derives
+    /// `ctxa`/`ctxl` via `av1_get_entropy_contexts` from
+    /// `pd->above_entropy_context` (never mutated during the RD walk) and
+    /// passes the UN-offset pointers, so EVERY txb of the block shares the
+    /// origin txb's skip ctx here, not its own walking ctx. Callers compute
+    /// it once per (block, tx_size) from the pre-walk contexts; only read
+    /// when `pol.predict_dc_level >= 1` (allintra speed >= 6), so 0 is fine
+    /// below that.
+    pub predict_skip_zero_blk_rate: i32,
 }
 
 /// One evaluated tx type's outcome (the winner's is returned).
@@ -903,10 +981,77 @@ pub fn search_tx_type_intra(
     let dequant_shift = if hbd { inp.bd as i32 - 5 } else { 3 };
     let qstep = (i32::from(inp.rows.dequant[1]) >> dequant_shift) as u32;
 
+    // `predict_dc_block` (tx_search.c:2118-2119): the skip/DC-block predictor
+    // runs when the stage's `predict_dc_level >= 1` (allintra speed>=6
+    // DEFAULT_EVAL + MODE_EVAL — `dc_blk_pred_level = 1`) on non-64-point txs.
+    // Level 1 predicts SKIP blocks only (both planes); the `dc_only_blk` arm
+    // needs level > 1 (speed-7+ machinery, unmodeled — the debug_assert
+    // below pins the envelope).
+    let predict_dc_block =
+        pol.predict_dc_level >= 1 && TXS_W[tx_size] != 64 && TXS_H[tx_size] != 64;
     // Residual SSE + MSE over the VISIBLE txb area (== full for interior txbs;
-    // clipped to the frame edge for partial-SB txbs, matching C `pixel_diff_dist`).
-    let (mut block_sse_u, mut block_mse_q8) =
-        av1_pixel_diff_dist(inp.residual, w, 0, 0, inp.visible_cols, inp.visible_rows);
+    // clipped to the frame edge for partial-SB txbs, matching C
+    // `pixel_diff_dist`). With the predictor live, BOTH come from
+    // `pixel_diff_stats` instead (C :2025 — its DOUBLE-arithmetic mse then
+    // feeds the trellis/tx-domain gates below).
+    let (mut block_sse_u, mut block_mse_q8);
+    if predict_dc_block {
+        debug_assert!(pol.predict_dc_level <= 1, "dc_only (level>1) is speed-7+ machinery");
+        let (sse, mse, per_px_mean, raw_var) =
+            pixel_diff_stats(inp.residual, w, inp.visible_cols, inp.visible_rows);
+        debug_assert_ne!(mse, u32::MAX, "predict path needs a visible txb (C :2028 assert)");
+        block_sse_u = sse;
+        block_mse_q8 = mse;
+        // predict_dc_only_block (tx_search.c:2011-2076), the level-1 skip arm:
+        // a residual with variance below `1.8*qstep^2` AND a transform-domain
+        // mean below the DC qstep quantizes to an all-zero (eob 0) DCT_DCT
+        // block — short-circuit the whole tx-type search with the skip result.
+        let var_threshold = (1.8f64 * f64::from(qstep) * f64::from(qstep)) as u64;
+        let block_var = if hbd {
+            let s = 2 * (i32::from(inp.bd) - 8);
+            (raw_var + ((1u64 << s) >> 1)) >> s
+        } else {
+            raw_var
+        };
+        if block_var < var_threshold {
+            // NOTE the dc qstep uses a FIXED >>3 (C :2024), not the
+            // bd-dependent dequant_shift the AC lane above uses.
+            let dc_qstep = i32::from(inp.rows.dequant[0]) >> 3;
+            if per_px_mean.abs() * i64::from(DC_COEFF_SCALE[tx_size])
+                < (i64::from(dc_qstep) << 12)
+            {
+                // The skip fast path (:2039-2070): eob 0, DCT_DCT,
+                // entropy ctx 0, dist = sse<<4 (sse bd-rounded FIRST),
+                // rate = the block-origin zero_blk_rate (see the
+                // `predict_skip_zero_blk_rate` field docs).
+                let mut sse_s = sse as i64;
+                if hbd {
+                    sse_s = round_power_of_two_i64(sse_s, 2 * (i32::from(inp.bd) - 8));
+                }
+                let dist = sse_s << 4;
+                let rate = inp.predict_skip_zero_blk_rate;
+                let full = TXS_W[tx_size] * TXS_H[tx_size];
+                return Some(TxTypeSearchResult {
+                    best_tx_type: 0, // DCT_DCT (:2115)
+                    best_eob: 0,
+                    best_txb_ctx: 0, // txb_entropy_ctx[block] = 0 (:2069)
+                    rate,
+                    dist,
+                    sse: dist,
+                    rd: rdcost(inp.rdmult, rate, dist),
+                    skip_txfm: true,
+                    qcoeff: vec![0; full],
+                    dqcoeff: vec![0; full],
+                    evaluated_mask: 0,
+                });
+            }
+            // predict_dc_level > 1 would set dc_only_blk here — unreachable
+            // at level 1 (the assert above).
+        }
+    } else {
+        (block_sse_u, block_mse_q8) =
+            av1_pixel_diff_dist(inp.residual, w, 0, 0, inp.visible_cols, inp.visible_rows);
+    }
     let mut block_sse = block_sse_u as i64;
     if hbd {
         let s = 2 * (inp.bd as i32 - 8);
@@ -1377,6 +1522,11 @@ pub struct TxfmYrdEnv<'a> {
     pub bd: u8,
     // Quantizer + RD.
     pub rows: &'a aom_quant::PlaneQuantRows<'a>,
+    /// `x->qindex` (the frame base qindex on this fixed-q KEY envelope) —
+    /// read by the speed>=6 intra-tx-depth NN's `log_dc_q_square` feature
+    /// (`av1_dc_quant_QTX(x->qindex, 0, bd)`, tx_search.c:2867 — the RAW
+    /// frame qindex, NOT the y-dc-delta-adjusted `dequant_QTX[0]`).
+    pub qindex: i32,
     pub rdmult: i32,
     /// The full REAL per-(txs_ctx, eob_multi_size) luma cost-table set;
     /// [`txfm_rd_in_plane_intra`] selects the table for the CANDIDATE
@@ -1434,6 +1584,9 @@ pub fn txfm_rd_in_plane_intra(
     ref_best_rd: i64,
     current_rd_in: i64,
     pol: &TxTypeSearchPolicy,
+    // `enable_nn_prune_intra_tx_depths` (tx_search.c:3022): Some only from
+    // the depth loop's largest-tx iteration when the speed>=6 NN sf is on.
+    mut nn_prune: Option<NnDepthPruneCtx<'_>>,
 ) -> Option<(RdStats, Vec<TxbWinner>)> {
     if current_rd_in > ref_best_rd {
         return None;
@@ -1454,6 +1607,17 @@ pub fn txfm_rd_in_plane_intra(
     // av1_get_entropy_contexts: working copies of the neighbour contexts.
     let mut t_above: Vec<i8> = env.above_ctx[..max_blocks_wide].to_vec();
     let mut t_left: Vec<i8> = env.left_ctx[..max_blocks_high].to_vec();
+    // predict_dc_only_block's zero_blk_rate ctx (tx_search.c:2055-2063): the
+    // BLOCK-ORIGIN skip ctx from the PERSISTENT (pre-walk) entropy arrays —
+    // shared by every txb of this block (see the
+    // `TxTypeSearchInputs::predict_skip_zero_blk_rate` docs). Computed here
+    // BEFORE the walk stamps t_above/t_left.
+    let predict_skip_zero_blk_rate = if pol.predict_dc_level >= 1 {
+        let (origin_skip_ctx, _) = aom_txb::get_txb_ctx(bsize, tx_size, 0, &t_above, &t_left);
+        env.coeff_costs.tables(tx_size).txb_skip[origin_skip_ctx as usize * 2 + 1]
+    } else {
+        0
+    };
 
     let mut stats = RdStats::zero();
     let mut winners: Vec<TxbWinner> = Vec::new();
@@ -1535,6 +1699,30 @@ pub fn txfm_rd_in_plane_intra(
                 txw,
             );
 
+            // ml_predict_intra_tx_depth_prune (block_rd_txfm, tx_search.c:
+            // 3089-3097): with the NN enabled for this (largest-depth) walk,
+            // evaluate it on the freshly-subtracted residual. The model's own
+            // gates (:2836-2842): !lossless, the tx covers the whole block
+            // (txsize_to_bsize[tx_size] == bsize — with the TX_8X8-only model
+            // support this reduces to an 8x8 block's single txb), bd 8.
+            // TX_PRUNE_LARGEST aborts this depth's evaluation
+            // (av1_invalid_rd_stats + exit_early); TX_PRUNE_SPLIT is consumed
+            // by the depth loop before the next (smaller) size.
+            if let Some(nn) = nn_prune.as_mut() {
+                if !env.lossless && tx_size == 1 && bsize == 3 && env.bd == 8 {
+                    *nn.outcome = ml_predict_intra_tx_depth_prune(
+                        &residual,
+                        txw,
+                        nn.source_variance,
+                        env.qindex,
+                        env.bd,
+                    );
+                    if *nn.outcome == TxPruneType::Largest {
+                        return None;
+                    }
+                }
+            }
+
             // search_tx_type over the neighbour ctx at this txb position.
             let bctx = crate::BlockContext {
                 plane_bsize: bsize,
@@ -1589,6 +1777,7 @@ pub fn txfm_rd_in_plane_intra(
                 visible_cols: vis_cols,
                 visible_rows: vis_rows,
                 qm_level: env.qm_levels.map(|l| l[0]),
+                predict_skip_zero_blk_rate,
             };
             // `block_rd_txfm` (tx_search.c:3104) computes
             // `args->best_rd - args->current_rd` as a RAW int64_t subtraction
@@ -1712,6 +1901,7 @@ pub fn uniform_txfm_yrd_intra(
     tx_size: usize,
     ref_best_rd: i64,
     pol: &TxTypeSearchPolicy,
+    nn_prune: Option<NnDepthPruneCtx<'_>>,
 ) -> (i64, Option<(RdStats, Vec<TxbWinner>)>) {
     let tx_select = env.tx_mode_is_select && block_signals_txsize(env.bsize);
     let tx_size_rate = if tx_select {
@@ -1724,7 +1914,7 @@ pub fn uniform_txfm_yrd_intra(
     let no_this_rd = rdcost(env.rdmult, no_skip_txfm_rate + tx_size_rate, 0);
 
     let Some((mut stats, winners)) =
-        txfm_rd_in_plane_intra(env, recon, tx_size, ref_best_rd, no_this_rd, pol)
+        txfm_rd_in_plane_intra(env, recon, tx_size, ref_best_rd, no_this_rd, pol, nn_prune)
     else {
         return (i64::MAX, None);
     };
@@ -1751,6 +1941,150 @@ pub fn uniform_txfm_yrd_intra(
 pub const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] = [
     0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18,
 ];
+
+/// `TX_PRUNE_TYPE` (block.h:504): the intra-tx-depth NN's verdict, carried
+/// across the depth loop like C's `txfm_params->nn_prune_depths_for_intra_tx`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxPruneType {
+    /// `TX_PRUNE_NONE`.
+    None,
+    /// `TX_PRUNE_SPLIT`: skip the split (smaller) tx depths.
+    Split,
+    /// `TX_PRUNE_LARGEST`: abort the largest-depth evaluation.
+    Largest,
+}
+
+/// The `enable_nn_prune_intra_tx_depths` bundle threaded into the txb walk
+/// (C sets the flag on `txfm_params` and the walk reads `x->source_variance`
+/// off the shared MACROBLOCK; the port threads both explicitly).
+pub struct NnDepthPruneCtx<'a> {
+    /// Where the verdict lands (`txfm_params->nn_prune_depths_for_intra_tx`).
+    pub outcome: &'a mut TxPruneType,
+    /// `x->source_variance` — the `log1pf` feature input.
+    pub source_variance: u32,
+}
+
+/// `get_dev` (tx_search.c:1697): `sqrtf(max(0, x2_sum/num - mean^2))` with
+/// C's exact double-division-then-float arithmetic.
+fn get_dev(mean: f32, x2_sum: f64, num: i32) -> f32 {
+    let e_x2 = (x2_sum / f64::from(num)) as f32;
+    let diff = e_x2 - mean * mean;
+    if diff > 0.0 { diff.sqrt() } else { 0.0 }
+}
+
+/// `get_mean_dev_features` (tx_search.c:1709): block + sub-block residual
+/// mean/deviation features. Layout for the 8x8 intra-tx-split model
+/// (bw = bh = 8 -> subw = subh = 4, four sub-blocks): `[0]` block mean,
+/// `[1]` block dev, `[2..10]` per-sub (mean, dev) in raster order, `[10]`
+/// deviation of sub-means, `[11]` mean of sub-devs. Returns the next
+/// feature index (12).
+fn get_mean_dev_features(data: &[i16], stride: usize, bw: usize, bh: usize, features: &mut [f32]) -> usize {
+    let subh = if bh >= bw { bh >> 1 } else { bh };
+    let subw = if bw >= bh { bw >> 1 } else { bw };
+    let num = (bw * bh) as i32;
+    let sub_num = (subw * subh) as i32;
+    let mut feature_idx = 2usize;
+    let mut total_x_sum = 0i32;
+    let mut total_x2_sum = 0i64;
+    let mut num_sub_blks = 0i32;
+    let mut mean2_sum = 0.0f64;
+    let mut dev_sum = 0.0f32;
+    let mut row = 0usize;
+    while row < bh {
+        let mut col = 0usize;
+        while col < bw {
+            // aom_get_blk_sse_sum over the (subw x subh) sub-block.
+            let mut x_sum = 0i32;
+            let mut x2_sum = 0i64;
+            for r in 0..subh {
+                let base = (row + r) * stride + col;
+                for &d in &data[base..base + subw] {
+                    x_sum += i32::from(d);
+                    x2_sum += i64::from(d) * i64::from(d);
+                }
+            }
+            total_x_sum += x_sum;
+            total_x2_sum += x2_sum;
+            let mean = x_sum as f32 / sub_num as f32;
+            let dev = get_dev(mean, x2_sum as f64, sub_num);
+            features[feature_idx] = mean;
+            features[feature_idx + 1] = dev;
+            feature_idx += 2;
+            mean2_sum += f64::from(mean * mean);
+            dev_sum += dev;
+            num_sub_blks += 1;
+            col += subw;
+        }
+        row += subh;
+    }
+    let lvl0_mean = total_x_sum as f32 / num as f32;
+    features[0] = lvl0_mean;
+    features[1] = get_dev(lvl0_mean, total_x2_sum as f64, num);
+    // Deviation of means; mean of deviations.
+    features[feature_idx] = get_dev(lvl0_mean, mean2_sum, num_sub_blks);
+    features[feature_idx + 1] = dev_sum / num_sub_blks as f32;
+    feature_idx + 2
+}
+
+/// `ml_predict_intra_tx_depth_prune` (tx_search.c:2823): the 8x8-block NN
+/// verdict over the largest-tx residual. The model gates (":2836-2842")
+/// — lossless / tx not covering the block / bd != 8 / tx != TX_8X8 — are
+/// checked by the CALLER (the walk), which passes the txb residual (`diff`
+/// at the block origin, stride = txb width = 8). Features: 12 mean/dev
+/// values + `log1pf(source_variance)` + `log1pf(dc_q^2/256)` with dc_q =
+/// `av1_dc_quant_QTX(qindex, 0, bd) >> (bd - 8)`; normalized by the
+/// transcribed mean/std tables; one ReLU hidden layer (16) + linear output
+/// + `av1_nn_output_prec_reduce` (reduce_prec = 1 at the call site :2879);
+/// verdict per `av1_intra_tx_prune_nn_thresh_8x8`.
+pub fn ml_predict_intra_tx_depth_prune(
+    diff: &[i16],
+    diff_stride: usize,
+    source_variance: u32,
+    qindex: i32,
+    bd: u8,
+) -> TxPruneType {
+    use crate::intra_tx_nn_weights as w;
+    let mut features = [0f32; w::NUM_FEATURES];
+    let mut fi = get_mean_dev_features(diff, diff_stride, 8, 8, &mut features);
+    features[fi] = (source_variance as f32).ln_1p();
+    fi += 1;
+    let dc_q = i32::from(aom_quant::av1_dc_quant_qtx(qindex, 0, bd)) >> (bd - 8);
+    // log1pf((float)(dc_q * dc_q) / 256.0f).
+    let log_dc_q_square = ((dc_q * dc_q) as f32 / 256.0f32).ln_1p();
+    features[fi] = log_dc_q_square;
+    fi += 1;
+    debug_assert_eq!(fi, w::NUM_FEATURES);
+    for i in 0..w::NUM_FEATURES {
+        features[i] = (features[i] - w::MEAN[i]) / w::STD[i];
+    }
+
+    // av1_nn_predict_c (ml.c): one ReLU hidden layer, linear 1-wide output,
+    // then av1_nn_output_prec_reduce (the call site passes reduce_prec = 1).
+    let mut hidden = [0f32; w::NUM_HIDDEN];
+    for (node, h) in hidden.iter_mut().enumerate() {
+        let mut val = w::B0[node];
+        for i in 0..w::NUM_FEATURES {
+            val += w::W0[node * w::NUM_FEATURES + i] * features[i];
+        }
+        *h = val.max(0.0); // ReLU
+    }
+    let mut score = w::B1[0];
+    for (i, &hv) in hidden.iter().enumerate() {
+        score += w::W1[i] * hv;
+    }
+    // av1_nn_output_prec_reduce (ml.c:19): C's `+ 0.5` is a DOUBLE literal.
+    const PREC: f32 = (1 << 9) as f32;
+    const INV_PREC: f32 = 1.0 / PREC;
+    score = ((f64::from(score * PREC) + 0.5) as i32) as f32 * INV_PREC;
+
+    if score <= w::PRUNE_THRESH[0] {
+        TxPruneType::Split
+    } else if score > w::PRUNE_THRESH[1] {
+        TxPruneType::Largest
+    } else {
+        TxPruneType::None
+    }
+}
 
 /// `TX_SIZE_SEARCH_METHOD` (enc_enums.h:262): the tx-size search strategy for a
 /// uniform intra block. `USE_FULL_RD` runs the depth sweep; `USE_LARGESTALL`
@@ -1876,6 +2210,9 @@ pub fn choose_tx_size_type_from_rd_intra(
     let mut best: Option<TxSizeChoice> = None;
     let mut best_rd = i64::MAX;
     let mut rd = [i64::MAX; MAX_TX_DEPTH as usize + 1];
+    // `txfm_params->nn_prune_depths_for_intra_tx` (reset TX_PRUNE_NONE per
+    // block, tx_search.c:3059): the largest-depth walk's NN verdict.
+    let mut nn_outcome = TxPruneType::None;
     let mut tx_size = start_tx;
     let mut depth = init_depth;
     while depth <= MAX_TX_DEPTH {
@@ -1886,6 +2223,16 @@ pub fn choose_tx_size_type_from_rd_intra(
             tx_size = SUB_TX_SIZE_MAP[tx_size];
             continue;
         }
+        // `if (nn_prune_depths == TX_PRUNE_SPLIT) break;` (tx_search.c:3016)
+        // — the largest depth's verdict skips the smaller sizes.
+        if nn_outcome == TxPruneType::Split {
+            break;
+        }
+        // `enable_nn_prune_intra_tx_depths = sf && tx_size == start_tx`
+        // (:3022): the NN only ever evaluates on the largest-depth walk.
+        let nn_ctx = (pol.prune_intra_tx_depths_using_nn && tx_size == start_tx).then(|| {
+            NnDepthPruneCtx { outcome: &mut nn_outcome, source_variance }
+        });
         // rd_thresh (tx_search.c:3030): with use_rd_based_breakout_for_intra_
         // tx_search ON, tighten the per-depth early-exit to the running
         // across-depth best; else the caller's ref_best_rd.
@@ -1894,7 +2241,7 @@ pub fn choose_tx_size_type_from_rd_intra(
         } else {
             ref_best_rd
         };
-        let (this_rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, rd_thresh, pol);
+        let (this_rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, rd_thresh, pol, nn_ctx);
         rd[depth as usize] = this_rd;
         if this_rd < best_rd {
             let (stats, winners) = res.expect("valid rd implies stats");
@@ -1949,7 +2296,7 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
     );
     if env.lossless {
         // choose_smallest_tx_size: evaluate TX_4X4 only.
-        let (rd, res) = uniform_txfm_yrd_intra(env, recon, 0, ref_best_rd, pol);
+        let (rd, res) = uniform_txfm_yrd_intra(env, recon, 0, ref_best_rd, pol, None);
         return res.map(|(stats, winners)| TxSizeChoice {
             best_tx_size: 0,
             best_rd: rd,
@@ -1961,7 +2308,7 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
         // choose_largest_tx_size: one uniform_txfm_yrd at the single largest tx
         // size (no depth sweep, no size-RD comparison, no low-contrast prune).
         let tx_size = choose_largest_tx_size_intra(env.bsize, enable_tx64, enable_rect_tx);
-        let (rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, ref_best_rd, pol);
+        let (rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, ref_best_rd, pol, None);
         return res.map(|(stats, winners)| TxSizeChoice {
             best_tx_size: tx_size,
             best_rd: rd,

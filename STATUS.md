@@ -2823,6 +2823,52 @@ true-oracle-validated against REAL `aomenc --cpu-used=6` header LF levels across
 × {mono,420} incl. both clamp extremes (`speed6_prep_lf_from_q_matches_real_aomenc`); no caller
 below speed 6 (byte-inert for speeds 0-5), the speed-6 flip wires it like `non_dual` was for 4/5.
 
+## Gate 2 — `--cpu-used=6` (speed-6) all-intra KEY byte-match (64/64 — FULL CANON GRID) (2026-07-16, encoder track)
+
+**Every speed-6 delta is ported + live — 64/64 cells byte-identical** vs real aomenc
+`--cpu-used=6` ({64,128}² × cq{12,32,48,63} × {flat,two-tone,vgrad,diag} × {mono,420},
+`encoder_gate_speed6_textured_allintra`) + the asserted anti-vacuous witness
+(`encoder_gate_speed6_vs_speed5_sf_witness`: port with FULL speed-5 features vs cpu-6 diverges
+on `vgrad 64² cq32` mono+420; speed-6 features match). Landed machinery (full delta table +
+per-feature bisect evidence in CLAUDE.md KB-10): the LPF_PICK_FROM_Q harness flip; the partition
+prune set (`default_max_partition_size=BLOCK_32X32` square-split-forced root,
+`use_square_partition_only_threshold=BLOCK_16X16`, ext-partition thresh BLOCK_128X128 for all
+sizes, qidx rect prune, 4x4-var-deviation rect prune arm 2, none-pred-mode rect prune + the new
+`ModeGrid::bsizes` neighbour-bsize stamps, sub-8x8 neighbour prune) — chunks 2+3 took the
+baseline map to 54/64; the intra-loop set (`top_intra_model_count_allowed=2` +
+neighbour-adaptive slot, odd-delta-angle reorder+prune, HOG level 4, `prune_filter_intra_level=
+2`); `predict_dc_only_block` skip prediction (DEFAULT+MODE stages; the block-origin
+zero_blk_rate ctx quirk; flips 4 cells incl. mono => luma-side); the 8x8 NN tx-depth prune
+(transcribed weights + `intra_tx_nn_diff` 4000/4000 vs REAL `av1_nn_predict_c`; byte-inert on
+the canon grid — 0 fires measured — LIVE with 96 Split verdicts on the noise extension);
+the winner-mode OFF restructure (no stats stored, single best_mbmi re-eval, source-variance
+bypass level 1); chroma narrowing (`cfl_search_range=1` — flips 8 4:2:0 cells;
+`prune_smooth_intra_mode_for_chroma` carried, consumer-wired, unreached on current grids);
+`perform_coeff_opt=6` + `tx_domain_dist_level=3` (winner pass moves to tx-domain distortion) +
+`winner_mode_tx_type_pruning=3`/`prune_tx_type_est_rd=0`.
+
+**Coverage extension** `encoder_gate_speed6_noise_flatuv_allintra` (noise luma + flat uv, 64² x
+cq{32,48,63} x {mono,420}): cq32/48 hard-asserted byte-match (the NN's live cells); **cq63
+mono+420 PINNED OPEN** — a KB-2-class multi-feature near-tie at qindex 255 (winner-pass tx-size
+sweep picks TX_16X16 over TX_32X32 by 0.19% where real keeps 32; search partition tree matches
+real exactly; no single-feature revert closes it; asserted-diverge, fails on match -> promote).
+Next step: sibling-C RD dump of the (mi 8,0) winner sweep. Speeds 0-5 gates re-verified
+byte-unchanged; full `cargo test -p aom-encode` green before landing.
+
+**cpu-used sweep state: speeds 0-6 done** (6: 64/64 canon + the pinned-open noise-cq63 pair).
+Next: speed 7 — `default_min_partition_size = BLOCK_8X8` + `partition_search_type =
+VAR_BASED_PARTITION` + `cdef_pick_method = CDEF_PICK_FROM_Q` (CDEF off in allintra => inert) +
+`rt_sf.mode_search_skip_flags |= FLAG_SKIP_INTRA_DIRMISMATCH` + `rt_sf.var_part_split_threshold_
+shift = 7` (speed_features.c:566-575). VERIFIED walk structure (encodeframe.c:848-895
+`encode_rd_sb`): at allintra speed 7 (use_nonrd_pick_mode stays 0 until speed 8) the RD sb
+encoder takes the VAR_BASED_PARTITION arm — `av1_choose_var_based_partitioning` FIXES the
+partition tree per SB, then **`av1_rd_use_partition`** walks the fixed tree with the normal RD
+intra mode search per block (a new fixed-tree walk fn; the leaf machinery reuses the existing
+pick path). The nonrd PICKMODE (`encode_nonrd_sb`/`av1_nonrd_use_partition`) only starts at
+speed 8 (`use_nonrd_pick_mode = 1`). So speed 7 = port av1_choose_var_based_partitioning (+
+var_part_split_threshold_shift consumer) + av1_rd_use_partition; NOT a prune
+re-parameterization.
+
 ## #23 QM-on forward-quant encode — byte-match gate (2026-07-16, encoder track)
 
 **`--enable-qm=1` ALLINTRA KEY encodes byte-match real aomenc end-to-end** — the

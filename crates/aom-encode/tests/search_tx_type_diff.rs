@@ -234,6 +234,7 @@ fn search_tx_type_intra_matches_c_chain() {
                 visible_cols: w,
                 visible_rows: h,
                 qm_level: None,
+                predict_skip_zero_blk_rate: 0,
             };
             let got = search_tx_type_intra(&inp, &pol, ref_best_rd);
 
