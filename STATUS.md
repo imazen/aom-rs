@@ -2926,3 +2926,77 @@ C — not just the final coefficients.
   CDEF_ADAPTIVE) — the nullable-qmatrix plumbing is the entry point when
   that knob is scheduled. Multi-tile + QM composition not gated (single-tile
   only; the QM arm asserts tiles == (0,0)).
+
+## Gate 3 — performance track OPENED: harness + first SIMD kernel (2026-07-16, perf track)
+
+**Infrastructure (landed 057bde2 + this chunk series):**
+- **`crates/aom-bench`** — the Gate-3 measurement harness: zenbench paired
+  benches (`benches/gate3.rs`, c_oracle as per-group baseline so the port
+  row's paired CI IS the Gate-3 ratio) + `gate3_profile` callgrind driver.
+  Encode cells replicate the byte-exact e2e gates verbatim (KB-6 real-content
+  recipe at speed-0 {64²,128²,196²}×cq{12,32,63} + one speed-4 synthetic
+  point); decode cells = first-KEY TU of 5 conformance vectors (64², 196²,
+  352×288×q{00,32,63}). EVERY cell byte-verifies port-vs-C in setup before
+  timing (`assert_byte_exact`). `just bench-gate3` (quiet box only) /
+  `just bench-smoke` / `just profile`.
+- **`crates/aom-dispatch`** — the SIMD dispatch policy crate:
+  `AOM_FORCE_SCALAR=1` (`just test-scalar`) disables every archmage token
+  process-wide at first dispatch, so every `incant!` falls through to
+  `_scalar` = the transcribed port, verbatim. ONE archmage universe:
+  aom-dist/aom-intra migrated from the `/root/work/archmage` path dep to
+  registry `archmage = "0.9.27"` (CI clone workaround removed per its TODO).
+- **Profile ranking committed**: `benchmarks/gate3_profile_ranking_2026-07-16.md`
+  (+ .meta) — callgrind Ir, load-tolerant. Encode (128² cq32 s0): transforms
+  ~33%, txb kernels ~18%, quantize_fp ~5%, highbd_variance ~3%, alloc ~3.5%.
+  Decode (352×288 q32): CDEF ~27%, wiener ~13%, inv-txfm ~12%, deblock ~9.5%,
+  od_ec entropy ~6.5% (serial — not SIMD-able), txb-read ctx ~5%.
+  PROVISIONAL smoke wall ratios (noisy box, directional only): encode port
+  ~3.4-4.2× C at s0 cq12/32, ~7× cq63, ~9× s4; decode ~1.5× (q00) to ~8×
+  (q63). Honest quiet-box zenbench baseline: PENDING (box must drain).
+
+**SIMD kernel #1 — `av1_quantize_fp_no_qmatrix` (the speed-0 search
+quantizer, ~5% of encode Ir):** `aom_quant::simd::
+av1_quantize_fp_no_qmatrix_dispatch` — ONE magetypes generic i32x8 kernel
+(`#[magetypes(v3, neon, wasm128, -scalar)]`), hand-written `_scalar` variant
+= the transcribed port verbatim, `incant!` dispatch, `aom_dispatch::
+scalar_forced()` pin at entry. Bit-exactness is argued in-module (the two
+reformulated steps — the gate threshold and the i64 rounding add — are exact
+integer identities on the FULL i32×i16 domain) and pinned by
+`tests/quantize_fp_simd_diff.rs`: SIMD == scalar port on qcoeff/dqcoeff/eob
+across 9 permutation tiers × {production + fully-adversarial tables/coeffs +
+edge spikes} × 9 sizes × 3 log_scales (anti-vacuous: asserts AVX2 present on
+x86 CI). Wired into the `xform_quant` Fp/flat/lowbd arm (aom-encode).
+
+**Parity discipline (per landing, from this chunk on):** full workspace
+suite 0-failed in BOTH dispatch modes (`just test` + `just test-scalar`) +
+the bench harness byte-verify. Float decision helpers (av1_nn_predict, HOG,
+softmax, variance-factor) stay SCALAR permanently — decision-side, cheap,
+and float SIMD reassociation would shift RD decisions.
+
+**SIMD kernel #1 measured (callgrind Ir, enc_s0_128_cq32):** whole-encode
+155.21B -> 148.86B Ir (-4.1%); the quantize cluster 7.65B -> 2.25B (~3.4x),
+AVX2 tier confirmed live in the profile.
+
+**SIMD kernel #2 — `cdef_filter_block_16` (decode's #1, ~27% of the CDEF-on
+vector's Ir):** `aom_cdef::simd` — width-8 row kernel (i16x8, one row/vector)
++ width-4 two-row kernel (4+4 lanes), same magetypes pattern; the dispatch
+lives INSIDE `cdef_filter_block_16` so every caller (the frame walk) gets it
+transparently, and `cdef_filter_block_16_scalar` is the never-routed
+reference twin. Exactness: structural-domain argument in-module (pixels <=
+4095 | CDEF_VERY_LARGE, header strength/damping ranges -> every i16 lane op
+matches the scalar core's own narrowings, incl. the deliberate i16 sum wrap
+and the tap*constrain `as i16` truncation == mullo). Pins: the PRE-EXISTING
+240k-case `cdef_filter16_byte_identical` C-differential now drives the
+DISPATCHING function (bw=4 and bw=8 route SIMD) against the REAL C kernels,
+the 420-case `cdef_frame_matches_real_c_walk` oracle covers the frame-walk
+integration, and the new `cdef_filter_simd_diff.rs` pins SIMD == scalar core
+at every token permutation over the structural domain + boundary fills.
+**Measured (callgrind Ir, dec_352x288_q32):** whole-decode 3.657B -> 2.807B
+(-23.2%); the ~985M cdef_filter cluster collapsed to ~40M SIMD + residual
+(cdef_find_dir 61M, next on the CDEF list).
+
+**Next kernels (profile order):** wiener convolve (decode #1 now, ~17%),
+inverse-txfm stack (shared decode+encode; i64-sum-exact formulation first,
+i32 only with a range proof), deblock filters (~5-9%), txb trio
+(txb_init_levels / get_nz_mag / get_lower_levels_ctx, encode ~12%),
+forward-txfm stack, cdef_find_dir, variance/SAD family.
