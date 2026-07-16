@@ -922,14 +922,18 @@ fn encoder_gate_real_image_e2e_kb6_repro() {
         diverged
     );
 
-    // (1) PROMOTED byte-match gates — after the KB-6 luma re-encode edge-filter
-    // fix (per-block get_intra_edge_filter_type, mirroring #26 for chroma) the
-    // real size-64x64 cells byte-match real aomenc at cq5/12/20/48/63. Assert
-    // every one: a regression here is NOT the open KB-6 divergence (the OTHER
-    // cells) — it means a previously byte-exact real cell broke, or the harness
-    // broke. These are the promotion the coordinator asked for as cells go green;
-    // cq32 stays a known SECOND near-tie (still under the divergence gate below).
-    for cq in [5, 12, 20, 48, 63] {
+    // (1) PROMOTED byte-match gates — the real size-64x64 cells byte-match real
+    // aomenc at EVERY cq (5/12/20/32/48/63). cq5/12/20/48/63 landed with the KB-6
+    // luma re-encode edge-filter fix (per-block get_intra_edge_filter_type,
+    // mirroring #26 for chroma); **cq32 landed 2026-07-16 with the AB-partition
+    // HORZ_A nested-reuse fix** (partition_pick.rs: sub-block 1's
+    // reuse_prev_rd_results_for_part_ab is nested under sub-block 0's readiness,
+    // matching partition_search.c:3858-3868 — the port was reusing the split-context
+    // DC+filter_intra winner for the HORZ_A top-right 8x8 where C re-searches it and
+    // picks SMOOTH_H_PRED). Assert every one: a regression here is NOT the open KB-6
+    // divergence (the OTHER cells) — it means a previously byte-exact real cell
+    // broke, or the harness broke.
+    for cq in [5, 12, 20, 32, 48, 63] {
         let label = format!("av1-1-b8-01-size-64x64 420 cq{cq}");
         let ok = results
             .iter()
@@ -939,7 +943,7 @@ fn encoder_gate_real_image_e2e_kb6_repro() {
         assert!(
             ok,
             "regression: real cell `{label}` must byte-match real aomenc \
-             (KB-6 luma re-encode fix landed cq5/12/20/48/63 on size-64x64)"
+             (KB-6: cq5/12/20/48/63 = luma re-encode fix; cq32 = AB HORZ_A nested-reuse fix)"
         );
     }
 
@@ -982,18 +986,21 @@ fn assert_open_divergence(kb: &str, results: &[(String, bool)]) {
     );
 }
 
-/// **KB-4 repro (OPEN) — bd10 non-4:2:0 chroma RD divergence.** At bit depth 10
-/// the port's encoded bitstream diverges from real aomenc for 4:4:4 / 4:2:2 chroma
-/// (the non-4:2:0 subsamplings): a large-coefficient RD-decision (tx_type / eob /
-/// partition) near-tie at high bit depth — see KB-4 in CLAUDE.md. The byte-exact
-/// bd10 regime (mono + 4:2:0, moderate content) is covered green by
-/// `encoder_gate_bd10_diff`; this repro locks the DIVERGENT non-420 corner that
-/// was held out of the 4:2:2/4:4:4 e2e gate (which is bd8-only). Committed
-/// characterization: green while KB-4 is open, fails (promote) when it byte-matches.
+/// **KB-4 bd10 non-4:2:0 chroma — byte-match gate (FIXED 2026-07-16).** At bit
+/// depth 10 the port's encoded bitstream for 4:4:4 / 4:2:2 chroma (the non-4:2:0
+/// subsamplings) now byte-matches real aomenc. The divergence was NOT a bd10
+/// large-coefficient RD-scaling issue (the original KB-4 hypothesis) — it was the
+/// **AB-partition HORZ_A nested-reuse bug** (partition_pick.rs: sub-block 1's
+/// `reuse_prev_rd_results_for_part_ab` must be nested under sub-block 0's readiness,
+/// partition_search.c:3858-3868). The same fix that closed the size-64x64 cq32 KB-6
+/// near-tie made all four of these cells byte-exact. Promoted from a characterization
+/// repro to an ASSERTING byte-match gate: a regression here means the AB nested-reuse
+/// fix broke. The byte-exact bd10 mono+4:2:0 regime is covered by
+/// `encoder_gate_bd10_diff`.
 #[test]
 fn encoder_gate_bd10_non420_e2e_kb4_repro() {
     // Full bd10-range textured luma+chroma (values 0..=1023), distinct so CfL
-    // cannot trivialize chroma — the large-coefficient regime KB-4 lives in.
+    // cannot trivialize chroma — the large-coefficient regime KB-4 lived in.
     let luma = tex_luma(0x3ff);
     let chroma = tex_chroma(0x3ff);
     let mut results: Vec<(String, bool)> = Vec::new();
@@ -1003,7 +1010,7 @@ fn encoder_gate_bd10_non420_e2e_kb4_repro() {
             results.push((format!("bd10-{fmt} {sz}x{sz} cq32"), res.matched));
         }
     }
-    assert_open_divergence("KB-4", &results);
+    report_and_assert("KB-4 bd10 non-420", &results);
 }
 
 /// **KB-5 repro (OPEN) — lossless (cq0 / qindex 0) KEY encode divergence.** A

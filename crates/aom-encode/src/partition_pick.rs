@@ -2076,7 +2076,16 @@ pub fn rd_pick_partition_real(
                     is_split_ctx_is_ready[0]
                         .then(|| split_child_leaf_for_reuse[0].as_ref())
                         .flatten(),
-                    is_split_ctx_is_ready[1]
+                    // C NESTS sub-block 1's reuse inside sub-block 0's
+                    // (partition_search.c:3858-3868: `if (is_ctx_ready[..][0]) {
+                    // ...; if (is_ctx_ready[..][1]) { ... } }`) — sub-block 1 is
+                    // reused ONLY when sub-block 0 is ALSO ready. A split[0] that
+                    // sub-split (partitioning != NONE) leaves is_split_ctx_is_ready[0]
+                    // false, so C re-searches BOTH top quarters even if split[1]
+                    // was a NONE leaf; reusing [1] independently would feed the
+                    // split-context winner into the HORZ_A top-right quarter and
+                    // skip its fresh (different-neighbour) search.
+                    (is_split_ctx_is_ready[0] && is_split_ctx_is_ready[1])
                         .then(|| split_child_leaf_for_reuse[1].as_ref())
                         .flatten(),
                 ],
