@@ -78,7 +78,7 @@
 use crate::intra_uv_rd::{CflDcCache, CflPredict, UV_CFL_PRED, UvRdEnv, predict_uv_txb};
 use crate::tx_search::{
     BLK_H_B, BLK_W_B, MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W, TXSIZE_SQR_UP_MAP,
-    trellis_rdmult_intra, trellis_rdmult_intra_y, uv_intra_tx_type,
+    max_block_units, trellis_rdmult_intra, trellis_rdmult_intra_y, uv_intra_tx_type,
 };
 use crate::{
     BlockContext, OptimizeInputs, QuantKind, QuantParams, xform_quant, xform_quant_optimize,
@@ -564,6 +564,22 @@ pub fn encode_intra_block_plane_uv(
     // Plane 4x4 unit dims (mi_size_wide/high of the SUBSAMPLED plane bsize).
     let max_blocks_wide = MI_SIZE_WIDE_B[plane_bsize];
     let max_blocks_high = MI_SIZE_HIGH_B[plane_bsize];
+    // Frame-edge clip (max_block_wide/high, chroma-subsampled): a partial edge
+    // block codes only its in-frame chroma tx sub-blocks (the entropy stamp in
+    // encode_sb clips identically so the txb list lines up). Context arrays stay
+    // full plane-block size.
+    let (blocks_wide_visible, blocks_high_visible, _mbr, _mbb) = max_block_units(
+        env.mi_cols,
+        env.mi_rows,
+        env.mi_col,
+        env.mi_row,
+        MI_SIZE_WIDE_B[env.bsize] as i32,
+        MI_SIZE_HIGH_B[env.bsize] as i32,
+        MI_SIZE_WIDE_B[plane_bsize] * 4,
+        MI_SIZE_HIGH_B[plane_bsize] * 4,
+        env.ss_x,
+        env.ss_y,
+    );
     let pi = plane - 1;
 
     // ENTROPY_CONTEXT ta/tl = {0}; av1_get_entropy_contexts only when
@@ -583,9 +599,9 @@ pub fn encode_intra_block_plane_uv(
 
     let mut txbs: Vec<TxbEncode> = Vec::new();
     let mut blk_row = 0usize;
-    while blk_row < max_blocks_high {
+    while blk_row < blocks_high_visible {
         let mut blk_col = 0usize;
-        while blk_col < max_blocks_wide {
+        while blk_col < blocks_wide_visible {
             // --- encode_block_intra ---
             // av1_predict_intra_block_facade: predict INTO the recon plane
             // (CfL arm applies the WINNER's signalled alphas).

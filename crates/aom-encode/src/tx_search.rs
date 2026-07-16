@@ -307,6 +307,46 @@ pub fn get_txb_visible_dimensions(
     (visible_width, visible_height)
 }
 
+/// `max_block_wide` / `max_block_high` (av1_common_int.h:1567/1581): the
+/// frame-edge-clipped tx-block extent of a plane block, in that plane's 4-pel MI
+/// units, PLUS the block's `mb_to_right_edge`/`mb_to_bottom_edge` (1/8-pel, luma
+/// level — reused for `get_txb_visible_dimensions`). `bw_mi`/`bh_mi` are the
+/// block's LUMA mi dims; `plane_bsize_w`/`plane_bsize_h` the plane block PIXEL
+/// dims (= `block_size_wide/high[plane_bsize]`); `ss_x`/`ss_y` the plane
+/// subsampling. For an interior block this returns the full plane block; for a
+/// partial-SB edge block it clips to the visible frame area. Luma (ss = 0) gives
+/// the same result as the interior loops' inline `min(max_blocks, mi-mi)` clip.
+#[allow(clippy::too_many_arguments)]
+pub fn max_block_units(
+    mi_cols: i32,
+    mi_rows: i32,
+    mi_col: i32,
+    mi_row: i32,
+    bw_mi: i32,
+    bh_mi: i32,
+    plane_bsize_w: usize,
+    plane_bsize_h: usize,
+    ss_x: usize,
+    ss_y: usize,
+) -> (usize, usize, i32, i32) {
+    let mb_to_right = (mi_cols - bw_mi - mi_col) * 32; // MI_SIZE(4) * 8
+    let mb_to_bottom = (mi_rows - bh_mi - mi_row) * 32;
+    let mut mbw = plane_bsize_w as i32;
+    let mut mbh = plane_bsize_h as i32;
+    if mb_to_right < 0 {
+        mbw += mb_to_right >> (3 + ss_x);
+    }
+    if mb_to_bottom < 0 {
+        mbh += mb_to_bottom >> (3 + ss_y);
+    }
+    (
+        (mbw >> 2).max(0) as usize,
+        (mbh >> 2).max(0) as usize,
+        mb_to_right,
+        mb_to_bottom,
+    )
+}
+
 /// `av1_pixel_diff_dist` (tx_search.c): the residual (src - pred) SSE over the
 /// txb's VISIBLE pixels, plus `block_mse_q8 = 256 * sse / visible_pels`
 /// (`u32::MAX` when the visible area is empty). `diff` is the plane's

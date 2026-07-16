@@ -87,7 +87,7 @@ use crate::intra_uv_rd::{
     UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
 use crate::partition::PartRdStats;
-use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W};
+use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W, max_block_units};
 use aom_entropy::partition::{get_plane_block_size, update_ext_partition_context};
 use aom_intra::cfl::CflCtx;
 use aom_txb::{CoeffCostSet, txb_entropy_context};
@@ -634,7 +634,24 @@ pub fn encode_b_intra_dry(
         // Planes 1/2 (the C loop breaks when !is_chroma_ref).
         if !env.monochrome && is_chroma_ref {
             let plane_bsize = get_plane_block_size(bsize, env.ss_x, env.ss_y);
-            let (pmw, pmh) = (MI_SIZE_WIDE_B[plane_bsize], MI_SIZE_HIGH_B[plane_bsize]);
+            // Iterate only the VISIBLE chroma tx blocks (frame-edge
+            // `max_block_wide/high` clip WITH chroma subsampling), matching the
+            // UV encode's txb count so `k` stays in `out.txbs` bounds and the
+            // entropy-context stamp covers exactly the coded (in-frame) tx
+            // blocks — mirrors `encode_intra_block_plane_uv`. Interior blocks
+            // return the full plane block; the context arrays stay full size.
+            let (pmw, pmh, _, _) = max_block_units(
+                env.mi_cols,
+                env.mi_rows,
+                mi_col,
+                mi_row,
+                MI_SIZE_WIDE_B[bsize] as i32,
+                MI_SIZE_HIGH_B[bsize] as i32,
+                MI_SIZE_WIDE_B[plane_bsize] * 4,
+                MI_SIZE_HIGH_B[plane_bsize] * 4,
+                env.ss_x,
+                env.ss_y,
+            );
             let (ptxw_u, ptxh_u) = (TXS_W[uv_tx] >> 2, TXS_H[uv_tx] >> 2);
             let au = (mi_col >> env.ss_x) as usize;
             let lu = ((mi_row & 31) >> env.ss_y) as usize;

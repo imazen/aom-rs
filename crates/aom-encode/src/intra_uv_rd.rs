@@ -49,7 +49,7 @@
 use crate::rd::rdcost;
 use crate::tx_search::{
     MAX_TXSIZE_RECT_LOOKUP, RdStats, TxTypeSearchInputs, TxTypeSearchPolicy, TxbWinner,
-    search_tx_type_intra,
+    get_txb_visible_dimensions, max_block_units, search_tx_type_intra,
 };
 use aom_entropy::partition::{get_plane_block_size, get_uv_mode, intra_avail};
 use aom_intra::cfl::{CFL_BUF_LINE, CflCtx, cfl_predict_block};
@@ -513,6 +513,22 @@ pub fn txfm_rd_in_plane_uv(
     let max_blocks_high = MI_H[plane_bsize];
     let pi = plane - 1;
 
+    // Frame-edge clip (max_block_wide/high with chroma subsampling): a partial
+    // edge block's off-frame chroma tx sub-blocks are not searched, and per-txb
+    // distortion is measured only over the visible area (get_txb_visible_dimensions).
+    let (blocks_wide_visible, blocks_high_visible, mb_to_right, mb_to_bottom) = max_block_units(
+        env.mi_cols,
+        env.mi_rows,
+        env.mi_col,
+        env.mi_row,
+        MI_W[env.bsize] as i32,
+        MI_H[env.bsize] as i32,
+        MI_W[plane_bsize] * 4,
+        MI_H[plane_bsize] * 4,
+        env.ss_x,
+        env.ss_y,
+    );
+
     // av1_get_entropy_contexts: working copies of the neighbour contexts.
     let mut t_above: Vec<i8> = env.above_ctx[pi][..max_blocks_wide].to_vec();
     let mut t_left: Vec<i8> = env.left_ctx[pi][..max_blocks_high].to_vec();
@@ -523,9 +539,9 @@ pub fn txfm_rd_in_plane_uv(
     let mut exit_early = false;
 
     let mut blk_row = 0usize;
-    while blk_row < max_blocks_high {
+    while blk_row < blocks_high_visible {
         let mut blk_col = 0usize;
-        while blk_col < max_blocks_wide {
+        while blk_col < blocks_wide_visible {
             if exit_early {
                 return None; // intra: exit_early alone invalidates
             }
@@ -571,6 +587,19 @@ pub fn txfm_rd_in_plane_uv(
                 above: &t_above[blk_col..],
                 left: &t_left[blk_row..],
             };
+            // Chroma frame-edge visible extent of THIS txb (subsampled).
+            let (vis_c, vis_r) = get_txb_visible_dimensions(
+                MI_W[plane_bsize] * 4,
+                MI_H[plane_bsize] * 4,
+                txw,
+                txh,
+                blk_row,
+                blk_col,
+                mb_to_right,
+                mb_to_bottom,
+                env.ss_x as u32,
+                env.ss_y as u32,
+            );
             let inp = TxTypeSearchInputs {
                 residual: &residual,
                 src,
@@ -591,10 +620,8 @@ pub fn txfm_rd_in_plane_uv(
                 rdmult: env.rdmult,
                 coeff_costs: env.coeff_costs,
                 tx_type_costs: env.tx_type_costs,
-                // Chroma frame-edge visible clip is CHUNK 2 (KB-6); full tx dims
-                // here keeps interior chroma byte-identical for now.
-                visible_cols: txw,
-                visible_rows: txh,
+                visible_cols: vis_c,
+                visible_rows: vis_r,
             };
             // Same unguarded C subtraction as `txfm_rd_in_plane_intra`'s luma
             // walk (tx_search.c `block_rd_txfm` is plane-generic) -- replicate
@@ -833,17 +860,28 @@ pub fn intra_model_rd_uv(
     let plane_bsize = get_plane_block_size(env.bsize, env.ss_x, env.ss_y);
     let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
     let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
-    let max_blocks_wide = MI_W[plane_bsize];
-    let max_blocks_high = MI_H[plane_bsize];
     let pi = plane - 1;
     let src = env.src(plane);
     let n = txw * txh;
+    // Frame-edge clip (max_block_wide/high, chroma-subsampled).
+    let (blocks_wide_visible, blocks_high_visible, _mbr, _mbb) = max_block_units(
+        env.mi_cols,
+        env.mi_rows,
+        env.mi_col,
+        env.mi_row,
+        MI_W[env.bsize] as i32,
+        MI_H[env.bsize] as i32,
+        MI_W[plane_bsize] * 4,
+        MI_H[plane_bsize] * 4,
+        env.ss_x,
+        env.ss_y,
+    );
 
     let mut satd_cost: i64 = 0;
     let mut blk_row = 0usize;
-    while blk_row < max_blocks_high {
+    while blk_row < blocks_high_visible {
         let mut blk_col = 0usize;
-        while blk_col < max_blocks_wide {
+        while blk_col < blocks_wide_visible {
             let txb_off = env.ref_off[pi] + (blk_row * env.ref_stride + blk_col) * 4;
             predict_uv_txb(
                 env,
