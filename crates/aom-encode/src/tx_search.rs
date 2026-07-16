@@ -1025,6 +1025,12 @@ pub fn txfm_rd_in_plane_intra(
     let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
     let max_blocks_wide = MI_SIZE_WIDE_B[bsize];
     let max_blocks_high = MI_SIZE_HIGH_B[bsize];
+    // C clips the tx-block LOOP to the visible frame area (`max_block_wide`/
+    // `max_block_high`, av1_common_int.h:1568): a partial edge block's off-frame
+    // tx sub-blocks are never searched/predicted (the predictor asserts
+    // `n_top_px >= 0`). Luma plane, no subsampling. Context arrays stay full.
+    let blocks_wide_visible = max_blocks_wide.min((env.mi_cols - env.mi_col).max(0) as usize);
+    let blocks_high_visible = max_blocks_high.min((env.mi_rows - env.mi_row).max(0) as usize);
 
     // av1_get_entropy_contexts: working copies of the neighbour contexts.
     let mut t_above: Vec<i8> = env.above_ctx[..max_blocks_wide].to_vec();
@@ -1036,9 +1042,9 @@ pub fn txfm_rd_in_plane_intra(
     let mut exit_early = false;
 
     let mut blk_row = 0usize;
-    while blk_row < max_blocks_high {
+    while blk_row < blocks_high_visible {
         let mut blk_col = 0usize;
-        while blk_col < max_blocks_wide {
+        while blk_col < blocks_wide_visible {
             if exit_early {
                 // C: the next block_rd_txfm call marks incomplete_exit; for
                 // intra exit_early alone already invalidates.
@@ -1519,12 +1525,18 @@ pub fn intra_model_rd_y(env: &TxfmYrdEnv, recon: &mut [u16], tx_size: usize) -> 
     let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
     let max_blocks_wide = MI_SIZE_WIDE_B[bsize];
     let max_blocks_high = MI_SIZE_HIGH_B[bsize];
+    // C clips the tx-block LOOP to the visible frame area (`max_block_wide`/
+    // `max_block_high`, av1_common_int.h:1568): a partial edge block's off-frame
+    // tx sub-blocks are never searched/predicted (the predictor asserts
+    // `n_top_px >= 0`). Luma plane, no subsampling.
+    let blocks_wide_visible = max_blocks_wide.min((env.mi_cols - env.mi_col).max(0) as usize);
+    let blocks_high_visible = max_blocks_high.min((env.mi_rows - env.mi_row).max(0) as usize);
 
     let mut satd_cost: i64 = 0;
     let mut blk_row = 0usize;
-    while blk_row < max_blocks_high {
+    while blk_row < blocks_high_visible {
         let mut blk_col = 0usize;
-        while blk_col < max_blocks_wide {
+        while blk_col < blocks_wide_visible {
             // av1_predict_intra_block_facade: predict INTO the recon plane.
             let (n_top, n_topright, n_left, n_bottomleft) = intra_avail(
                 env.sb_size,

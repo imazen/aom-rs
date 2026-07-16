@@ -140,13 +140,27 @@ impl MiNbrGrid {
     pub fn zero_left(&mut self) {
         self.left = [None; 32];
     }
-    fn stamp(&mut self, mi_row: i32, mi_col: i32, mi_w: usize, mi_h: usize, nbr: MiNbrKf) {
+    fn stamp(
+        &mut self,
+        mi_row: i32,
+        mi_col: i32,
+        mi_w: usize,
+        mi_h: usize,
+        mi_cols: i32,
+        mi_rows: i32,
+        nbr: MiNbrKf,
+    ) {
         let a0 = mi_col as usize;
-        for x in self.above[a0..a0 + mi_w].iter_mut() {
+        // C clips the mode-info write to x_mis/y_mis (av1_update_state,
+        // encodeframe_utils.c:353): a partial edge block writes only its
+        // in-frame mi cells, leaving off-frame neighbour slots untouched.
+        let x_mis = mi_w.min((mi_cols - mi_col).max(0) as usize);
+        let y_mis = mi_h.min((mi_rows - mi_row).max(0) as usize);
+        for x in self.above[a0..a0 + x_mis].iter_mut() {
             *x = Some(nbr);
         }
         let l0 = (mi_row & 31) as usize;
-        for x in self.left[l0..l0 + mi_h].iter_mut() {
+        for x in self.left[l0..l0 + y_mis].iter_mut() {
             *x = Some(nbr);
         }
     }
@@ -337,7 +351,7 @@ pub fn pack_leaf(
         y_mode: winner.mode as i32,
         skip_txfm: i32::from(winner.skip_txfm),
     };
-    nbr.stamp(mi_row, mi_col, mi_w, mi_h, nbr_kf);
+    nbr.stamp(mi_row, mi_col, mi_w, mi_h, env.mi_cols, env.mi_rows, nbr_kf);
 }
 
 /// Pack-stage per-plane coefficient loop: walk `out.txbs` (already in raster
@@ -468,6 +482,9 @@ pub fn pack_sb(
             PARTITION_VERT_B,
             get_partition_subsize(bsize, PARTITION_VERT_B) as usize,
         ),
+        // Off-frame placeholder: unreachable here (the entry guard returned
+        // for its off-frame origin), but the match must be exhaustive.
+        SbTree::Absent => return,
     };
 
     if bsize >= 3 {
@@ -770,6 +787,8 @@ pub fn pack_sb(
                 );
             }
         }
+        // Off-frame placeholder — unreachable past the entry frame-bound guard.
+        SbTree::Absent => {}
     }
 
     update_ext_partition_context(

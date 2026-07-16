@@ -877,6 +877,9 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
                          rd_pick_partition_real must never produce an AB tree here"
                     )
                 }
+                // Off-frame SPLIT-child placeholder — not a coded node, counts
+                // for nothing (interior fixtures never produce it).
+                aom_encode::encode_sb::SbTree::Absent => {}
             }
         }
         let mut expect = ExpectStats::default();

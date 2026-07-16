@@ -122,19 +122,40 @@ pub struct TileCtxState {
     pub left_tctx: [u8; 32],
 }
 
+/// `ALIGN_POWER_OF_TWO(mi_cols, MAX_MIB_SIZE_LOG2)` (aom_ports/mem.h:68;
+/// `MAX_MIB_SIZE_LOG2` = 5): round the tile MI width up to a whole superblock
+/// (a 32-mi multiple — the COMPILE-TIME max SB, 128px, used unconditionally by
+/// `av1_alloc_above_context_buffers` regardless of the frame's actual SB size).
+/// The above-context arrays are allocated to this width (alloccommon.c:414-448)
+/// so a partial edge superblock — whose full-extent context save/restore covers
+/// a straddling `BLOCK_64X64` candidate reaching past `mi_cols` to the SB
+/// boundary — stays in bounds. `mi_cols` alone under-allocates and the search's
+/// `save_context` panics on the first frame whose width is not a whole number
+/// of superblocks (e.g. 196px -> mi_cols=50, aligned=64).
+pub fn aligned_mi_cols(mi_cols: usize) -> usize {
+    const MAX_MIB_SIZE_LOG2: usize = 5;
+    (mi_cols + (1 << MAX_MIB_SIZE_LOG2) - 1) & !((1usize << MAX_MIB_SIZE_LOG2) - 1)
+}
+
 impl TileCtxState {
-    /// Zeroed contexts for a tile of `mi_cols` (the av1_zero tile init).
+    /// Zeroed contexts for a tile of `mi_cols` (the av1_zero tile init). The
+    /// ABOVE arrays are sized to [`aligned_mi_cols`] (a whole-SB multiple), NOT
+    /// bare `mi_cols`, matching `av1_alloc_above_context_buffers`
+    /// (alloccommon.c:414) so a frame-edge partial superblock's context
+    /// save/restore never overruns the array. The LEFT arrays are per-SB-strip
+    /// (32 = `MAX_MIB_SIZE`) and already whole-SB.
     pub fn zeroed(mi_cols: usize) -> Self {
+        let aligned = aligned_mi_cols(mi_cols);
         TileCtxState {
-            above_ectx: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
+            above_ectx: [vec![0; aligned], vec![0; aligned], vec![0; aligned]],
             left_ectx: [[0; 32]; 3],
-            above_pctx: vec![0; mi_cols],
+            above_pctx: vec![0; aligned],
             left_pctx: [0; 32],
             // The C tile init memsets the txfm-context arrays to
             // tx_size_wide[TX_SIZES_LARGEST] == 64, NOT 0
             // (av1_zero_above_context / av1_zero_left_context;
             // aom_entropy::partition::TXFM_CTX_INIT).
-            above_tctx: vec![aom_entropy::partition::TXFM_CTX_INIT; mi_cols],
+            above_tctx: vec![aom_entropy::partition::TXFM_CTX_INIT; aligned],
             left_tctx: [aom_entropy::partition::TXFM_CTX_INIT; 32],
         }
     }
@@ -195,6 +216,36 @@ pub struct LeafWinner {
     /// sub-block at the SAME position/size can be seeded from it verbatim
     /// instead of re-searching under a different (tighter) budget.
     pub raw_rdstats: PartRdStats,
+}
+
+impl LeafWinner {
+    /// A never-coded placeholder for a rectangular partition's second
+    /// sub-block whose origin is off-frame at a partial edge superblock — the
+    /// C's `is_not_edge_block[i]`-false case where `rd_pick_rect_partition`
+    /// searches only sub-0 (partition_search.c:3604). Every tree walker guards
+    /// the sub-1 frame bound (`if mi_row/col + hbs < mi_rows/cols`) before
+    /// touching it, so this is inert; `bsize` carries the nominal rect subsize
+    /// only to satisfy the in-guard `debug_assert_eq!(s1.bsize, subsize)` in
+    /// the (unreached) coded branch.
+    pub fn off_frame_placeholder(bsize: usize) -> Self {
+        LeafWinner {
+            bsize,
+            mode: 0,
+            angle_delta_y: 0,
+            use_filter_intra: false,
+            filter_intra_mode: 0,
+            tx_size: 0,
+            luma_edge_filter_type: 0,
+            uv_mode: 0,
+            angle_delta_uv: 0,
+            cfl_alpha_idx: 0,
+            cfl_alpha_signs: 0,
+            uv_edge_filter_type: 0,
+            tx_type_map: Vec::new(),
+            skip_txfm: false,
+            raw_rdstats: PartRdStats::invalid(),
+        }
+    }
 }
 
 /// The frame/tile environment shared by every leaf of one dry-run walk.
@@ -308,6 +359,16 @@ pub enum SbTree {
     /// (`subsize`), then top-right quarter, bottom-right quarter (both
     /// `bsize2`) — `ab_subsize[VERT_B]` (column-axis mirror of HORZ_B).
     VertB(Box<[LeafWinner; 3]>),
+    /// A SPLIT child whose origin (`mi_row`/`mi_col`) is entirely off-frame at
+    /// a partial edge superblock — the C's `pc_tree->split[idx]` for an
+    /// out-of-bounds quadrant, which `write_modes_sb`/`encode_sb` never code
+    /// (partition_search.c:1583, the `mi_row >= mi_rows || mi_col >= mi_cols`
+    /// out). It carries no winner and is NEVER traversed: every walker
+    /// (`encode_sb_dry`, `pack_sb`, `stamp_grid_from_tree`, `stamp_lf_tree`)
+    /// tests the same frame-bound guard at entry and returns before inspecting
+    /// it. It exists only so `Split`'s `[SbTree; 4]` can hold a placeholder for
+    /// the trimmed quadrant instead of a bogus leaf.
+    Absent,
 }
 
 /// `PARTITION_NONE` / `PARTITION_HORZ` / `PARTITION_VERT` /
@@ -531,11 +592,18 @@ pub fn encode_b_intra_dry(
         // Plane 0.
         let (txw_u, txh_u) = (TXS_W[winner.tx_size] >> 2, TXS_H[winner.tx_size] >> 2);
         let map_stride = mi_w;
+        // The Y encode produced txbs for the VISIBLE tx blocks only (the
+        // frame-edge `max_block_wide/high` clip); iterate the same range so
+        // `k` stays in `y_out.txbs` bounds and the entropy-context stamp
+        // covers exactly the coded (in-frame) tx blocks, matching C's
+        // edge-clipped `av1_set_entropy_contexts`. Map stride stays full.
+        let bwv = mi_w.min((env.mi_cols - mi_col).max(0) as usize);
+        let bhv = mi_h.min((env.mi_rows - mi_row).max(0) as usize);
         let mut k = 0usize;
         let mut blk_row = 0usize;
-        while blk_row < mi_h {
+        while blk_row < bhv {
             let mut blk_col = 0usize;
-            while blk_col < mi_w {
+            while blk_col < bwv {
                 let tt = crate::encode_intra::get_tx_type_y(
                     env.lossless,
                     winner.tx_size,
@@ -690,6 +758,9 @@ pub fn encode_sb_dry(
             PARTITION_VERT_B,
             aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B) as usize,
         ),
+        // Off-frame placeholder: unreachable here (the entry guard returned
+        // for its off-frame origin), but the match must be exhaustive.
+        SbTree::Absent => return,
     };
     debug_assert_ne!(subsize, 255, "tree subsize is valid by construction");
     // !dry_run partition-CDF update: pack stage (skipped at DRY_RUN).
@@ -1031,6 +1102,8 @@ pub fn encode_sb_dry(
             debug_assert_eq!(s2.bsize, bsize2);
             leaves.push(out);
         }
+        // Off-frame placeholder — unreachable past the entry frame-bound guard.
+        SbTree::Absent => {}
     }
     update_ext_partition_context(
         &mut state.above_pctx,

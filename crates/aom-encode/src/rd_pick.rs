@@ -200,9 +200,21 @@ pub struct RdPickIntraOutcome {
 /// state `xd->tx_type_map` holds after the sby tail's ctx restore
 /// (intra_mode_search.c:1739). Non-origin cells default to DCT_DCT (dead
 /// state; see [`RdPickIntraBest::tx_type_map`]).
-pub fn winner_tx_type_map(bsize: usize, y: &IntraSbyBest) -> Vec<u8> {
+pub fn winner_tx_type_map(
+    bsize: usize,
+    mi_row: i32,
+    mi_col: i32,
+    mi_cols: i32,
+    mi_rows: i32,
+    y: &IntraSbyBest,
+) -> Vec<u8> {
     let mbw = MI_SIZE_WIDE_B[bsize];
     let mbh = MI_SIZE_HIGH_B[bsize];
+    // The tx search only produced winners for the VISIBLE tx blocks (the
+    // frame-edge clip, `max_block_wide/high`); iterate the same range so `k`
+    // stays in `y.winners` bounds. Map stride is the FULL block width.
+    let bwv = mbw.min((mi_cols - mi_col).max(0) as usize);
+    let bhv = mbh.min((mi_rows - mi_row).max(0) as usize);
     let (txwu, txhu) = (
         crate::tx_search::TXS_W[y.tx_size] >> 2,
         crate::tx_search::TXS_H[y.tx_size] >> 2,
@@ -210,9 +222,9 @@ pub fn winner_tx_type_map(bsize: usize, y: &IntraSbyBest) -> Vec<u8> {
     let mut map = vec![0u8; mbw * mbh];
     let mut k = 0usize;
     let mut blk_row = 0usize;
-    while blk_row < mbh {
+    while blk_row < bhv {
         let mut blk_col = 0usize;
-        while blk_col < mbw {
+        while blk_col < bwv {
             update_txk_array(
                 &mut map,
                 mbw,
@@ -259,7 +271,14 @@ pub fn rd_pick_intra_mode_sb(
     // (3) set_mode_eval_params(DEFAULT_EVAL): state no-op at speed 0 (docs).
 
     // The sby tail restored the winner's tx_type_map into xd->tx_type_map.
-    let mut tx_type_map = winner_tx_type_map(y_env.bsize, &y);
+    let mut tx_type_map = winner_tx_type_map(
+        y_env.bsize,
+        y_env.mi_row,
+        y_env.mi_col,
+        y_env.mi_cols,
+        y_env.mi_rows,
+        &y,
+    );
 
     // (4) the uv side.
     let mut store_y = false;

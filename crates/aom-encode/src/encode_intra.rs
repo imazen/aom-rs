@@ -286,6 +286,13 @@ pub fn encode_intra_block_plane_y(
     let max_blocks_wide = MI_SIZE_WIDE_B[bsize];
     let max_blocks_high = MI_SIZE_HIGH_B[bsize];
     let map_stride = max_blocks_wide;
+    // C clips the tx-block LOOP to the visible frame area (`max_block_wide`/
+    // `max_block_high`, av1_common_int.h:1568): a partial edge block's off-frame
+    // tx sub-blocks are never predicted/coded (the predictor asserts
+    // `n_top_px >= 0`). Luma plane, so no subsampling. The map stride and
+    // neighbour-context arrays stay the FULL block width.
+    let blocks_wide_visible = max_blocks_wide.min((env.mi_cols - env.mi_col).max(0) as usize);
+    let blocks_high_visible = max_blocks_high.min((env.mi_rows - env.mi_row).max(0) as usize);
 
     // ENTROPY_CONTEXT ta/tl = {0}; av1_get_entropy_contexts only when
     // enable_optimize_b (the enum truth test, encodemb.c:817-819).
@@ -299,9 +306,9 @@ pub fn encode_intra_block_plane_y(
 
     let mut txbs: Vec<TxbEncode> = Vec::new();
     let mut blk_row = 0usize;
-    while blk_row < max_blocks_high {
+    while blk_row < blocks_high_visible {
         let mut blk_col = 0usize;
-        while blk_col < max_blocks_wide {
+        while blk_col < blocks_wide_visible {
             // --- encode_block_intra ---
             // av1_predict_intra_block_facade: predict INTO the recon plane.
             let (n_top, n_topright, n_left, n_bottomleft) = intra_avail(

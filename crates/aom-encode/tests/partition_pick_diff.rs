@@ -1034,6 +1034,8 @@ fn stamp_grid(
                 "partition_pick_diff.rs's NONE/SPLIT/HORZ/VERT-only harness never produces an AB tree"
             )
         }
+        // Off-frame SPLIT-child placeholder (interior fixtures never produce it).
+        SbTree::Absent => {}
     }
 }
 
@@ -1614,6 +1616,8 @@ fn rd_pick_partition_real_matches_c_recursion() {
                 SbTree::HorzA(_) | SbTree::HorzB(_) | SbTree::VertA(_) | SbTree::VertB(_) => {
                     panic!("this NONE/SPLIT/HORZ/VERT-only harness never produces an AB tree")
                 }
+                // Off-frame SPLIT-child placeholder (interior fixtures never produce it).
+                SbTree::Absent => {}
             }
         }
         let (mut n, mut s) = (0usize, 0usize);

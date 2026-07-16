@@ -698,5 +698,7 @@ fn stamp_lf_tree(
                 mi_cols,
             );
         }
+        // Off-frame placeholder — unreachable past the entry frame-bound guard.
+        SbTree::Absent => {}
     }
 }

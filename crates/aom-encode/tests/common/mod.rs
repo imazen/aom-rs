@@ -3152,6 +3152,9 @@ impl COracle<'_> {
                 "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
                  every current caller passes enable_ab_partitions: false"
             ),
+            // Off-frame SPLIT-child placeholder — unreachable past the entry
+            // frame-bound guard, but the match must be exhaustive.
+            SbTree::Absent => return,
         };
         match tree {
             SbTree::Leaf(w) => {
@@ -3208,6 +3211,9 @@ impl COracle<'_> {
                 "this shared C-oracle encode_sb helper is NONE/SPLIT/HORZ/VERT-only -- \
                  every current caller passes enable_ab_partitions: false"
             ),
+            // Off-frame SPLIT-child placeholder — unreachable past the entry
+            // frame-bound guard.
+            SbTree::Absent => {}
         }
         // The REAL update_ext_partition_context (64-entry above window).
         let mut above64 = [0i8; 64];

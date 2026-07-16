@@ -210,6 +210,8 @@ fn sbtree_seq(
         SbTree::VertB(_) => 7,
         SbTree::Horz4(_) => 8,
         SbTree::Vert4(_) => 9,
+        // Off-frame SPLIT-child placeholder — unreachable past the entry guard.
+        SbTree::Absent => return,
     };
     out.push((mi_row, mi_col, bsize, p));
     if let SbTree::Split(kids) = tree {

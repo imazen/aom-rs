@@ -1827,10 +1827,15 @@ pub fn rd_pick_partition_real(
                 best_rdc = sum_rdc;
                 found = true;
                 pc_tree_partitioning = 3; // PARTITION_SPLIT
-                let kids: Vec<SbTree> = children
-                    .into_iter()
-                    .map(|t| t.expect("found split has 4 found children"))
-                    .collect();
+                // Off-frame quadrants at a partial edge SB are `None` here
+                // (pushed at the `y >= mi_rows || x >= mi_cols` trim above,
+                // mirroring the C's `pc_tree->split[idx]` for an out-of-bounds
+                // origin that `encode_sb`/`write_modes_sb` never code). They
+                // become `SbTree::Absent` placeholders — every tree walker
+                // guards the same frame bound at entry, so an `Absent` slot is
+                // never inspected. (An interior SB has all 4 children `Some`.)
+                let kids: Vec<SbTree> =
+                    children.into_iter().map(|t| t.unwrap_or(SbTree::Absent)).collect();
                 best_tree = Some(SbTree::Split(Box::new(
                     <[SbTree; 4]>::try_from(kids).ok().unwrap(),
                 )));
@@ -1988,10 +1993,22 @@ pub fn rd_pick_partition_real(
                 best_rdc = sum_rdc;
                 found = true;
                 pc_tree_partitioning = 1 + i as i32; // PARTITION_HORZ / PARTITION_VERT
-                let pair = Box::new([
-                    w0.take().expect("rect winner sub 0"),
-                    w1.take().expect("interior rect winner sub 1"),
-                ]);
+                // At a partial edge SB the second sub-block is off-frame and
+                // was never searched (`is_not_edge_block` false, sub-1 skipped
+                // above — partition_search.c:3604); it becomes a never-coded
+                // placeholder. Every walker guards the sub-1 frame bound before
+                // touching it. Interior blocks always have a real sub-1 winner.
+                let sub1 = match w1.take() {
+                    Some(w) => w,
+                    None => {
+                        debug_assert!(
+                            !is_not_edge_block,
+                            "rect sub-1 absent only at a frame edge"
+                        );
+                        crate::encode_sb::LeafWinner::off_frame_placeholder(subsize)
+                    }
+                };
+                let pair = Box::new([w0.take().expect("rect winner sub 0"), sub1]);
                 best_tree = Some(if i == 0 {
                     SbTree::Horz(pair)
                 } else {
@@ -2554,5 +2571,7 @@ fn stamp_grid_from_tree(
                 mi_cols,
             );
         }
+        // Off-frame placeholder — unreachable past the entry frame-bound guard.
+        SbTree::Absent => {}
     }
 }
