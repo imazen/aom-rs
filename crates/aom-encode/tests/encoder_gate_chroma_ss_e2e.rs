@@ -462,6 +462,7 @@ fn run_case(
         intra_uv_mode_cost: &real.mode_costs.intra_uv_mode_cost,
         cfl_costs: &real.cfl_costs,
         partition_costs: &real.partition_costs,
+        partition_cdfs: &real.partition_cdf,
         allintra,
         speed,
         qindex,

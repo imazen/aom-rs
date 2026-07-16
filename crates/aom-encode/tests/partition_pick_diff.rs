@@ -63,6 +63,10 @@ mod common;
 use common::*;
 
 const STRIDE: usize = 256;
+/// The diff harness encodes at mi(0,0) in a 512x512 mi frame, so every tested
+/// block is interior (`has_rows && has_cols`) and the frame-EDGE partition-cost
+/// override never fires — `PickFrameCfg::partition_cdfs` is never read here.
+const UNUSED_EDGE_PARTITION_CDF: [[u16; 11]; 20] = [[0u16; 11]; 20];
 const MI_WB: [usize; 22] = [
     1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
 ];
@@ -1422,6 +1426,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
             intra_uv_mode_cost: &uv_mode_cost,
             cfl_costs: &cfl_costs,
             partition_costs: &partition_costs,
+            partition_cdfs: &UNUSED_EDGE_PARTITION_CDF,
             allintra,
             speed: 0,
             qindex: qindex as i32,

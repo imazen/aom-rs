@@ -907,6 +907,11 @@ pub fn pack_tile(
                 intra_uv_mode_cost: &sb_real.mode_costs.intra_uv_mode_cost,
                 cfl_costs: &sb_real.cfl_costs,
                 partition_costs: &sb_real.partition_costs,
+                // SB-adapted partition CDF (matches `partition_costs` above) so
+                // the edge-block override reads the CDF that has adapted through
+                // the prior SBs, not the frame-init one the `..*pick_cfg` spread
+                // would supply.
+                partition_cdfs: &sb_real.partition_cdf,
                 ..*pick_cfg
             };
 

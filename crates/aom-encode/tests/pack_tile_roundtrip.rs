@@ -654,6 +654,18 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
                 *e = rng.range(0, 6 << 9);
             }
         }
+        // Synthetic-but-VALID partition inverse-CDF for the frame-EDGE override
+        // (set_partition_cost_for_edge_blk): this glue test builds random
+        // `partition_costs` directly, so there is no real CDF to gather — a
+        // uniform 10-symbol inverse CDF is valid input for the edge gather at
+        // the searched region's flush-right/bottom SBs. The roundtrip only
+        // needs pack/unpack consistency; the exact edge decision is irrelevant.
+        let mut partition_cdf = [[0u16; 11]; 20];
+        for row in partition_cdf.iter_mut() {
+            for (k, e) in row.iter_mut().take(10).enumerate() {
+                *e = (32768 - (k as i32 + 1) * 32768 / 10) as u16; // AOM_ICDF, uniform; [9] == 0
+            }
+        }
         let pol = if allintra {
             TxTypeSearchPolicy::speed0_allintra()
         } else {
@@ -723,6 +735,7 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             intra_uv_mode_cost: &uv_mode_cost,
             cfl_costs: &cfl_costs,
             partition_costs: &partition_costs,
+            partition_cdfs: &partition_cdf,
             allintra,
             speed: 0,
             qindex: qindex as i32,
@@ -1184,6 +1197,7 @@ fn pack_tile_roundtrips_with_real_costs() {
             intra_uv_mode_cost: &real.mode_costs.intra_uv_mode_cost,
             cfl_costs: &real.cfl_costs,
             partition_costs: &real.partition_costs,
+            partition_cdfs: &real.partition_cdf,
             allintra,
             speed: 0,
             qindex: qindex as i32,

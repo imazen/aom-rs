@@ -57,6 +57,12 @@ pub struct RealCosts {
     pub tx_type_costs_y: Box<TxTypeCosts>,
     pub cfl_costs: CflCosts,
     pub partition_costs: [[i32; EXT_PARTITION_TYPES]; PARTITION_CONTEXTS],
+    /// The RAW per-context partition inverse-CDF rows (`fc->partition_cdf`,
+    /// `EXT_PARTITION_TYPES + 1` wide). `set_partition_cost_for_edge_blk`
+    /// (partition_search.c:3411) gathers these to a 2-way distribution at a
+    /// frame-edge block — a lossy step the precomputed 10-way `partition_costs`
+    /// can't reproduce — so the raw CDF is kept alongside for the edge override.
+    pub partition_cdf: [[u16; EXT_PARTITION_TYPES + 1]; PARTITION_CONTEXTS],
     pub skip_costs: [[i32; 2]; SKIP_CONTEXTS],
     /// The REAL per-`(txs_ctx, eob_multi_size)` luma coefficient-coding cost
     /// tables (`av1_fill_coeff_costs`'s `plane == PLANE_TYPE_Y` slice).
@@ -147,8 +153,14 @@ pub fn derive_real_costs(kf: &KfFrameContext, enable_filter_intra: bool) -> Real
     fill_tx_type_costs(&mut tx_type_costs_y, &intra_ext_tx_cdf, &inter_ext_tx_cdf);
 
     let mut partition_costs = [[0i32; EXT_PARTITION_TYPES]; PARTITION_CONTEXTS];
-    let partition_cdf: Vec<u16> = kf.partition.iter().flatten().copied().collect();
-    fill_partition_costs(&mut partition_costs, &partition_cdf);
+    let partition_cdf_flat: Vec<u16> = kf.partition.iter().flatten().copied().collect();
+    fill_partition_costs(&mut partition_costs, &partition_cdf_flat);
+    // Reshape the flat CDF into per-context rows for the edge-block override.
+    let mut partition_cdf = [[0u16; EXT_PARTITION_TYPES + 1]; PARTITION_CONTEXTS];
+    let cdf_stride = EXT_PARTITION_TYPES + 1;
+    for (ctx, row) in partition_cdf.iter_mut().enumerate() {
+        row.copy_from_slice(&partition_cdf_flat[ctx * cdf_stride..(ctx + 1) * cdf_stride]);
+    }
 
     let mut skip_costs = [[0i32; 2]; SKIP_CONTEXTS];
     let skip_cdf: Vec<u16> = kf.skip.iter().flatten().copied().collect();
@@ -167,6 +179,7 @@ pub fn derive_real_costs(kf: &KfFrameContext, enable_filter_intra: bool) -> Real
         tx_type_costs_y,
         cfl_costs,
         partition_costs,
+        partition_cdf,
         skip_costs,
         coeff_costs_y,
         coeff_costs_uv,

@@ -194,10 +194,11 @@ use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TxTypeSearchPolicy, TxfmY
 use aom_dist::highbd_variance;
 use aom_entropy::partition::{
     allow_palette, get_partition_subsize, get_plane_block_size, get_tx_size_context,
-    palette_bsize_ctx, palette_mode_ctx, partition_plane_context,
+    palette_bsize_ctx, palette_mode_ctx, partition_gather_horz_alike, partition_gather_vert_alike,
+    partition_plane_context,
 };
 use aom_intra::cfl::CflCtx;
-use aom_txb::TxTypeCosts;
+use aom_txb::{TxTypeCosts, cost_symbol, cost_tokens_from_cdf};
 
 /// `num_pels_log2_lookup[BLOCK_SIZES_ALL]` (common_data.h).
 const NUM_PELS_LOG2: [u32; 22] = [
@@ -374,6 +375,12 @@ pub struct PickFrameCfg<'a> {
     pub cfl_costs: &'a CflCosts,
     /// `mode_costs->partition_cost[pl_ctx][..]` rows.
     pub partition_costs: &'a [[i32; 10]; 20],
+    /// Raw `fc->partition_cdf[pl_ctx]` rows (`EXT_PARTITION_TYPES + 1` wide).
+    /// Read only at frame-EDGE blocks, where `set_partition_cost_for_edge_blk`
+    /// (partition_search.c:3411) gathers the CDF to a 2-way split-vs-not
+    /// distribution and re-derives the partition cost (the precomputed 10-way
+    /// `partition_costs` can't be un-summed). Interior blocks never read this.
+    pub partition_cdfs: &'a [[u16; 11]; 20],
     /// `oxcf.mode == ALLINTRA` (the leaf variance-factor arm; the caller
     /// also pre-folds the SB rdmult modifier into `SbEncodeEnv::rdmult`).
     pub allintra: bool,
@@ -1516,6 +1523,38 @@ fn use_square_partition_only_threshold_allintra(speed: i32, w: i32, h: i32) -> u
     t
 }
 
+/// `set_partition_cost_for_edge_blk` (partition_search.c:3411): the partition
+/// cost row for a frame-EDGE block. `read_partition` (decodeframe.c) codes a
+/// gathered 2-way symbol at an edge — HORZ/SPLIT at the bottom, VERT/SPLIT at
+/// the right — or a forced SPLIT at the bottom-right corner, so the RD search
+/// must charge that gathered cost instead of the full 10-way `partition_cost`.
+/// `cdf_row` is `fc->partition_cdf[pl_ctx]` (`EXT_PARTITION_TYPES + 1` wide);
+/// all non-coded partition types stay at `av1_cost_symbol(0)` (max cost). The
+/// caller applies this only when `bsize_at_least_8x8 && !(has_rows && has_cols)`
+/// (the C `pl_ctx_idx >= 0` assert + the `!av1_blk_has_rows_and_cols` gate at
+/// partition_search.c:5695).
+pub(crate) fn set_partition_cost_for_edge_blk(
+    cdf_row: &[u16],
+    bsize: usize,
+    has_rows: bool,
+    has_cols: bool,
+) -> [i32; 10] {
+    let mut ec = [cost_symbol(0); 10]; // max_cost = av1_cost_symbol(0)
+    if has_cols {
+        // At the bottom, the two possibilities are HORZ and SPLIT.
+        let bot = partition_gather_vert_alike(cdf_row, bsize);
+        cost_tokens_from_cdf(&mut ec, &bot, Some(&[1, 3])); // PARTITION_HORZ, PARTITION_SPLIT
+    } else if has_rows {
+        // At the right, the two possibilities are VERT and SPLIT.
+        let rhs = partition_gather_horz_alike(cdf_row, bsize);
+        cost_tokens_from_cdf(&mut ec, &rhs, Some(&[2, 3])); // PARTITION_VERT, PARTITION_SPLIT
+    } else {
+        // At the bottom right, we always split.
+        ec[3] = 0; // PARTITION_SPLIT
+    }
+    ec
+}
+
 pub fn rd_pick_partition_real(
     env: &SbEncodeEnv,
     cfg: &PickFrameCfg,
@@ -1700,7 +1739,23 @@ pub fn rd_pick_partition_real(
     } else {
         0
     };
-    let partition_cost = &cfg.partition_costs[pl_ctx];
+    // set_partition_cost_for_edge_blk (partition_search.c:3411, called at
+    // :5695 `if (!av1_blk_has_rows_and_cols(...))`): at a frame edge
+    // read_partition does NOT code the full 10-way partition symbol — it codes
+    // a gathered 2-way distribution (HORZ/SPLIT at the bottom, VERT/SPLIT at
+    // the right) or a forced SPLIT at the bottom-right corner. The RD search
+    // must charge the SAME cost or it mis-prices the partition decision at the
+    // edge SBs (KB-6 partial-SB). Interior blocks (has_rows && has_cols) keep
+    // the full 10-way cost. Only meaningful for bsize_at_least_8x8 (the C
+    // assert; sub-8x8 blocks signal no partition symbol and pl_ctx is 0).
+    let edge_partition_cost: [i32; 10];
+    let partition_cost: &[i32; 10] = if bsize_at_least_8x8 && !(has_rows && has_cols) {
+        edge_partition_cost =
+            set_partition_cost_for_edge_blk(&cfg.partition_cdfs[pl_ctx], bsize, has_rows, has_cols);
+        &edge_partition_cost
+    } else {
+        &cfg.partition_costs[pl_ctx]
+    };
 
     // av1_rd_cost_update(x->rdmult, &best_rdc) (:5744).
     rd_cost_update(env.rdmult, &mut best_rdc);
@@ -2642,5 +2697,75 @@ fn stamp_grid_from_tree(
         }
         // Off-frame placeholder — unreachable past the entry frame-bound guard.
         SbTree::Absent => {}
+    }
+}
+
+#[cfg(test)]
+mod edge_partition_cost_tests {
+    use super::*;
+
+    /// Witness for `set_partition_cost_for_edge_blk` (the CHUNK-3 frame-edge
+    /// partition-cost override). The gather + `cost_tokens_from_cdf` +
+    /// `cost_symbol` primitives are each already proven byte-exact vs C
+    /// (`aom_entropy::partition` write tests, `aom_txb::prob_cost` diff tests);
+    /// this locks the COMPOSITION the C source dictates — the per-edge gather
+    /// choice, the `[HORZ,SPLIT]`/`[VERT,SPLIT]` inverse maps, the
+    /// `av1_cost_symbol(0)` fill, and the forced-SPLIT corner — which is where a
+    /// porting mistake would live.
+    #[test]
+    fn edge_cost_matches_gathered_composition() {
+        // An asymmetric but valid 10-symbol partition inverse CDF (BLOCK_64X64,
+        // so every partition type participates — the 128x128 VERT_4/HORZ_4 skip
+        // does not apply). Probabilities sum to CDF_PROB_TOP (32768).
+        let probs = [8000i32, 2000, 6000, 5000, 3000, 1000, 2000, 1768, 2000, 2000];
+        let mut cdf = [0u16; 11];
+        let mut cum = 0i32;
+        for (k, &p) in probs.iter().enumerate() {
+            cum += p;
+            cdf[k] = (32768 - cum) as u16; // AOM_ICDF
+        }
+        assert_eq!(cdf[9], 0, "a valid inverse CDF terminates at 0 on its last symbol");
+        let bsize = 12; // BLOCK_64X64
+        let max = cost_symbol(0);
+
+        // Bottom edge (has_cols, !has_rows): HORZ + SPLIT via vert_alike gather.
+        let bot = set_partition_cost_for_edge_blk(&cdf, bsize, false, true);
+        let mut expect_bot = [max; 10];
+        let g = partition_gather_vert_alike(&cdf, bsize);
+        cost_tokens_from_cdf(&mut expect_bot, &g, Some(&[1, 3]));
+        assert_eq!(bot, expect_bot, "bottom edge = vert_alike over [HORZ, SPLIT]");
+        for (i, &c) in bot.iter().enumerate() {
+            if i != 1 && i != 3 {
+                assert_eq!(c, max, "bottom edge: uncoded type {i} stays max_cost");
+            }
+        }
+
+        // Right edge (has_rows, !has_cols): VERT + SPLIT via horz_alike gather.
+        let rhs = set_partition_cost_for_edge_blk(&cdf, bsize, true, false);
+        let mut expect_rhs = [max; 10];
+        let g2 = partition_gather_horz_alike(&cdf, bsize);
+        cost_tokens_from_cdf(&mut expect_rhs, &g2, Some(&[2, 3]));
+        assert_eq!(rhs, expect_rhs, "right edge = horz_alike over [VERT, SPLIT]");
+        for (i, &c) in rhs.iter().enumerate() {
+            if i != 2 && i != 3 {
+                assert_eq!(c, max, "right edge: uncoded type {i} stays max_cost");
+            }
+        }
+
+        // For an asymmetric CDF the two edges must differ — proves the per-edge
+        // gather/inv-map selection is not accidentally swapped.
+        assert_ne!(
+            bot[3], rhs[3],
+            "bottom vs right SPLIT cost must differ for an asymmetric CDF"
+        );
+
+        // Bottom-right corner (!has_rows, !has_cols): forced SPLIT, rest max.
+        let corner = set_partition_cost_for_edge_blk(&cdf, bsize, false, false);
+        assert_eq!(corner[3], 0, "corner forces PARTITION_SPLIT (cost 0)");
+        for (i, &c) in corner.iter().enumerate() {
+            if i != 3 {
+                assert_eq!(c, max, "corner: non-SPLIT type {i} stays max_cost");
+            }
+        }
     }
 }
