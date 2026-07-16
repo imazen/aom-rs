@@ -261,6 +261,34 @@ pub fn av1_highbd_iwht4x4_add(input: &[i32], output: &mut [u16], stride: usize, 
     }
 }
 
+/// `av1_inverse_transform_block` (`av1/common/idct.c`): the recon inverse-transform
+/// dispatch used on BOTH the encode and decode reconstruction paths. For a
+/// coded-lossless block (`xd->lossless[segment_id]`, which forces `TX_4X4` +
+/// `DCT_DCT`) it applies the reversible 4x4 Walsh–Hadamard inverse
+/// [`av1_highbd_iwht4x4_add`] (eob-dispatched); otherwise the regular
+/// [`av1_inv_txfm2d_add`]. `input` is the dequantized coefficient block; `dst`
+/// holds the prediction on entry and the reconstruction on return. Mirrors the
+/// forward split in `xform_quant` (DCT vs [`av1_fwht4x4`]) so the encoder's
+/// reconstruction (and any pixel-domain distortion) matches the decoder bit for
+/// bit at qindex 0.
+#[allow(clippy::too_many_arguments)]
+pub fn av1_inverse_transform_add(
+    input: &[i32],
+    dst: &mut [u16],
+    stride: usize,
+    tx_type: usize,
+    tx_size: usize,
+    bd: i32,
+    eob: usize,
+    lossless: bool,
+) {
+    if lossless {
+        av1_highbd_iwht4x4_add(input, dst, stride, eob, bd);
+    } else {
+        av1_inv_txfm2d_add(input, dst, stride, tx_type, tx_size, bd);
+    }
+}
+
 /// `av1_highbd_iwht4x4_16_add_c` — the full 4-point reversible Walsh–Hadamard
 /// applied column-then-row. Bit-exact port; `range_check_value(_, bd+1)` is a
 /// no-op in the production config (coefficient range checking off).
@@ -320,5 +348,68 @@ fn av1_highbd_iwht4x4_1_add(input: &[i32], dest: &mut [u16], stride: usize, bd: 
         dest[i + stride] = highbd_clip_pixel_add(dest[i + stride], e, bd);
         dest[i + 2 * stride] = highbd_clip_pixel_add(dest[i + 2 * stride], e, bd);
         dest[i + 3 * stride] = highbd_clip_pixel_add(dest[i + 3 * stride], e, bd);
+    }
+}
+
+/// `av1_fwht4x4_c` (`av1/encoder/hybrid_fwd_txfm.c:24`): the 4x4 reversible,
+/// orthonormal Walsh–Hadamard FORWARD transform used for `xd->lossless` blocks
+/// (forced `TX_4X4`, `tx_type` always `DCT_DCT`). Shared for high and low bit
+/// depth — there is no separate `av1_highbd_fwht4x4` (the highbd dispatch reaches
+/// this same function).
+///
+/// `input` is the 4x4 residual (row-major, row stride `stride`); `output` is the
+/// 16-entry raster coefficient block. Intermediates are `tran_high_t` (i64);
+/// output is `tran_low_t` (i32).
+///
+/// This is the transpose-dual of the inverse [`av1_highbd_iwht4x4_add`]: the
+/// inverse shifts its INPUT down by `UNIT_QUANT_SHIFT`, the forward scales its
+/// pass-1 OUTPUT up by `UNIT_QUANT_FACTOR == 1 << UNIT_QUANT_SHIFT`, so the pair
+/// is identity at the lossless unit quantizer (`level * 4 >> 2 == level`). Two
+/// details are load-bearing and preserved verbatim: (a) each pass writes its four
+/// results in the `(a1, c1, d1, b1)` permutation, NOT identity; (b) the
+/// `* UNIT_QUANT_FACTOR` lands only on pass 1.
+pub fn av1_fwht4x4(input: &[i16], output: &mut [i32], stride: usize) {
+    const UNIT_QUANT_FACTOR: i64 = 1 << UNIT_QUANT_SHIFT;
+    // Pass 0 (input columns -> output rows), NO shift, NO factor. Iteration i
+    // reads input column i (input[i], input[i+stride], input[i+2*stride],
+    // input[i+3*stride]) and writes output[4*i .. 4*i+4].
+    for i in 0..4 {
+        let mut a1 = i64::from(input[i]);
+        let mut b1 = i64::from(input[i + stride]);
+        let mut c1 = i64::from(input[i + 2 * stride]);
+        let mut d1 = i64::from(input[i + 3 * stride]);
+
+        a1 += b1;
+        d1 -= c1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= c1;
+        d1 += b1;
+        output[4 * i] = a1 as i32;
+        output[4 * i + 1] = c1 as i32;
+        output[4 * i + 2] = d1 as i32;
+        output[4 * i + 3] = b1 as i32;
+    }
+    // Pass 1 (output raster-columns -> output columns), APPLY *UNIT_QUANT_FACTOR.
+    // Iteration i reads output column i (output[i], output[i+4], output[i+8],
+    // output[i+12]) and writes the same column, scaled.
+    for i in 0..4 {
+        let mut a1 = i64::from(output[i]);
+        let mut b1 = i64::from(output[i + 4]);
+        let mut c1 = i64::from(output[i + 8]);
+        let mut d1 = i64::from(output[i + 12]);
+
+        a1 += b1;
+        d1 -= c1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= c1;
+        d1 += b1;
+        output[i] = (a1 * UNIT_QUANT_FACTOR) as i32;
+        output[i + 4] = (c1 * UNIT_QUANT_FACTOR) as i32;
+        output[i + 8] = (d1 * UNIT_QUANT_FACTOR) as i32;
+        output[i + 12] = (b1 * UNIT_QUANT_FACTOR) as i32;
     }
 }

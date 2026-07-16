@@ -6060,6 +6060,27 @@ pub fn ref_fwd_txfm2d(tx_size: usize, input: &[i16], stride: usize, tx_type: usi
     out
 }
 
+// av1/encoder/hybrid_fwd_txfm.c — the 4x4 reversible Walsh–Hadamard forward
+// transform for coded-lossless blocks. Shared for high and low bit depth (no
+// separate highbd variant). Signature: (const int16_t*, tran_low_t* /*int32*/,
+// int stride).
+extern "C" {
+    pub fn av1_fwht4x4_c(input: *const i16, output: *mut i32, stride: i32);
+}
+
+/// Reference forward 4x4 Walsh–Hadamard (`av1_fwht4x4_c`) — the coded-lossless
+/// forward transform. `input` is the 4x4 residual with row stride `stride`
+/// (must be readable at `input[i + 3*stride]` for `i in 0..4`); returns the
+/// 16-entry raster coefficient block. Bit-depth-independent.
+pub fn ref_fwht4x4(input: &[i16], stride: usize) -> Vec<i32> {
+    ref_init();
+    let mut out = vec![0i32; 16];
+    unsafe {
+        av1_fwht4x4_c(input.as_ptr(), out.as_mut_ptr(), stride as i32);
+    }
+    out
+}
+
 // av1/common/av1_inv_txfm2d.c — inverse 2D add entry points.
 // Signature: (const int32_t*, uint16_t* dest, int stride, TX_TYPE, int bd).
 pub type Inv2dFn = unsafe extern "C" fn(*const i32, *mut u16, i32, i32, i32);

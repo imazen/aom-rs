@@ -43,7 +43,7 @@ use aom_quant::{
     aom_quantize_b_qm, av1_highbd_quantize_dc, av1_highbd_quantize_fp_no_qmatrix,
     av1_highbd_quantize_fp_qm, av1_quantize_dc, av1_quantize_fp_no_qmatrix, av1_quantize_fp_qm,
 };
-use aom_transform::inv_txfm2d::av1_inv_txfm2d_add;
+use aom_transform::inv_txfm2d::{av1_fwht4x4, av1_inv_txfm2d_add};
 use aom_transform::txfm2d::av1_fwd_txfm2d;
 use aom_txb::{
     CoeffCostTables, dequant_txb, get_txb_ctx, optimize_txb, optimize_txb_qm, scan,
@@ -100,6 +100,13 @@ pub struct QuantParams<'a> {
     /// the forward transform, trellis, entropy context, and writer are all
     /// bd-independent (verified: forward output is identical for bd 8/10/12).
     pub bd: u8,
+    /// `xd->lossless[segment_id]` for this block's segment (coded-lossless =>
+    /// `true` for every segment at qindex 0 with zero q-deltas). When set, the
+    /// forward transform is the reversible 4x4 Walsh–Hadamard ([`av1_fwht4x4`])
+    /// instead of `av1_fwd_txfm2d` — libaom's `highbd_fwd_txfm_4x4`
+    /// (`hybrid_fwd_txfm.c:83`) makes the same branch. Lossless forces
+    /// `tx_size == TX_4X4` and `tx_type == DCT_DCT` upstream.
+    pub lossless: bool,
 }
 
 impl<'a> QuantParams<'a> {
@@ -116,7 +123,14 @@ impl<'a> QuantParams<'a> {
     ///   `round_QTX` (the facade passes the B round with the FP multiplier).
     ///
     /// `qm`/`iqm` start as `None` (flat); set them for the quant-matrix path.
-    pub fn from_plane_rows(rows: &aom_quant::PlaneQuantRows<'a>, kind: QuantKind, bd: u8) -> Self {
+    /// `lossless` is the block's segment `xd->lossless` bit (routes the forward
+    /// transform to [`av1_fwht4x4`]); pass `false` for the normal path.
+    pub fn from_plane_rows(
+        rows: &aom_quant::PlaneQuantRows<'a>,
+        kind: QuantKind,
+        bd: u8,
+        lossless: bool,
+    ) -> Self {
         let pair =
             |row: &'a [i16; 8]| -> &'a [i16; 2] { row[..2].try_into().expect("row has 8 lanes") };
         let (quant, round) = match kind {
@@ -133,6 +147,7 @@ impl<'a> QuantParams<'a> {
             qm: None,
             iqm: None,
             bd,
+            lossless,
         }
     }
 }
@@ -167,9 +182,18 @@ pub fn xform_quant(
     let sc = scan(tx_size, tx_type);
 
     // av1_xform: forward 2-D transform into a full-size buffer (64-point sizes
-    // repack their valid area into the first n_coeffs entries in-place).
+    // repack their valid area into the first n_coeffs entries in-place). For a
+    // coded-lossless block libaom's `highbd_fwd_txfm_4x4` (hybrid_fwd_txfm.c:83)
+    // swaps the DCT for the reversible 4x4 Walsh–Hadamard; lossless forces
+    // TX_4X4 (== 0) and DCT_DCT (== 0) upstream, so this is the only tx here.
     let mut coeff = vec![0i32; full];
-    av1_fwd_txfm2d(residual, &mut coeff, TX_W[tx_size], tx_type, tx_size);
+    if qp.lossless {
+        debug_assert_eq!(tx_size, 0, "lossless forces TX_4X4");
+        debug_assert_eq!(tx_type, 0, "lossless forces DCT_DCT");
+        av1_fwht4x4(residual, &mut coeff, TX_W[tx_size]);
+    } else {
+        av1_fwd_txfm2d(residual, &mut coeff, TX_W[tx_size], tx_type, tx_size);
+    }
 
     // av1_quant: quantize the valid coefficient block.
     let mut qcoeff = vec![0i32; n_coeffs];

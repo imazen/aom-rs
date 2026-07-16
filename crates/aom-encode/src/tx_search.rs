@@ -563,7 +563,7 @@ fn prune_txk_type_intra(
     prune_factor: i64,
     txk_map: &mut [usize; TX_TYPES],
 ) -> u16 {
-    let qp_b = QuantParams::from_plane_rows(inp.rows, QuantKind::B, inp.bd);
+    let qp_b = QuantParams::from_plane_rows(inp.rows, QuantKind::B, inp.bd, inp.lossless);
     let (txb_skip_ctx, dc_sign_ctx) = aom_txb::get_txb_ctx(
         inp.bctx.plane_bsize,
         tx_size,
@@ -996,7 +996,7 @@ pub fn search_tx_type_intra(
     } else {
         QuantKind::Fp
     };
-    let qp = QuantParams::from_plane_rows(inp.rows, kind, inp.bd);
+    let qp = QuantParams::from_plane_rows(inp.rows, kind, inp.bd, inp.lossless);
     let trellis_rdmult = trellis_rdmult_intra(
         inp.rdmult,
         pol.sharpness,
@@ -1151,6 +1151,8 @@ pub fn search_tx_type_intra(
                     inp.bd,
                     inp.visible_cols,
                     inp.visible_rows,
+                    res.eob as usize,
+                    inp.lossless,
                 );
                 if is_high_energy && d < tx_domain_dist {
                     d = tx_domain_dist;
@@ -1215,6 +1217,8 @@ pub fn search_tx_type_intra(
                 inp.bd,
                 inp.visible_cols,
                 inp.visible_rows,
+                b.best_eob as usize,
+                inp.lossless,
             );
             b.sse = block_sse;
             b.rd = rdcost(inp.rdmult, b.rate, b.dist);
@@ -1243,16 +1247,20 @@ pub fn dist_block_px_domain(
     bd: u8,
     visible_cols: usize,
     visible_rows: usize,
+    eob: usize,
+    lossless: bool,
 ) -> i64 {
     let (w, h) = (TXS_W[tx_size], TXS_H[tx_size]);
     let mut recon = pred[..w * h].to_vec();
-    aom_transform::inv_txfm2d::av1_inv_txfm2d_add(
+    aom_transform::inv_txfm2d::av1_inverse_transform_add(
         dqcoeff,
         &mut recon,
         w,
         tx_type,
         tx_size,
         i32::from(bd),
+        eob,
+        lossless,
     );
     let (_var, sse) = aom_dist::highbd_variance(
         &src[src_off..],
@@ -1621,13 +1629,15 @@ pub fn txfm_rd_in_plane_intra(
                 blk_row + txh_unit < max_blocks_high || blk_col + txw_unit < max_blocks_wide;
             if win.best_eob > 0 && not_last_txb {
                 let mut tight = pred.clone();
-                aom_transform::inv_txfm2d::av1_inv_txfm2d_add(
+                aom_transform::inv_txfm2d::av1_inverse_transform_add(
                     &win.dqcoeff,
                     &mut tight,
                     txw,
                     win.best_tx_type,
                     tx_size,
                     i32::from(env.bd),
+                    win.best_eob as usize,
+                    env.lossless,
                 );
                 for r in 0..txh {
                     recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]

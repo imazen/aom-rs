@@ -146,6 +146,7 @@ fn xform_quant_optimize_highbd_identical() {
                     qm,
                     iqm,
                     bd: 12,
+                    lossless: false,
                 };
                 let bctx = BlockContext {
                     above: &above,

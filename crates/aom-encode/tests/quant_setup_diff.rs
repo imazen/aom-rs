@@ -247,7 +247,7 @@ fn from_plane_rows_matches_real_facades() {
                     sharpness,
                 );
                 let rows = set_q_index(&quants, &deq, qindex, plane);
-                let qp = QuantParams::from_plane_rows(&rows, kind, bd);
+                let qp = QuantParams::from_plane_rows(&rows, kind, bd, false);
 
                 let residual: Vec<i16> = (0..full)
                     .map(|_| rng.range(-(rmax - 1), rmax) as i16)

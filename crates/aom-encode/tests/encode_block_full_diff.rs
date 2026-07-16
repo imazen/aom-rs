@@ -203,6 +203,7 @@ fn encode_block_coeffs_full_identical() {
                     qm,
                     iqm,
                     bd,
+                    lossless: false,
                 };
                 let bctx = BlockContext {
                     above: &above,

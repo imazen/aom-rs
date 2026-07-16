@@ -292,10 +292,41 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   nested sub-block reuse) — all 4 bd10 non-420 cells (444/422 × 64²/128² cq32) byte-match,
   asserted by `encoder_gate_bd10_non420_e2e_kb4_repro`.
 
-### KB-5 — Encoder: lossless (cq0 / qindex 0) KEY encode divergence — REAL, tracked (task #32)
-- **Symptom:** lossless allintra KEY (cq0 → qindex 0, `coded_lossless`) diverges badly — mono 64² cq0: first-diff at byte 2 (within the 9-byte header region), port tile 5426B vs the ENTIRE real frame 4966B (port ~10% larger). A port tile larger than the whole real frame ⇒ the port is very likely NOT taking the lossless coding path.
-- **Root cause (LOCALIZED + VERIFIED — chroma-ss read-only + coordinator grep — TWO bugs):** (1) HARNESS-SETUP (task #32, immediate/blocking): `run_case` does a single `read_uncompressed_header` with `cfg.coded_lossless=false`, skipping the two-pass lossless probe the parser contract requires (`aom-entropy/src/header.rs:2952` clones cfg + gates loopfilter/cdef/tx_mode reads on `cfg.coded_lossless`, a writer-mirror input by design). The real decoder does the two-pass (`aom-decode/src/frame.rs:455-487`: parse → `frame_coded_lossless(probe)` [:355 = base_qindex==0 && all 5 plane q-deltas 0] → re-parse with `cfg.coded_lossless/all_lossless=true`). Skipping it → `p.coded_lossless=false` → (a) header emits a phantom loopfilter block the real lossless header omits (byte-2 first-diff), (b) `env.lossless=false` → port runs its NON-lossless encoder at qindex0 (full DCT) → 5426B tile. The lossless SEARCH branch is correct + present (partition_pick.rs:577, tx_search.rs:1448 TX_4X4-only, pack.rs:296) — just never reached. (2) LATENT ENCODER PORT BUG (task #33, surfaces after the harness fix): NO forward Walsh-Hadamard transform in the encode path — `xform_quant` (aom-encode/src/lib.rs:172) unconditionally calls `av1_fwd_txfm2d`; libaom applies `av1_fwht4x4`/`av1_highbd_fwht4x4` for coded-lossless TX_4X4. VERIFIED: grep fwht/fwalsh across aom-encode+aom-transform = ZERO hits; the decoder HAS the inverse (`aom-transform/src/inv_txfm2d.rs:256 av1_highbd_iwht4x4_add`). So even with env.lossless=true, coeffs diverge.
-- **Fix (TWO parts, BOTH required for green):** (1) HARNESS (#32, chroma-ss): mirror the decoder's two-pass in run_case — probe, compute is_lossless from probe.quant, re-parse with cfg.coded_lossless/all_lossless=true. Necessary but NOT sufficient. (2) ENCODER (#33): add forward WHT to aom-transform + route xform_quant (lib.rs:172) and the UV path (intra_uv_rd.rs:800) to it for coded-lossless TX_4X4. Witness (COMMITTED 2026-07-15): `encoder_gate_lossless_cq0_e2e_kb5_repro` in `encoder_gate_chroma_ss_e2e.rs` — mono + 4:2:0 cq0 cells, a CI-green characterization (the cq0 encode does NOT panic; it cleanly diverges — mono tile 5426B vs the real 4966B, matching the documented symptom). Close ONLY by a landed fix (promote to a byte-match gate) — never by weakening.
+### KB-5 — Encoder: lossless (cq0 / qindex 0) KEY encode — MONO FIXED ✅ (byte-exact, hard-asserted); 420 chroma RD near-tie remains
+- **MONO FIXED 2026-07-16.** Mono 64² cq0 (coded-lossless allintra KEY) is now an end-to-end BYTE
+  MATCH vs real aomenc, hard-asserted in `encoder_gate_lossless_cq0_e2e_kb5_repro`
+  (encoder_gate_chroma_ss_e2e.rs). THREE fixes were required (the two originally localized below,
+  plus a third found during landing):
+  1. **Harness two-pass (#32):** `run_case` now mirrors the decoder's two-pass lossless probe —
+     parse, compute coded_lossless from the probe's quant params (base_qindex==0 && all 5 plane
+     q-deltas 0), re-parse with `cfg.coded_lossless/all_lossless=true`.
+  2. **Forward WHT (#33):** `av1_fwht4x4` ported into aom-transform (bit-exact vs `av1_fwht4x4_c`,
+     gated by `fwht4x4_diff`); `QuantParams` gained a `lossless` flag; `xform_quant` (lib.rs) and
+     every encoder recon site (encode_intra / tx_search / intra_uv_rd) route coded-lossless TX_4X4
+     through WHT/IWHT via `av1_inverse_transform_add(.., eob, lossless)`. The SATD fast model stays
+     DCT (`av1_quick_txfm` forces lossless=0 in C — intra_uv_rd.rs:800 unchanged, do NOT "fix" it).
+     The differential oracle (tests/common/mod.rs `c_search_tx_type_p` / `c_uniform_txfm_yrd`) uses
+     `ref_fwht4x4`/`ref_highbd_iwht4x4_add` for lossless — a faithfulness correction (real C uses
+     WHT for lossless, hybrid_fwd_txfm.c:83-86).
+  3. **Entropy-context propagation (the actual byte-divergence root, found via decode-both
+     localization `kb5_lossless_localize.rs`):** the WRITTEN `txb_skip_ctx`/`dc_sign_ctx` must
+     derive from the REAL above/left neighbour entropy context ALWAYS — C's write path
+     (`av1_write_coeffs_txb`, encodetxb.c:596-598) is never gated on the trellis; only C's
+     trellis-local `ta/tl` fill is (encodemb.c:817-819). The port shared one ta/tl array for both
+     uses (encode_intra.rs, luma + chroma arms) and seeded it from the real context only when the
+     trellis was on; coded-lossless runs trellis-OFF (USE_B_QUANT_NO_TRELLIS), so a block with a
+     coded left neighbour wrote ctx 1/0 instead of the real 3/1 and desynced the decoder. Fix:
+     always seed ta/tl from the real neighbour context.
+- **REMAINING (open, do not close KB-5 yet):** 4:2:0 cq0 diverges via a **≤1-rdcost-unit chroma RD
+  near-tie** at the first 16×16 partition node (real picks SPLIT, port picks NONE; the port's child-3
+  rdcost 63759 EXACTLY equals the budget, strict-< keeps NONE). KB-2/KB-6 class. Verified correct so
+  far: chroma `cost_coeffs_txb` for large lossless coeffs (up to 3000), real-context usage, dist=0
+  accumulation. Coverage gap: `txfm_uvrd_diff` never tests qindex 0 — a lossless chroma UV-RD
+  differential (extending it to qindex 0, with the common/mod.rs UvRdEnv oracle path taught
+  WHT-for-lossless like the yrd path was) is the next localization step, or C-side per-partition RD
+  instrumentation ala KB-2. The gate keeps the 420 cell as an open characterization
+  (`assert_open_divergence`) and hard-asserts mono — it FAILS the moment 420 starts matching
+  (→ promote to full byte-match) or mono regresses.
 
 ### KB-6 — Encoder: REAL-content RD divergence at bd8 4:2:0 (PRIMARY config) — REAL, tracked, FIRST ROOT FIXED (luma re-encode), continuing
 - **FIX #1 LANDED 2026-07-15 (ca2826f) — luma re-encode intra edge filter.** The luma analogue of

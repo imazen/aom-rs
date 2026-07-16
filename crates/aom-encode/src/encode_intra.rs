@@ -87,7 +87,7 @@ use aom_dist::highbd_subtract_block;
 use aom_entropy::partition::{get_plane_block_size, intra_avail};
 use aom_intra::cfl::{CflCtx, cfl_store_tx};
 use aom_intra::predict_intra_high;
-use aom_transform::inv_txfm2d::av1_inv_txfm2d_add;
+use aom_transform::inv_txfm2d::av1_inverse_transform_add;
 use aom_txb::{CoeffCostTables, get_txb_ctx};
 
 /// `TRELLIS_OPT_TYPE` (encodemb.h:43-48). C-valued discriminants.
@@ -294,14 +294,25 @@ pub fn encode_intra_block_plane_y(
     let blocks_wide_visible = max_blocks_wide.min((env.mi_cols - env.mi_col).max(0) as usize);
     let blocks_high_visible = max_blocks_high.min((env.mi_rows - env.mi_row).max(0) as usize);
 
-    // ENTROPY_CONTEXT ta/tl = {0}; av1_get_entropy_contexts only when
-    // enable_optimize_b (the enum truth test, encodemb.c:817-819).
+    // ta/tl are the running per-txb entropy context (init from the block's real
+    // above/left neighbour context, then stamped per-txb below). They feed BOTH
+    // the trellis (`av1_optimize_b`, when enabled) AND the `get_txb_ctx` that
+    // derives the WRITTEN `txb_skip_ctx`/`dc_sign_ctx` (the non-optimize arm
+    // below). C keeps these separate: the trellis fills its own `ta/tl` only when
+    // `enable_optimize_b` (encodemb.c:817-819), but the write path ALWAYS derives
+    // its ctx from the real `pd->above/left_entropy_context` (encodetxb.c:596-598,
+    // and the search coeff cost via `av1_cost_coeffs_txb` does the same) — never
+    // gated on the trellis. Because the port shares one array for both uses, it
+    // must ALWAYS seed from the real neighbour context; gating this on the trellis
+    // (as an earlier version did) zeroed the cross-block context for coded-lossless
+    // (trellis-off), so a block with a coded left neighbour (e.g. the right half of
+    // a VERT split) got txb_skip_ctx=1/dc_sign_ctx=0 instead of the real 3/1 and
+    // the coded bytes desynced the decoder. Within-block propagation was already
+    // fine; only this first-txb cross-block seed was wrong.
     let mut ta = vec![0i8; max_blocks_wide];
     let mut tl = vec![0i8; max_blocks_high];
-    if env.enable_optimize_b != TrellisOptType::NoTrellisOpt {
-        ta.copy_from_slice(&env.above_ctx[..max_blocks_wide]);
-        tl.copy_from_slice(&env.left_ctx[..max_blocks_high]);
-    }
+    ta.copy_from_slice(&env.above_ctx[..max_blocks_wide]);
+    tl.copy_from_slice(&env.left_ctx[..max_blocks_high]);
     let use_trellis = is_trellis_used(env.enable_optimize_b, env.dry_run_output_enabled);
 
     let mut txbs: Vec<TxbEncode> = Vec::new();
@@ -402,7 +413,7 @@ pub fn encode_intra_block_plane_y(
                 } else {
                     QuantKind::B
                 };
-                let qp = QuantParams::from_plane_rows(env.rows, kind, env.bd);
+                let qp = QuantParams::from_plane_rows(env.rows, kind, env.bd, env.lossless);
                 if use_trellis {
                     let bctx = BlockContext {
                         above: &ta[blk_col..],
@@ -443,13 +454,15 @@ pub fn encode_intra_block_plane_y(
             // if (*eob) av1_inverse_transform_block into the recon plane.
             if eob > 0 {
                 let mut tight = pred.clone();
-                av1_inv_txfm2d_add(
+                av1_inverse_transform_add(
                     &dqcoeff,
                     &mut tight,
                     txw,
                     tx_type,
                     tx_size,
                     i32::from(env.bd),
+                    eob as usize,
+                    env.lossless,
                 );
                 for r in 0..txh {
                     recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]
@@ -582,14 +595,15 @@ pub fn encode_intra_block_plane_uv(
     );
     let pi = plane - 1;
 
-    // ENTROPY_CONTEXT ta/tl = {0}; av1_get_entropy_contexts only when
-    // enable_optimize_b (encodemb.c:817-819).
+    // Always seed ta/tl from the real above/left neighbour context (see the luma
+    // arm's comment): they feed both the trellis and the WRITTEN txb_skip_ctx/
+    // dc_sign_ctx, and the write path derives its ctx from the real context
+    // regardless of the trellis (encodetxb.c:596-598). Gating on the trellis
+    // zeroed the cross-block seed for coded-lossless (trellis-off) chroma.
     let mut ta = vec![0i8; max_blocks_wide];
     let mut tl = vec![0i8; max_blocks_high];
-    if prm.enable_optimize_b != TrellisOptType::NoTrellisOpt {
-        ta.copy_from_slice(&env.above_ctx[pi][..max_blocks_wide]);
-        tl.copy_from_slice(&env.left_ctx[pi][..max_blocks_high]);
-    }
+    ta.copy_from_slice(&env.above_ctx[pi][..max_blocks_wide]);
+    tl.copy_from_slice(&env.left_ctx[pi][..max_blocks_high]);
     let use_trellis = is_trellis_used(prm.enable_optimize_b, prm.dry_run_output_enabled);
 
     // The facade's CfL state: outside cfl_rd_pick_alpha the DC-prediction
@@ -679,7 +693,7 @@ pub fn encode_intra_block_plane_uv(
                     QuantKind::B
                 };
                 let rows = if plane == 1 { env.rows_u } else { env.rows_v };
-                let qp = QuantParams::from_plane_rows(rows, kind, env.bd);
+                let qp = QuantParams::from_plane_rows(rows, kind, env.bd, env.lossless);
                 if use_trellis {
                     let bctx = BlockContext {
                         above: &ta[blk_col..],
@@ -727,13 +741,15 @@ pub fn encode_intra_block_plane_uv(
                         &recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw],
                     );
                 }
-                av1_inv_txfm2d_add(
+                av1_inverse_transform_add(
                     &dqcoeff,
                     &mut tight,
                     txw,
                     tx_type,
                     tx_size,
                     i32::from(env.bd),
+                    eob as usize,
+                    env.lossless,
                 );
                 for r in 0..txh {
                     recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]

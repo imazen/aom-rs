@@ -71,6 +71,7 @@ fn check(rng: &mut Rng, tx_size: usize, tx_type: usize, bd: i32) {
         qm: None,
         iqm: None,
         bd: bd as u8,
+        lossless: false,
     };
 
     let r = xform_quant(&residual, tx_size, tx_type, QuantKind::B, &qp, false);
@@ -126,6 +127,7 @@ fn reconstruct_txb_matches_c_composition() {
         qm: None,
         iqm: None,
         bd: 8,
+        lossless: false,
     };
     let r = xform_quant(&residual, 2, 0, QuantKind::B, &qp, false);
     let mut got = pred.clone();

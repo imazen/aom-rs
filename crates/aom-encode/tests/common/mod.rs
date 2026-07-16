@@ -328,7 +328,11 @@ pub fn c_uniform_txfm_yrd(
             let not_last_txb = blk_row + txhu < (bh >> 2) || blk_col + txwu < (bw >> 2);
             if weob > 0 && not_last_txb {
                 let mut tight = pred.clone();
-                c::ref_inv_txfm2d_add(tx_size, &wdqc, &mut tight, txw, wtype, bd as i32);
+                if lossless {
+                    c::ref_highbd_iwht4x4_add(&wdqc, &mut tight, txw, weob as usize, bd as i32);
+                } else {
+                    c::ref_inv_txfm2d_add(tx_size, &wdqc, &mut tight, txw, wtype, bd as i32);
+                }
                 for r in 0..txh {
                     recon_c[txb_off + r * stride..txb_off + r * stride + txw]
                         .copy_from_slice(&tight[r * txw..r * txw + txw]);
@@ -710,7 +714,16 @@ pub fn c_search_tx_type_p(
         if mask_c & (1 << tx_type) == 0 {
             continue;
         }
-        let coeff = c::ref_fwd_txfm2d(tx_size, residual, w, tx_type);
+        // Coded-lossless TX_4X4 uses the forward Walsh–Hadamard transform
+        // (hybrid_fwd_txfm.c:83-86 `highbd_fwd_txfm_4x4`: `if (lossless)
+        // av1_fwht4x4`, asserting DCT_DCT), NOT the DCT — via the shared
+        // `av1_xform_quant` this drives BOTH the tx-RD search and the final
+        // encode, so the RD oracle must mirror it or diverge from real C.
+        let coeff = if lossless {
+            c::ref_fwht4x4(residual, w)
+        } else {
+            c::ref_fwd_txfm2d(tx_size, residual, w, tx_type)
+        };
         let tcoeff = coeff[..n_coeffs].to_vec();
         let mut qc = vec![0i32; n_coeffs];
         let mut dqc = vec![0i32; n_coeffs];
@@ -811,7 +824,14 @@ pub fn c_search_tx_type_p(
             if !is_tx64 || !high_energy || sse_diff * 2 < s_tx {
                 let tx_dom = d;
                 let mut recon = pred.to_vec();
-                c::ref_inv_txfm2d_add(tx_size, &dqc, &mut recon, w, tx_type, bd as i32);
+                // Lossless recon uses the inverse WHT (av1_inverse_transform_block
+                // dispatches on xd->lossless → av1_highbd_iwht4x4_add), matching the
+                // forward WHT above and the port's own recon.
+                if lossless {
+                    c::ref_highbd_iwht4x4_add(&dqc, &mut recon, w, eob, bd as i32);
+                } else {
+                    c::ref_inv_txfm2d_add(tx_size, &dqc, &mut recon, w, tx_type, bd as i32);
+                }
                 let (_v, vf_sse) = c::ref_hbd_variance(
                     VAR_IDX[tx_size],
                     bd,

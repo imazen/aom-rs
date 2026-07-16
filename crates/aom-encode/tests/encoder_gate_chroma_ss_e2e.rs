@@ -302,9 +302,41 @@ fn run_case(
         ..Default::default()
     };
 
+    // Two-pass header parse for coded-lossless, mirroring the decoder
+    // (aom-decode/src/frame.rs:466-490). `read_uncompressed_header` gates its
+    // loop-filter / CDEF / restoration / tx-mode tail reads on `cfg.coded_lossless`
+    // / `cfg.all_lossless` (a writer-mirror INPUT), but quant + segmentation
+    // precede every gated read, so a probe pass with `coded_lossless = false`
+    // yields exact quant regardless of the (then-misread) tail. Recompute
+    // `coded_lossless` from the probe's quant — this harness encodes segmentation-
+    // off KEY frames, so `frame_coded_lossless` reduces to base_qindex == 0 with
+    // all 5 plane q-deltas 0 — and, when the stream IS coded-lossless (cq0 /
+    // `--lossless=1`), re-parse with the correct gating so the tail is read right.
+    // No superres here => `all_lossless == coded_lossless`.
     let mut rb = ReadBitBuffer::new(frame_payload);
-    let p = read_uncompressed_header(&mut rb, &cfg);
-    let real_bit_len = rb.bit_position();
+    let probe = read_uncompressed_header(&mut rb, &cfg);
+    let key_shown = !probe.prefix.show_existing_frame
+        && probe.prefix.frame_type == 0
+        && probe.prefix.show_frame;
+    let coded_lossless = key_shown
+        && probe.quant.base_qindex == 0
+        && probe.quant.y_dc_delta_q == 0
+        && probe.quant.u_dc_delta_q == 0
+        && probe.quant.u_ac_delta_q == 0
+        && probe.quant.v_dc_delta_q == 0
+        && probe.quant.v_ac_delta_q == 0;
+    let (p, real_bit_len) = if coded_lossless {
+        let mut cfg2 = cfg.clone();
+        cfg2.coded_lossless = true;
+        cfg2.all_lossless = true;
+        let mut rb2 = ReadBitBuffer::new(frame_payload);
+        let mut p2 = read_uncompressed_header(&mut rb2, &cfg2);
+        p2.coded_lossless = true;
+        p2.all_lossless = true;
+        (p2, rb2.bit_position())
+    } else {
+        (probe, rb.bit_position())
+    };
     assert!(!p.prefix.show_existing_frame);
     assert_eq!(p.prefix.frame_type, 0, "frame_type must be KEY");
     let tiles_log2 = p.tile_info.log2_cols + p.tile_info.log2_rows;
@@ -1111,11 +1143,28 @@ fn encoder_gate_bd10_non420_e2e_kb4_repro() {
 fn encoder_gate_lossless_cq0_e2e_kb5_repro() {
     let luma = tex_luma(0xff);
     let chroma = tex_chroma(0xff);
-    let mut results: Vec<(String, bool)> = Vec::new();
-    for &(mono, ss_x, ss_y, fmt) in &[(true, 1, 1, "mono"), (false, 1, 1, "420")] {
-        // cq_level 0 → base_qindex 0 → coded_lossless.
-        let res = run_case(64, 64, mono, ss_x, ss_y, 2, 0, 8, &luma, &chroma, &chroma, 0, 0);
-        results.push((format!("lossless-{fmt} 64x64 cq0"), res.matched));
-    }
-    assert_open_divergence("KB-5", &results);
+    // MONO lossless (cq0 → qindex 0, coded_lossless): FIXED — byte-exact vs real
+    // aomenc. Closed by the forward WHT (av1_fwht4x4, routed through xform_quant for
+    // coded-lossless TX_4X4) PLUS the entropy-context-propagation fix: the WRITTEN
+    // txb_skip_ctx / dc_sign_ctx must derive from the REAL above/left neighbour
+    // context even when the trellis is off (coded-lossless uses USE_B_QUANT_NO_TRELLIS),
+    // matching C's write path (encodetxb.c:596-598 always reads pd->*_entropy_context).
+    // The port had gated that seed on the trellis, so the right half of a VERT split
+    // wrote ctx 1/0 instead of the real 3/1 and desynced the decoder. Hard-assert as a
+    // regression guard — mono must stay byte-exact.
+    let mono = run_case(64, 64, true, 1, 1, 2, 0, 8, &luma, &chroma, &chroma, 0, 0);
+    assert!(
+        mono.matched,
+        "KB-5 mono lossless cq0 regressed — the forward-WHT + entropy-context fix must keep it byte-exact"
+    );
+    // 4:2:0 lossless: a residual chroma RD near-tie remains — the first 16×16 node
+    // splits PARTITION_SPLIT in aomenc but PARTITION_NONE in the port, SPLIT losing by
+    // ≤1 rdcost unit on the chroma cost (child-3 lands exactly at its remaining budget).
+    // Tracked OPEN in KB-5 (CLAUDE.md). Kept as a characterization that FAILS (prompting
+    // promotion to a byte-match gate) once the chroma near-tie is closed.
+    let c420 = run_case(64, 64, false, 1, 1, 2, 0, 8, &luma, &chroma, &chroma, 0, 0);
+    assert_open_divergence(
+        "KB-5 (4:2:0 residual)",
+        &[("lossless-420 64x64 cq0".to_string(), c420.matched)],
+    );
 }

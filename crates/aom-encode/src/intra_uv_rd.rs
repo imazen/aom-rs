@@ -634,13 +634,15 @@ pub fn txfm_rd_in_plane_uv(
             // recon_intra: reconstruct the winner over the prediction.
             if win.best_eob > 0 {
                 let mut tight = pred.clone();
-                aom_transform::inv_txfm2d::av1_inv_txfm2d_add(
+                aom_transform::inv_txfm2d::av1_inverse_transform_add(
                     &win.dqcoeff,
                     &mut tight,
                     txw,
                     win.best_tx_type,
                     tx_size,
                     i32::from(env.bd),
+                    win.best_eob as usize,
+                    env.lossless,
                 );
                 for r in 0..txh {
                     recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]
