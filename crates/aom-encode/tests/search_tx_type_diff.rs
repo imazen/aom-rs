@@ -196,7 +196,15 @@ fn search_tx_type_intra_matches_c_chain() {
                 left: &left,
             };
             let rdmult = rng.range(1, 1 << 22);
-            let pol = TxTypeSearchPolicy::speed0_allintra();
+            // Exercise the KB-8 winner-mode MODE_EVAL first-pass tx-type
+            // restriction (use_default_intra_tx_type) across ~1/4 of iterations,
+            // threaded into BOTH the port policy and the C ref mask so the full
+            // search_tx_type chain must still match under the restricted set.
+            let use_default = iter % 4 == 0;
+            let pol = TxTypeSearchPolicy {
+                use_default_intra_tx_type: use_default,
+                ..TxTypeSearchPolicy::speed0_allintra()
+            };
             // Mostly unconstrained; occasionally tight to exercise the
             // adaptive_txb_search break.
             let ref_best_rd = if iter % 9 == 8 { 1 << 10 } else { i64::MAX };
@@ -239,9 +247,9 @@ fn search_tx_type_intra_matches_c_chain() {
                 1,     // use_reduced_intra_txset (speed-0 allintra)
                 false, // use_derived_intra_tx_type_set
                 true,  // enable_flip_idtx
-                false, // use_intra_dct_only
-                false, // use_default_intra_tx_type
-                false, // use_screen_content_tools
+                false,       // use_intra_dct_only
+                use_default, // use_default_intra_tx_type (KB-8 MODE_EVAL pass)
+                false,       // use_screen_content_tools
             );
             let _ = txk_c;
             let (bsse_raw, mut mse_c) =

@@ -564,6 +564,12 @@ impl SpeedFeatures {
         let coeff_col = Self::resolve_eval_col(stage, self.enable_winner_mode_for_coeff_opt);
         let txd_col = Self::resolve_eval_col(stage, self.enable_winner_mode_for_use_tx_domain_dist);
         let coeff_row = &COEFF_OPT_THRESHOLDS[self.perform_coeff_opt as usize][coeff_col];
+        // set_mode_eval_params(MODE_EVAL): use_default_intra_tx_type =
+        // (fast_intra_tx_type_search == 2 || use_intra_default_tx_only). Only the
+        // MODE_EVAL stage sets it; DEFAULT_EVAL/WINNER_MODE_EVAL force it to 0
+        // (rdopt_utils.h:576/636). `use_intra_default_tx_only` is a CLI flag (off
+        // on the allintra envelope).
+        let use_default_intra_tx_type = stage == MODE_EVAL && self.fast_intra_tx_type_search == 2;
         TxTypeSearchPolicy {
             skip_trellis,
             coeff_opt_dist_threshold: coeff_row[0],
@@ -578,6 +584,10 @@ impl SpeedFeatures {
             use_chroma_trellis_rd_mult: self.use_chroma_trellis_rd_mult,
             intra_tx_size_init_depth_rect: self.intra_tx_size_search_init_depth_rect,
             intra_tx_size_init_depth_sqr: self.intra_tx_size_search_init_depth_sqr,
+            use_default_intra_tx_type,
+            // Non-screen textured envelope; screen-content would thread the real
+            // cpi->use_screen_content_tools here.
+            use_screen_content_tools: false,
         }
     }
 }

@@ -601,6 +601,16 @@ pub struct TxTypeSearchPolicy {
     /// sf `tx_sf.intra_tx_size_search_init_depth_sqr` — the square (w == h)
     /// block floor; 1 for all speeds (speed_features.c:367).
     pub intra_tx_size_init_depth_sqr: i32,
+    /// `txfm_params.use_default_intra_tx_type` — the MODE_EVAL first-pass
+    /// tx-type restriction (see [`TxMaskParams::use_default_intra_tx_type`]).
+    /// Threaded into [`search_tx_type_intra`]'s tx-mask; false for DEFAULT_EVAL
+    /// / WINNER_MODE_EVAL, so speed 0..=3 (single-pass DEFAULT_EVAL) is
+    /// byte-identical. Set true only by the MODE_EVAL stage at speed>=4.
+    pub use_default_intra_tx_type: bool,
+    /// `cpi->use_screen_content_tools` — the other [`get_default_tx_type_y`]
+    /// input, threaded alongside `use_default_intra_tx_type`. False on the
+    /// non-screen textured envelope.
+    pub use_screen_content_tools: bool,
 }
 
 impl TxTypeSearchPolicy {
@@ -618,6 +628,8 @@ impl TxTypeSearchPolicy {
             use_chroma_trellis_rd_mult: true,
             intra_tx_size_init_depth_rect: 0,
             intra_tx_size_init_depth_sqr: 1,
+            use_default_intra_tx_type: false,
+            use_screen_content_tools: false,
         }
     }
 
@@ -749,6 +761,17 @@ pub fn search_tx_type_intra(
 
     // Allowed tx-type set (identity txk_map at speed 0); the chroma arm pins
     // the UV tx type.
+    // The tx-mask params: speed-0 allintra values for the fixed fields, with the
+    // per-stage `use_default_intra_tx_type` / `use_screen_content_tools` threaded
+    // from the policy (both false for DEFAULT_EVAL, so speed 0..=3 is unchanged;
+    // the MODE_EVAL first pass at speed>=4 sets use_default). The chroma arm
+    // ignores use_default (its tx type is derived from luma), so passing it is
+    // harmless there.
+    let tx_mask_params = TxMaskParams {
+        use_default_intra_tx_type: pol.use_default_intra_tx_type,
+        use_screen_content_tools: pol.use_screen_content_tools,
+        ..TxMaskParams::speed0_allintra()
+    };
     let (allowed_tx_mask, txk_allowed) = if inp.plane == 0 {
         get_tx_mask_intra(
             tx_size,
@@ -757,7 +780,7 @@ pub fn search_tx_type_intra(
             inp.filter_intra_mode,
             inp.lossless,
             inp.reduced_tx_set_used,
-            &TxMaskParams::speed0_allintra(),
+            &tx_mask_params,
         )
     } else {
         let (m, t) = get_tx_mask_uv_intra(
@@ -768,7 +791,7 @@ pub fn search_tx_type_intra(
             inp.filter_intra_mode,
             inp.lossless,
             inp.reduced_tx_set_used,
-            &TxMaskParams::speed0_allintra(),
+            &tx_mask_params,
         );
         (m, Some(t))
     };
