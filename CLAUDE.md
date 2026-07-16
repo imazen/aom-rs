@@ -328,7 +328,7 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   (`assert_open_divergence`) and hard-asserts mono — it FAILS the moment 420 starts matching
   (→ promote to full byte-match) or mono regresses.
 
-### KB-6 — Encoder: REAL-content RD divergence at bd8 4:2:0 (PRIMARY config) — REAL, tracked, FIRST ROOT FIXED (luma re-encode), continuing
+### KB-6 — Encoder: REAL-content RD divergence at bd8 4:2:0 (PRIMARY config) — FIXED ✅ (all roots landed; real-content map 30/30)
 - **FIX #1 LANDED 2026-07-15 (ca2826f) — luma re-encode intra edge filter.** The luma analogue of
   #26 (chroma). `encode_b_intra_dry` — the dry-run re-encode used by BOTH the search's inter-strip
   context propagation (`partition_pick.rs:1054/1338/1914`) AND the pack output (`pack.rs:317`) — froze
@@ -344,9 +344,9 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   `kb6_real_rd_localize.rs` (decode-both-streams): first divergent SB was leaf mi(12,12) bsize=BLOCK_4X16
   angled (y_mode=6, angle_delta_y=1), real eob=0 vs port eob=2, ±1 recon at (48,48). Verified: full
   aom-encode suite green; `partition_pick_diff` green with randomized SMOOTH neighbours.
-- **REMAINING (one axis).** Map (combined tree, MEASURED 2026-07-16 after the KB-4
-  OUTPUT_ENABLED fix + the partial-SB chunk series): **26/30 byte-exact — the ONLY divergences
-  left are 196×196 cq12/20/32/48** (the bottom-edge over-split near-tie, pinned below). Every
+- **CLOSED 2026-07-16 — the REAL-CONTENT MAP IS 30/30 BYTE-EXACT** (was 26/30 after the KB-4
+  OUTPUT_ENABLED fix + the partial-SB chunk series; 29/30 after the entropy-stamp/edge-CDF
+  landing; the last cell, 196² cq48, closed by the pack write-ctx fix below). Every
   interior-crop cell now matches: size-64×64 all 6 cq (cq5/12/20/48/63 with FIX #1; cq32 with
   1ecfafb — AB HORZ_A nested sub-block reuse); quantizer-64² 6/6, film-64² 6/6, quantizer-128²
   6/6 — the former cq5 low-q cluster and the quantizer-128² cq12/20/32 near-ties cleared with
@@ -354,8 +354,7 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   cq63 closed 2026-07-16 by the KB-4 OUTPUT_ENABLED tx_type_map fix** (the port coded DCT-eob1
   where real codes an eob0 skip — the reset-leak signature, present in interior AND edge SB
   rows).
-- **DISTINCT SUB-GAP — partial-SB (frame dims not a multiple of 64px) — FIXED except ONE cell
-  (196² cq48).** Landed: the CHUNK series (`3167800` CHUNK 0+1 true-frame harness + luma visible
+- **DISTINCT SUB-GAP — partial-SB (frame dims not a multiple of 64px) — FULLY FIXED (all 6 cq).** Landed: the CHUNK series (`3167800` CHUNK 0+1 true-frame harness + luma visible
   dist clip, `7c468ee` CHUNK 2 chroma visible clips via `max_block_units`, `4b8b1f1` CHUNK 3
   `set_partition_cost_for_edge_blk`), the KB-4 OUTPUT_ENABLED tx_type_map reset-leak fix
   (`a2dd28e`, closed 196² cq63), and the **frame-edge entropy-stamp tail-zero + frame-init edge
@@ -377,11 +376,26 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   does not). Note the C encode-path per-txb stamp `av1_set_txb_context` (encodemb.h) is
   full-footprint UNclipped — only the tokenize/persistent stamp clips; the port's local ta/tl
   stamps correctly mirror the former and needed no change.
-  **196² cq5/12/20/32/63 are asserted byte-match gates** in `encoder_gate_real_image_e2e_kb6_repro`.
-  **RESIDUAL (pinned, assert-diverge in `kb6_characterize_196_partial_sb`, now targeting cq48):**
-  196² cq48 (qindex 192) diverges at tile-byte 253 of ~609/616 — MID-stream (SB rows 1-2), NOT the
-  bottom-row-boundary signature the fixed cells had — a distinct near-tie, next localization
-  target (decode-both on the current tree).
+  **All six 196² cells (cq5/12/20/32/48/63) are asserted byte-match gates** in
+  `encoder_gate_real_image_e2e_kb6_repro` (now a FULL 30-cell byte-match gate).
+  **cq48 (the LAST cell) FIXED 2026-07-16 — pack WRITE-ctx source (tokenize vs trellis):**
+  decode-both + pass-context markers proved the search was ALREADY C-identical at the divergent
+  leaf (mi(0,48) 32×64 SMOOTH; both OUTPUT_ENABLED walks requantize txb4 to C's coded
+  (tt1, eob37)) — the decoded "(eob4, tt2)" was a desync artifact of the port's own bits. C caches
+  the pack's `(txb_skip_ctx, dc_sign_ctx)` in the TOKENIZE walk
+  (`av1_update_and_record_txb_context`, encodetxb.c, OUTPUT arm; `av1_write_coeffs_txb` writes the
+  CACHED pair) derived from the PERSISTENT entropy arrays — whose within-leaf stamps are
+  edge-CLIPPED (`av1_set_entropy_contexts`) — while the TRELLIS uses the encode walk's
+  full-footprint local `av1_set_txb_context` stamps; the port used the trellis pair for the write
+  too. `txb_skip_ctx` is OR-based (tail-zero inert — why the 29/30 landing sufficed there) but
+  `dc_sign_ctx` is SIGN-OF-SUM: at txb blk(8,0) (16×16, vis 8×16) the above tail-zero drops +2
+  (C: −4+2 = −2 → ctx 1; port: −4+4 = 0 → ctx 0) → ONE DC-sign symbol on a different cdf row →
+  bits diverge at tile byte ~253 with IDENTICAL symbols everywhere. Fix: `encode_b_intra_dry`
+  Step 4 (encode_sb.rs, the tokenize-equivalent stamp loop) derives the write pair from the
+  persistent arrays per txb — before that txb's clipped stamp, C's exact read point — and
+  overwrites the cached `TxbEncode` pair (dcs gated on `qcoeff[0] != 0`, Y+U+V planes); sole
+  consumer is `pack_plane_coeffs`. Interior txbs derive identical values (structurally zero-diff
+  on the green corpus).
 - **MULTI-TILE encode is byte-exact** (commit f6e6319, `encoder_gate_multitile_e2e`): the port's own
   per-tile search+pack byte-matches real aomenc across 2×1/1×2/2×2 grids (4:4:4 128² × cq{12,32,63}).
 - **DISCOVERED 2026-07-15 via the new real-image e2e gate** (`encoder_gate_real_image_e2e_kb6_repro`
@@ -405,19 +419,19 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   + the 4 bd10 non-420 KB-4 cells; the partial-SB chunk series (distortion visible-clips + edge
   partition cost) cleared the cq5 low-q cluster + the quantizer-128² cq12/20/32 near-ties + 196²
   cq5; the KB-4 OUTPUT_ENABLED tx_type_map fix (2026-07-16) closed quantizer-128² cq63 + 196²
-  cq63. Only the 196² bottom-edge over-split (cq12/20/32/48) remains — same class (a speed-0 RD
-  near-tie tipped by an edge/neighbour/rounding/pass-structure difference).
+  cq63; the frame-edge entropy-stamp tail-zero + edge partition CDF landing (4567e58) closed 196²
+  cq12/20/32; and the pack write-ctx fix (2026-07-16) closed the final cell, 196² cq48 — the
+  last three roots were all WRITE-side probability defects (identical symbols on
+  different-probability cdf rows), not search decisions.
 - **Repro (COMMITTED, CI-green characterization):** `encoder_gate_real_image_e2e_kb6_repro` prints the
   full per-cell MATCH/MISMATCH map, asserts a byte-exact CONTROL (64×64 cq20 — harness-faithfulness +
   regression guard), and asserts the KB-6 divergence is still PRESENT (gates: when the port becomes
   byte-exact on real content the test FAILS → promote it to a full `report_and_assert` byte-match
   gate). Not a weakened test — the correct end state is full byte-identity on real content.
-- **Next step (localization):** the ONLY remaining KB-6 target is the **196×196 bottom-edge
-  over-split** (cq12/20/32/48; pinned in `kb6_characterize_196_partial_sb`): the mi(48,0)
-  HORZ-vs-SPLIT distortion-side near-tie on the 8px-visible strip — run the sibling-C
-  per-candidate RD dump (KB-2/KB-3 methodology) at that 16×16 node, find the tipping term, fix
-  it KB-2/KB-3-style. Close ONLY by a landed fix that makes real content byte-match — never by
-  weakening or by narrowing the corpus.
+- **Next step: NONE — the real-content map is complete (30/30).**
+  `encoder_gate_real_image_e2e_kb6_repro` is promoted to a full byte-match gate over all 30
+  cells; any real-content divergence is now a regression, not an open KB-6 axis. (KB-1, KB-5,
+  KB-7, KB-8 and the Gate-2 cpu-used sweep remain separate tracks.)
 - **Priority note:** KB-6 hits the single most common real-world case (bd8 4:2:0 photographic content
   at web qindex), so it is arguably higher-impact than the bd10/bd12 (KB-4) and lossless (KB-5)
   corners. Sequencing is the coordinator's call.

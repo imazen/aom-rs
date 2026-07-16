@@ -2680,3 +2680,47 @@ Measured result: 196×196 cq12, cq20, cq32 all TRUE END-TO-END BYTE MATCH; **KB-
 `kb6_characterize_196_partial_sb` re-pinned at the one remaining cell — 196² cq48, which diverges
 at tile-byte 253/616 (MID-stream, SB rows 1-2; a distinct near-tie, not the bottom-row class).
 Full `cargo test -p aom-encode` green before landing.
+
+## KB-6 — pack write-ctx source (tokenize vs trellis): 196² cq48 byte-match — REAL-CONTENT MAP 30/30 ✅
+
+The LAST real-content cell. The inherited "which eval lands in the winner tx_type_map"
+localization was REFUTED by pass-context markers on both sides (port KB6P_PASS/RD/WIN/PICKED/WALK
+dumps + C KB4-CAND/WIN and KB6E_WSKIP/WTT in the byte-gate-verified `/root/kb6-edge-instr`
+sibling, FRAME_PAYLOAD==616): at the divergent leaf mi(0,48) 32×64 VERT-sub0 the port's search was
+ALREADY C-identical end-to-end — same 8 (mode,delta) passes reaching the TX_16X16 depth (pass 3 =
+SMOOTH wins), same per-pass tx-type winners, same improvement stores, same picked map origins
+[0,2,2,1], and BOTH OUTPUT_ENABLED walks requantize txb4 to (tt1, eob37) = C's coded value. The
+decoded-port "txb4 = (eob4, tt2)" was the port decoder faithfully reading the port's OWN
+wrong-probability bits — a desync artifact (same class as the 29/30 landing's "over-split").
+
+**Measured write-side defect (the one and only input mismatch at the leaf):** the port wrote txb
+blk(8,0)'s DC-sign symbol on `dc_sign_cdf[0][0]`; C writes it on `dc_sign_cdf[0][1]`
+(KB6E_WSKIP: C cached ectx_raw=20 → skip 4, dcs 1; port walk dump: tsc 4, dsc 0). All other txbs'
+(tsc, dsc) pairs matched. Bits diverge at tile byte ~253 with IDENTICAL symbols everywhere.
+
+**Root cause — C derives the pack's write ctx in the TOKENIZE walk, not the encode walk:**
+`av1_update_and_record_txb_context` (encodetxb.c, OUTPUT_ENABLED arm) computes
+`(txb_skip_ctx, dc_sign_ctx)` from the PERSISTENT `pd->above/left_entropy_context` arrays — whose
+within-leaf state carries the earlier txbs' edge-CLIPPED `av1_set_entropy_contexts` stamps — and
+caches the pair in `cb_coef_buff->entropy_ctx` (`skip | dcs<<4`, dcs only when `tcoeff[0] != 0`);
+`av1_write_coeffs_txb` writes with the CACHED pair and never re-derives. The TRELLIS meanwhile
+uses the encode walk's LOCAL ta/tl with FULL-footprint `av1_set_txb_context` stamps
+(encode_block_intra, encodemb.c). The port derived one pair (the trellis one) and fed it to both
+consumers. Interior txbs: identical (no clip). Edge txbs: `txb_skip_ctx` is OR-based (tail-zero
+inert — why the 29/30 landing sufficed there) but `dc_sign_ctx` is SIGN-OF-SUM — the tail-zero
+REMOVES terms: above = txb blk(4,0)'s stamp cell 19 (cul3 | pos<<3): C reads [19,19,0,0] → +2,
+port read [19,19,19,19] → +4; left rows 8..12 sum −4 ⇒ C −2 → ctx 1, port 0 → ctx 0.
+
+**Fix (encode_sb.rs, `encode_b_intra_dry` Step 4 — the tokenize-equivalent stamp loop):** derive
+`(tok_tsc, tok_dsc) = get_txb_ctx(...)` from the persistent `state.above_ectx/left_ectx` at the
+TOP of each per-txb iteration (before that txb's clipped stamp — exactly C's tokenize read point)
+and overwrite the cached `TxbEncode.txb_skip_ctx/dc_sign_ctx` (dcs gated on `qcoeff[0] != 0`, all
+three planes). Sole consumer of the pair is `pack_plane_coeffs` (grep-verified); the trellis pair
+inside `xform_quant_optimize` is untouched. Interior txbs derive identical values — structurally
+zero-diff on the previously-green corpus.
+
+Measured result: **196×196 cq48 TRUE END-TO-END BYTE MATCH — the real-content map is 30/30**.
+Promotions: cq48 added to the asserted 196² cells in `encoder_gate_real_image_e2e_kb6_repro` and
+the repro's assert-diverge tail replaced with `report_and_assert` over ALL 30 cells (full
+byte-match gate); `kb6_characterize_196_partial_sb` flipped to assert the cell KEEPS matching.
+Full `cargo test -p aom-encode --no-fail-fast` green before landing.

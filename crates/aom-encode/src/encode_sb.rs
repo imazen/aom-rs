@@ -90,7 +90,7 @@ use crate::partition::PartRdStats;
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W, max_block_units};
 use aom_entropy::partition::{get_plane_block_size, update_ext_partition_context};
 use aom_intra::cfl::CflCtx;
-use aom_txb::{CoeffCostSet, txb_entropy_context};
+use aom_txb::{CoeffCostSet, get_txb_ctx, txb_entropy_context};
 
 /// `store_cfl_required` (cfl.h:38) — the NON-rdo `store_y` gate of
 /// `encode_superblock`, intra arm (`is_inter_block == 0`).
@@ -505,7 +505,7 @@ pub fn encode_b_intra_dry(
         above_ctx: &above_y,
         left_ctx: &left_y,
     };
-    let y_out = if output_enabled {
+    let mut y_out = if output_enabled {
         // OUTPUT_ENABLED: the eob-0 -> DCT_DCT resets land in the frame-map
         // copy (transient here — the pack writes tx_type syntax only for
         // eob > 0 txbs, whose entries the reset never touches), and the
@@ -646,6 +646,46 @@ pub fn encode_b_intra_dry(
                     blk_row,
                     blk_col,
                 );
+                // C's tokenize (`av1_update_and_record_txb_context`,
+                // encodetxb.c, OUTPUT_ENABLED arm) derives the WRITE-side
+                // `(txb_skip_ctx, dc_sign_ctx)` from the PERSISTENT
+                // above/left entropy arrays — whose within-leaf state at this
+                // point carries the earlier txbs' edge-CLIPPED
+                // `av1_set_entropy_contexts` stamps — and caches it in
+                // `cb_coef_buff->entropy_ctx` for `av1_write_coeffs_txb`. The
+                // encode walk's local ta/tl (full-footprint
+                // `av1_set_txb_context` stamps) feed ONLY the trellis. For
+                // interior txbs the two derivations agree (no clip); at a
+                // frame-edge txb whose within-leaf neighbour footprint spans
+                // the visible boundary they can differ — the tail-zeroed
+                // cells drop out of the dc-sign SUM (and the skip-ctx OR).
+                // KB-6 196² cq48: txb blk(8,0) of the mi(0,48) 32×64 leaf read
+                // dc_sign = left(-4) + above(+4 full-stamp) = 0 → ctx 0 in the
+                // port vs C's left(-4) + above(+2 clipped) = -2 → ctx 1 — the
+                // DC-sign symbol went to a different cdf row, diverging the
+                // bits mid-tile with IDENTICAL search decisions. Overwrite the
+                // cached pair with the tokenize-derived one; the pack writes
+                // with these rows (pack.rs `pack_plane_coeffs`).
+                let (tok_tsc, tok_dsc) = get_txb_ctx(
+                    bsize,
+                    winner.tx_size,
+                    0,
+                    &state.above_ectx[0][a0 + blk_col..],
+                    &state.left_ectx[0][l0 + blk_row..],
+                );
+                {
+                    let t = &mut y_out.txbs[k];
+                    t.txb_skip_ctx = tok_tsc as usize;
+                    // C caches dc_sign_ctx only when the DC (tcoeff[0]) is
+                    // nonzero (`entropy_ctx[block] |= dc_sign_ctx << 4`);
+                    // otherwise the cached field stays 0 (and the writer
+                    // never reads it — no DC sign symbol is coded).
+                    t.dc_sign_ctx = if t.qcoeff.first().copied().unwrap_or(0) != 0 {
+                        tok_dsc as usize
+                    } else {
+                        0
+                    };
+                }
                 let txb = &y_out.txbs[k];
                 let cul = txb_entropy_context(&txb.qcoeff, winner.tx_size, tt, txb.eob as usize);
                 // The recompute equals the encode walk's stored ctx: eob==0
@@ -713,13 +753,32 @@ pub fn encode_b_intra_dry(
                 uv_tx,
                 env.reduced_tx_set_used,
             );
-            for (plane, out) in [(1usize, u_out.as_ref()), (2usize, v_out.as_ref())] {
+            for (plane, out) in [(1usize, u_out.as_mut()), (2usize, v_out.as_mut())] {
                 let out = out.expect("chroma-ref leaf has uv outcomes");
                 let mut k = 0usize;
                 let mut blk_row = 0usize;
                 while blk_row < pmh {
                     let mut blk_col = 0usize;
                     while blk_col < pmw {
+                        // Tokenize-derived WRITE ctx from the persistent
+                        // (clipped-stamp) arrays — see the plane-0 stamp
+                        // above for the C mapping + KB-6 mechanism.
+                        let (tok_tsc, tok_dsc) = get_txb_ctx(
+                            plane_bsize,
+                            uv_tx,
+                            plane,
+                            &state.above_ectx[plane][au + blk_col..],
+                            &state.left_ectx[plane][lu + blk_row..],
+                        );
+                        {
+                            let t = &mut out.txbs[k];
+                            t.txb_skip_ctx = tok_tsc as usize;
+                            t.dc_sign_ctx = if t.qcoeff.first().copied().unwrap_or(0) != 0 {
+                                tok_dsc as usize
+                            } else {
+                                0
+                            };
+                        }
                         let txb = &out.txbs[k];
                         let cul = txb_entropy_context(&txb.qcoeff, uv_tx, uv_tt, txb.eob as usize);
                         debug_assert_eq!(cul, txb.txb_entropy_ctx, "uv tokenize cul == encode ctx");

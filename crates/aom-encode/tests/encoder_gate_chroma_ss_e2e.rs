@@ -891,13 +891,14 @@ fn ivf_temporal_units(data: &[u8]) -> Vec<Vec<u8>> {
 /// near-tie signature): real content triggers partition/mode/tx RD decisions the
 /// hand-tuned synthetic patterns never did. Tracked as KB-6 (see CLAUDE.md).
 ///
-/// This is a committed REPRODUCTION, not a weakened byte-match gate. It (1)
-/// asserts a byte-exact CONTROL (64x64 cq20 — proves the harness + the fixed
-/// paths are correct on real pixels and guards that point against regression),
-/// and (2) asserts the KB-6 divergence is still PRESENT so the bug is gated: when
-/// a fix makes real content byte-exact, this test FAILS and must be promoted to a
-/// full `report_and_assert` byte-match gate. The correct end state is full
-/// byte-identity on real content.
+/// PROMOTED 2026-07-16 to a FULL byte-match gate: all 30 real-content cells
+/// (5 vectors/crops × cq 5/12/20/32/48/63) byte-match real aomenc. The
+/// per-group asserts (1)/(1b)/(1c) keep the per-fix history + specific
+/// regression messages; (2) is the all-cells `report_and_assert`. The last
+/// cell (196² cq48) closed with the tokenize WRITE-ctx fix (encode_sb.rs —
+/// C caches the pack's `(txb_skip_ctx, dc_sign_ctx)` from the persistent
+/// clipped-stamp arrays in `av1_update_and_record_txb_context`, not from the
+/// trellis's full-footprint local ta/tl).
 #[test]
 fn encoder_gate_real_image_e2e_kb6_repro() {
     let dir = corpus_dir();
@@ -1047,10 +1048,17 @@ fn encoder_gate_real_image_e2e_kb6_repro() {
     // full-footprint `get_txb_ctx` reads OR in (wrong txb_skip_ctx → same
     // symbols on different-probability cdf rows → bottom-row stream desync) —
     // plus the edge partition-cost gather reading the frame-init `cm->fc`
-    // table (partition_search.c:3415), not the per-SB-adapted one. The one
-    // remaining 196 cell (cq48, a DIFFERENT mid-stream near-tie) stays pinned
-    // via (2) + kb6_characterize_196_partial_sb.
-    for cq in [5, 12, 20, 32, 63] {
+    // table (partition_search.c:3415), not the per-SB-adapted one; **cq48
+    // (the LAST cell) with the tokenize WRITE-ctx fix** — C's pack writes
+    // each txb's coefficients with the `(txb_skip_ctx, dc_sign_ctx)` cached
+    // by the tokenize walk (`av1_update_and_record_txb_context`,
+    // encodetxb.c) from the PERSISTENT entropy arrays (edge-CLIPPED
+    // `av1_set_entropy_contexts` stamps), while the trellis uses the encode
+    // walk's local full-footprint stamps; the port used the trellis pair for
+    // both, so an edge txb whose within-leaf neighbour footprint spans the
+    // visible boundary could write its DC-sign on a different cdf row
+    // (196² cq48: identical search decisions, bits diverged mid-tile).
+    for cq in [5, 12, 20, 32, 48, 63] {
         let label = format!("av1-1-b8-01-size-196x196 420 cq{cq}");
         let ok = results
             .iter()
@@ -1065,16 +1073,11 @@ fn encoder_gate_real_image_e2e_kb6_repro() {
         );
     }
 
-    // (2) KB-6 GATE — the divergence must still be present. When the port becomes
-    // byte-exact on real content this assertion fails: that is the signal to
-    // promote this repro to a full `report_and_assert` byte-match gate (see
-    // CLAUDE.md KB-6). This is characterization of an OPEN bug, not a weakened test.
-    assert!(
-        !diverged.is_empty(),
-        "KB-6 appears FIXED: real bd8 4:2:0 content is now byte-exact vs real aomenc. \
-         Promote encoder_gate_real_image_e2e_kb6_repro to an asserting byte-match gate \
-         (report_and_assert over all cells) and close KB-6 in CLAUDE.md."
-    );
+    // (2) PROMOTED 2026-07-16 — the full 30-cell real-content map byte-matches
+    // real aomenc (the last cell, 196² cq48, closed with the tokenize
+    // WRITE-ctx fix — see (1c)). This is now a FULL byte-match gate: any
+    // real-content cell diverging is a regression.
+    report_and_assert("KB-6 real-image e2e (30/30 promoted)", &results);
 }
 
 /// Print a per-cell map and assert an OPEN bug still reproduces. Shared by the

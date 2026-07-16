@@ -770,25 +770,36 @@ fn kb6_localize_size_64_cq32() {
 /// closed cq12/20/32. cq32/cq12/cq20/cq5/cq63 are asserted byte-match gates
 /// in `encoder_gate_real_image_e2e_kb6_repro`.
 ///
-/// REMAINING (pinned here): **cq48** (qindex 192) — first tile-byte
-/// divergence at byte 253 of ~609/616, i.e. MID-STREAM around SB row 1-2,
-/// NOT the bottom-row-boundary signature the fixed cells had — a distinct
-/// near-tie, next localization target.
-///
-/// Pinned as assert-diverge per KB-6: FAILS (a) if the encode panics/regresses,
-/// or (b) the moment the cell byte-matches — the signal to flip the assert and
-/// promote 196 cq48 in `encoder_gate_real_image_e2e_kb6_repro`.
+/// FIXED 2026-07-16 (the LAST cell — map 30/30): **cq48** (qindex 192) was
+/// NOT a search near-tie — decode-both + full pass-marker dumps proved the
+/// port's search decisions, per-pass tx-type evals, winner stores, and both
+/// OUTPUT_ENABLED requant walks were ALREADY identical to C at the divergent
+/// leaf (mi(0,48) 32×64 SMOOTH, txbs blk(8,0)/(12,0)). The divergence was a
+/// WRITE-side cdf-row defect (the entropy-stamp-fix class, dc-sign flavour):
+/// C's pack writes each txb's coefficients with the `(txb_skip_ctx,
+/// dc_sign_ctx)` cached by the TOKENIZE walk
+/// (`av1_update_and_record_txb_context`, encodetxb.c — derived from the
+/// PERSISTENT entropy arrays whose within-leaf stamps are edge-CLIPPED
+/// `av1_set_entropy_contexts`), while the TRELLIS uses the encode walk's
+/// local full-footprint `av1_set_txb_context` stamps. The port used the
+/// trellis pair for both; at txb blk(8,0) (vis 8×16 of a 16×16 txb) the
+/// above-footprint tail-zero flipped the dc-sign SUM (C: −4+2 = −2 → ctx 1;
+/// port: −4+4 = 0 → ctx 0) → the DC-sign symbol went to a different cdf row
+/// → bits diverged at tile byte ~253 with IDENTICAL symbols, and the decoded
+/// "txb4 = (eob4,tt2)" was that desync's artifact, not a decision. Fix:
+/// encode_sb.rs Step 4 (the tokenize-equivalent stamp loop) derives the
+/// pack's write ctx from the persistent arrays per txb — before that txb's
+/// clipped stamp — exactly C's tokenize; interior txbs derive identical
+/// values. Promoted: 196² cq48 is an asserted byte-match cell in
+/// `encoder_gate_real_image_e2e_kb6_repro` (30/30); this pin now asserts the
+/// cell KEEPS matching (decisions + recon identical via decode-both).
 #[test]
 fn kb6_characterize_196_partial_sb() {
     let matched = localize_real("av1-1-b8-01-size-196x196", 48, 0, 0, 0, 0);
-    eprintln!(
-        "\n=== KB-6 196x196 partial-SB cq48: encode OK, matched={matched} \
-         (open divergence: mid-stream near-tie, see above) ==="
-    );
+    eprintln!("\n=== KB-6 196x196 partial-SB cq48: encode OK, matched={matched} ===");
     assert!(
-        !matched,
-        "KB-6 196x196 cq48 now BYTE-MATCHES real aomenc: the last partial-SB \
-         divergence is fixed. Flip this assert and promote 196x196 cq48 in \
-         encoder_gate_real_image_e2e_kb6_repro to an asserted byte-match gate."
+        matched,
+        "KB-6 196x196 cq48 REGRESSED: the tokenize write-ctx fix (encode_sb.rs \
+         Step 4) previously made this cell byte-match real aomenc (map 30/30)."
     );
 }
