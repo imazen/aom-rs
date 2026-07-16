@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod frame;
+mod simd;
 
 pub const CDEF_BSTRIDE: usize = 144; // ALIGN_POWER_OF_TWO(128 + 16, 3)
 pub const CDEF_VERY_LARGE: i32 = 0x4000;
@@ -191,6 +192,87 @@ pub fn cdef_filter_block(
 /// real C lowbd path).
 #[allow(clippy::too_many_arguments)]
 pub fn cdef_filter_block_16(
+    dst: &mut [u16],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_width: usize,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    // Width-8 rows (the luma 8x8 bulk of CDEF cost) take the SIMD row kernel
+    // (bit-identical to the core — simd.rs module docs + the differentials:
+    // cdef_filter_diff.rs pins THIS dispatching function against the REAL C
+    // kernels, cdef_filter_simd_diff.rs pins it against the scalar core at
+    // every token permutation); width-4 blocks keep the scalar core.
+    if block_width == 8 {
+        simd::cdef_filter_16_w8(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_height,
+            enable_primary,
+            enable_secondary,
+        );
+        return;
+    }
+    if block_width == 4 && block_height % 2 == 0 {
+        simd::cdef_filter_16_w4(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_height,
+            enable_primary,
+            enable_secondary,
+        );
+        return;
+    }
+    cdef_filter_block_core(
+        in_buf,
+        in_off,
+        pri_strength,
+        sec_strength,
+        dir,
+        pri_damping,
+        sec_damping,
+        coeff_shift,
+        block_width,
+        block_height,
+        enable_primary,
+        enable_secondary,
+        |i, j, y| dst[dst_off + i * dstride + j] = y as u16,
+    );
+}
+
+/// The scalar core with the u16 store, NEVER SIMD-routed — the reference
+/// side of the SIMD-vs-scalar differential (`cdef_filter_simd_diff.rs`).
+/// Same contract as [`cdef_filter_block_16`].
+#[allow(clippy::too_many_arguments)]
+pub fn cdef_filter_block_16_scalar(
     dst: &mut [u16],
     dst_off: usize,
     dstride: usize,
