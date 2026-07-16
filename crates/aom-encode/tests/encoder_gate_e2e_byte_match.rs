@@ -1833,3 +1833,93 @@ fn isolate_vgrad256_cq32_cnn_partition_prune() {
     assert_eq!(sqsplit_disabled[3], 16, "all sixteen 16x16 sub-blocks must be CNN square-split-disabled");
     assert_eq!(sqsplit_disabled[4], 64, "all sixty-four 8x8 sub-blocks must be CNN square-split-disabled");
 }
+
+/// Gate 2 (`aomenc --cpu-used=2`) — the all-intra KEY **speed-2** path. Reuses the
+/// full e2e derivation with `ref_encode_av1_kf(cpu_used=2)` +
+/// `SpeedFeatures::set_allintra(2)`. Byte-identical to real aomenc `--cpu-used=2`
+/// end to end across a size × quality × content × subsampling grid: 64/128 (1×1 /
+/// 2×2 SB) × cq{12,32,48,63} (qindex ~48/128/184/232, spanning the aggressive-web
+/// to high-q range) × {flat, two-tone, vgrad, diag} × {mono, 4:2:0}.
+///
+/// The speed-2 deltas over speed 1 that are LIVE on the bd8 4:2:0 all-intra KEY
+/// path (`set_allintra_speed_features_*`, speed_features.c speed>=2 blocks):
+///   - `disable_smooth_intra = 1` (:429) — prunes SMOOTH_H_PRED / SMOOTH_V_PRED
+///     from the luma intra-mode search (SMOOTH_PRED survives, since
+///     `prune_filter_intra_level != 0`);
+///   - `prune_filter_intra_level = 1` (:431) — restricts the filter-intra search
+///     to the FILTER variants derived from the best-so-far Y mode;
+///   - `perform_coeff_opt = 3` (:433) — coeff-opt dist threshold 1728 -> 864;
+///   - `ml_4_partition_search_level_index = 2` (:237) — the 4-way ML-prune row (a
+///     byte no-op: `av1_partition4_{search,not_search}_thresh` is byte-identical
+///     for levels 1 and 2);
+///   - `intra_pruning_with_hog = 2` (:430) — a byte no-op (the HOG threshold table
+///     `{-1.2,-1.2,-0.6,0.4}` maps level 1 and 2 to the same -1.2);
+///   - `top_intra_model_count_allowed = 3` (:404) — actually a speed>=1 delta the
+///     port had left hardcoded at 4. It drives the `prune_intra_y_mode` model-RD
+///     slot (index = count-1). Inert at speed 0/1 for every existing gate (the
+///     mode set kept fewer than 4 competitive models), but the speed-2
+///     `disable_smooth_intra` prune shrinks the mode set enough that the 4-vs-3
+///     slot difference tips the winner. **Witness:** `diag 128x128 cq48`
+///     byte-matches with `top_intra_model_count_allowed = 3` and re-diverges with
+///     4 (proven by env-gated bisect during development), while it byte-matched
+///     at speed 0/1 both ways — i.e. this cell diverged from aomenc `--cpu-used=2`
+///     before the fix and byte-matches after.
+///
+/// All other speed-2 deltas are inert here: inter/motion (`auto_mv_step_size`,
+/// `simple_motion_search_prune_agg`), CDEF / loop-restoration search (off in the
+/// allintra default envelope), the INTER-only `partition_search_breakout_*`
+/// thresholds, and the `!boosted`-gated qindex `ext_partition_eval_thresh` (a KEY
+/// frame is always boosted). Every cell asserts real end-to-end byte-identity.
+#[test]
+fn encoder_gate_speed2_textured_allintra() {
+    fn content_for(w: usize, h: usize, name: &str) -> Box<dyn Fn(usize, usize) -> u8> {
+        match name {
+            "two-tone" => Box::new(move |_r, c| if c < w / 2 { 72 } else { 168 }),
+            "vgrad" => Box::new(move |_r, c| (32 + c * 190 / w) as u8),
+            "diag" => Box::new(move |r, c| (32 + (r + c) * 190 / (w + h)) as u8),
+            "flat" => Box::new(move |_r, _c| 128u8),
+            other => panic!("unknown {other:?}"),
+        }
+    }
+    let mut results: Vec<(String, bool)> = Vec::new();
+    for &(w, h) in &[(64usize, 64usize), (128usize, 128usize)] {
+        for &name in &["flat", "two-tone", "vgrad", "diag"] {
+            for &cq in &[12i32, 32, 48, 63] {
+                for &mono in &[true, false] {
+                    let content = content_for(w, h, name);
+                    let ok = attempt_case_content_uv(
+                        w,
+                        h,
+                        mono,
+                        1,
+                        1,
+                        2,
+                        cq,
+                        2,
+                        2,
+                        |r, c| content(r, c),
+                        |r, c| (60 + (r * 7 + c * 3) % 80) as u8,
+                    );
+                    let fmt = if mono { "mono" } else { "420" };
+                    eprintln!(
+                        "speed2 {name} {w}x{h} {fmt} cq{cq}: {}",
+                        if ok { "MATCH" } else { "DIFF" }
+                    );
+                    results.push((format!("{name} {w}x{h} {fmt} cq{cq}"), ok));
+                }
+            }
+        }
+    }
+    let failed: Vec<&String> = results
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(n, _)| n)
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{}/{} cpu-used=2 all-intra cells diverged from real aomenc: {:?}",
+        failed.len(),
+        results.len(),
+        failed
+    );
+}

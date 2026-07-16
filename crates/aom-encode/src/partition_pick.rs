@@ -503,7 +503,20 @@ fn leaf_pick_sb_modes(
             &mut skip_mask,
         );
     }
-    let gates = IntraSbyGates::speed0(skip_mask);
+    let mut gates = IntraSbyGates::speed0(skip_mask);
+    // Speed-2 all-intra intra-mode deltas (set_allintra_speed_features_framesize
+    // _independent, speed_features.c:429/431): prune SMOOTH_H_PRED / SMOOTH_V_PRED
+    // from the luma mode search (disable_smooth_intra), and restrict the
+    // filter-intra search to the FILTER modes derived from the best-so-far Y mode
+    // (prune_filter_intra_level=1). Both are inert at speed<2 (IntraSbyGates::speed0
+    // leaves them off), so speed 0/1 byte-match gates are unaffected. Only applied
+    // for allintra: GOOD has its own disable_smooth_intra schedule and, in this
+    // port's envelope, always runs at speed 0.
+    if cfg.allintra && cfg.speed >= 2 {
+        gates.disable_smooth_intra = true;
+        // C: 1 at speed>=2, 2 at speed>=4 (unmodeled). 1 covers speed 2/3.
+        gates.prune_filter_intra_level = 1;
+    }
 
     // Neighbour winner modes (module docs: the mi-grid reads).
     let above_mode = if up_available {
@@ -593,7 +606,15 @@ fn leaf_pick_sb_modes(
     };
     let sby_cfg = IntraSbySearchCfg {
         gates: &gates,
-        top_intra_model_count_allowed: 4,
+        // `intra_sf.top_intra_model_count_allowed` (speed_features.c:2443 default
+        // TOP_INTRA_MODEL_COUNT=4; :404 -> 3 at allintra speed>=1; :533 -> 2 at
+        // speed>=4, unmodeled). Drives the `top_intra_model_rd[]` slot
+        // `prune_intra_y_mode` compares against (index = count-1). At speed 0/1
+        // the byte-match gates were inert to 4-vs-3 (the mode set kept fewer than
+        // 4 competitive models); the speed-2 `disable_smooth_intra` prune shrinks
+        // the mode set enough that the 4-vs-3 slot difference tips the winner, so
+        // this must be the correct 3 at speed>=1 to byte-match.
+        top_intra_model_count_allowed: if cfg.allintra && cfg.speed >= 1 { 3 } else { 4 },
         adapt_top_model_rd_count_using_neighbors: false,
         above_mode,
         left_mode,
@@ -2217,11 +2238,15 @@ pub fn rd_pick_partition_real(
             let frame_h_px = env.mi_rows * 4;
             let min_dim = frame_w_px.min(frame_h_px);
             let res_idx = usize::from(min_dim >= 480) + usize::from(min_dim >= 720);
-            // ml_4_partition_search_level_index (part_sf, speed_features.c:210):
-            // 0 at speed 0, 1 at speed >= 1 — mirrors SpeedFeatures::set_allintra
-            // for the modeled range (the speed-2/3 min(speed,3) deltas are
-            // unmodeled = #10; predict_4partition_prune guards level_index >= 3).
-            let ml_4_level_index = i32::from(cfg.speed >= 1);
+            // ml_4_partition_search_level_index (part_sf): 0 at speed 0, then
+            // min(speed,3) — 1 at speed>=1 (speed_features.c:210), 2 at speed>=2
+            // (:237), 3 at speed>=3 (:271) — mirrors SpeedFeatures::set_allintra.
+            // The port's threshold-table path is correct for levels 0/1/2 (and the
+            // C table is byte-identical for levels 1 and 2, so this is a byte no-op
+            // at speed 2); predict_4partition_prune guards level_index >= 3 (the
+            // speed>=3 alternate-NN branch is unmodeled = #10) and returns the
+            // inputs unchanged there, so the clamp is safe.
+            let ml_4_level_index = cfg.speed.clamp(0, 3);
             let (h4, v4) = crate::part4_prune::predict_4partition_prune(
                 bsize,
                 pc_tree_partitioning,

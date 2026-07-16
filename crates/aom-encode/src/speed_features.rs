@@ -114,8 +114,22 @@ pub struct SpeedFeatures {
     // ---- intra_sf --------------------------------------------------------
     /// `intra_sf.intra_pruning_with_hog` — allintra base 1
     /// (speed_features.c:360); speed>=2 -> 2, speed>=3 -> 3. Luma HOG
-    /// directional-mode prune aggressiveness.
+    /// directional-mode prune aggressiveness. NOTE for bytes: the C threshold
+    /// table `thresh[4] = {-1.2, -1.2, -0.6, 0.4}` (intra_mode_search.c:1505,
+    /// indexed by `level-1`) makes level 1 and level 2 IDENTICAL (-1.2), so the
+    /// 1->2 bump at speed 2 does not move the HOG prune output; the threshold
+    /// only changes at speed>=3 (level 3 -> -0.6).
     pub intra_pruning_with_hog: i32,
+    /// `intra_sf.disable_smooth_intra` — default 0 (init_intra_sf:2438); allintra
+    /// speed>=2 -> 1 (speed_features.c:429). Prunes SMOOTH_H_PRED / SMOOTH_V_PRED
+    /// from the luma intra-mode search (intra_mode_search.c:1564-1567); SMOOTH_PRED
+    /// survives while `prune_filter_intra_level != 0` (the :1574 interaction).
+    pub disable_smooth_intra: bool,
+    /// `intra_sf.prune_filter_intra_level` — default 0 (init_intra_sf:2440);
+    /// allintra speed>=2 -> 1 (speed_features.c:431), speed>=4 -> 2. At level 1
+    /// the filter-intra search (rd_pick_filter_intra_sby, intra_mode_search.c:264)
+    /// only evaluates the FILTER modes derived from the best-so-far Y mode.
+    pub prune_filter_intra_level: i32,
     /// `intra_sf.prune_palette_search_level` — default 0 (init_intra_sf:2431);
     /// speed>=1 -> 1 (speed_features.c:402).
     pub prune_palette_search_level: i32,
@@ -209,6 +223,8 @@ impl SpeedFeatures {
             ml_4_partition_search_level_index: 0, // init_part_sf:2305
             // intra_sf
             intra_pruning_with_hog: 1, // allintra base (speed_features.c:360)
+            disable_smooth_intra: false, // init_intra_sf:2438
+            prune_filter_intra_level: 0, // init_intra_sf:2440
             prune_palette_search_level: 0, // init_intra_sf:2431
             prune_luma_palette_size_search_level: 1, // allintra base (:362)
             top_intra_model_count_allowed: TOP_INTRA_MODEL_COUNT, // init_intra_sf:2443
@@ -260,6 +276,37 @@ impl SpeedFeatures {
             sf.cdef_pick_method = CDEF_FAST_SEARCH_LVL1;
             sf.dual_sgr_penalty_level = 1;
             sf.enable_sgr_ep_pruning = 1;
+        }
+
+        // ---- if (speed >= 2) { ... }
+        //   framesize-DEPENDENT block (speed_features.c:236-267): the intra-still
+        //   relevant delta is `ml_4_partition_search_level_index = 2` (:237). The
+        //   other :236 fields are inert on the all-intra KEY path within this
+        //   port's envelope: `use_square_partition_only_threshold = BLOCK_32X32`
+        //   for <480p is UNCHANGED from speed 1 (KB-3); `partition_search_breakout_
+        //   {dist,rate}_thr` is INTER-only (partition_search.c:4260 gates on
+        //   `!frame_is_intra_only`); `prune_tx_type_using_stats` needs >=480p and
+        //   `prune_tx_size_level` needs use_hbd (both false here).
+        //   framesize-INDEPENDENT block (speed_features.c:424-437): the intra-still
+        //   relevant deltas are `disable_smooth_intra=1` (:429), `intra_pruning_
+        //   with_hog=2` (:430), `prune_filter_intra_level=1` (:431), and
+        //   `perform_coeff_opt=3` (:433). `auto_mv_step_size`/`simple_motion_search_
+        //   prune_agg` are inter/motion (inert on all-intra KEY); the two lpf_sf
+        //   fields (`prune_wiener_based_on_src_var`, `prune_sgr_based_on_wiener`)
+        //   are loop-restoration search (OFF in the allintra default envelope).
+        //   qindex-DEPENDENT block (speed_features.c:2939): `ext_partition_eval_
+        //   thresh = BLOCK_128X128` is gated on `!boosted`, and a KEY frame is
+        //   always boosted (frame_is_kf_gf_arf via frame_is_intra_only,
+        //   encoder.h:4055) => inert here.
+        if speed >= 2 {
+            // part_sf (framesize-dependent, :237)
+            sf.ml_4_partition_search_level_index = 2;
+            // intra_sf (:429-431)
+            sf.disable_smooth_intra = true;
+            sf.intra_pruning_with_hog = 2;
+            sf.prune_filter_intra_level = 1;
+            // rd_sf (:433)
+            sf.perform_coeff_opt = 3;
         }
 
         sf
@@ -342,6 +389,35 @@ mod tests {
         assert_eq!(sf.intra_tx_size_search_init_depth_rect, 0);
         assert_eq!(sf.tx_ml_tx_split_thresh, 8500);
         assert_eq!(sf.cdef_pick_method, CDEF_FULL_SEARCH);
+        // The speed-2 intra deltas stay at their speed-0 defaults at speed 0.
+        assert!(!sf.disable_smooth_intra);
+        assert_eq!(sf.prune_filter_intra_level, 0);
+        assert_eq!(sf.intra_pruning_with_hog, 1);
+        assert_eq!(sf.ml_4_partition_search_level_index, 0);
+    }
+
+    /// The speed-2 all-intra deltas, asserted against the source values
+    /// (`set_allintra_*` speed>=2 blocks). At speed 2 the speed>=1 deltas remain
+    /// in force and these additional fields flip.
+    #[test]
+    fn speed2_allintra_deltas_match_source() {
+        let sf = SpeedFeatures::set_allintra(2, false, false);
+        // NEW at speed 2 (framesize-independent :429-433 + dependent :237).
+        assert!(sf.disable_smooth_intra); // :429
+        assert_eq!(sf.intra_pruning_with_hog, 2); // :430
+        assert_eq!(sf.prune_filter_intra_level, 1); // :431
+        assert_eq!(sf.perform_coeff_opt, 3); // :433
+        assert_eq!(sf.ml_4_partition_search_level_index, 2); // :237
+        // Carried from speed 1 (unchanged at speed 2).
+        assert_eq!(sf.adaptive_txb_search_level, 2);
+        assert_eq!(sf.top_intra_model_count_allowed, 3);
+        assert_eq!(sf.intra_tx_size_search_init_depth_rect, 1);
+        assert!(sf.skip_tx_search);
+        assert_eq!(sf.less_rectangular_check_level, 1); // still 1 (bumps to 2 at speed>=3)
+        // Derived tx policy at speed 2: perform_coeff_opt=3 -> dist threshold 864.
+        let pol = sf.tx_type_search_policy(false, 0);
+        assert_eq!(pol.coeff_opt_dist_threshold, 864); // coeff_opt_thresholds[3][0][0]
+        assert_eq!(pol.coeff_opt_satd_threshold, u32::MAX);
     }
 
     /// The speed-1 all-intra deltas, asserted against the source values (items
