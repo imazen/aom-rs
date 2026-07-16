@@ -1,0 +1,26 @@
+[package]
+name = "aom-bench"
+version = "0.0.1"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Gate-3 performance harness for aom-rs: zenbench paired benchmarks of the pure-Rust port vs the real libaom C oracle (in-process via aom-sys-ref), plus a callgrind profile driver. Bench-only crate, never published."
+publish = false
+
+[dependencies]
+# The port under measurement.
+aom-encode = { path = "../aom-encode" }
+aom-decode = { path = "../aom-decode" }
+aom-entropy = { path = "../aom-entropy" }
+aom-quant = { path = "../aom-quant" }
+# The REAL C oracle (reference libaom v3.14.1, Release + SIMD). This crate is
+# bench-only (publish = false), so depending on the FFI oracle here mirrors the
+# dev-dependency isolation the shipping crates use: all unsafe stays inside
+# aom-sys-ref, and nothing here ships.
+aom-sys-ref = { path = "../aom-sys-ref" }
+
+[dev-dependencies]
+zenbench = "0.1.9"
+
+[[bench]]
+name = "gate3"
+harness = false
