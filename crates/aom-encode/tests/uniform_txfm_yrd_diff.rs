@@ -571,6 +571,7 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                 true,
                 true,
                 aom_encode::tx_search::USE_FULL_RD,
+                None,
             );
 
             // ---- C-side depth loop (choose_tx_size_type_from_rd transcribed) ----

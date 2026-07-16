@@ -299,6 +299,7 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                 mb_to_right_edge: 1 << 12,
                 mb_to_bottom_edge: 1 << 12,
                 winner_mode: None,
+                palette: None,
             };
             let mut recon_rust = recon0.clone();
             let mut var_cache_rust = Block4x4VarInfo::sb_cache(sb_size);

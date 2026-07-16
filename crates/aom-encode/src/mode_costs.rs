@@ -217,16 +217,17 @@ pub fn fill_intra_mode_costs(
 }
 
 /// Bit-exact port of `intra_mode_info_cost_y`
-/// (av1/encoder/intra_mode_search_utils.h) for the **`palette_size[0] == 0`**
-/// path: the Y mode-info signaling rate = `mode_cost` (the caller-selected
-/// `y_mode_costs[above_ctx][left_ctx][mode]` / `mbmode_cost[group][mode]`
-/// entry) + the no-palette flag bit (when palette is allowed and the mode is
-/// `DC_PRED`) + the filter-intra flag/mode + the Y angle delta + the intrabc
-/// flag. The palette-USE branch (size/color/map rate) is out of scope here —
-/// it belongs to the palette search.
+/// (av1/encoder/intra_mode_search_utils.h): the Y mode-info signaling rate =
+/// `mode_cost` (the caller-selected `y_mode_costs[above_ctx][left_ctx][mode]`
+/// / `mbmode_cost[group][mode]` entry) + the palette flag bit (when palette
+/// is allowed and the mode is `DC_PRED`) [+ the palette size/colour/map rate
+/// when `use_palette` — precomputed by the palette search and passed as
+/// `palette_extra_rate`] + the filter-intra flag/mode (gated
+/// `av1_filter_intra_allowed`, which requires `palette_size[0] == 0`) + the
+/// Y angle delta + the intrabc flag.
 ///
-/// At most one of `mode != DC_PRED`, `use_intrabc`, `use_filter_intra` may
-/// hold (the C asserts this; mirrored here).
+/// At most one of `mode != DC_PRED`, `use_palette`, `use_intrabc`,
+/// `use_filter_intra` may hold (the C asserts this; mirrored here).
 #[allow(clippy::too_many_arguments)]
 pub fn intra_mode_info_cost_y(
     costs: &IntraModeCosts,
@@ -242,22 +243,30 @@ pub fn intra_mode_info_cost_y(
     palette_mode_ctx: usize,
     enable_filter_intra: bool,
     allow_intrabc: bool,
+    use_palette: bool,
+    palette_extra_rate: i32,
 ) -> i32 {
     let mut total_rate = mode_cost;
-    let use_palette = 0usize; // scope: palette_size[0] == 0
     // Can only activate one mode.
     assert!(
         usize::from(mode != DC_PRED)
-            + use_palette
+            + usize::from(use_palette)
             + usize::from(use_intrabc)
             + usize::from(use_filter_intra)
             <= 1
     );
     if try_palette && mode == DC_PRED {
-        total_rate += costs.palette_y_mode_cost[palette_bsize_ctx][palette_mode_ctx][use_palette];
+        total_rate +=
+            costs.palette_y_mode_cost[palette_bsize_ctx][palette_mode_ctx][usize::from(use_palette)];
+        if use_palette {
+            // palette_y_size_cost + write_uniform_cost(first index) +
+            // av1_palette_color_cost_y + av1_cost_color_map — computed by the
+            // palette search (it owns the cache/map state).
+            total_rate += palette_extra_rate;
+        }
     }
-    // av1_filter_intra_allowed(cm, mbmi), with palette_size[0] == 0.
-    if mode == DC_PRED && filter_intra_allowed_bsize(enable_filter_intra, bsize) {
+    // av1_filter_intra_allowed(cm, mbmi): requires palette_size[0] == 0.
+    if mode == DC_PRED && !use_palette && filter_intra_allowed_bsize(enable_filter_intra, bsize) {
         total_rate += costs.filter_intra_cost[bsize][usize::from(use_filter_intra)];
         if use_filter_intra {
             total_rate += costs.filter_intra_mode_cost[filter_intra_mode];
@@ -271,6 +280,107 @@ pub fn intra_mode_info_cost_y(
         total_rate += costs.intrabc_cost[usize::from(use_intrabc)];
     }
     total_rate
+}
+
+// ---------------------------------------------------------------------------
+// palette size + colour-index cost tables (av1_fill_mode_rates palette slice)
+// ---------------------------------------------------------------------------
+
+/// `PALETTE_SIZES` (entropymode.h).
+pub const PALETTE_SIZES: usize = 7;
+/// `PALETTE_COLOR_INDEX_CONTEXTS` (entropymode.h).
+pub const PALETTE_COLOR_INDEX_CONTEXTS: usize = 5;
+/// `PALETTE_COLORS` (entropymode.h).
+pub const PALETTE_COLORS: usize = 8;
+
+/// The palette size + colour-index signaling costs (`ModeCosts.
+/// palette_y_size_cost` / `palette_uv_size_cost` / `palette_y_color_cost` /
+/// `palette_uv_color_cost`, block.h) — the `av1_fill_mode_rates` slices at
+/// rd.c:136-152. Kept separate from [`IntraModeCosts`] (whose layout the
+/// rd_shim differential pins); only the palette search reads these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteCosts {
+    pub palette_y_size_cost: [[i32; PALETTE_SIZES]; PALETTE_BSIZE_CTXS],
+    pub palette_uv_size_cost: [[i32; PALETTE_SIZES]; PALETTE_BSIZE_CTXS],
+    pub palette_y_color_cost:
+        [[[i32; PALETTE_COLORS]; PALETTE_COLOR_INDEX_CONTEXTS]; PALETTE_SIZES],
+    pub palette_uv_color_cost:
+        [[[i32; PALETTE_COLORS]; PALETTE_COLOR_INDEX_CONTEXTS]; PALETTE_SIZES],
+}
+
+impl PaletteCosts {
+    /// All-zero tables, filled by [`fill_palette_costs`].
+    pub fn zeroed() -> Self {
+        PaletteCosts {
+            palette_y_size_cost: [[0; PALETTE_SIZES]; PALETTE_BSIZE_CTXS],
+            palette_uv_size_cost: [[0; PALETTE_SIZES]; PALETTE_BSIZE_CTXS],
+            palette_y_color_cost: [[[0; PALETTE_COLORS]; PALETTE_COLOR_INDEX_CONTEXTS];
+                PALETTE_SIZES],
+            palette_uv_color_cost: [[[0; PALETTE_COLORS]; PALETTE_COLOR_INDEX_CONTEXTS];
+                PALETTE_SIZES],
+        }
+    }
+}
+
+/// The palette slices of `av1_fill_mode_rates` (rd.c:136-152):
+/// `av1_cost_tokens_from_cdf` over `palette_{y,uv}_size_cdf[bctx]`
+/// (`PALETTE_SIZES` symbols, rows `PALETTE_SIZES + 1` wide) and
+/// `palette_{y,uv}_color_index_cdf[size][ctx]` (`n = size + 2` symbols, rows
+/// `PALETTE_COLORS + 1` wide). CDF layouts match
+/// [`aom_entropy::partition::KfFrameContext`]'s `palette_y_size` /
+/// `palette_uv_size` / `palette_y_color_index` / `palette_uv_color_index`.
+pub fn fill_palette_costs(
+    out: &mut PaletteCosts,
+    palette_y_size_cdf: &[[u16; PALETTE_SIZES + 1]; PALETTE_BSIZE_CTXS],
+    palette_uv_size_cdf: &[[u16; PALETTE_SIZES + 1]; PALETTE_BSIZE_CTXS],
+    palette_y_color_index_cdf: &[[[u16; PALETTE_COLORS + 1]; PALETTE_COLOR_INDEX_CONTEXTS];
+         PALETTE_SIZES],
+    palette_uv_color_index_cdf: &[[[u16; PALETTE_COLORS + 1]; PALETTE_COLOR_INDEX_CONTEXTS];
+         PALETTE_SIZES],
+) {
+    for i in 0..PALETTE_BSIZE_CTXS {
+        cost_tokens_from_cdf(&mut out.palette_y_size_cost[i], &palette_y_size_cdf[i], None);
+        cost_tokens_from_cdf(
+            &mut out.palette_uv_size_cost[i],
+            &palette_uv_size_cdf[i],
+            None,
+        );
+    }
+    for i in 0..PALETTE_SIZES {
+        for j in 0..PALETTE_COLOR_INDEX_CONTEXTS {
+            cost_tokens_from_cdf(
+                &mut out.palette_y_color_cost[i][j],
+                &palette_y_color_index_cdf[i][j],
+                None,
+            );
+            cost_tokens_from_cdf(
+                &mut out.palette_uv_color_cost[i][j],
+                &palette_uv_color_index_cdf[i][j],
+                None,
+            );
+        }
+    }
+}
+
+/// `write_uniform_cost` (intra_mode_search_utils.h): the
+/// `av1_cost_literal`-scaled bit count of `write_uniform(n, v)` (the
+/// truncated-binary first colour index).
+pub fn write_uniform_cost(n: i32, v: i32) -> i32 {
+    // get_unsigned_bits(n) = n > 0 ? get_msb(n) + 1 : 0 = 32 - clz(n).
+    let l = if n > 0 {
+        32 - (n as u32).leading_zeros() as i32
+    } else {
+        0
+    };
+    let m = (1 << l) - n;
+    if l == 0 {
+        return 0;
+    }
+    if v < m {
+        (l - 1) * 512 // av1_cost_literal(l - 1)
+    } else {
+        l * 512 // av1_cost_literal(l)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,12 +492,20 @@ pub fn intra_mode_info_cost_uv(
     angle_delta_uv: i32,
     try_palette: bool,
     y_palette_active: bool,
+    use_palette: bool,
+    palette_extra_rate: i32,
 ) -> i32 {
     let mut total_rate = mode_cost;
-    let use_palette = 0usize; // scope: palette_size[1] == 0
-    assert!(usize::from(uv_mode != UV_DC_PRED) + use_palette <= 1);
+    assert!(usize::from(uv_mode != UV_DC_PRED) + usize::from(use_palette) <= 1);
     if try_palette && uv_mode == UV_DC_PRED {
-        total_rate += costs.palette_uv_mode_cost[usize::from(y_palette_active)][use_palette];
+        total_rate +=
+            costs.palette_uv_mode_cost[usize::from(y_palette_active)][usize::from(use_palette)];
+        if use_palette {
+            // palette_uv_size_cost + write_uniform_cost(first index) +
+            // av1_palette_color_cost_uv + av1_cost_color_map (plane 1) — the
+            // UV palette search owns the cache/map state.
+            total_rate += palette_extra_rate;
+        }
     }
     let intra_mode = aom_entropy::partition::get_uv_mode(uv_mode);
     if is_directional_mode(intra_mode) && use_angle_delta(bsize) {

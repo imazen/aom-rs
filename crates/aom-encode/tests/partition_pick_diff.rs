@@ -333,6 +333,7 @@ impl CPick<'_> {
             mb_to_right_edge: mb_right,
             mb_to_bottom_edge: mb_bottom,
             winner_mode: None,
+            palette: None,
         };
         let mut var_cache = Block4x4VarInfo::sb_cache(self.sb_size);
 

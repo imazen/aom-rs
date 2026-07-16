@@ -782,6 +782,7 @@ fn leaf_pick_sb_modes(
         mb_to_right_edge: (env.mi_cols - mi_w as i32 - mi_col) * 4 * 8,
         mb_to_bottom_edge: (env.mi_rows - mi_h as i32 - mi_row) * 4 * 8,
         winner_mode: wm_cfg.as_ref(),
+        palette: None,
     };
     let mut var_cache = Block4x4VarInfo::sb_cache(env.sb_size);
 

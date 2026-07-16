@@ -221,6 +221,8 @@ pub fn intra_mode_rd_eval(
         rates.palette_mode_ctx,
         rates.enable_filter_intra,
         rates.allow_intrabc,
+        false,
+        0,
     );
     let rate = coeff_rate + tx_type_rate + mode_rate;
 
@@ -817,6 +819,32 @@ pub struct IntraSbySearchCfg<'a> {
     /// search); `Some` = MODE_EVAL first pass -> top-N winner stats ->
     /// WINNER_MODE_EVAL re-eval (speed>=4 all-intra).
     pub winner_mode: Option<&'a WinnerModeCfg<'a>>,
+    /// The palette SEARCH configuration (`av1_rd_pick_palette_intra_sby` runs
+    /// iff `oxcf.tool_cfg.enable_palette && av1_allow_palette(..)`,
+    /// intra_mode_search.c:1485): `None` models `--enable-palette=0` (the
+    /// standard-shim envelope every pre-existing gate runs under — the
+    /// no-palette FLAG cost still applies via `try_palette` above). `Some`
+    /// carries the size/colour cost tables + neighbour palette state + the
+    /// palette speed-feature levels.
+    pub palette: Option<PaletteModeCfg<'a>>,
+}
+
+/// The palette-search slice of [`IntraSbySearchCfg`] (present iff
+/// `oxcf.tool_cfg.enable_palette`).
+pub struct PaletteModeCfg<'a> {
+    /// The palette size/colour-index cost tables
+    /// ([`crate::mode_costs::fill_palette_costs`]).
+    pub costs: &'a crate::mode_costs::PaletteCosts,
+    /// Above/left neighbour palette state (`xd->above_mbmi`/`left_mbmi`
+    /// palette projection) for `av1_get_palette_cache`.
+    pub above: Option<aom_entropy::partition::PaletteNbrKf>,
+    pub left: Option<aom_entropy::partition::PaletteNbrKf>,
+    /// sf `intra_sf.prune_palette_search_level` (allintra: 0/1/2 at speeds
+    /// 0/1+/3+).
+    pub prune_palette_search_level: i32,
+    /// sf `intra_sf.prune_luma_palette_size_search_level` (allintra: 1 at
+    /// speed 0, 2 at speed>=1).
+    pub prune_luma_palette_size_search_level: i32,
 }
 
 /// The winner-mode two-pass configuration (KB-8, speed>=4 all-intra): the
@@ -877,13 +905,17 @@ pub fn bypass_winner_mode_processing(
 /// One stored winner (`WinnerModeStats`, block.h): the mbmi fields the
 /// second pass restores before re-evaluating. `rd` is the FIRST-pass
 /// (ALLINTRA-variance-factored) rd used for ranking.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinnerModeEntry {
     pub mode: usize,
     pub angle_delta: i32,
     pub use_filter_intra: bool,
     pub filter_intra_mode: usize,
     pub rd: i64,
+    /// The palette-Y candidate state (size/colors/map) when this stored
+    /// winner is a palette mode (store_winner_mode_stats' color_map copy,
+    /// rdopt_utils.h:718-723); the second pass restores it before re-eval.
+    pub palette_y: Option<crate::palette_search::PaletteYInfo>,
 }
 
 /// `store_winner_mode_stats` (rdopt_utils.h:679), intra-frame scope (the
@@ -956,6 +988,10 @@ pub struct IntraSbyBest {
     /// filter-intra search wins (mode is DC_PRED then).
     pub use_filter_intra: bool,
     pub filter_intra_mode: usize,
+    /// `best_mbmi.palette_mode_info` (Y half) + the winning colour-index map
+    /// (`best_palette_color_map`): set when the post-loop palette search
+    /// (`av1_rd_pick_palette_intra_sby`) wins. `mode` is DC_PRED then.
+    pub palette_y: Option<crate::palette_search::PaletteYInfo>,
 }
 
 /// The search outcome: the winner (`None` = no candidate beat `best_rd_in`,
@@ -1091,6 +1127,7 @@ pub fn rd_pick_intra_sby_mode_y(
             cfg.enable_tx64,
             cfg.enable_rect_tx,
             pass_method,
+            None,
         ) else {
             continue; // this_rate_tokenonly == INT_MAX
         };
@@ -1122,6 +1159,8 @@ pub fn rd_pick_intra_sby_mode_y(
                 cfg.palette_mode_ctx,
                 cfg.enable_filter_intra,
                 cfg.allow_intrabc,
+                false,
+                0,
             );
         let this_distortion = choice.stats.dist;
         let mut this_rd = rd::rdcost(env.rdmult, this_rate, this_distortion);
@@ -1164,6 +1203,7 @@ pub fn rd_pick_intra_sby_mode_y(
                     use_filter_intra: false,
                     filter_intra_mode: 0,
                     rd: this_rd,
+                    palette_y: None,
                 },
             );
         }
@@ -1182,12 +1222,40 @@ pub fn rd_pick_intra_sby_mode_y(
                 best_rd: this_rd,
                 use_filter_intra: false,
                 filter_intra_mode: 0,
+                palette_y: None,
             });
         }
     }
 
-    // Palette search (av1_rd_pick_palette_intra_sby, try_palette): NOT
-    // composed — out of scope (gated on allow_screen_content_tools).
+    // Palette search (av1_rd_pick_palette_intra_sby, intra_mode_search.c:1662)
+    // — try_palette = enable_palette && av1_allow_palette(..): `cfg.palette`
+    // models the enable_palette half (None under --enable-palette=0, the
+    // standard-shim envelope), `cfg.try_palette` the allow half.
+    if cfg.try_palette {
+        if let Some(pal_cfg) = &cfg.palette {
+            let args = crate::palette_search::PaletteSearchArgs {
+                dc_mode_cost: bmode_costs[0],
+                cfg,
+                pass_pol,
+                pass_method,
+                palette_costs: pal_cfg.costs,
+                palette_above: pal_cfg.above.as_ref(),
+                palette_left: pal_cfg.left.as_ref(),
+                prune_palette_search_level: pal_cfg.prune_palette_search_level,
+                prune_luma_palette_size_search_level: pal_cfg.prune_luma_palette_size_search_level,
+                discount_color_cost: false,
+                source_variance: cfg.source_variance,
+            };
+            crate::palette_search::rd_pick_palette_intra_sby(
+                env,
+                recon,
+                &args,
+                &mut best_rd,
+                &mut best,
+                &mut winner_stats,
+            );
+        }
+    }
 
     // Filter-intra search: LIVE at speed 0 (intra_mode_search.c:1672 —
     // beat_best_rd && av1_filter_intra_allowed_bsize; the seq-level flag and
@@ -1251,6 +1319,7 @@ pub fn rd_pick_intra_sby_mode_y(
                     use_filter_intra: b.use_filter_intra,
                     filter_intra_mode: b.filter_intra_mode,
                     rd: b.best_rd,
+                    palette_y: b.palette_y.clone(),
                 }]
             };
             for entry in reeval.iter() {
@@ -1267,6 +1336,14 @@ pub fn rd_pick_intra_sby_mode_y(
                 } else {
                     i64::MAX
                 };
+                // Palette entry: restore the colour map + palette prediction
+                // (the winner-stats color_index_map copy, :1701-1707).
+                let pal_yrd = entry.palette_y.as_ref().map(|p| crate::tx_search::PaletteYrd {
+                    colors: &p.colors,
+                    size: p.size,
+                    map: &p.color_map,
+                    map_stride: crate::tx_search::BLK_W_B[bsize],
+                });
                 let Some(choice) = pick_uniform_tx_size_type_yrd_intra(
                     env,
                     recon,
@@ -1276,6 +1353,7 @@ pub fn rd_pick_intra_sby_mode_y(
                     cfg.enable_tx64,
                     cfg.enable_rect_tx,
                     wm.winner_tx_size_method,
+                    pal_yrd.as_ref(),
                 ) else {
                     continue; // rd_stats.rate == INT_MAX (:1204)
                 };
@@ -1289,6 +1367,18 @@ pub fn rd_pick_intra_sby_mode_y(
                         env.tx_size_ctx,
                     );
                 }
+                // Palette entry: the palette size/colour/map extra rate
+                // (recomputed here as intra_mode_info_cost_y does from mbmi).
+                let palette_extra = entry.palette_y.as_ref().map_or(0, |p| {
+                    cfg.palette.as_ref().map_or(0, |pal_cfg| {
+                        crate::palette_search::palette_y_extra_rate(
+                            env,
+                            p,
+                            pal_cfg,
+                            cfg.palette_bsize_ctx,
+                        )
+                    })
+                });
                 let this_rate = choice.stats.rate
                     + if entry.use_filter_intra {
                         intra_mode_info_cost_y(
@@ -1305,6 +1395,8 @@ pub fn rd_pick_intra_sby_mode_y(
                             cfg.palette_mode_ctx,
                             cfg.enable_filter_intra,
                             cfg.allow_intrabc,
+                            false,
+                            0,
                         )
                     } else {
                         intra_mode_info_cost_y(
@@ -1321,6 +1413,8 @@ pub fn rd_pick_intra_sby_mode_y(
                             cfg.palette_mode_ctx,
                             cfg.enable_filter_intra,
                             cfg.allow_intrabc,
+                            entry.palette_y.is_some(),
+                            palette_extra,
                         )
                     };
                 let this_rd = rd::rdcost(env.rdmult, this_rate, choice.stats.dist);
@@ -1338,6 +1432,7 @@ pub fn rd_pick_intra_sby_mode_y(
                         best_rd: this_rd,
                         use_filter_intra: entry.use_filter_intra,
                         filter_intra_mode: entry.filter_intra_mode,
+                        palette_y: entry.palette_y.clone(),
                     });
                 }
             }
@@ -1459,6 +1554,7 @@ pub fn rd_pick_filter_intra_sby_y(
             cfg.enable_tx64,
             cfg.enable_rect_tx,
             pass_method,
+            None,
         ) else {
             continue; // rate == INT_MAX
         };
@@ -1483,6 +1579,8 @@ pub fn rd_pick_filter_intra_sby_y(
                 cfg.palette_mode_ctx,
                 cfg.enable_filter_intra,
                 cfg.allow_intrabc,
+                false,
+                0,
             );
         let mut this_rd = rd::rdcost(env.rdmult, this_rate, choice.stats.dist);
         if cfg.allintra && this_rd != i64::MAX {
@@ -1520,6 +1618,7 @@ pub fn rd_pick_filter_intra_sby_y(
                     use_filter_intra: true,
                     filter_intra_mode: fi_mode,
                     rd: this_rd,
+                    palette_y: None,
                 },
             );
         }
@@ -1537,6 +1636,7 @@ pub fn rd_pick_filter_intra_sby_y(
                 best_rd: this_rd,
                 use_filter_intra: true,
                 filter_intra_mode: fi_mode,
+                palette_y: None,
             });
         }
     }
@@ -1554,6 +1654,7 @@ mod winner_stats_tests {
             use_filter_intra: false,
             filter_intra_mode: 0,
             rd,
+            palette_y: None,
         }
     }
     fn rds(list: &[WinnerModeEntry]) -> Vec<(usize, i64)> {

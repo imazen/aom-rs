@@ -466,7 +466,7 @@ fn pick_intra_mode_rd_matches_c_chain() {
                     pal_bctx as i32,
                     pal_mctx as i32,
                     enable_fi,
-                    allow_intrabc,
+                    allow_intrabc
                 );
                 let rate = coeff_rate + tx_type_rate + mode_rate;
                 let (dist, _sse) = c::ref_dist_block_tx_domain(tcoeff, &dqc, tx_size, bd);

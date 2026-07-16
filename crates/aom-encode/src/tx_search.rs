@@ -1564,6 +1564,23 @@ pub struct TxbWinner {
     pub txb_ctx: u8,
 }
 
+/// A palette-Y candidate for the yrd walk (`av1_predict_intra_block`'s
+/// `use_palette` arm): per-txb prediction is `palette[map[(r+y)*stride+c+x]]`
+/// — the colour-index map fill — instead of spatial intra prediction. The
+/// map covers the FULL `block_width x block_height` pixel extent of the
+/// block (extended from the visible crop), stride = `map_stride`
+/// (= block width in pixels).
+pub struct PaletteYrd<'a> {
+    /// `palette_colors[0..size]` (the Y section).
+    pub colors: &'a [u16; 8],
+    /// `palette_size[0]`.
+    pub size: usize,
+    /// The colour-index map (`block_width * block_height`).
+    pub map: &'a [u8],
+    /// Map row stride in pixels (= block width).
+    pub map_stride: usize,
+}
+
 /// `av1_txfm_rd_in_plane` (tx_search.c) for a luma intra block at `tx_size`
 /// (uniform): the `av1_foreach_transformed_block_in_plane` raster walk; per
 /// txb predict-from-recon (`intra_avail` + `predict_intra_high` INTO the
@@ -1587,6 +1604,7 @@ pub fn txfm_rd_in_plane_intra(
     // `enable_nn_prune_intra_tx_depths` (tx_search.c:3022): Some only from
     // the depth loop's largest-tx iteration when the speed>=6 NN sf is on.
     mut nn_prune: Option<NnDepthPruneCtx<'_>>,
+    palette: Option<&PaletteYrd>,
 ) -> Option<(RdStats, Vec<TxbWinner>)> {
     if current_rd_in > ref_best_rd {
         return None;
@@ -1635,50 +1653,63 @@ pub fn txfm_rd_in_plane_intra(
             }
 
             // av1_predict_intra_block_facade: predict INTO the recon plane.
-            let (n_top, n_topright, n_left, n_bottomleft) = intra_avail(
-                env.sb_size,
-                bsize,
-                env.mi_row,
-                env.mi_col,
-                env.up_available,
-                env.left_available,
-                env.tile_col_end,
-                env.tile_row_end,
-                env.partition,
-                tx_size,
-                0,
-                0,
-                blk_row as i32,
-                blk_col as i32,
-                bw as i32,
-                bh as i32,
-                env.mi_cols,
-                env.mi_rows,
-                env.mode,
-                env.angle_delta * 3, // ANGLE_STEP
-                env.use_filter_intra,
-            );
             let txb_off = env.ref_off + (blk_row * env.ref_stride + blk_col) * 4;
             let mut pred = vec![0u16; txw * txh];
-            predict_intra_high(
-                recon,
-                txb_off,
-                env.ref_stride,
-                &mut pred,
-                txw,
-                env.mode,
-                env.angle_delta * 3,
-                env.use_filter_intra,
-                env.filter_intra_mode,
-                env.disable_edge_filter,
-                env.filter_type,
-                tx_size,
-                n_top as usize,
-                n_topright,
-                n_left as usize,
-                n_bottomleft,
-                env.bd as i32,
-            );
+            if let Some(pal) = palette {
+                // av1_predict_intra_block's use_palette arm: the colour-index
+                // map fill at this txb's pixel offset (x = blk_col*4,
+                // y = blk_row*4) — no spatial prediction, no neighbour reads.
+                let (x, y) = (blk_col * 4, blk_row * 4);
+                for r in 0..txh {
+                    for c in 0..txw {
+                        pred[r * txw + c] =
+                            pal.colors[pal.map[(r + y) * pal.map_stride + c + x] as usize];
+                    }
+                }
+            } else {
+                let (n_top, n_topright, n_left, n_bottomleft) = intra_avail(
+                    env.sb_size,
+                    bsize,
+                    env.mi_row,
+                    env.mi_col,
+                    env.up_available,
+                    env.left_available,
+                    env.tile_col_end,
+                    env.tile_row_end,
+                    env.partition,
+                    tx_size,
+                    0,
+                    0,
+                    blk_row as i32,
+                    blk_col as i32,
+                    bw as i32,
+                    bh as i32,
+                    env.mi_cols,
+                    env.mi_rows,
+                    env.mode,
+                    env.angle_delta * 3, // ANGLE_STEP
+                    env.use_filter_intra,
+                );
+                predict_intra_high(
+                    recon,
+                    txb_off,
+                    env.ref_stride,
+                    &mut pred,
+                    txw,
+                    env.mode,
+                    env.angle_delta * 3,
+                    env.use_filter_intra,
+                    env.filter_intra_mode,
+                    env.disable_edge_filter,
+                    env.filter_type,
+                    tx_size,
+                    n_top as usize,
+                    n_topright,
+                    n_left as usize,
+                    n_bottomleft,
+                    env.bd as i32,
+                );
+            }
             // The C facade writes the prediction into dst (the recon plane).
             for r in 0..txh {
                 recon[txb_off + r * env.ref_stride..txb_off + r * env.ref_stride + txw]
@@ -1902,6 +1933,9 @@ pub fn uniform_txfm_yrd_intra(
     ref_best_rd: i64,
     pol: &TxTypeSearchPolicy,
     nn_prune: Option<NnDepthPruneCtx<'_>>,
+    // Palette-Y candidate (av1_rd_pick_palette_intra_sby's tx search —
+    // prediction becomes the colour-map fill).
+    palette: Option<&PaletteYrd>,
 ) -> (i64, Option<(RdStats, Vec<TxbWinner>)>) {
     let tx_select = env.tx_mode_is_select && block_signals_txsize(env.bsize);
     let tx_size_rate = if tx_select {
@@ -1914,7 +1948,7 @@ pub fn uniform_txfm_yrd_intra(
     let no_this_rd = rdcost(env.rdmult, no_skip_txfm_rate + tx_size_rate, 0);
 
     let Some((mut stats, winners)) =
-        txfm_rd_in_plane_intra(env, recon, tx_size, ref_best_rd, no_this_rd, pol, nn_prune)
+        txfm_rd_in_plane_intra(env, recon, tx_size, ref_best_rd, no_this_rd, pol, nn_prune, palette)
     else {
         return (i64::MAX, None);
     };
@@ -2191,6 +2225,7 @@ pub fn choose_tx_size_type_from_rd_intra(
     source_variance: u32,
     enable_tx64: bool,
     enable_rect_tx: bool,
+    palette: Option<&PaletteYrd>,
 ) -> Option<TxSizeChoice> {
     let bsize = env.bsize;
     let max_rect_tx_size = MAX_TXSIZE_RECT_LOOKUP[bsize];
@@ -2241,7 +2276,8 @@ pub fn choose_tx_size_type_from_rd_intra(
         } else {
             ref_best_rd
         };
-        let (this_rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, rd_thresh, pol, nn_ctx);
+        let (this_rd, res) =
+            uniform_txfm_yrd_intra(env, recon, tx_size, rd_thresh, pol, nn_ctx, palette);
         rd[depth as usize] = this_rd;
         if this_rd < best_rd {
             let (stats, winners) = res.expect("valid rd implies stats");
@@ -2287,6 +2323,7 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
     enable_tx64: bool,
     enable_rect_tx: bool,
     tx_size_search_method: usize,
+    palette: Option<&PaletteYrd>,
 ) -> Option<TxSizeChoice> {
     // select_tx_mode (rdopt_utils.h) couples the two at frame level:
     // coded_lossless => ONLY_4X4, i.e. never TX_MODE_SELECT.
@@ -2296,7 +2333,7 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
     );
     if env.lossless {
         // choose_smallest_tx_size: evaluate TX_4X4 only.
-        let (rd, res) = uniform_txfm_yrd_intra(env, recon, 0, ref_best_rd, pol, None);
+        let (rd, res) = uniform_txfm_yrd_intra(env, recon, 0, ref_best_rd, pol, None, palette);
         return res.map(|(stats, winners)| TxSizeChoice {
             best_tx_size: 0,
             best_rd: rd,
@@ -2308,7 +2345,7 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
         // choose_largest_tx_size: one uniform_txfm_yrd at the single largest tx
         // size (no depth sweep, no size-RD comparison, no low-contrast prune).
         let tx_size = choose_largest_tx_size_intra(env.bsize, enable_tx64, enable_rect_tx);
-        let (rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, ref_best_rd, pol, None);
+        let (rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, ref_best_rd, pol, None, palette);
         return res.map(|(stats, winners)| TxSizeChoice {
             best_tx_size: tx_size,
             best_rd: rd,
@@ -2324,6 +2361,7 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
         source_variance,
         enable_tx64,
         enable_rect_tx,
+        palette,
     )
 }
 

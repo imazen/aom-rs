@@ -213,7 +213,7 @@ fn intra_mode_info_cost_y_matches_c() {
                                 pal_bctx as i32,
                                 pal_mctx as i32,
                                 enable_fi,
-                                allow_intrabc,
+                                allow_intrabc
                             );
                             let got = intra_mode_info_cost_y(
                                 &costs,
@@ -229,6 +229,8 @@ fn intra_mode_info_cost_y_matches_c() {
                                 pal_mctx,
                                 enable_fi,
                                 allow_intrabc,
+                                false,
+                                0,
                             );
                             assert_eq!(
                                 got, want,

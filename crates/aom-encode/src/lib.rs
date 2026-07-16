@@ -26,6 +26,7 @@ pub mod lf_search;
 pub mod mode_costs;
 pub mod obu_assemble;
 pub mod pack;
+pub mod palette_search;
 pub mod part4_nn_weights;
 pub mod pickcdef;
 pub mod part4_prune;

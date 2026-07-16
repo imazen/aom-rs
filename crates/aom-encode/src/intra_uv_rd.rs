@@ -1379,6 +1379,8 @@ fn pick_intra_angle_routine_sbuv(
             angle_delta_uv,
             lp.try_palette,
             false,
+            false,
+            0,
         );
     let this_rd = rdcost(env.rdmult, this_rate, tokenonly.dist);
     if this_rd < *best_rd {
@@ -1643,6 +1645,8 @@ pub fn rd_pick_intra_sbuv_mode(
                 angle_delta_uv,
                 lp.try_palette,
                 false,
+                false,
+                0,
             );
         let this_rd = rdcost(env.rdmult, this_rate, tokenonly.1);
         visit.this_rd = Some(this_rd);
