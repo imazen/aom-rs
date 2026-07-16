@@ -27,6 +27,7 @@ pub mod mode_costs;
 pub mod obu_assemble;
 pub mod pack;
 pub mod part4_nn_weights;
+pub mod pickcdef;
 pub mod part4_prune;
 pub mod partition;
 pub mod partition_pick;
