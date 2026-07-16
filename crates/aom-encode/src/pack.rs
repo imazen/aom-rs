@@ -116,23 +116,45 @@ pub struct PackCfg {
     pub allow_screen_content_tools: bool,
 }
 
+/// Per-64x64-unit CDEF signalling inputs for a CDEF-enabled pack walk —
+/// the mi-grid facts C's `write_cdef` reads (`cm->cdef_info.cdef_bits` +
+/// the `mbmi->cdef_strength` the search stamped at each unit's top-left
+/// mi, `bitstream.c:880-919`). Absent (`None` on [`MiNbrGrid::cdef`]) for
+/// the CDEF-off envelope, where the strength literal is zero-width.
+#[derive(Clone, Debug)]
+pub struct CdefPackState {
+    /// `cdef_info.cdef_bits` — the strength-literal width (0..=3).
+    pub cdef_bits: u32,
+    /// Per-64x64-unit strength index, `nvfb x nhfb` raster
+    /// ([`crate::pickcdef::CdefSearchResult::unit_strength`]). Units the
+    /// search never stamped hold 0 and are never written (all their blocks
+    /// are skip).
+    pub unit_strength: Vec<i32>,
+    /// Units per row (`nhfb`).
+    pub nhfb: i32,
+}
+
 /// Per-MI-position neighbour tracking for [`write_mb_modes_kf_fc`]'s
 /// `above`/`left: Option<MiNbrKf>` — the same shape/reset discipline as
 /// [`TileCtxState`]'s other above/left arrays (above indexed by absolute
 /// `mi_col`, zeroed once per tile; left indexed by `mi_row & 31`, zeroed at
-/// each SB row).
+/// each SB row) — plus the frame-constant CDEF signalling inputs (also
+/// per-tile pack-walk state; `None` = CDEF off).
 pub struct MiNbrGrid {
     above: Vec<Option<MiNbrKf>>,
     left: [Option<MiNbrKf>; 32],
+    /// CDEF signalling inputs for [`pack_leaf`]'s `write_cdef` path.
+    pub cdef: Option<CdefPackState>,
 }
 
 impl MiNbrGrid {
     /// All-absent neighbours (tile start: `av1_zero_above_context`'s
-    /// mode-info analogue — no MI has been coded yet).
+    /// mode-info analogue — no MI has been coded yet). CDEF off.
     pub fn zeroed(mi_cols: usize) -> Self {
         MiNbrGrid {
             above: vec![None; mi_cols],
             left: [None; 32],
+            cdef: None,
         }
     }
     /// `av1_zero_left_context`'s mode-info analogue: called at each SB row
@@ -246,10 +268,18 @@ pub fn pack_leaf(
     // ---- 1. write_mbmi_b: mode-info (write_mb_modes_kf_fc). ----
     let above_nbr = nbr.above[mi_col as usize];
     let left_nbr = nbr.left[(mi_row & 31) as usize];
+    // write_cdef reads the strength stamped at the CDEF unit's FIRST mi
+    // (bitstream.c:909-915: `mi_grid_base[mi_row & ~(cdef_size-1),
+    // mi_col & ~..]->cdef_strength`) — the per-unit grid lookup below IS
+    // that read (a 64x64 unit = 16 mi; `>> 4` == `& !15` then unit index).
+    // 0 when CDEF is off: the literal is zero-width there, never coded.
+    let cdef_strength = nbr.cdef.as_ref().map_or(0, |c| {
+        c.unit_strength[((mi_row >> 4) * c.nhfb + (mi_col >> 4)) as usize]
+    });
     let info = MbModeInfoKf {
         segment_id: 0,
         skip: i32::from(winner.skip_txfm),
-        cdef_strength: 0,
+        cdef_strength,
         current_qindex: cfg.base_qindex,
         delta_lf: [0; 4],
         delta_lf_from_base: 0,
@@ -982,4 +1012,132 @@ pub fn pack_tile(
         }
     }
     trees
+}
+
+/// Phase-2 pack walk for the TWO-PASS (post-filter-search) frame encode:
+/// re-walk ALREADY-PICKED [`SbTree`]s — from a phase-1 [`pack_tile`] whose
+/// bits were discarded — writing the real bitstream, optionally with the
+/// per-unit CDEF strength literals interleaved.
+///
+/// This models libaom's actual architecture for filters whose parameters
+/// are searched AFTER the frame encode but signalled INSIDE the tile data
+/// (CDEF): C's encode pass (`encode_sb(.., OUTPUT_ENABLED, ..)`,
+/// encodeframe.c) adapts one tile-context copy (seeded from `cm->fc`) and
+/// produces the reconstruction; deblock + `av1_cdef_search` run on that
+/// recon; `av1_pack_bitstream` then seeds a SECOND fresh tile context from
+/// the same `cm->fc` and re-writes every symbol, now emitting `write_cdef`
+/// literals. The port's phase 1 is a `pack_tile` call into a throwaway
+/// entropy coder (its `kf` adaptation and recon ARE the encode pass); this
+/// function is the pack pass. CDEF strength literals are raw
+/// (CDF-free) writes, so this pass's `kf` adapts through the IDENTICAL
+/// symbol stream phase 1 saw — the per-SB `derive_real_costs(kf)` states
+/// match SB-for-SB, and the leaf re-encode reproduces phase 1's
+/// coefficients byte-for-byte (the same both-walks-identical argument the
+/// fused [`pack_tile`] already rests on, split across two calls).
+///
+/// `recon_*` MUST arrive in the same initial state phase 1 started from
+/// (NOT phase 1's final or deblocked output): the walk re-encodes every
+/// leaf, and intra prediction reads recon neighbours as of the walk
+/// position. `kf` MUST be a fresh `default_for_qindex` context.
+///
+/// `cdef`: `Some` = write `cdef.cdef_bits`-wide strength literals per
+/// 64x64 unit (the searched [`crate::pickcdef::CdefSearchResult`] mapped
+/// into a [`CdefPackState`]); `None` = CDEF-off (byte-identical to the
+/// fused [`pack_tile`] walk over the same trees).
+#[allow(clippy::too_many_arguments)]
+pub fn pack_tile_from_trees(
+    enc: &mut OdEcEnc,
+    env: &SbEncodeEnv,
+    pick_cfg: &PickFrameCfg,
+    pack_cfg: &PackCfg,
+    kf: &mut KfFrameContext,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    trees: &mut [SbTree],
+    mi_row0: i32,
+    mi_col0: i32,
+    n_sb_rows: i32,
+    n_sb_cols: i32,
+    sb_mi: i32,
+    sb_size: usize,
+    cdef: Option<CdefPackState>,
+) {
+    assert_eq!(
+        trees.len(),
+        (n_sb_rows * n_sb_cols) as usize,
+        "one picked tree per SB"
+    );
+    let mi_cols = env.mi_cols as usize;
+    let mut pack_tile_ctx = TileCtxState::zeroed(mi_cols);
+    let mut nbr = MiNbrGrid::zeroed(mi_cols);
+    let mut kfs = kf_block_state(pack_cfg, env, sb_mi);
+    if let Some(c) = cdef {
+        kfs.cdef_bits = c.cdef_bits;
+        nbr.cdef = Some(c);
+    }
+
+    for r in 0..n_sb_rows {
+        pack_tile_ctx.left_ectx = [[0; 32]; 3];
+        pack_tile_ctx.left_pctx = [0; 32];
+        pack_tile_ctx.left_tctx = [aom_entropy::partition::TXFM_CTX_INIT; 32];
+        nbr.zero_left();
+        for c in 0..n_sb_cols {
+            let mi_row = mi_row0 + r * sb_mi;
+            let mi_col = mi_col0 + c * sb_mi;
+
+            // Identical per-SB folds to pack_tile's (same inputs → same
+            // values as phase 1 derived at this SB): the ALLINTRA rdmult
+            // modifier and the INTERNAL_COST_UPD_SB cost refresh.
+            let sb_rdmult = if pick_cfg.allintra {
+                let mi_w = MI_SIZE_WIDE_B[sb_size] as i32;
+                let mi_h = MI_SIZE_HIGH_B[sb_size] as i32;
+                let ref_off_y =
+                    env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+                let mb_to_right_edge = (env.mi_cols - mi_w - mi_col) * 4 * 8;
+                let mb_to_bottom_edge = (env.mi_rows - mi_h - mi_row) * 4 * 8;
+                let (var_min, var_max) = crate::partition_pick::log_sub_block_var(
+                    env.src_y,
+                    ref_off_y,
+                    env.stride,
+                    sb_size,
+                    mb_to_right_edge,
+                    mb_to_bottom_edge,
+                    env.bd,
+                );
+                let modifier = crate::partition_pick::intra_sb_rdmult_modifier(var_min, var_max);
+                crate::partition_pick::fold_intra_sb_rdmult(env.rdmult, modifier)
+            } else {
+                env.rdmult
+            };
+            let sb_real = crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra);
+            let sb_env = SbEncodeEnv {
+                rdmult: sb_rdmult,
+                coeff_costs_y: &sb_real.coeff_costs_y,
+                coeff_costs_uv: &sb_real.coeff_costs_uv,
+                tx_type_costs: &sb_real.tx_type_costs_y,
+                ..*env
+            };
+
+            let mut cfl_pack = CflCtx::new(env.ss_x as i32, env.ss_y as i32);
+            let tree = &mut trees[(r * n_sb_cols + c) as usize];
+            pack_sb(
+                enc,
+                &sb_env,
+                pack_cfg,
+                kf,
+                &mut kfs,
+                &mut pack_tile_ctx,
+                &mut nbr,
+                recon_y,
+                recon_u,
+                recon_v,
+                &mut cfl_pack,
+                tree,
+                mi_row,
+                mi_col,
+                sb_size,
+            );
+        }
+    }
 }
