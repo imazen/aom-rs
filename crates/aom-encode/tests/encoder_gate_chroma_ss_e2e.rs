@@ -1001,6 +1001,31 @@ fn encoder_gate_real_image_e2e_kb6_repro() {
         );
     }
 
+    // (1c) NEWLY-PROMOTED byte-match gate — the first PARTIAL-SB (frame-edge)
+    // full-frame byte match, landed 2026-07-16 with the KB-6 frame-edge chunk
+    // series: true-196x196 harness (ceil n_sb + border-extend), luma + chroma
+    // pixel-domain distortion clipped to the visible frame area
+    // (get_txb_visible_dimensions / max_block_* with chroma subsampling), and
+    // the edge-block partition-cost override (set_partition_cost_for_edge_blk).
+    // 196 = 3*64+4, so the right column + bottom row are partial superblocks —
+    // this cell proves the edge encode path end-to-end. The remaining 196 cells
+    // (cq12/20/32/48/63) still diverge on a bottom-edge-SB-row RD near-tie
+    // (see kb6_characterize_196_partial_sb) and stay pinned via (2).
+    {
+        let label = "av1-1-b8-01-size-196x196 420 cq5";
+        let ok = results
+            .iter()
+            .find(|(n, _)| n.as_str() == label)
+            .map(|(_, ok)| *ok)
+            .expect("promoted cell present");
+        assert!(
+            ok,
+            "regression: real cell `{label}` must byte-match real aomenc \
+             (KB-6 partial-SB frame-edge fixes: visible-area distortion clips + \
+             edge partition-cost override)"
+        );
+    }
+
     // (2) KB-6 GATE — the divergence must still be present. When the port becomes
     // byte-exact on real content this assertion fails: that is the signal to
     // promote this repro to a full `report_and_assert` byte-match gate (see

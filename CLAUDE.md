@@ -290,14 +290,29 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   diversity at low pixel count): quantizer-64² 4/6, film-64² 5/6 match; the multi-SB quantizer-128²
   crop mostly diverges. **Divergences cluster at cq5 (qindex 20, aggressive low-q) across ALL THREE
   crop contents — a strong content-independent low-q near-tie, the next localization target.**
-- **DISTINCT SUB-GAP — partial-SB (frame dims not a multiple of 64px).** The **196×196** cells all
-  diverge via a SEPARATE mechanism: the port's partition search does not model frame-EDGE (partial)
-  superblocks (`rd_pick_4partition` docs: edge 4-way "simply not attempted"; edge rect "out of scope"),
-  and `TileCtxState::zeroed` sizes the above-context to bare `mi_cols` not `aligned_mi_cols =
-  ALIGN_POWER_OF_TWO(mi_cols, MAX_MIB_SIZE_LOG2)` (alloccommon.c:414) so a full-SB context read at the
-  edge SB overflows. This is a real correctness gap for any non-64-aligned frame, tracked as part of
-  KB-6 but is NOT the RD-near-tie class — fix separately (context arrays → aligned_mi_cols + edge-block
-  partition search + ceil the SB loop).
+- **DISTINCT SUB-GAP — partial-SB (frame dims not a multiple of 64px) — MOSTLY FIXED 2026-07-16,
+  ONE RESIDUAL NEAR-TIE.** Landed chunk series (`3167800` CHUNK 0+1, `7c468ee` CHUNK 2, `4b8b1f1`
+  CHUNK 3): (0) the KB-6 harness now encodes the TRUE 196×196 frame — `run_case`/`localize_real`
+  ceil `n_sb` and size + replicate-border-extend the source planes to the SB-aligned extent
+  (matching `aom_extend_frame_borders`; the earlier floor-to-192 silent wrong-size skip is gone;
+  `TileCtxState` above-contexts were already `aligned_mi_cols`-sized); (1) luma pixel-domain
+  distortion (`dist_block_px_domain`, tx_search.rs) clips to `get_txb_visible_dimensions` at edge
+  txbs; (2) the chroma paths clip identically WITH chroma subsampling via the new
+  `max_block_units` = `max_block_wide/high` helper (intra_uv_rd.rs UV RD, encode_intra.rs UV
+  encode, encode_sb.rs UV entropy stamp) — this took the whole top 3 SB rows INCLUDING the
+  right-edge partial SBs byte-exact at cq32 (previously a chroma angle_delta flip at mi(32,48));
+  (3) `set_partition_cost_for_edge_blk` (partition_search.c:3411) is ported + wired
+  (`partition_pick.rs`, new `PickFrameCfg::partition_cdfs` raw-CDF plumbing, SB-adapted in
+  pack.rs; witness `edge_cost_matches_gathered_composition` locks the gather composition).
+  **Result: 196×196 cq5 is a TRUE END-TO-END BYTE MATCH — the first full partial-SB frame match —
+  promoted to an asserted gate in `encoder_gate_real_image_e2e_kb6_repro` (map now 24/30).**
+  **RESIDUAL (pinned, assert-diverge in `kb6_characterize_196_partial_sb`):** 196 cq12/20/32/48/63
+  still diverge on the BOTTOM-edge SB row — first leaf mismatch at mi(48,0): real picks 16×8, the
+  port over-splits to 8×4 on the 8px-visible strip (cq32: port tile 999B vs real 1006B; cq12
+  matches through byte 2224 of 2230). NOT the edge partition cost (CHUNK 3 correct, no effect) and
+  NOT the edge-rect search structure (the port's `is_not_edge_block` sub-0-only rect handling
+  already matches C) — a distortion-side HORZ-vs-SPLIT near-tie; next step is the sibling-C
+  per-candidate RD dump (KB-2/KB-3 methodology) at the mi(48,0) 16×16 node.
 - **MULTI-TILE encode is byte-exact** (commit f6e6319, `encoder_gate_multitile_e2e`): the port's own
   per-tile search+pack byte-matches real aomenc across 2×1/1×2/2×2 grids (4:4:4 128² × cq{12,32,63}).
 - **DISCOVERED 2026-07-15 via the new real-image e2e gate** (`encoder_gate_real_image_e2e_kb6_repro`

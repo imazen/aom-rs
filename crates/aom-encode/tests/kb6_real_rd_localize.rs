@@ -750,35 +750,38 @@ fn kb6_localize_size_64_cq32() {
     );
 }
 
-/// Characterize the **196x196 partial-SB gap** (distinct from the RD-near-tie
-/// class). 196px is not a multiple of 64 → mi_cols = mi_dim(196) = 50, so the
-/// frame has a partial edge superblock at mi_col/mi_row 48 (a 2-mi-wide, 8px strip).
-/// The port's `TileCtxState::zeroed(mi_cols)` (encode_sb.rs:127) sizes the above
-/// context arrays to bare `mi_cols=50`, NOT `aligned_mi_cols =
-/// ALIGN_POWER_OF_TWO(mi_cols, MAX_MIB_SIZE_LOG2) = 64` (alloccommon.c:414); the
-/// full-frame SB walk (`n_sb = ceil(mi_cols/16) = 4`) reaches the edge SB at
-/// mi_col=48 and the partition search reads `above_ectx[0][48..64]` (a full
-/// BLOCK_64X64 candidate) which overruns the length-50 array → panic. This test
-/// catches the unwind and reports it as characterization: the port CANNOT encode a
-/// partial-SB frame today. (The e2e gate sidesteps the panic by FLOORING n_sb to 3
-/// = encoding only 192x192, which then diverges by construction — a strip of real
-/// pixels is missing.) Report-only; asserts nothing so it stays green while the gap
-/// is open, per KB-6.
+/// Localize the **196x196 partial-SB divergence** (distinct from the RD-near-tie
+/// class). 196px is not a multiple of 64 → mi_cols = mi_dim(196) = 50: the frame
+/// has partial edge superblocks along the right column and bottom row (mi 48, a
+/// 2-mi/8px visible strip; SB extent runs to the border-extended 256px).
+///
+/// The port now ENCODES the true 196x196 frame (no panic, no size floor):
+/// `TileCtxState` above-contexts are `aligned_mi_cols`-sized, the harness ceils
+/// `n_sb` + border-extends the source (CHUNK 0), the luma + chroma distortion
+/// paths clip to `get_txb_visible_dimensions`/`max_block_*` (CHUNKs 1-2, which
+/// took the whole top 3 SB rows INCLUDING the right-edge partial SBs byte-exact
+/// at cq32), and the edge-block partition-cost override
+/// (`set_partition_cost_for_edge_blk`, CHUNK 3) charges the gathered 2-way edge
+/// cost. REMAINING divergence (pinned here): the BOTTOM-edge SB row — first
+/// leaf mismatch at mi(48,0), real picks bsize=5 (16x8) where the port picks
+/// bsize=2 (8x4), an over-split on the 8px-visible strip (real tile 1006B vs
+/// port 999B at cq32). A distortion-side HORZ-vs-SPLIT near-tie; needs the
+/// sibling-C per-candidate RD dump (KB-2/KB-3 methodology) to pin the term.
+///
+/// Pinned as assert-diverge per KB-6: FAILS (a) if the encode panics/regresses,
+/// or (b) the moment the cell byte-matches — the signal to flip the assert and
+/// promote the 196 cells in `encoder_gate_real_image_e2e_kb6_repro`.
 #[test]
 fn kb6_characterize_196_partial_sb() {
-    let res = std::panic::catch_unwind(|| {
-        localize_real("av1-1-b8-01-size-196x196", 32, 0, 0, 0, 0)
-    });
-    match res {
-        Ok(matched) => eprintln!(
-            "\n=== KB-6 196x196 partial-SB cq32: NO PANIC, matched={matched} \
-             (partial-SB support may have landed — re-check the gap) ==="
-        ),
-        Err(_) => eprintln!(
-            "\n=== KB-6 196x196 partial-SB cq32: PANIC (expected) — the port's \
-             edge-SB partition search overruns the mi_cols-sized context arrays; \
-             partial-SB (frame-edge) encode is unported. See the panic backtrace \
-             above for the exact index/site. ==="
-        ),
-    }
+    let matched = localize_real("av1-1-b8-01-size-196x196", 32, 0, 0, 0, 0);
+    eprintln!(
+        "\n=== KB-6 196x196 partial-SB cq32: encode OK, matched={matched} \
+         (open divergence: bottom-edge SB row over-split, see above) ==="
+    );
+    assert!(
+        !matched,
+        "KB-6 196x196 cq32 now BYTE-MATCHES real aomenc: the partial-SB bottom-edge \
+         divergence is fixed. Flip this assert and promote the 196x196 cells in \
+         encoder_gate_real_image_e2e_kb6_repro to asserted byte-match gates."
+    );
 }

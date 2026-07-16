@@ -2599,3 +2599,36 @@ two-pass (`multi_winner_mode_type`/`enable_winner_mode_for_*` + `perform_coeff_o
 unported SATD trellis-skip at tx_search.rs:664) — every cell whose mono sibling also diverges; 3 are
 pure-chroma cq12 (unported chroma DEFAULT_EVAL coeff-opt-5). `diag 64x64 cq63` byte-matches at speed 4
 (NOT pinned). Full `cargo test -p aom-encode` green.
+
+## KB-6 — partial-SB (frame-edge) encode: 196×196 chunk series (CHUNK 0-3) + first full partial-SB byte match
+
+Landed `3167800` (CHUNK 0+1), `7c468ee` (CHUNK 2), `4b8b1f1` (CHUNK 3) — the KB-6 frame-edge
+series for non-64-aligned frames (196 = 3·64+4: partial right-column + bottom-row superblocks).
+
+- **CHUNK 0 — true-frame harness.** `run_case`/`localize_real` now encode the REAL 196×196: ceil
+  `n_sb`, size + replicate-border-extend the source planes to the SB-aligned extent (matching
+  `aom_extend_frame_borders` — C reads full-extent blocks from the border-extended source and
+  measures distortion only over the visible area). Kills the silent floor-to-192 wrong-size skip
+  and the edge-SB `perpixel_variance_y` overrun panic.
+- **CHUNK 1 — luma visible-distortion clip.** `dist_block_px_domain` (tx_search.rs) +
+  `search_tx_type_intra` measure SSE over `get_txb_visible_dimensions` (rdopt_utils.h:307) instead
+  of full tx dims at edge txbs.
+- **CHUNK 2 — chroma visible clips (with subsampling).** New `max_block_units` =
+  `max_block_wide/high` (av1_common_int.h:1567/1581) helper; clipped loops + per-txb visible dims
+  in `txfm_rd_in_plane_uv`/`intra_model_rd_uv` (intra_uv_rd.rs), `encode_intra_block_plane_uv`
+  (encode_intra.rs), and the UV entropy stamp (encode_sb.rs). Took the top 3 SB rows INCLUDING
+  right-edge partial SBs byte-exact at cq32 (was a chroma angle_delta flip at mi(32,48)).
+- **CHUNK 3 — edge partition-cost override.** `set_partition_cost_for_edge_blk`
+  (partition_search.c:3411) ported: gathered 2-way HORZ/SPLIT (bottom) / VERT/SPLIT (right) /
+  forced-SPLIT (corner) cost via `partition_gather_vert/horz_alike` + `cost_tokens_from_cdf`,
+  all-others `av1_cost_symbol(0)`; new `PickFrameCfg::partition_cdfs` raw-CDF plumbing (SB-adapted
+  in pack.rs). Witness `edge_cost_matches_gathered_composition` locks the composition; primitives
+  already byte-exact vs C.
+
+**Result: `av1-1-b8-01-size-196x196 420 cq5` is a TRUE END-TO-END BYTE MATCH — the first full
+partial-SB real-content frame match — promoted to an asserted gate in
+`encoder_gate_real_image_e2e_kb6_repro` (KB-6 map now 24/30).** Residual: 196 cq12/20/32/48/63
+diverge on a bottom-edge-SB-row RD near-tie (real 16×8 vs port 8×4 at mi(48,0); cq12 matches
+through byte 2224/2230) — pinned assert-diverge in `kb6_characterize_196_partial_sb`; next step is
+the sibling-C per-candidate RD dump at that node. Full `cargo test -p aom-encode` green (61 result
+lines, 0 failed).
