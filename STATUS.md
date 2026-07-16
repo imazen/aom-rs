@@ -2573,7 +2573,7 @@ pinned exactly in the gate (fails if a KB-6 fix makes one match → promote, or 
 new cell). See KB-7. New gate `encoder_gate_speed3_textured_allintra`; full `cargo test -p
 aom-encode` green.
 
-## Gate 2 — `--cpu-used=4` (speed-4) all-intra KEY byte-match (59/64; LUMA BYTE-EXACT)
+## Gate 2 — `--cpu-used=4` (speed-4) all-intra KEY byte-match (62/64 after the speed-5 landing's override fix; LUMA BYTE-EXACT)
 
 **Every documented speed-4 `set_allintra` delta is now ported + live** (the KB-8 chunk series —
 see CLAUDE.md KB-8 for the commit-by-commit list): the SATD trellis-skip, the stage-aware
@@ -2587,6 +2587,9 @@ at level 1, via `split_part_rect_win` threading). **59 of 64 cells byte-identica
 mono cells match: the speed-4 luma path is byte-exact.** The 5 pinned residuals are 4:2:0
 KB-7-class chroma low-q near-ties (same content cells as KB-7's speed-3 pins) — tracked under
 KB-7, not a speed-4 gap. Gate `encoder_gate_speed4_textured_allintra` pins them exactly.
+*(UPDATE, speed-5 landing: 3 of those 5 pins were actually the missing `speed_features.c:608-615`
+chroma-HOG override, not KB-7 ties — fixed, gate now **62/64** with a 2-cell KB-7 pin; see the
+cpu-used=5 section below + CLAUDE.md KB-8/KB-9.)*
 
 Earlier partial landing (51/64) below for history:
 
@@ -2763,3 +2766,54 @@ witnesses `kb7_rd_localize.rs` (cpu3 + cpu4 two-tone 64² cq12, decode-both diff
 `speed4_allintra_deltas_match_source` corrected to the C value (`chroma_intra_pruning_with_hog
 == 0` at speed 4). Full `cargo test -p aom-encode --no-fail-fast` = 149 passed / 0 failed,
 rebased over 57d5ce0 (KB-6 30/30).
+
+## Gate 2 — `--cpu-used=5` (speed-5) all-intra KEY byte-match (64/64 — FULL GRID)
+
+**Every speed-5 `set_allintra` delta is ported + live — 64/64 cells byte-identical** vs real
+aomenc `--cpu-used=5` ({64,128}² × cq{12,32,48,63} × {flat,two-tone,vgrad,diag} × {mono,420}),
+asserted by `encoder_gate_speed5_textured_allintra`. Zero pinned residuals — the first speed
+level since 0 with a fully-clean textured grid. Speed 5 is a re-parameterization of the KB-8
+speed-4 machinery (no new search subsystems); full delta table + inert list in CLAUDE.md KB-9.
+
+- **`multi_winner_mode_type = MULTI_WINNER_MODE_FAST`** (speed_features.c:524): the luma
+  winner-mode two-pass keeps the top-**2** winners (speed 4: top-3) — flows through the existing
+  `WinnerModeCfg::max_winner_count` (`winner_mode_count_allowed` rdopt_utils.h:236). Bisect
+  witness: flips `two-tone 64² mono cq63` + `420 cq63` (mono ⇒ luma-side).
+- **`ext_partition_eval_thresh`** (:510-511 + qindex-dep :2947-2962 `aggr = AOMMIN(4, speed-2)`
+  == 3): BLOCK_128X128 unconditionally on sub-480p frames → `bsize > thresh` never holds →
+  **AB + 4-way partitions never evaluated** at speed 5 on this grid. New
+  `ext_partition_eval_thresh_allintra_key` (partition_pick.rs) feeds BOTH C consumer sites
+  (`allow_ab_partition_search` partition_search.c:4005, `prune_4_way_partition_search` :4136;
+  raw-enum bsize compare now matches C literally). ≥480p KEY: `screen ? BLOCK_8X8 :
+  BLOCK_16X16`; speed>=6: BLOCK_128X128 everywhere; the other qindex arms are dead on KEY
+  (boosted / intra-only) — unit-locked by `thresh_matches_source_arms`. Bisect witness: flips
+  `two-tone 64² 420 cq12` + `vgrad 128² 420 cq12` (the former speed-4 KB-7 pins — closed there
+  by KB-7's NN root; at speed 5 the disable removes those candidates before any NN runs).
+- **`chroma_intra_pruning_with_hog = 3`** (:515) — transcribed, then zeroed by the **:608-616
+  final override** (`prune_chroma_modes_using_luma_winner` on since speed 4 ⇒ chroma HOG OFF).
+  The missing override was found INDEPENDENTLY by this landing and by the KB-7 landing (its
+  speed-4 second root — see the KB-7 CLOSED section above); both model it identically (the
+  `set_allintra` tail + the `chroma_hog_level` gate), and the merged tree carries one copy.
+  Wiring gotcha (re-verified here): `prune_chroma_modes_using_luma_winner` must thread into
+  `UvLoopPolicy` independently of the HOG mask — it originally piggybacked on the mask's
+  branch, so zeroing HOG alone silently disabled the luma-winner prune (24-cell chroma
+  breakage caught during this landing) until the threading was split.
+- **`intra_cnn_based_part_prune_level`**: screen arm 0 → 1 (:512-513; non-screen stays 2) —
+  wired through the existing CNN prune (level-1 `none_disallowed` exemption already modeled);
+  byte-inert on the non-screen grid.
+- **Verified inert** (CLAUDE.md KB-9 list): simple-motion LVL5, `use_coarse_filter_level_search=0`
+  (already default), wiener/sgr disables, mesh-prune, qindex-dep winner_mode_tx_type_pruning=3
+  (`!intra`), prune_sub_8x8 (=0 no-op at 5), rect_partition_eval_thresh (`!boosted`); no
+  framesize-dependent speed-5 block; LF stays NON_DUAL.
+
+**Anti-vacuous witness (asserted):** `encoder_gate_speed5_vs_speed4_sf_witness` — port with
+SPEED-4 features vs aomenc `--cpu-used=5` DIVERGES (two-tone 64² mono+420 cq63); with speed-5
+features the same cells byte-match. Full-grid cross-check measured 60/64 at speed-4-features vs
+64/64 at speed-5 (4 load-bearing cells). Full `cargo test --workspace` green before landing.
+
+**cpu-used sweep state: speeds 0-5 done** (0: baseline everywhere; 1: 14/14; 2: 16/16;
+3: 64/64 + 4: 64/64 — both closed by the KB-7 landing; 5: 64/64). Next: speed 6 — NOT a pure re-parameterization
+(new machinery: LPF_PICK_FROM_Q, `prune_intra_tx_depths_using_nn`, `dc_blk_pred_level`,
+`prune_luma_odd_delta_angles_in_intra`, `adapt_top_model_rd_count_using_neighbors`,
+`multi_winner_mode_type=OFF`, partition prunes :537-546 incl. `default_max_partition_size=
+BLOCK_32X32`, `use_square_partition_only_threshold=BLOCK_16X16`) — prep facts in CLAUDE.md KB-9.

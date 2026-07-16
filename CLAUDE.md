@@ -514,14 +514,67 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
      by its threshold formula — and the 4-way `prune_4_partition_using_split_info` at level 1 =
      speed>=3, via `split_part_rect_win` rect-win threading through the SPLIT recursion).
 - **Key facts for future speeds (verified against source):** `top_intra_model_count_allowed` stays
-  **3** at speed 4 (the `=2` drop is speed>=5, :533); `MULTI_WINNER_MODE_DEFAULT=2` / `FAST=1`
-  (speed_features.h:226/230), `winner_mode_count_allowed={1,2,3}`; the AB split-info threshold
-  `min(3*(2*(MAXQ-q)/MAXQ),3)` is 3 for q<=127 / 0 for q>=128; C's chroma search runs DEFAULT_EVAL
-  (rdopt.c:3659 resets right after the luma two-pass); the winner re-eval (`intra_block_yrd`) gets
-  NO ALLINTRA variance factor yet compares vs the factored first-pass best_rd (C asymmetry,
-  preserved); C's LARGESTALL arm bypasses `uniform_txfm_yrd`'s rate assembly — equivalent to it
-  with `tx_mode_is_select=false` (tx_size_rate=0), which is how the port models it.
-- **Gate PINS the 5-cell residual set exactly** — FAILS on any promotion (→ promote) or regression.
+  **3** at speeds 4 AND 5 — the `=2` drop is **speed>=6** (:533, inside the `if (speed >= 6)`
+  block at :527; an earlier note here mis-attributed it to speed>=5); `MULTI_WINNER_MODE_DEFAULT=2`
+  / `FAST=1` (speed_features.h:226/230), `winner_mode_count_allowed={1,2,3}`; the AB split-info
+  threshold `min(3*(2*(MAXQ-q)/MAXQ),3)` is 3 for q<=127 / 0 for q>=128; C's chroma search runs
+  DEFAULT_EVAL (rdopt.c:3659 resets right after the luma two-pass); the winner re-eval
+  (`intra_block_yrd`) gets NO ALLINTRA variance factor yet compares vs the factored first-pass
+  best_rd (C asymmetry, preserved); C's LARGESTALL arm bypasses `uniform_txfm_yrd`'s rate assembly
+  — equivalent to it with `tx_mode_is_select=false` (tx_size_rate=0), which is how the port models
+  it.
+- **Gate asserts FULL 64/64 byte-identity** — FAILS on any regression.
+
+### KB-9 — Encoder: `--cpu-used=5` speed-5 deltas — PORTED ✅ (64/64 byte-identical, 0 residuals)
+- **Status (2026-07-16): every speed-5 delta is PORTED + LIVE — 64/64 cells byte-identical** vs
+  real aomenc (`encoder_gate_speed5_textured_allintra`, {64,128}² × cq{12,32,48,63} ×
+  {flat,two-tone,vgrad,diag} × {mono,420}). No pinned residuals: the two cells that had been
+  KB-7-pinned at speed 4 (`two-tone 64² cq12`, `vgrad 128² cq12` — since closed there by the
+  KB-7 roots) byte-match at speed 5 independently, because the AB/4-way disable (below) removes
+  the near-tie's partition candidates from the search space entirely.
+- **LIVE deltas (each individually witness-verified by bisect during landing):**
+  1. `winner_mode_sf.multi_winner_mode_type = MULTI_WINNER_MODE_FAST` (:524): the luma two-pass
+     stores/re-evaluates the top-**2** winners (speed 4: top-3) — `winner_mode_count_allowed`
+     rdopt_utils.h:236, already parameterized through `WinnerModeCfg::max_winner_count`. Flips
+     `two-tone 64² mono cq63` + `420 cq63` on the gate grid (the mono flip proves it luma-side).
+  2. `part_sf.ext_partition_eval_thresh`: default BLOCK_8X8 through speed 4; at speed 5 the
+     framesize-independent :510-511 sets `screen ? BLOCK_8X8 : BLOCK_16X16`, then the
+     qindex-dependent `aggr = AOMMIN(4, speed-2)` == 3 arm (:2947-2962) sets **BLOCK_128X128
+     UNCONDITIONALLY for sub-480p frames** (no boosted/intra gate) → `bsize > thresh` never holds
+     → **AB + 4-way partitions are never evaluated** on sub-480p KEY frames. Consumers:
+     `allow_ab_partition_search` (partition_search.c:4005) + `prune_4_way_partition_search`
+     (:4136), both now read `ext_partition_eval_thresh_allintra_key` (partition_pick.rs; the
+     other qindex-dep arms are dead on KEY — boosted + intra-only; speed>=6 = BLOCK_128X128 for
+     ALL sizes; `ext_part_eval_based_on_cur_best` is GOOD-only, :1013). Flips the 2 cq12 cells (the former speed-4 KB-7 pins).
+- **Set-then-overridden:** `chroma_intra_pruning_with_hog = 3` (:515) is zeroed by the :608-615
+  final override (chroma HOG off at speed>=4 — the KB-8 entry documents the override fix).
+- **Screen-only:** `intra_cnn_based_part_prune_level`: screen arm 0 → 1 (:512-513; non-screen
+  stays 2). Wired through the existing CNN prune (`predict_decision` handles level 1's
+  `none_disallowed` exemption); byte-inert on the (non-screen) gate grid.
+- **Verified INERT on the allintra KEY envelope:** `simple_motion_search_prune_agg=LVL5` (:509,
+  motion), `use_coarse_filter_level_search=0` (:517, ALREADY the default — init :2532),
+  `disable_wiener/sgr_filter` (:519-520, restoration off), `prune_mesh_search=LVL_2` (:522,
+  intrabc/motion), qindex-dep `winner_mode_tx_type_pruning=3` (:3059, `!(intra||screen)` —
+  stays 2), qindex-dep `prune_sub_8x8_partition_level=0` (:3070, field only raised at speed>=6),
+  qindex-dep `rect_partition_eval_thresh` aggr 0→1 (:2980, `!boosted`). The framesize-DEPENDENT
+  setter has NO speed-5 block (:302 jumps 4→6). LF stays NON_DUAL (:496; LPF_PICK_FROM_Q is
+  speed>=6), tx/winner tables all carry speed-4 values.
+- **Anti-vacuous witness (asserted):** `encoder_gate_speed5_vs_speed4_sf_witness` — the port with
+  SPEED-4 features vs real `aomenc --cpu-used=5` DIVERGES (4 cells incl. mono cq63); with speed-5
+  features it matches. Gate asserts full 64/64 — FAILS on any regression.
+- **Speed-6 prep facts (verified against source while here):** speed>=6 block :527-564 —
+  `top_intra_model_count_allowed=2` (:533), `prune_filter_intra_level=2` (:529),
+  `intra_pruning_with_hog=4` (:531) + `chroma_intra_pruning_with_hog=4` (:530, still overridden
+  to 0), `cfl_search_range=1` (:532), `adapt_top_model_rd_count_using_neighbors=1` (:534),
+  `prune_luma_odd_delta_angles_in_intra=1` (:535), `multi_winner_mode_type=OFF` (:561),
+  `prune_winner_mode_eval_level=1` (:562), `dc_blk_pred_level=1` (:563), `winner_mode_tx_type_
+  pruning=3` + `prune_tx_type_est_rd=0` (:551-552), `prune_intra_tx_depths_using_nn` (:553),
+  `perform_coeff_opt=6` + `tx_domain_dist_level=3` (:555-556), `lpf_pick=LPF_PICK_FROM_Q` (:559),
+  partition prunes :537-546 (`prune_rectangular_split_based_on_qidx=2`, `prune_rect_part_using_
+  4x4_var_deviation/none_pred_mode`, `prune_sub_8x8_partition_level=1`, `prune_part4_search=3`,
+  `default_max_partition_size=BLOCK_32X32`!), framesize-dep :304-316 (`use_square_partition_only_
+  threshold=BLOCK_16X16` etc.). Substantially new machinery (LPF-from-Q, NN tx-depth prune,
+  DC-block prediction, odd-delta-angle prune) — NOT a pure re-parameterization like speed 5 was.
 
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 

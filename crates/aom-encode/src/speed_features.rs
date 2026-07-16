@@ -25,20 +25,22 @@
 //! This models the sf fields that (a) the port already consumes at speed 0 and
 //! (b) differ speed-0 → speed-N on an intra-still KEY frame with CDEF +
 //! loop-restoration search disabled (the current e2e harness envelope). The
-//! speed cascade is transcribed faithfully for **speeds 0..=3** (the intra-still
+//! speed cascade is transcribed faithfully for **speeds 0..=5** (the intra-still
 //! deltas at each level; inert inter/motion/CDEF/loop-restoration fields are
-//! documented per-block below, not carried as struct fields). **Speed 4 is a
-//! PARTIAL port**: the `prune_chroma_modes_using_luma_winner` chroma prune
-//! (:480) and the `LPF_PICK_FROM_FULL_IMAGE_NON_DUAL` loop-filter search (:496,
-//! wired via `lf_search::pick_filter_level`'s `non_dual` flag, not an sf field)
-//! ARE modeled, but the winner-mode two-pass subsystem
-//! (`enable_winner_mode_for_*`, speed_features.c:502-505), `perform_coeff_opt=5`
-//! (needs the unported SATD trellis-skip), the tx-type PRUNE_3 / est-RD deltas,
-//! and `prune_ext_part_using_split_info=2` are **not yet modeled** (tracked as
-//! KB-8) — do not treat a `set_allintra(4)` result as complete. Speed >= 5
-//! (`prune_filter_intra_level = 2` at :529, `chroma_intra_pruning_with_hog = 3`
-//! at :515, etc.) is entirely unmodeled. The `lpf_sf` CDEF/restoration fields
-//! are carried for provenance but do not affect bytes (CDEF + restoration off).
+//! documented per-block below, not carried as struct fields). Speed 4 carries
+//! the full KB-8 winner-mode two-pass parameter set (the `prune_chroma_modes_
+//! using_luma_winner` chroma prune :480, the `LPF_PICK_FROM_FULL_IMAGE_NON_
+//! DUAL` loop-filter search :496 — wired via `lf_search::pick_filter_level`'s
+//! `non_dual` flag, not an sf field — plus the winner-mode two-pass subsystem
+//! :488-505). Speed 5 re-parameterizes it (`multi_winner_mode_type` DEFAULT ->
+//! FAST :524) and disables the AB/4-way extended partitions on sub-480p frames
+//! via `ext_partition_eval_thresh` (:510 + the qindex-dependent :2947-2963
+//! aggr=3 arm; NOT a struct field here — framesize+qindex dependent, resolved
+//! by `partition_pick::ext_partition_eval_thresh_allintra_key`). Speed >= 6
+//! (`prune_filter_intra_level = 2` at :529, `top_intra_model_count_allowed = 2`
+//! at :533, `multi_winner_mode_type = OFF` at :561, LPF_PICK_FROM_Q at :559,
+//! etc.) is unmodeled. The `lpf_sf` CDEF/restoration fields are carried for
+//! provenance but do not affect bytes (CDEF + restoration off).
 //!
 //! Source line citations are against libaom v3.14.1 (git 03087864).
 
@@ -114,8 +116,9 @@ pub struct SpeedFeatures {
     pub less_rectangular_check_level: i32,
     /// `part_sf.intra_cnn_based_part_prune_level` — default 0
     /// (init_part_sf:2311); speed>=1 -> `allow_screen_content_tools ? 0 : 2`
-    /// (speed_features.c:387-388). CNN split-vs-nonsplit partition prune on
-    /// intra SBs.
+    /// (speed_features.c:387-388); speed>=5 -> `allow_screen_content_tools ?
+    /// 1 : 2` (:512-513, only the screen arm moves). CNN split-vs-nonsplit
+    /// partition prune on intra SBs.
     pub intra_cnn_based_part_prune_level: i32,
     /// `part_sf.reuse_best_prediction_for_part_ab` — default 0
     /// (partition_search.c:89 / speed_features.c:2324); speed>=1 -> 1
@@ -136,7 +139,10 @@ pub struct SpeedFeatures {
     /// only changes at speed>=3 (level 3 -> -0.6).
     pub intra_pruning_with_hog: i32,
     /// `intra_sf.chroma_intra_pruning_with_hog` — default 0 (init_intra_sf, off);
-    /// allintra speed>=3 -> 2 (speed_features.c:454). Turns ON the CHROMA
+    /// allintra speed>=3 -> 2 (speed_features.c:454), speed>=5 -> 3 (:515) —
+    /// BUT the :608-615 final override zeroes it whenever
+    /// `prune_chroma_modes_using_luma_winner` is on (speed>=4), so the net
+    /// value is 2 ONLY at speed 3 and 0 everywhere else. Turns ON the CHROMA
     /// directional-mode HOG prune (intra_mode_search.c:959-972): for an intra
     /// frame the threshold table is `thresh[1] = {-1.2, -1.2, -0.6, 0.4}`
     /// (indexed by `level-1`), so level 2 -> -1.2. Prunes UV_V_PRED..UV_D67_PRED
@@ -547,6 +553,63 @@ impl SpeedFeatures {
             sf.enable_winner_mode_for_tx_size_srch = true; // :505 (MODE_EVAL → USE_LARGESTALL)
         }
 
+        // ---- if (speed >= 5) { ... } (speed_features.c:508-525 independent;
+        //      the framesize-DEPENDENT setter has NO speed-5 block — :302 jumps
+        //      from `speed >= 4` to `speed >= 6`). Intra-still-relevant deltas:
+        //
+        //   LIVE on the allintra KEY path:
+        //     - `multi_winner_mode_type = MULTI_WINNER_MODE_FAST` (:524): the
+        //       luma winner-mode two-pass stores/re-evaluates the top-2 winners
+        //       instead of speed 4's top-3 (`winner_mode_count_allowed`,
+        //       rdopt_utils.h:236).
+        //     - `ext_partition_eval_thresh = screen ? BLOCK_8X8 : BLOCK_16X16`
+        //       (:510-511) + the qindex-dependent aggr=3 overrides (:2947-2963,
+        //       `aggr = AOMMIN(4, speed-2)`; the `!is_480p_or_larger` arm sets
+        //       BLOCK_128X128 UNCONDITIONALLY — no boosted/intra gate — so
+        //       sub-480p KEY frames disable AB + 4-way entirely). Framesize +
+        //       qindex dependent ⇒ NOT a struct field here; resolved by
+        //       `partition_pick::ext_partition_eval_thresh_allintra_key` (the
+        //       boosted/!intra arms are dead on KEY: frame_is_boosted holds and
+        //       frame_is_intra_only kills the `!frame_is_intra_only` gates).
+        //
+        //   Set-then-overridden (transcribed for source faithfulness):
+        //     - `chroma_intra_pruning_with_hog = 3` (:515) — zeroed right back
+        //       by the :608-615 final override below, because
+        //       `prune_chroma_modes_using_luma_winner` is 1 from speed >= 4.
+        //       Net: chroma HOG is OFF at speed >= 4 (including 5).
+        //
+        //   Screen-content-only (non-screen value unchanged):
+        //     - `intra_cnn_based_part_prune_level = screen ? 1 : 2` (:512-513):
+        //       for non-screen frames 2 == the speed>=1 value (no change); for
+        //       screen frames the CNN prune turns ON at level 1 (was 0).
+        //
+        //   INERT on this path (verified against source):
+        //     - `simple_motion_search_prune_agg = SIMPLE_AGG_LVL5` (:509) —
+        //       every simple-motion consumer is `!frame_is_intra_only` (the
+        //       KB-3 elimination list).
+        //     - `use_coarse_filter_level_search = 0` (:517) — the init default
+        //       is already 0 (init_lpf_sf:2532; only the GOOD path :1356 sets
+        //       it nonzero), so this is a literal no-op for allintra.
+        //     - `disable_wiener_filter` / `disable_sgr_filter = true`
+        //       (:519-520) — loop-restoration search is OFF in the allintra
+        //       envelope (CLAUDE.md primary-envelope note).
+        //     - `prune_mesh_search = PRUNE_MESH_SEARCH_LVL_2` (:522) — mesh
+        //       search is motion/intrabc-only (intrabc mesh runs only on
+        //       screen-content intra frames; no intrabc in this envelope).
+        //     - qindex-dependent `speed == 5` `winner_mode_tx_type_pruning = 3`
+        //       (:3059-3068) — gated `!(frame_is_intra_only || screen)`, never
+        //       on an allintra KEY frame (stays 2).
+        //     - qindex-dependent `speed >= 5` `prune_sub_8x8_partition_level =
+        //       0` (:3070-3077) — the field is only raised at speed >= 6
+        //       (:541), so at speed 5 it is already 0.
+        //     - qindex-dependent `rect_partition_eval_thresh` (:2980-2991,
+        //       aggr 0 -> 1 at speed 5) — gated `!boosted`; KEY is boosted.
+        if speed >= 5 {
+            sf.intra_cnn_based_part_prune_level = if allow_screen_content_tools { 1 } else { 2 };
+            sf.chroma_intra_pruning_with_hog = 3; // :515 (zeroed below)
+            sf.multi_winner_mode_type = 1; // MULTI_WINNER_MODE_FAST (:524) → top-2 re-eval
+        }
+
         // The unconditional tail of set_allintra_speed_features_framesize_
         // independent (speed_features.c:608-616, AFTER every speed block):
         // "As the speed feature prune_chroma_modes_using_luma_winner already
@@ -833,7 +896,7 @@ mod tests {
         assert!(sf.enable_winner_mode_for_tx_size_srch); // :505
         assert_eq!(sf.winner_mode_count_allowed(), 3);
         assert!(sf.use_rd_based_breakout_for_intra_tx_search); // :460 (speed>=3)
-        // top_intra_model_count_allowed stays 3 (the =2 drop is speed>=5, :533).
+        // top_intra_model_count_allowed stays 3 (the =2 drop is speed>=6, :533).
         assert_eq!(sf.top_intra_model_count_allowed, 3);
         // DEFAULT_EVAL (chroma + single-pass) policy: coeff row [5][0] = {864, 97}
         // — the finite SATD threshold turns the trellis SATD-skip ON; tx-domain
@@ -859,6 +922,66 @@ mod tests {
         // Tx-size methods: MODE_EVAL LARGESTALL, WINNER FULL_RD.
         assert_eq!(sf.tx_size_search_method_for_stage(MODE_EVAL), 2);
         assert_eq!(sf.tx_size_search_method_for_stage(WINNER_MODE_EVAL), 0);
+    }
+
+    /// The speed-5 all-intra deltas, asserted against the source values
+    /// (`set_allintra_*` speed>=5 block :508-525 + the :608-615 final
+    /// override; the framesize-dependent setter has no speed-5 block). The
+    /// framesize+qindex-dependent `ext_partition_eval_thresh` lives in
+    /// `partition_pick::ext_partition_eval_thresh_allintra_key` (tested
+    /// there), not on this struct.
+    #[test]
+    fn speed5_allintra_deltas_match_source() {
+        let sf = SpeedFeatures::set_allintra(5, false, false);
+        // NEW at speed 5: the winner-mode two-pass narrows to top-2 (:524).
+        assert_eq!(sf.multi_winner_mode_type, 1); // MULTI_WINNER_MODE_FAST
+        assert_eq!(sf.winner_mode_count_allowed(), 2);
+        // chroma HOG: set to 3 (:515) then zeroed by the :608-615 override
+        // (prune_chroma_modes_using_luma_winner on since speed 4).
+        assert_eq!(sf.chroma_intra_pruning_with_hog, 0);
+        assert!(sf.prune_chroma_modes_using_luma_winner);
+        // Non-screen CNN prune level: 2 at speed>=1, UNCHANGED at speed 5
+        // (:512-513 only moves the screen-content arm 0 -> 1).
+        assert_eq!(sf.intra_cnn_based_part_prune_level, 2);
+        let screen = SpeedFeatures::set_allintra(5, true, false);
+        assert_eq!(screen.intra_cnn_based_part_prune_level, 1);
+        // Everything else carries the speed-4 values (verified: no other
+        // intra-still field appears in the speed>=5 block).
+        assert_eq!(sf.top_intra_model_count_allowed, 3); // the =2 drop is speed>=6 (:533)
+        assert_eq!(sf.prune_filter_intra_level, 1); // the =2 bump is speed>=6 (:529)
+        assert_eq!(sf.intra_pruning_with_hog, 3); // the =4 bump is speed>=6 (:531)
+        assert_eq!(sf.less_rectangular_check_level, 2);
+        assert!(sf.disable_smooth_intra);
+        assert_eq!(sf.perform_coeff_opt, 5);
+        assert_eq!(sf.tx_domain_dist_thres_level, 3);
+        assert_eq!(sf.winner_mode_tx_type_pruning, 2); // qindex-dep =3 arm is !intra-only
+        assert_eq!(sf.fast_intra_tx_type_search, 2);
+        assert_eq!(sf.prune_2d_txfm_mode, 3);
+        assert!(sf.prune_tx_type_est_rd);
+        assert!(sf.enable_winner_mode_for_coeff_opt);
+        assert!(sf.enable_winner_mode_for_use_tx_domain_dist);
+        assert!(sf.enable_winner_mode_for_tx_size_srch);
+        assert!(sf.use_rd_based_breakout_for_intra_tx_search);
+        assert_eq!(sf.ml_4_partition_search_level_index, 3);
+        // Stage policies are identical to speed 4 (same table indices); only
+        // the winner count differs. (Field-wise: TxTypeSearchPolicy derives no
+        // PartialEq.)
+        let sf4 = SpeedFeatures::set_allintra(4, false, false);
+        for stage in [DEFAULT_EVAL, MODE_EVAL, WINNER_MODE_EVAL] {
+            let p5 = sf.tx_type_search_policy_for_stage(stage, false, 0);
+            let p4 = sf4.tx_type_search_policy_for_stage(stage, false, 0);
+            assert_eq!(p5.coeff_opt_dist_threshold, p4.coeff_opt_dist_threshold);
+            assert_eq!(p5.coeff_opt_satd_threshold, p4.coeff_opt_satd_threshold);
+            assert_eq!(
+                p5.use_transform_domain_distortion,
+                p4.use_transform_domain_distortion
+            );
+            assert_eq!(p5.tx_domain_dist_threshold, p4.tx_domain_dist_threshold);
+            assert_eq!(p5.prune_2d_txfm_mode, p4.prune_2d_txfm_mode);
+            assert_eq!(p5.use_default_intra_tx_type, p4.use_default_intra_tx_type);
+            assert_eq!(sf.tx_size_search_method_for_stage(stage), sf4.tx_size_search_method_for_stage(stage));
+        }
+        assert_eq!(sf4.winner_mode_count_allowed(), 3);
     }
 
     /// KB-8 chunk 2a: the stage-aware [`SpeedFeatures::tx_type_search_policy_for_stage`]

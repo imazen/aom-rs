@@ -1226,18 +1226,68 @@ fn rd_pick_4partition(
     (sum_rdc, Some(Box::new(arr)))
 }
 
-/// `allow_ab_partition_search` (partition_search.c:3992-4020): simplifies at
-/// speed 0 KEY to `do_rectangular_split && bsize > BLOCK_8X8 && has_rows &&
-/// has_cols` — `ab_bsize_thresh` stays its `BLOCK_8X8` default
-/// (`ext_part_eval_based_on_cur_best` is 0 at speed 0 both usages, already
-/// established via the 4-way port's own module docs on
-/// `partition4_allowed_base`), and `prune_ext_part_state`
-/// (`prune_ext_part_none_skippable`) requires `skip_non_sq_part_based_on_
-/// none >= 1`, the SAME sf already established dead at speed 0 in the
+/// `part_sf.ext_partition_eval_thresh` resolved for the **allintra KEY**
+/// path: the bsize threshold BOTH extended-partition stages compare against
+/// (`allow_ab_partition_search` partition_search.c:4005 `bsize >
+/// ab_bsize_thresh`, and `prune_4_way_partition_search` :4136 `bsize >
+/// part4_bsize_thresh` — the same sf field read at both sites;
+/// `ext_part_eval_based_on_cur_best`, the only per-site adjustment, is set
+/// exclusively on the GOOD path at :1013 and stays its 0 default here).
+///
+/// Value resolution (returns the BLOCK_SIZE enum value):
+/// - default `BLOCK_8X8` (init_part_sf, speed_features.c:2312) for every
+///   speed <= 4: the framesize-independent setter first assigns the field in
+///   its `speed >= 5` block (:510), and the qindex-dependent `speed >= 2`
+///   overrides (:2939-2965, `aggr = AOMMIN(4, speed-2)`) are all dead on a
+///   KEY frame below speed 5 — the aggr<=1 arms are gated `!boosted` (KEY is
+///   boosted: frame_is_boosted → frame_is_kf_gf_arf) and the aggr==2 arm is
+///   gated `!frame_is_intra_only`.
+/// - speed 5: the framesize-independent :510-511 sets `screen ? BLOCK_8X8 :
+///   BLOCK_16X16`; then the qindex-dependent aggr==3 arm (:2947-2962) sets
+///   `BLOCK_128X128` UNCONDITIONALLY for `!is_480p_or_larger` frames (no
+///   boosted/intra gate — LIVE on KEY). Its two >=480p sub-arms stay dead on
+///   KEY (`!frame_is_intra_only` gates both), keeping the :510 value there.
+/// - speed >= 6: the qindex-dependent aggr==4 `else` arm (:2963-2964) sets
+///   `BLOCK_128X128` unconditionally for every frame size.
+///
+/// `bsize > BLOCK_128X128` never holds, so a 128 threshold disables AB and
+/// 4-way partitions outright. Frame w/h derive from mi dims like the
+/// established `use_square_partition_only_threshold_allintra` caller and the
+/// 4-way `res_idx` (exact for SB-aligned frames; same documented gap).
+fn ext_partition_eval_thresh_allintra_key(
+    allintra: bool,
+    speed: i32,
+    w: i32,
+    h: i32,
+    allow_screen_content_tools: bool,
+) -> usize {
+    if !allintra || speed < 5 {
+        return 3; // BLOCK_8X8 (default; GOOD stays speed-0-frozen out of scope)
+    }
+    let is_480p_or_larger = w.min(h) >= 480;
+    if speed >= 6 || !is_480p_or_larger {
+        15 // BLOCK_128X128 — AB + 4-way disabled
+    } else if allow_screen_content_tools {
+        3 // BLOCK_8X8 (:510)
+    } else {
+        6 // BLOCK_16X16 (:511)
+    }
+}
+
+/// `allow_ab_partition_search` (partition_search.c:3992-4020): simplifies on
+/// the intra KEY path to `do_rectangular_split && bsize > ab_bsize_thresh &&
+/// has_rows && has_cols` — `ab_bsize_thresh` is
+/// [`ext_partition_eval_thresh_allintra_key`] (`ext_part_eval_based_on_cur_
+/// best` is 0 outside GOOD — see that helper's docs), and `prune_ext_part_
+/// state` (`prune_ext_part_none_skippable`) requires `skip_non_sq_part_based_
+/// on_none >= 1`, the SAME sf already established dead at speed 0 in the
 /// rect-stage module docs — so `!prune_ext_part_state` is always true and
-/// omitted.
+/// omitted. The bsize compare is the raw BLOCK_SIZE enum order, exactly as C
+/// (`bsize > ab_bsize_thresh`); partition nodes are square so this equals the
+/// former 1-D-width compare for every reachable input.
 fn allow_ab_partition_search(
     bsize: usize,
+    ab_bsize_thresh: usize,
     do_rectangular_split: bool,
     has_rows: bool,
     has_cols: bool,
@@ -1247,10 +1297,7 @@ fn allow_ab_partition_search(
     if best_rdcost == i64::MAX {
         return true;
     }
-    const BLK_1D: [usize; 22] = [
-        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
-    ];
-    do_rectangular_split && BLK_1D[bsize] > BLK_1D[3] && has_rows && has_cols
+    do_rectangular_split && bsize > ab_bsize_thresh && has_rows && has_cols
 }
 
 /// `evaluate_ab_partition_based_on_split` (partition_strategy.c:1870): keep an
@@ -1744,15 +1791,20 @@ pub fn rd_pick_partition_real(
     //      effect is the four search-space flags. ----
     //
     // `part_sf.intra_cnn_based_part_prune_level` = `SpeedFeatures::set_allintra`
-    // (0 at speed 0; `allow_screen_content_tools ? 0 : 2` at speed >= 1, allintra
-    // path). Derived from the existing cfg fields so speed-0 (and GOOD) stay
-    // frozen — the level is 0 there, making this whole block a no-op.
-    let intra_cnn_based_part_prune_level =
-        if cfg.allintra && cfg.speed >= 1 && !cfg.allow_screen_content_tools {
-            2
+    // (0 at speed 0; `allow_screen_content_tools ? 0 : 2` at speed >= 1,
+    // speed_features.c:387-388; `allow_screen_content_tools ? 1 : 2` at
+    // speed >= 5, :512-513 — only the screen arm moves). Derived from the
+    // existing cfg fields so speed-0 (and GOOD) stay frozen — the level is 0
+    // there, making this whole block a no-op.
+    let intra_cnn_based_part_prune_level = if cfg.allintra && cfg.speed >= 1 {
+        if cfg.allow_screen_content_tools {
+            i32::from(cfg.speed >= 5)
         } else {
-            0
-        };
+            2
+        }
+    } else {
+        0
+    };
     if intra_cnn_based_part_prune_level != 0
         && env.sb_size >= 12 // BLOCK_64X64
         && bsize <= 12 // BLOCK_64X64
@@ -2267,6 +2319,18 @@ pub fn rd_pick_partition_real(
     // below (HORZ_B/VERT_B's own reuse input). rect_part_rd is ALSO consumed
     // by the 4-way ML prune further down.
 
+    // `part_sf.ext_partition_eval_thresh` for BOTH extended-partition stages
+    // below (the AB gate :4005 and the 4-way gate :4136 read the same sf
+    // field). BLOCK_8X8 (default) through speed 4; speed 5 disables AB+4-way
+    // on sub-480p frames (BLOCK_128X128) — see the helper's docs.
+    let ext_partition_eval_thresh = ext_partition_eval_thresh_allintra_key(
+        cfg.allintra,
+        cfg.speed,
+        env.mi_cols * 4,
+        env.mi_rows * 4,
+        cfg.allow_screen_content_tools,
+    );
+
     // ---- AB partition stage (ab_partitions_search, partition_search.c:
     // 3762-3885; wired :5895-5906) ----
     //
@@ -2294,6 +2358,7 @@ pub fn rd_pick_partition_real(
         // verified dead) -- always false, omitted from the gate below.
         let ext_partition_allowed = allow_ab_partition_search(
             bsize,
+            ext_partition_eval_thresh,
             do_rectangular_split,
             has_rows,
             has_cols,
@@ -2444,15 +2509,22 @@ pub fn rd_pick_partition_real(
     // already verified dead there) — so the C's `&& !prune_ext_part_state`
     // factor is always true here and omitted.
     //
-    // ext_partition_eval_thresh stays at its av1_reset_part_sf default
-    // (BLOCK_8X8) at speed 0 both usages — every override in
-    // speed_features.c is gated `if (speed >= 5)` (verified against the
-    // checked-in v3.14.1 source). ext_part_eval_based_on_cur_best is 0 at
-    // speed 0 both usages (allintra never sets it; good's only setter is
+    // ext_partition_eval_thresh: BLOCK_8X8 (the av1_reset_part_sf default)
+    // through speed 4; the allintra speed>=5 setter + the qindex-dependent
+    // aggr>=3 arms move it — resolved by ext_partition_eval_thresh_allintra
+    // _key (see its docs; C reads the SAME sf field here, :4136, as in
+    // allow_ab_partition_search, :4005). ext_part_eval_based_on_cur_best is
+    // 0 outside GOOD (allintra never sets it; good's only setter is
     // `if (speed >= 5)`) so it never raises the threshold to BLOCK_128X128.
+    // The bsize compare is the raw BLOCK_SIZE enum order, exactly as C
+    // (`bsize > part4_bsize_thresh`); partition nodes are square so this
+    // equals the former 1-D-width compare for every reachable input. C's
+    // rdcost==INT64_MAX don't-prune early-out (:4131) is unreachable on this
+    // interior envelope (NONE always yields a valid rd) — same established
+    // simplification as the AB stage's must_find_valid_partition handling.
     let partition4_allowed_base = cfg.enable_1to4_partitions
         && do_rectangular_split
-        && BLK_1D[bsize] > BLK_1D[3] // > BLOCK_8X8
+        && bsize > ext_partition_eval_thresh // > BLOCK_8X8 through speed 4
         && has_rows
         && has_cols;
     // prune_part4_search == 2 at speed 0 both usages (verified): disables
@@ -2889,6 +2961,47 @@ fn stamp_grid_from_tree(
         }
         // Off-frame placeholder — unreachable past the entry frame-bound guard.
         SbTree::Absent => {}
+    }
+}
+
+#[cfg(test)]
+mod ext_partition_eval_thresh_tests {
+    use super::ext_partition_eval_thresh_allintra_key;
+
+    /// `ext_partition_eval_thresh` resolution for the allintra KEY path,
+    /// asserted against the source arms (speed_features.c:510-511 + the
+    /// qindex-dependent :2939-2965 `aggr = AOMMIN(4, speed-2)` cascade with
+    /// the boosted/!intra arms dead on KEY — see the helper's docs).
+    #[test]
+    fn thresh_matches_source_arms() {
+        // Speeds 0..=4: the init default BLOCK_8X8 at every size/screen combo
+        // (the qindex-dependent aggr<=2 arms are all !boosted / !intra gated).
+        for speed in 0..=4 {
+            for &(w, h) in &[(64, 64), (128, 128), (640, 480), (1280, 720)] {
+                for &sc in &[false, true] {
+                    assert_eq!(
+                        ext_partition_eval_thresh_allintra_key(true, speed, w, h, sc),
+                        3,
+                        "speed {speed} {w}x{h} sc={sc}"
+                    );
+                }
+            }
+        }
+        // Speed 5, sub-480p: BLOCK_128X128 unconditionally (:2952) — AB +
+        // 4-way disabled (bsize > BLOCK_128X128 never holds).
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 5, 64, 64, false), 15);
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 5, 128, 128, true), 15);
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 5, 640, 360, false), 15);
+        // Speed 5, >=480p: the framesize-independent :510-511 value survives
+        // (screen ? BLOCK_8X8 : BLOCK_16X16).
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 5, 640, 480, false), 6);
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 5, 1280, 720, false), 6);
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 5, 640, 480, true), 3);
+        // Speed >= 6: BLOCK_128X128 for every size (:2963 else arm).
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 6, 1280, 720, false), 15);
+        assert_eq!(ext_partition_eval_thresh_allintra_key(true, 9, 64, 64, true), 15);
+        // Non-allintra (GOOD speed-0 envelope): default.
+        assert_eq!(ext_partition_eval_thresh_allintra_key(false, 5, 64, 64, false), 3);
     }
 }
 

@@ -2189,3 +2189,120 @@ fn encoder_gate_speed4_textured_allintra() {
          byte-identity) — a speed-4 regression was introduced -> investigate."
     );
 }
+
+/// Gate 2 (`aomenc --cpu-used=5`) — the all-intra KEY **speed-5** path.
+/// {64,128}² × cq{12,32,48,63} × {flat,two-tone,vgrad,diag} × {mono,4:2:0}
+/// vs REAL `aomenc --cpu-used=5`: **64/64 cells byte-identical** (asserted).
+///
+/// The speed-5 deltas over speed 4 (speed_features.c:508-525 + the
+/// qindex-dependent aggr=3 arm; the framesize-dependent setter has no
+/// speed-5 block), all sourced from `SpeedFeatures::set_allintra(5)` +
+/// `ext_partition_eval_thresh_allintra_key`:
+/// - `multi_winner_mode_type = MULTI_WINNER_MODE_FAST` (:524): the luma
+///   winner-mode two-pass keeps the top-2 (not top-3) winners.
+/// - `ext_partition_eval_thresh` → BLOCK_128X128 on sub-480p KEY frames
+///   (:510 + :2952): AB + 4-way partitions are never evaluated on this grid.
+/// - `chroma_intra_pruning_with_hog = 3` (:515) — zeroed right back by the
+///   :608-615 override (`prune_chroma_modes_using_luma_winner` on since
+///   speed 4), so chroma HOG stays OFF exactly as at speed 4.
+/// - Everything else carries the speed-4 values (top_intra_model_count 3,
+///   prune_filter_intra_level 1, NON_DUAL LF, the whole winner-mode/tx
+///   policy set — `speed5_allintra_deltas_match_source` pins the fields).
+///
+/// Anti-vacuity: `encoder_gate_speed5_vs_speed4_sf_witness` proves the
+/// speed-5 feature set is NOT byte-equivalent to speed-4's on this grid
+/// (port@speed-4-features vs aomenc --cpu-used=5 diverges on the witness
+/// cells; 4 cells full-grid at landing time), and per-delta bisects during
+/// landing showed each LIVE delta flips cells on its own: multi-winner FAST
+/// flips `two-tone 64² mono/420 cq63`; the ext-partition disable flips
+/// `two-tone 64² 420 cq12` + `vgrad 128² 420 cq12` (two former KB-7 cells —
+/// resolved at speed 4 by the KB-7 landing's level-3 old-model 4-way NN
+/// prune; at speed 5 the AB/4-way disable removes those candidates from the
+/// search space before any NN runs).
+#[test]
+fn encoder_gate_speed5_textured_allintra() {
+    fn content_for(w: usize, h: usize, name: &str) -> Box<dyn Fn(usize, usize) -> u8> {
+        match name {
+            "two-tone" => Box::new(move |_r, c| if c < w / 2 { 72 } else { 168 }),
+            "vgrad" => Box::new(move |_r, c| (32 + c * 190 / w) as u8),
+            "diag" => Box::new(move |r, c| (32 + (r + c) * 190 / (w + h)) as u8),
+            "flat" => Box::new(move |_r, _c| 128u8),
+            other => panic!("unknown {other:?}"),
+        }
+    }
+    let mut failures: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for &(w, h) in &[(64usize, 64usize), (128usize, 128usize)] {
+        for &name in &["flat", "two-tone", "vgrad", "diag"] {
+            for &cq in &[12i32, 32, 48, 63] {
+                for &mono in &[true, false] {
+                    let content = content_for(w, h, name);
+                    let ok = attempt_case_content_uv(
+                        w,
+                        h,
+                        mono,
+                        1,
+                        1,
+                        2,
+                        cq,
+                        5,
+                        5,
+                        |r, c| content(r, c),
+                        |r, c| (60 + (r * 7 + c * 3) % 80) as u8,
+                    );
+                    let fmt = if mono { "mono" } else { "420" };
+                    eprintln!(
+                        "speed5 {name} {w}x{h} {fmt} cq{cq}: {}",
+                        if ok { "MATCH" } else { "DIFF" }
+                    );
+                    if !ok {
+                        failures.push(format!("{name} {w}x{h} {fmt} cq{cq}"));
+                    }
+                    total += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "encoder_gate_speed5_textured_allintra: {}/{total} cells byte-identical vs aomenc \
+         --cpu-used=5",
+        total - failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "every cpu-used=5 all-intra cell must byte-match real aomenc; diverging: {failures:?}"
+    );
+}
+
+/// Anti-vacuous witness for [`encoder_gate_speed5_textured_allintra`]: the
+/// port runs with the **speed-4** feature set against REAL `aomenc
+/// --cpu-used=5` reference bytes and must DIVERGE — proving the speed-5
+/// deltas (`multi_winner_mode_type` FAST + the `ext_partition_eval_thresh`
+/// AB/4-way disable) are load-bearing, i.e. the 64/64 speed-5 gate is not
+/// vacuously matching a speed-4-equivalent search. The mono cell makes the
+/// luma-side (winner-mode) delta's effect visible with no chroma involved;
+/// the paired speed-5 run on the same cells re-asserts the true match so
+/// this witness can never "pass" via a harness that ignores `speed`.
+#[test]
+fn encoder_gate_speed5_vs_speed4_sf_witness() {
+    let two_tone_64 = |_r: usize, c: usize| if c < 32 { 72u8 } else { 168u8 };
+    let uv = |r: usize, c: usize| (60 + (r * 7 + c * 3) % 80) as u8;
+    // (mono, cq): the two cq63 cells the multi-winner FAST delta flips.
+    for &(mono, cq) in &[(true, 63i32), (false, 63)] {
+        let fmt = if mono { "mono" } else { "420" };
+        let cross = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 5, 4, two_tone_64, uv);
+        assert!(
+            !cross,
+            "two-tone 64x64 {fmt} cq{cq}: port with SPEED-4 features unexpectedly byte-matched \
+             aomenc --cpu-used=5 — the speed-5 witness cell has gone sf-equivalent; pick a new \
+             witness cell (or a speed-4 delta leaked into the speed-5 derivation)"
+        );
+        let true_match = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 5, 5, two_tone_64, uv);
+        assert!(
+            true_match,
+            "two-tone 64x64 {fmt} cq{cq}: the speed-5 witness cell must byte-match with the \
+             speed-5 features (it does in the full gate)"
+        );
+    }
+}
+
