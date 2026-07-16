@@ -1932,8 +1932,9 @@ fn encoder_gate_speed2_textured_allintra() {
 /// `SpeedFeatures::set_allintra(3)`. Byte-identical to real aomenc `--cpu-used=3`
 /// end to end across the same size × quality × content × subsampling grid as the
 /// speed-2 gate: 64/128 (1×1 / 2×2 SB) × cq{12,32,48,63} × {flat, two-tone, vgrad,
-/// diag} × {mono, 4:2:0} — **61/64 cells byte-identical** (the 3 excluded cells are
-/// a pinned KB-6-class chroma-RD residual, see the assertion at the bottom).
+/// diag} × {mono, 4:2:0} — **ALL 64/64 cells byte-identical** (the former 3-cell
+/// KB-7 pin was resolved by porting the level-3 OLD-model 4-way ML prune; see the
+/// KB-7 note at the assertion at the bottom).
 ///
 /// Anti-vacuous witness (the chroma HOG delta is load-bearing): BEFORE this fix
 /// (i.e. `set_allintra(3)` returning the speed-2 sf values, chroma HOG OFF) **16**
@@ -2026,38 +2027,37 @@ fn encoder_gate_speed3_textured_allintra() {
         }
     }
 
-    // Three cq12 4:2:0 cells are a KB-6-class LATENT chroma-RD partition near-tie
-    // EXPOSED (not caused) by the correctly-ported chroma HOG: at cq12 (qindex 48,
-    // the aggressive-web low-q regime KB-6 flags) the chroma HOG (bit-exact vs C —
-    // `prune_intra_mode_with_hog_uv_matches_c`, 900 cases) shrinks the chroma mode
-    // set enough that a pre-existing chroma-RD near-tie tips a SB-root partition
-    // (localized: real=BLOCK_64X64 NONE vs the port's split). It is NOT a speed-3
-    // porting defect (the delta is bit-exact) — same class as KB-6's cq5 low-q
-    // near-ties, tracked there. Pinned EXACTLY: if a KB-6 chroma-RD fix later makes
-    // one match, this FAILS -> promote it to the byte-match set; if a regression
-    // breaks a new cell, this FAILS -> investigate.
+    // KB-7 RESOLVED (was: 3 pinned cq12 4:2:0 residuals — two-tone 64/128,
+    // vgrad 128). The flips were NOT a latent chroma-RD arithmetic near-tie —
+    // decode-both + the sibling-C RD dump showed every leaf RD (NONE / HORZ /
+    // VERT, luma AND chroma parts) matching C to the unit — but a
+    // partition-search-SPACE gap: at speed>=3 C's `av1_ml_prune_4_partition`
+    // switches to the OLD (`ml_model_index == 0`, LABEL_SIZE=4,
+    // UNnormalized-features, int-score max-minus-thresh) NN variant
+    // (partition_strategy.c:1359/1472-1497), which on these cells prunes
+    // HORZ_4/VERT_4 at every 32x32 node; the port's old level>=3 guard skipped
+    // the ML prune entirely, so it searched HORZ_4, found a cheaper 4-way
+    // (two-tone 64x64 cq12: child-0 HORZ_4 rdcost 12.9M vs NONE 16.5M) and the
+    // SB root flipped NONE->SPLIT. With the old-model branch ported
+    // (part4_prune.rs OLD_* weights + int-score decision), ALL 64 cells are
+    // byte-identical; this gate now asserts full byte-identity.
     let mut residual: Vec<String> = results
         .iter()
         .filter(|(_, ok)| !*ok)
         .map(|(n, _)| n.clone())
         .collect();
     residual.sort();
-    let expected_residual = [
-        "two-tone 128x128 420 cq12".to_string(),
-        "two-tone 64x64 420 cq12".to_string(),
-        "vgrad 128x128 420 cq12".to_string(),
-    ];
+    let expected_residual: [String; 0] = [];
     let matched = results.iter().filter(|(_, ok)| *ok).count();
     eprintln!(
         "encoder_gate_speed3_textured_allintra: {matched}/{} cells byte-identical vs aomenc \
-         --cpu-used=3 (3 KB-6-class cq12 4:2:0 residuals pinned)",
+         --cpu-used=3",
         results.len()
     );
     assert_eq!(
         residual, expected_residual,
-        "cpu-used=3 divergence set changed: got {residual:?}. If a cell now MATCHES, the \
-         KB-6 chroma-RD near-tie was fixed -> promote it into the byte-match claim; if a NEW \
-         cell diverges, a speed-3 regression was introduced -> investigate."
+        "cpu-used=3 divergence set changed: got {residual:?} (expected FULL 64/64 \
+         byte-identity) — a speed-3 regression was introduced -> investigate."
     );
 }
 
@@ -2065,7 +2065,9 @@ fn encoder_gate_speed3_textured_allintra() {
 /// the full e2e derivation with `ref_encode_av1_kf(cpu_used=4)` +
 /// `SpeedFeatures::set_allintra(4)`, over the same grid as the speed-2/3 gates:
 /// 64/128 × cq{12,32,48,63} × {flat, two-tone, vgrad, diag} × {mono, 4:2:0} —
-/// **51/64 cells byte-identical** vs real aomenc `--cpu-used=4`.
+/// **ALL 64/64 cells byte-identical** vs real aomenc `--cpu-used=4` (51/64
+/// after the two wired deltas below, 59/64 after the KB-8 chunk series,
+/// 64/64 after the two KB-7 roots — see the note at the assertion).
 ///
 /// This is a PARTIAL speed-4 port (see `speed_features.rs`'s `if speed >= 4`
 /// block). Two speed-4 deltas are LIVE and wired here; the rest are KB-8:
@@ -2103,13 +2105,12 @@ fn encoder_gate_speed3_textured_allintra() {
 /// level 1). That took the gate 51/64 → 59/64: ALL 32 mono cells byte-match,
 /// i.e. the speed-4 LUMA path is byte-exact.
 ///
-/// The 5 pinned residuals are 4:2:0 chroma-tied KB-7-class near-ties (KB-7's
-/// speed-3 pins are the SAME content cells at cq12): `diag 128x128 cq12`,
-/// `two-tone 64x64 cq12`, `two-tone 64x64 cq32`, `vgrad 128x128 cq12`,
-/// `vgrad 64x64 cq12` — the latent chroma-RD low-q near-tie tracked under
-/// KB-7, not a missing speed-4 delta.
-/// Pinned EXACTLY: if a fix makes one match this FAILS -> promote it; if a
-/// NEW cell diverges a speed-4 regression was introduced -> investigate.
+/// The former 5-cell 4:2:0 cq12/cq32 pin (KB-7) was then resolved by TWO
+/// speed-feature-port fixes (see the note at the assertion): the level-3
+/// OLD-model 4-way ML prune (shared with speed 3) and the
+/// `chroma_intra_pruning_with_hog`-disable tail (speed_features.c:608-616,
+/// live at speed>=4 via `prune_chroma_modes_using_luma_winner`) — taking the
+/// gate 59/64 → 64/64 full byte-identity.
 #[test]
 fn encoder_gate_speed4_textured_allintra() {
     fn content_for(w: usize, h: usize, name: &str) -> Box<dyn Fn(usize, usize) -> u8> {
@@ -2157,34 +2158,34 @@ fn encoder_gate_speed4_textured_allintra() {
         .map(|(n, _)| n.clone())
         .collect();
     residual.sort();
-    // The exact residual set with EVERY documented speed-4 delta ported + live
-    // (the KB-8 chunk series: SATD trellis-skip, stage-aware policies, the
-    // luma winner-mode two-pass MODE_EVAL → top-3 → WINNER_MODE_EVAL, the
-    // est-rd tx-type prune + txk_map reorder, use_rd_based_breakout, and both
-    // split-info prunes). All 32 MONO cells byte-match — the speed-4 LUMA
-    // path is byte-exact. The 5 residuals are 4:2:0 chroma-tied near-ties of
-    // the KB-7 class (KB-7's own speed-3 pins are the SAME content cells at
-    // cq12): a latent chroma-RD near-tie tipping the partition at low q,
-    // present at speed 3 AND 4 — tracked under KB-7, not a missing speed-4
-    // delta. When the KB-7 chroma root lands, re-check + promote these.
-    let expected_residual = [
-        "diag 128x128 420 cq12".to_string(),
-        "two-tone 64x64 420 cq12".to_string(),
-        "two-tone 64x64 420 cq32".to_string(),
-        "vgrad 128x128 420 cq12".to_string(),
-        "vgrad 64x64 420 cq12".to_string(),
-    ];
+    // KB-7 RESOLVED (was: 5 pinned 4:2:0 cq12/cq32 residuals). TWO distinct
+    // speed-feature-port gaps, no RD-arithmetic bug:
+    //   1. (shared with speed 3) `av1_ml_prune_4_partition`'s OLD
+    //      (`ml_model_index == 0`) NN variant at level>=3 was unported — the
+    //      port searched HORZ_4/VERT_4 where C prunes them (see the speed-3
+    //      gate's KB-7 note).
+    //   2. (speed-4-specific) the UNCONDITIONAL TAIL of
+    //      set_allintra_speed_features_framesize_independent
+    //      (speed_features.c:608-616) force-disables
+    //      `chroma_intra_pruning_with_hog` whenever
+    //      `prune_chroma_modes_using_luma_winner` is on (allintra speed>=4).
+    //      The port kept the chroma HOG live at speed 4, HOG-pruning a
+    //      directional uv mode C evaluates and picks (two-tone 64x64 cq12:
+    //      C picks UV_V_PRED 58469617, the port had HOG-masked V and picked
+    //      UV_SMOOTH 58779332) — the leaf then coded different chroma bytes.
+    // With the old-model 4-way branch ported + the HOG-disable tail modeled,
+    // ALL 64 cells are byte-identical; this gate now asserts full
+    // byte-identity.
+    let expected_residual: [String; 0] = [];
     let matched = results.iter().filter(|(_, ok)| *ok).count();
     eprintln!(
         "encoder_gate_speed4_textured_allintra: {matched}/{} cells byte-identical vs aomenc \
-         --cpu-used=4 (5 KB-7-class chroma cq12/cq32 near-tie residuals pinned; all 32 mono \
-         cells byte-match — the speed-4 luma winner-mode two-pass is byte-exact)",
+         --cpu-used=4",
         results.len()
     );
     assert_eq!(
         residual, expected_residual,
-        "cpu-used=4 divergence set changed: got {residual:?}. If a cell now MATCHES (e.g. the \
-         KB-7 chroma near-tie root landed), promote it into the byte-match claim; if a NEW cell \
-         diverges, a speed-4 regression was introduced -> investigate."
+        "cpu-used=4 divergence set changed: got {residual:?} (expected FULL 64/64 \
+         byte-identity) — a speed-4 regression was introduced -> investigate."
     );
 }

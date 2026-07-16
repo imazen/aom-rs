@@ -2724,3 +2724,42 @@ Promotions: cq48 added to the asserted 196² cells in `encoder_gate_real_image_e
 the repro's assert-diverge tail replaced with `report_and_assert` over ALL 30 cells (full
 byte-match gate); `kb6_characterize_196_partial_sb` flipped to assert the cell KEEPS matching.
 Full `cargo test -p aom-encode --no-fail-fast` green before landing.
+
+## KB-7 CLOSED — speed-3 AND speed-4 gates at FULL 64/64 byte-identity (2026-07-16, encoder track)
+
+The 8 pinned cq12/cq32 4:2:0 cells (3 at `--cpu-used=3`, 5 at `--cpu-used=4`) were NOT a latent
+chroma-RD arithmetic near-tie: the sibling-C RD dump (throwaway instrumented
+partition_search/rdopt/intra_mode_search/partition_strategy, byte-inert vs the clean build)
+showed EVERY leaf RD — the 64×64 root NONE (rate 2612035 / dist 150041 / rdcost 58839818),
+each 32×32 child NONE, every HORZ/VERT rect leaf, luma AND chroma parts — matching the port
+**to the unit**. The flips were two unported speed-feature gates:
+
+1. **Level-3 OLD-model 4-way ML prune (speed>=3; closed the 3 speed-3 pins).**
+   `ml_model_index = (ml_4_partition_search_level_index < 3)` (partition_strategy.c:1359) — at
+   level 3 C runs the old `av1_4_partition_nn_*` net (LABEL_SIZE=4) on UNNORMALIZED features and
+   decides via `int_score = (int)(100·score)`, `thresh = max − {500,500,200}`, zero-then-set
+   from label bits (:1472-1497). Measured on `two-tone 64² cq12 cpu3`: scores [530,−348,0,−392]
+   thresh 30 → HORZ_4/VERT_4 BOTH pruned at every 32×32 node. The port's `level_index >= 3`
+   no-op guard let it search HORZ_4 (child-0: 12.9M < NONE 16.5M) → SB root flipped NONE→SPLIT.
+   Fix: `OLD_*` tables transcribed (`xtask/transcribe_part4_nn.py`) + the old branch in
+   `part4_prune.rs` (normalize skipped, C's overwrite-from-zero semantics; caller re-ANDs only
+   the interior frame-fit envelope guard). Plus the missing `av1_nn_output_prec_reduce`
+   (reduce_prec=1 at BOTH 4-way call sites; C's `+0.5` is double) — also added to the same-shape
+   gap in `ab_nn_prune.rs` (:1296 is reduce_prec=1 too). Witness: `part4_old_nn_diff.rs`, 4000
+   random-input decisions == a REAL `av1_nn_predict_c` oracle on the same tables.
+
+2. **Chroma-HOG force-disable tail (speed>=4; closed the 5 speed-4 pins).** The unconditional
+   tail of `set_allintra_speed_features_framesize_independent` (speed_features.c:608-616) zeroes
+   `chroma_intra_pruning_with_hog` whenever `prune_chroma_modes_using_luma_winner` is on
+   (allintra speed>=4). Measured: the instrumented C computes ZERO chroma-HOG masks at cpu4.
+   The port kept the HOG live → HOG-pruned UV_V_PRED where C picks it (root NONE: C uv=V
+   58469617 vs port uv=SMOOTH 58779332) → different chroma bytes. Fix: the tail in
+   `SpeedFeatures::set_allintra` + the `chroma_hog_level` gate in `partition_pick.rs`, with the
+   `UvLoopPolicy` build threading the luma-winner prune independently of the HOG mask.
+
+Promotions: `encoder_gate_speed3_textured_allintra` and `encoder_gate_speed4_textured_allintra`
+now assert FULL 64/64 byte-identity (pinned-residual lists removed); new asserted single-cell
+witnesses `kb7_rd_localize.rs` (cpu3 + cpu4 two-tone 64² cq12, decode-both diff on failure);
+`speed4_allintra_deltas_match_source` corrected to the C value (`chroma_intra_pruning_with_hog
+== 0` at speed 4). Full `cargo test -p aom-encode --no-fail-fast` = 149 passed / 0 failed,
+rebased over 57d5ce0 (KB-6 30/30).

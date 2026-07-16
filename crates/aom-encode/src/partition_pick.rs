@@ -817,17 +817,6 @@ fn leaf_pick_sb_modes(
         enable_optimize_b: env.enable_optimize_b,
     };
 
-    // Per-block CHROMA directional-mode HOG prune (`intra_sf.chroma_intra_pruning
-    // _with_hog`, speed_features.c:454). Off (level 0) at speed 0/1/2; allintra
-    // speed>=3 -> level 2 (SpeedFeatures::set_allintra). C computes the skip mask
-    // lazily on the first directional uv candidate (intra_mode_search.c:959-972)
-    // with the intra-frame threshold `thresh[1][level-1]` (= -1.2 at level 2);
-    // precomputing it here is byte-equivalent (the mask is deterministic and is
-    // only ever read in that same `is_directional && use_angle_delta` branch,
-    // intra_uv_rd.rs:1457-1464). Only computed on chroma-ref blocks of a
-    // non-monochrome frame — where the uv mode search actually evaluates modes.
-    // (Level derived inline from cfg.speed, mirroring the luma HOG level above.)
-    let chroma_hog_level = if cfg.allintra && cfg.speed >= 3 { 2 } else { 0 };
     // `intra_sf.prune_chroma_modes_using_luma_winner` (speed_features.c:480) —
     // default 0; allintra speed>=4 -> 1. Prunes chroma modes not in
     // `av1_derived_chroma_intra_mode_used_flag[luma_winner_mode]`
@@ -835,28 +824,59 @@ fn leaf_pick_sb_modes(
     // (intra_uv_rd.rs:1497); this turns it on. Only the LUMA winner mode is read,
     // so it is fully determined by the (already-decided) luma search.
     let prune_chroma_luma_winner = cfg.allintra && cfg.speed >= 4;
+    // Per-block CHROMA directional-mode HOG prune (`intra_sf.chroma_intra_pruning
+    // _with_hog`, speed_features.c:454). Off (level 0) at speed 0/1/2; allintra
+    // speed>=3 -> level 2 (SpeedFeatures::set_allintra) — but the UNCONDITIONAL
+    // TAIL of set_allintra_speed_features_framesize_independent (:608-616)
+    // force-disables it whenever `prune_chroma_modes_using_luma_winner` is on
+    // (allintra speed>=4), so it is live at exactly speed 3 in the modeled
+    // range (KB-7 second root: keeping it on at speed 4 HOG-pruned a
+    // directional uv mode C evaluates and picks). C computes the skip mask
+    // lazily on the first directional uv candidate (intra_mode_search.c:959-972)
+    // with the intra-frame threshold `thresh[1][level-1]` (= -1.2 at level 2);
+    // precomputing it here is byte-equivalent (the mask is deterministic and is
+    // only ever read in that same `is_directional && use_angle_delta` branch,
+    // intra_uv_rd.rs:1457-1464). Only computed on chroma-ref blocks of a
+    // non-monochrome frame — where the uv mode search actually evaluates modes.
+    // (Level derived inline from cfg.speed, mirroring the luma HOG level above;
+    // kept in lockstep with SpeedFeatures::set_allintra's tail.)
+    let chroma_hog_level = if cfg.allintra && cfg.speed >= 3 && !prune_chroma_luma_winner {
+        2
+    } else {
+        0
+    };
     let chroma_hog_lp;
-    let uv_lp: &UvLoopPolicy = if chroma_hog_level > 0 && !env.monochrome && is_chroma_ref {
-        let mut mask = [false; 13];
-        // C's collect_hog_data uses the LUMA `mb_to_*_edge` (1/8 luma-pel), then
-        // `>> ss` inside prune_intra_mode_with_hog_uv.
-        let mb_right = (env.mi_cols - mi_w as i32 - mi_col) * 4 * 8;
-        let mb_bottom = (env.mi_rows - mi_h as i32 - mi_row) * 4 * 8;
-        let th = [-1.2f32, -1.2, -0.6, 0.4][chroma_hog_level - 1];
-        prune_intra_mode_with_hog_uv(
-            env.src_u,
-            ref_off_uv,
-            env.stride,
-            bsize,
-            env.ss_x,
-            env.ss_y,
-            mb_right,
-            mb_bottom,
-            th,
-            &mut mask,
-        );
+    let uv_lp: &UvLoopPolicy = if (chroma_hog_level > 0 || prune_chroma_luma_winner)
+        && !env.monochrome
+        && is_chroma_ref
+    {
+        // The HOG mask only when the chroma HOG level is live (speed 3 —
+        // the speed>=4 tail zeroes it, see chroma_hog_level above); the
+        // luma-winner prune flag independently (speed>=4). Both feed the
+        // same UvLoopPolicy the uv loop consumes.
+        let mask = (chroma_hog_level > 0).then(|| {
+            let mut mask = [false; 13];
+            // C's collect_hog_data uses the LUMA `mb_to_*_edge` (1/8 luma-pel), then
+            // `>> ss` inside prune_intra_mode_with_hog_uv.
+            let mb_right = (env.mi_cols - mi_w as i32 - mi_col) * 4 * 8;
+            let mb_bottom = (env.mi_rows - mi_h as i32 - mi_row) * 4 * 8;
+            let th = [-1.2f32, -1.2, -0.6, 0.4][chroma_hog_level - 1];
+            prune_intra_mode_with_hog_uv(
+                env.src_u,
+                ref_off_uv,
+                env.stride,
+                bsize,
+                env.ss_x,
+                env.ss_y,
+                mb_right,
+                mb_bottom,
+                th,
+                &mut mask,
+            );
+            mask
+        });
         chroma_hog_lp = UvLoopPolicy {
-            chroma_hog_skip_mask: Some(mask),
+            chroma_hog_skip_mask: mask,
             prune_chroma_modes_using_luma_winner: prune_chroma_luma_winner,
             ..cfg.uv_lp.clone()
         };
@@ -2515,11 +2535,14 @@ pub fn rd_pick_partition_real(
             // ml_4_partition_search_level_index (part_sf): 0 at speed 0, then
             // min(speed,3) — 1 at speed>=1 (speed_features.c:210), 2 at speed>=2
             // (:237), 3 at speed>=3 (:271) — mirrors SpeedFeatures::set_allintra.
-            // The port's threshold-table path is correct for levels 0/1/2 (and the
-            // C table is byte-identical for levels 1 and 2, so this is a byte no-op
-            // at speed 2); predict_4partition_prune guards level_index >= 3 (the
-            // speed>=3 alternate-NN branch is unmodeled = #10) and returns the
-            // inputs unchanged there, so the clamp is safe.
+            // Levels 0/1/2 take the hd_-model threshold-table path; level 3
+            // (speed >= 3) takes the OLD-model int-score path (`ml_model_index =
+            // (level < 3)`, partition_strategy.c:1359), which OVERWRITES both
+            // flags from zero per the label bits — C semantics; it can resurrect
+            // a flag the pre-ML per-type gates cleared (KB-7 root: this branch
+            // used to be an unported no-op, so the port searched HORZ_4/VERT_4
+            // where C prunes them, flipping the speed-3/4 cq12 4:2:0 SB-root
+            // partition near-ties).
             let ml_4_level_index = cfg.speed.clamp(0, 3);
             let (h4, v4) = crate::part4_prune::predict_4partition_prune(
                 bsize,
@@ -2535,8 +2558,14 @@ pub fn rd_pick_partition_real(
                 part4_allowed[0],
                 part4_allowed[1],
             );
-            part4_allowed[0] = h4;
-            part4_allowed[1] = v4;
+            // Re-AND the interior-envelope frame-fit guard (all 4 strips
+            // in-frame — see the module docs on rd_pick_4partition's edge
+            // scope): inert for interior blocks; keeps a level-3 OVERWRITE
+            // from resurrecting a 4-way at a frame-edge node this port's
+            // 4-way walk does not model. (C itself codes fewer strips at an
+            // edge; that whole shape is out of the current envelope.)
+            part4_allowed[0] = h4 && all_4_rows_fit;
+            part4_allowed[1] = v4 && all_4_cols_fit;
         }
 
         // prune_4_partition_using_split_info (partition_search.c:4023):

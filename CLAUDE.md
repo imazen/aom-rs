@@ -436,39 +436,60 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   at web qindex), so it is arguably higher-impact than the bd10/bd12 (KB-4) and lossless (KB-5)
   corners. Sequencing is the coordinator's call.
 
-### KB-7 — Encoder: `--cpu-used=3` cq12 4:2:0 partition near-tie exposed by the (correct) chroma HOG — REAL, KB-6 class, pinned
-- **Symptom:** in `encoder_gate_speed3_textured_allintra` (Gate-2 cpu-used=3), 3 of 64 cells diverge
-  from real aomenc — `two-tone 64x64`, `two-tone 128x128`, `vgrad 128x128`, all **cq12 (qindex 48)
-  4:2:0**. All 32 mono cells + all cq32/48/63 4:2:0 cells byte-match (61/64). Localized
-  (decode-both, port decoder is bit-exact): a SB-root **partition flip** — real picks BLOCK_64X64
-  NONE, the port splits — driven by the chroma RD, only at low q.
-- **Root cause: NOT the speed-3 chroma HOG port (that is bit-exact).** The speed-3 delta
-  `chroma_intra_pruning_with_hog = 2` (speed_features.c:454) is correctly ported: the chroma HOG mask
-  (`prune_intra_mode_with_hog_uv`, hog.rs) is proven **byte-identical to C** across 900 cases (all
-  bd/subsampling/edge-clip combos — `prune_intra_mode_with_hog_uv_matches_c`), and its inputs are the
-  same offset/dims the (correct) chroma encode uses. Turning it ON fixed **13 of the 16** cq12+cq32
-  4:2:0 cells that diverged before it. The residual 3 are a **pre-existing latent chroma-RD near-tie**
-  (KB-6 class — the aggressive-web low-q regime KB-6 flags): the correct HOG shrinks the chroma mode
-  set enough that a chroma-RD near-tie tips the NONE-vs-split partition. Same mechanism as KB-2/KB-6
-  (a mode-set-shrinking delta exposes a latent RD tie), on the chroma partition path.
-- **Next chunk (localization):** decode-both per-SB at `two-tone 64x64 420 cq12` (1-SB, simplest);
-  the port's split vs real's NONE at mi(0,0) is the flip. Dump the port's NONE-candidate chroma RD vs
-  the sibling C's for the 64×64 (and its 32×32 SPLIT children) to find the chroma-RD term that
-  differs at qindex 48. Fix KB-2/KB-6-style, then promote the 3 pinned cells in
-  `encoder_gate_speed3_textured_allintra` into the byte-match claim. Close ONLY by a landed fix —
-  the gate PINS the exact residual set, so it FAILS the moment one starts matching (prompting
-  promotion) or a new cell regresses.
+### KB-7 — Encoder: `--cpu-used=3/4` cq12/cq32 4:2:0 partition flips — FIXED ✅ (TWO speed-feature-port roots; speed-3 AND speed-4 gates 64/64)
+- **FIXED 2026-07-16.** All 8 pinned cells (3 at speed-3 + 5 at speed-4) now BYTE-MATCH real
+  aomenc; both gates assert FULL 64/64 byte-identity. The "latent chroma-RD near-tie"
+  hypothesis was REFUTED by the sibling-C RD dump (throwaway instrumented C, kb7-instr inject
+  pattern; validated byte-inert vs the clean build): every leaf RD — NONE/HORZ/VERT, luma AND
+  chroma parts, and every SPLIT child total — matched C **to the unit**. The flips were TWO
+  partition-search-SPACE / speed-feature-port gaps:
+  1. **(speed>=3, closed ALL 3 speed-3 pins) `av1_ml_prune_4_partition`'s OLD-model branch was
+     unported.** At `ml_4_partition_search_level_index = 3` (allintra speed>=3) C flips
+     `ml_model_index = (level < 3) == 0` (partition_strategy.c:1359) → the old
+     `av1_4_partition_nn_*` weight set (LABEL_SIZE=4), **UNnormalized** features,
+     `int_score[i] = (int)(100*score[i])`, `thresh = max_score − {500,500,200}` (16/32/64),
+     zero-then-set from the label bits (:1472-1497). On these cells it prunes HORZ_4/VERT_4 at
+     every 32×32 node (measured: scores like [530,−348,0,−392], thresh=30 → only label 0 ⇒ both
+     pruned). The port's `predict_4partition_prune` guarded `level_index >= 3` as a NO-OP, so it
+     searched HORZ_4 and found a cheaper 4-way (two-tone 64² cq12: child-0 HORZ_4 rdcost 12.9M vs
+     NONE 16.5M) → root NONE→SPLIT. **Fix:** transcribe the OLD weight tables
+     (`xtask/transcribe_part4_nn.py` → `part4_nn_weights.rs` `OLD_*`) + the old-branch decision in
+     `part4_prune.rs` (normalize skipped, int-score/max−thresh, OVERWRITE-from-zero semantics —
+     C can resurrect a pre-ML-cleared flag; the caller re-ANDs only the interior-envelope
+     frame-fit guard). Also added the missing `av1_nn_output_prec_reduce` (ml.c:19 — BOTH
+     `av1_ml_prune_4_partition` call sites pass `reduce_prec=1`; C's `+ 0.5` is a DOUBLE literal)
+     to part4's NN — and the same latent gap in `ab_nn_prune.rs` (the AB NN call :1296 is also
+     reduce_prec=1). Witness: `part4_old_nn_diff.rs` — 4000 random-input decisions identical to a
+     REAL-`av1_nn_predict_c` oracle on the same OLD tables.
+  2. **(speed>=4, closed ALL 5 speed-4 pins) the chroma-HOG force-disable tail was unported.**
+     The UNCONDITIONAL tail of `set_allintra_speed_features_framesize_independent`
+     (speed_features.c:608-616) zeroes `chroma_intra_pruning_with_hog` whenever
+     `prune_chroma_modes_using_luma_winner` is on (allintra speed>=4; this also deadens the
+     speed-5/6 `=3/4` settings). Measured: the instrumented C computes ZERO chroma-HOG masks at
+     cpu-used=4. The port kept the HOG live at speed 4 and HOG-pruned UV_V_PRED where C evaluates
+     and picks it (two-tone 64² cq12 root NONE: C uv=V 58469617 vs port uv=SMOOTH 58779332) →
+     different chroma bytes. **Fix:** the tail in `SpeedFeatures::set_allintra` + the inline
+     `chroma_hog_level` gate in `partition_pick.rs` (`&& !prune_chroma_luma_winner`); the
+     `UvLoopPolicy` build now threads the luma-winner prune independently of the HOG mask
+     (they were coupled — dropping the HOG must not drop the luma-winner prune).
+- **Verified locally (worktree, rebased over 57d5ce0):** speed-3 gate 64/64, speed-4 gate 64/64
+  (both promoted from pinned-residual to full byte-identity asserts), new single-cell asserted
+  witnesses `kb7_rd_localize.rs` (cpu3 + cpu4, with decode-both diff on failure),
+  `part4_old_nn_diff` 4000/4000, `speed4_allintra_deltas_match_source` corrected to the
+  C-source value (`chroma_intra_pruning_with_hog == 0` at speed 4), full `cargo test -p
+  aom-encode` **149 passed / 0 failed**. Speed-0/1/2 byte gates unaffected (the old-model branch
+  only fires at level 3; the prec-reduce is decision-neutral on those grids — now faithful).
 
-### KB-8 — Encoder: `--cpu-used=4` speed-4 deltas — PORTED ✅ (59/64; luma byte-exact; 5 KB-7-class chroma near-ties pinned)
-- **Status (2026-07-16): every documented speed-4 delta is PORTED + LIVE — 59/64 cells byte-identical**
+### KB-8 — Encoder: `--cpu-used=4` speed-4 deltas — PORTED ✅ (64/64 after the KB-7 roots; luma was byte-exact at 59/64)
+- **Status (2026-07-16): every documented speed-4 delta is PORTED + LIVE — 64/64 cells byte-identical**
   vs real aomenc (`encoder_gate_speed4_textured_allintra`, {64,128}² × cq{12,32,48,63} ×
   {flat,two-tone,vgrad,diag} × {mono,420}), up from 35/64 baseline → 51/64 (chunk 1 series) →
-  59/64 (the winner-mode flip). **ALL 32 mono cells byte-match — the speed-4 LUMA path is
-  byte-exact.** The 5 pinned residuals are 4:2:0 chroma near-ties of the **KB-7 class** (KB-7's
-  speed-3 pins are the SAME content cells at cq12): `diag 128² cq12`, `two-tone 64² cq12`,
-  `two-tone 64² cq32`, `vgrad 128² cq12`, `vgrad 64² cq12` — the latent chroma-RD low-q near-tie
-  tracked under KB-7, NOT a missing speed-4 delta. When KB-7's chroma root lands, re-check +
-  promote these 5.
+  59/64 (the winner-mode flip) → **64/64 (the KB-7 roots: the level-3 OLD-model 4-way ML prune +
+  the speed>=4 chroma-HOG disable tail — see KB-7)**. ALL 32 mono cells were already byte-exact
+  at 59/64 (the speed-4 LUMA path); the 5 former 4:2:0 residuals (`diag 128² cq12`, `two-tone
+  64² cq12/cq32`, `vgrad 128² cq12`, `vgrad 64² cq12`) were KB-7's two roots, not a missing
+  speed-4 delta (confirmed: both are speed-feature gates, one shared with speed 3, one
+  speed-4-specific).
 - **The full landed chunk series (each verified on origin/main):**
   1. `prune_chroma_modes_using_luma_winner` + NON_DUAL LF search (e8c662f, 51/64).
   2. SATD trellis-skip body `skip_trellis_opt_based_on_satd` (16d4d85) — unit-tested vs REAL C

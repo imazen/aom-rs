@@ -547,6 +547,21 @@ impl SpeedFeatures {
             sf.enable_winner_mode_for_tx_size_srch = true; // :505 (MODE_EVAL → USE_LARGESTALL)
         }
 
+        // The unconditional tail of set_allintra_speed_features_framesize_
+        // independent (speed_features.c:608-616, AFTER every speed block):
+        // "As the speed feature prune_chroma_modes_using_luma_winner already
+        // constrains the number of chroma directional mode evaluations to a
+        // maximum of 1, the HOG computation ... does not seem to help" —
+        // the chroma HOG prune is force-DISABLED whenever the luma-winner
+        // chroma prune is on (allintra speed >= 4; this also deadens the
+        // speed>=5/6 `chroma_intra_pruning_with_hog = 3/4` settings in
+        // allintra). KB-7 second root: the port kept the chroma HOG live at
+        // speed 4, HOG-pruning a directional uv mode (e.g. UV_V_PRED) that C
+        // evaluates and picks — flipping the speed-4 cq12/cq32 4:2:0 cells.
+        if sf.prune_chroma_modes_using_luma_winner {
+            sf.chroma_intra_pruning_with_hog = 0;
+        }
+
         sf
     }
 
@@ -793,8 +808,13 @@ mod tests {
         let sf = SpeedFeatures::set_allintra(4, false, false);
         // NEW-and-WIRED at speed 4 (:480).
         assert!(sf.prune_chroma_modes_using_luma_winner);
-        // Carried from speed 3 (unchanged at speed 4 on this path).
-        assert_eq!(sf.chroma_intra_pruning_with_hog, 2); // :454 (bumps to 3 only at speed>=5)
+        // The :454 speed>=3 value 2 is OVERRIDDEN to 0 by the unconditional
+        // tail of set_allintra_speed_features_framesize_independent
+        // (:608-616) whenever prune_chroma_modes_using_luma_winner is on
+        // (allintra speed>=4) — KB-7 second root; empirically confirmed
+        // (the instrumented C encoder computes ZERO chroma HOG masks at
+        // cpu-used=4, and the speed-4 byte gate is 64/64 only with 0 here).
+        assert_eq!(sf.chroma_intra_pruning_with_hog, 0);
         assert_eq!(sf.intra_pruning_with_hog, 3); // :455
         assert_eq!(sf.less_rectangular_check_level, 2); // :444
         assert!(sf.disable_smooth_intra); // speed>=2 :429

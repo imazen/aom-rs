@@ -5,15 +5,22 @@
 //! framesize_independent` and `set_good_speed_features_framesize_
 //! independent`, speed_features.c -- not gated by any `if (speed >= N)`).
 //!
-//! Only the `ml_model_index == 1` ("hd_" weight set, `NEW_LABEL_SIZE=3`
-//! softmax) branch is transcribed: `ml_model_index = (ml_4_partition_search_
-//! level_index < 3)`. `ml_4_partition_search_level_index` is threaded in via
-//! `predict_4partition_prune`'s `level_index` param — 0 at speed 0, 1 at
-//! speed >= 1 in the port's modeled range (speed_features.c:210), always
-//! `< 3` => `ml_model_index = 1`. The `ml_model_index == 0` (`LABEL_SIZE=4`,
-//! no softmax) weight variant used at level 3 (speed >= 3) is NOT transcribed
-//! (see `xtask/transcribe_part4_nn.py`); `predict_4partition_prune` guards
-//! `level_index >= 3` and leaves the 4-way flags untouched there (#10).
+//! BOTH `ml_model_index` branches are modelled (`ml_model_index =
+//! (ml_4_partition_search_level_index < 3)`, partition_strategy.c:1359;
+//! the level is threaded in via `predict_4partition_prune`'s `level_index`
+//! param = `min(speed, 3)`):
+//!   - `== 1` ("hd_" weight set, `NEW_LABEL_SIZE=3`, mean/std-normalized
+//!     features, softmax + search/not-search threshold tables) — levels
+//!     0..2 (speed 0..2);
+//!   - `== 0` (the "old" `av1_4_partition_nn_*` weight set, `LABEL_SIZE=4`,
+//!     **UNnormalized** features — the `if (ml_model_index)` normalize is
+//!     skipped — `int_score[i] = (int)(100 * score[i])`, `thresh =
+//!     max_score - {500,500,200}` by bsize, then `av1_zero_array` + set
+//!     from the label bits: bit0 → HORZ4, bit1 → VERT4) — level 3
+//!     (speed >= 3). KB-7 root cause: this branch was unported (the port
+//!     left the 4-way flags untouched at level >= 3), so at cpu-used=3/4
+//!     the port evaluated HORZ_4/VERT_4 where C prunes them, flipping the
+//!     cq12 4:2:0 SB-root NONE-vs-SPLIT partition near-ties.
 //!
 //! `ext_ml_model_decision_after_part_ab` (the external-partition-model
 //! hook) requires `!frame_is_intra_only(cm)`, which is always false for our
@@ -29,19 +36,23 @@ fn get_unsigned_bits(n: u32) -> u32 {
 }
 
 /// `av1_nn_predict_c` (ml.c) specialized to this NN's fixed shape: exactly
-/// 1 ReLU hidden layer (16/32/64 all have `num_hidden_layers == 1`), then a
-/// linear (no-activation) output layer of `NEW_LABEL_SIZE` nodes.
-fn nn_predict_1layer(
+/// 1 ReLU hidden layer (16/32/64 all have `num_hidden_layers == 1`, BOTH
+/// model variants), then a linear (no-activation) output layer of `N`
+/// nodes (`NEW_LABEL_SIZE` = 3 for the "hd_" model, `LABEL_SIZE` = 4 for
+/// the level>=3 "old" model), then `av1_nn_output_prec_reduce` — BOTH
+/// `av1_ml_prune_4_partition` call sites pass `reduce_prec = 1`
+/// (partition_strategy.c:1475/1502), so the reduce is unconditional here.
+fn nn_predict_1layer<const N: usize>(
     input: &[f32; w::FEATURE_SIZE],
     w0: &[f32],
     b0: &[f32],
     hidden: usize,
     w1: &[f32],
-    b1: &[f32; w::NEW_LABEL_SIZE],
-) -> [f32; w::NEW_LABEL_SIZE] {
+    b1: &[f32; N],
+) -> [f32; N] {
     debug_assert_eq!(w0.len(), w::FEATURE_SIZE * hidden);
     debug_assert_eq!(b0.len(), hidden);
-    debug_assert_eq!(w1.len(), hidden * w::NEW_LABEL_SIZE);
+    debug_assert_eq!(w1.len(), hidden * N);
     // HIDDEN_32 (32) is the largest hidden layer among the 3 bsizes.
     let mut hbuf = [0f32; 32];
     for (node, hbuf_node) in hbuf.iter_mut().enumerate().take(hidden) {
@@ -51,13 +62,22 @@ fn nn_predict_1layer(
         }
         *hbuf_node = val.max(0.0); // ReLU
     }
-    let mut out = [0f32; w::NEW_LABEL_SIZE];
+    let mut out = [0f32; N];
     for (node, out_node) in out.iter_mut().enumerate() {
         let mut val = b1[node];
         for (i, &hv) in hbuf.iter().enumerate().take(hidden) {
             val += w1[node * hidden + i] * hv;
         }
         *out_node = val;
+    }
+    // `av1_nn_output_prec_reduce` (ml.c:19): `(int)(output[i] * prec + 0.5)`
+    // then `* inv_prec`. The C `+ 0.5` is a DOUBLE literal, so the f32
+    // product promotes to f64 before the add and the `(int)` truncation;
+    // `inv_prec = (float)(1.0 / 512)` is the exact power-of-two 1/512.
+    const PREC: f32 = (1 << 9) as f32;
+    const INV_PREC: f32 = 1.0 / PREC;
+    for v in out.iter_mut() {
+        *v = ((f64::from(*v * PREC) + 0.5) as i32) as f32 * INV_PREC;
     }
     out
 }
@@ -93,6 +113,16 @@ struct Tables {
     b0: &'static [f32],
     w1: &'static [f32],
     b1: &'static [f32; w::NEW_LABEL_SIZE],
+    /// The `ml_model_index == 0` ("old", `LABEL_SIZE=4`) weight set used at
+    /// level >= 3 (speed >= 3). Same hidden size as the hd_ set per the
+    /// `av1_4_partition_nnconfig_*` declarations.
+    old_w0: &'static [f32],
+    old_b0: &'static [f32],
+    old_w1: &'static [f32],
+    old_b1: &'static [f32; w::LABEL_SIZE],
+    /// `thresh = max_score - {500, 500, 200}` for 16x16/32x32/64x64
+    /// (partition_strategy.c:1487-1492).
+    old_thresh_sub: i32,
 }
 
 fn tables_for(bsize: usize) -> Option<Tables> {
@@ -106,6 +136,11 @@ fn tables_for(bsize: usize) -> Option<Tables> {
             b0: &w::B0_16,
             w1: &w::W1_16,
             b1: &w::B1_16,
+            old_w0: &w::OLD_W0_16,
+            old_b0: &w::OLD_B0_16,
+            old_w1: &w::OLD_W1_16,
+            old_b1: &w::OLD_B1_16,
+            old_thresh_sub: 500,
         }),
         9 => Some(Tables {
             bsize_idx: 2,
@@ -116,6 +151,11 @@ fn tables_for(bsize: usize) -> Option<Tables> {
             b0: &w::B0_32,
             w1: &w::W1_32,
             b1: &w::B1_32,
+            old_w0: &w::OLD_W0_32,
+            old_b0: &w::OLD_B0_32,
+            old_w1: &w::OLD_W1_32,
+            old_b1: &w::OLD_B1_32,
+            old_thresh_sub: 500,
         }),
         12 => Some(Tables {
             bsize_idx: 1,
@@ -126,6 +166,11 @@ fn tables_for(bsize: usize) -> Option<Tables> {
             b0: &w::B0_64,
             w1: &w::W1_64,
             b1: &w::B1_64,
+            old_w0: &w::OLD_W0_64,
+            old_b0: &w::OLD_B0_64,
+            old_w1: &w::OLD_W1_64,
+            old_b1: &w::OLD_B1_64,
+            old_thresh_sub: 200,
         }),
         _ => None,
     }
@@ -222,24 +267,55 @@ pub fn predict_4partition_prune(
     }
     debug_assert_eq!(fi, w::FEATURE_SIZE);
 
-    // `if (ml_model_index)` -- always true at speed 0 (module docs).
-    #[allow(clippy::needless_range_loop)] // 3 parallel arrays, indices mirror the C loop
-    for i in 0..w::FEATURE_SIZE {
-        features[i] = (features[i] - t.mean[i]) / t.std[i];
+    // `ml_model_index = (ml_4_partition_search_level_index < 3)`
+    // (partition_strategy.c:1359): the level is 0 at speed 0, min(speed, 3)
+    // above (speed_features.c:210/237/271), so level 3 == speed >= 3.
+    let ml_model_index = level_index < 3;
+
+    // `if (ml_model_index)` — the feature normalize is SKIPPED for the old
+    // (level >= 3) model (partition_strategy.c:1459-1463).
+    if ml_model_index {
+        #[allow(clippy::needless_range_loop)] // 3 parallel arrays, indices mirror the C loop
+        for i in 0..w::FEATURE_SIZE {
+            features[i] = (features[i] - t.mean[i]) / t.std[i];
+        }
     }
 
-    let score = nn_predict_1layer(&features, t.w0, t.b0, t.hidden, t.w1, t.b1);
+    if !ml_model_index {
+        // `ml_model_index == 0` (partition_strategy.c:1472-1497): the old
+        // LABEL_SIZE=4 model on UNnormalized features; `int_score[i] =
+        // (int)(100 * score[i])`; `thresh = max_score - {500,500,200}`;
+        // `av1_zero_array(part4_allowed)` then set from the label bits
+        // (bit0 → HORZ4, bit1 → VERT4) of every label reaching thresh —
+        // an OVERWRITE of the incoming flags, exactly like the C.
+        let score =
+            nn_predict_1layer::<{ w::LABEL_SIZE }>(&features, t.old_w0, t.old_b0, t.hidden, t.old_w1, t.old_b1);
+        let mut int_score = [0i32; w::LABEL_SIZE];
+        let mut max_score = -1000i32;
+        for (s, is) in score.iter().zip(int_score.iter_mut()) {
+            *is = (100.0 * s) as i32;
+            max_score = max_score.max(*is);
+        }
+        let thresh = max_score - t.old_thresh_sub;
+        let mut horz4 = false;
+        let mut vert4 = false;
+        for (i, &is) in int_score.iter().enumerate() {
+            if is >= thresh {
+                // C: `(i >> 0) & 1` -> HORZ4, `(i >> 1) & 1` -> VERT4.
+                if i & 1 == 1 {
+                    horz4 = true;
+                }
+                if (i >> 1) & 1 == 1 {
+                    vert4 = true;
+                }
+            }
+        }
+        return (horz4, vert4);
+    }
+
+    let score = nn_predict_1layer::<{ w::NEW_LABEL_SIZE }>(&features, t.w0, t.b0, t.hidden, t.w1, t.b1);
     let probs = softmax3(score);
 
-    // `ml_4_partition_search_level_index` (part_sf): 0 at speed 0, 1 at
-    // speed >= 1 (SpeedFeatures::set_allintra, speed_features.c:210). The
-    // threshold-table path below is how C decides at levels 0/1/2; at level 3
-    // (speed >= 3) C switches to a different NN model with no threshold table
-    // (partition_strategy.c:1359) — unported (#10), so leave the 4-way allowed
-    // flags untouched rather than mis-index the table.
-    if level_index >= 3 {
-        return (horz4_in, vert4_in);
-    }
     let thresh_idx = (level_index as usize * 3 + res_idx) * 5 + t.bsize_idx;
     let search_thresh = w::SEARCH_THRESH[thresh_idx];
     let not_search_thresh = w::NOT_SEARCH_THRESH[thresh_idx];

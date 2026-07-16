@@ -23,7 +23,13 @@ use crate::ab_nn_weights as w;
 
 /// `av1_nn_predict_c` (ml.c) specialized to this NN's fixed shape: 1 ReLU
 /// hidden layer (uniform 64 nodes across all 4 bsizes), then a linear
-/// (no-activation) output layer of 16 nodes.
+/// (no-activation) output layer of 16 nodes, then
+/// `av1_nn_output_prec_reduce` — the `av1_ml_prune_ab_partition` call site
+/// passes `reduce_prec = 1` (`av1_nn_predict(features, nn_config, 1,
+/// score)`, partition_strategy.c:1296), so the reduce is unconditional
+/// here (was missing — same latent-fidelity gap the KB-7 4-way fix closed
+/// in part4_prune.rs; the `(int)(100 * score)` decision reads the REDUCED
+/// scores in C).
 fn nn_predict_1layer(
     input: &[f32; w::FEATURE_SIZE],
     w0: &[f32; w::FEATURE_SIZE * w::HIDDEN],
@@ -46,6 +52,15 @@ fn nn_predict_1layer(
             val += w1[node * w::HIDDEN + i] * hv;
         }
         *out_node = val;
+    }
+    // `av1_nn_output_prec_reduce` (ml.c:19): `(int)(output[i] * prec + 0.5)`
+    // then `* inv_prec` — the C `+ 0.5` is a DOUBLE literal (f32 product
+    // promotes to f64 before the add + `(int)` truncation); `inv_prec` is
+    // the exact power-of-two 1/512.
+    const PREC: f32 = (1 << 9) as f32;
+    const INV_PREC: f32 = 1.0 / PREC;
+    for v in out.iter_mut() {
+        *v = ((f64::from(*v * PREC) + 0.5) as i32) as f32 * INV_PREC;
     }
     out
 }
