@@ -8001,6 +8001,8 @@ extern "C" {
         readback: *mut i32,
         cdf_out: *mut u16,
     ) -> i64;
+    /// EXPORTED `aom_count_primitive_refsubexpfin` (aom_dsp/binary_codes_writer.c).
+    fn aom_count_primitive_refsubexpfin(n: u16, k: u16, r: u16, v: u16) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_lr_corners_in_sb(
         w: i32,
@@ -11649,4 +11651,11 @@ pub fn ref_encode_av1_kf_film_grain(
     assert!(n > 0, "shim_encode_av1_kf_film_grain failed ({n})");
     out.truncate(n as usize);
     out
+}
+
+/// The REAL exported `aom_count_primitive_refsubexpfin`
+/// (aom_dsp/binary_codes_writer.c): coded bit count of
+/// `aom_write_primitive_refsubexpfin(n, k, ref, v)`.
+pub fn ref_count_primitive_refsubexpfin(n: u16, k: u16, r: u16, v: u16) -> i32 {
+    unsafe { aom_count_primitive_refsubexpfin(n, k, r, v) }
 }

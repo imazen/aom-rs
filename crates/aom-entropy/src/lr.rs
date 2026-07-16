@@ -7,8 +7,9 @@
 //!
 //! Everything here is decode-side; the values feed `aom-restore`'s kernels.
 
-use crate::cdf::{read_bit, read_literal, read_symbol};
+use crate::cdf::{read_bit, read_literal, read_symbol, update_cdf, write_literal};
 use crate::dec::OdEcDec;
+use crate::enc::OdEcEnc;
 
 /// `RESTORE_*` (av1/common/enums.h `RestorationType`).
 pub const RESTORE_NONE: u8 = 0;
@@ -448,4 +449,341 @@ pub fn lr_corners_in_sb(
     let rcol1 = (((mi_col + mi_size_wide) * mi_to_num_x + rnd_x) / denom_x).min(horz_units);
     let rrow1 = (((mi_row + mi_size_high) * mi_to_num_y + rnd_y) / denom_y).min(vert_units);
     (rcol0 < rcol1 && rrow0 < rrow1).then_some((rcol0, rcol1, rrow0, rrow1))
+}
+
+// ---------------------------------------------------------------------------
+// Write side (encoder): `aom_dsp/binary_codes_writer.c` primitives, the
+// per-unit writers of `av1/encoder/bitstream.c` (`write_wiener_filter` /
+// `write_sgrproj_filter` / `loop_restoration_write_sb_coeffs`), and the bit
+// counters the encoder's restoration search costs parameters with
+// (`aom_count_primitive_refsubexpfin`, used by pickrst.c's
+// `count_wiener_bits` / `count_sgrproj_bits`).
+// ---------------------------------------------------------------------------
+
+/// `recenter_nonneg` (aom_dsp/recenter.h): forward recentering of `v` around
+/// reference `r` (both nonnegative).
+fn recenter_nonneg(r: u16, v: u16) -> u16 {
+    if v > (r << 1) {
+        v
+    } else if v >= r {
+        (v - r) << 1
+    } else {
+        ((r - v) << 1) - 1
+    }
+}
+
+/// `recenter_finite_nonneg` (aom_dsp/recenter.h): forward recentering of a
+/// value `v` in `[0, n-1]` around a reference `r` also in `[0, n-1]` —
+/// inverse of [`inv_recenter_finite_nonneg`].
+pub fn recenter_finite_nonneg(n: u16, r: u16, v: u16) -> u16 {
+    if (r << 1) <= n {
+        recenter_nonneg(r, v)
+    } else {
+        recenter_nonneg(n - 1 - r, n - 1 - v)
+    }
+}
+
+/// `write_primitive_quniform` (aom_dsp/binary_codes_writer.c): quasi-uniform
+/// code for `v` in `[0, n-1]`.
+pub fn write_primitive_quniform(enc: &mut OdEcEnc, n: u16, v: u16) {
+    if n <= 1 {
+        return;
+    }
+    let l = (15 - n.leading_zeros() as i32) + 1; // get_msb(n) + 1
+    let m = (1i32 << l) - n as i32;
+    if (v as i32) < m {
+        write_literal(enc, v as i32, (l - 1) as u32);
+    } else {
+        write_literal(enc, m + ((v as i32 - m) >> 1), (l - 1) as u32);
+        write_literal(enc, (v as i32 - m) & 1, 1);
+    }
+}
+
+/// `count_primitive_quniform` (aom_dsp/binary_codes_writer.c).
+pub fn count_primitive_quniform(n: u16, v: u16) -> i32 {
+    if n <= 1 {
+        return 0;
+    }
+    let l = (15 - n.leading_zeros() as i32) + 1;
+    let m = (1i32 << l) - n as i32;
+    if (v as i32) < m { l - 1 } else { l }
+}
+
+/// `write_primitive_subexpfin` (aom_dsp/binary_codes_writer.c): finite
+/// subexponential code for `v` in `[0, n-1]` with parameter `k`.
+pub fn write_primitive_subexpfin(enc: &mut OdEcEnc, n: u16, k: u16, v: u16) {
+    let mut i: i32 = 0;
+    let mut mk: i32 = 0;
+    loop {
+        let b = if i != 0 { k as i32 + i - 1 } else { k as i32 };
+        let a = 1i32 << b;
+        if (n as i32) <= mk + 3 * a {
+            write_primitive_quniform(enc, (n as i32 - mk) as u16, (v as i32 - mk) as u16);
+            return;
+        }
+        let t = (v as i32) >= mk + a;
+        write_literal(enc, t as i32, 1);
+        if t {
+            i += 1;
+            mk += a;
+        } else {
+            write_literal(enc, v as i32 - mk, b as u32);
+            return;
+        }
+    }
+}
+
+/// `count_primitive_subexpfin` (aom_dsp/binary_codes_writer.c).
+pub fn count_primitive_subexpfin(n: u16, k: u16, v: u16) -> i32 {
+    let mut count: i32 = 0;
+    let mut i: i32 = 0;
+    let mut mk: i32 = 0;
+    loop {
+        let b = if i != 0 { k as i32 + i - 1 } else { k as i32 };
+        let a = 1i32 << b;
+        if (n as i32) <= mk + 3 * a {
+            count += count_primitive_quniform((n as i32 - mk) as u16, (v as i32 - mk) as u16);
+            return count;
+        }
+        count += 1;
+        if (v as i32) >= mk + a {
+            i += 1;
+            mk += a;
+        } else {
+            count += b;
+            return count;
+        }
+    }
+}
+
+/// `aom_write_primitive_refsubexpfin` (aom_dsp/binary_codes_writer.c).
+pub fn write_primitive_refsubexpfin(enc: &mut OdEcEnc, n: u16, k: u16, r: u16, v: u16) {
+    write_primitive_subexpfin(enc, n, k, recenter_finite_nonneg(n, r, v));
+}
+
+/// `aom_count_primitive_refsubexpfin` (aom_dsp/binary_codes_writer.c): the
+/// coded bit count of [`write_primitive_refsubexpfin`].
+pub fn count_primitive_refsubexpfin(n: u16, k: u16, r: u16, v: u16) -> i32 {
+    count_primitive_subexpfin(n, k, recenter_finite_nonneg(n, r, v))
+}
+
+/// `write_wiener_filter` (av1/encoder/bitstream.c): the three coded taps per
+/// direction (tap 0 skipped for the 5-tap chroma window), delta-coded against
+/// `ref`, which is updated in place.
+pub fn write_wiener_filter(
+    enc: &mut OdEcEnc,
+    wiener_win: usize,
+    w: &WienerInfoLr,
+    r: &mut WienerInfoLr,
+) {
+    for dir in 0..2 {
+        let (f, rf): (&[i16; 8], &[i16; 8]) = if dir == 0 {
+            (&w.vfilter, &r.vfilter)
+        } else {
+            (&w.hfilter, &r.hfilter)
+        };
+        if wiener_win == WIENER_WIN {
+            write_primitive_refsubexpfin(
+                enc,
+                (WIENER_FILT_TAP0_MAXV - WIENER_FILT_TAP0_MINV + 1) as u16,
+                WIENER_FILT_TAP0_SUBEXP_K,
+                (rf[0] as i32 - WIENER_FILT_TAP0_MINV) as u16,
+                (f[0] as i32 - WIENER_FILT_TAP0_MINV) as u16,
+            );
+        } else {
+            debug_assert!(f[0] == 0 && f[WIENER_WIN - 1] == 0);
+        }
+        write_primitive_refsubexpfin(
+            enc,
+            (WIENER_FILT_TAP1_MAXV - WIENER_FILT_TAP1_MINV + 1) as u16,
+            WIENER_FILT_TAP1_SUBEXP_K,
+            (rf[1] as i32 - WIENER_FILT_TAP1_MINV) as u16,
+            (f[1] as i32 - WIENER_FILT_TAP1_MINV) as u16,
+        );
+        write_primitive_refsubexpfin(
+            enc,
+            (WIENER_FILT_TAP2_MAXV - WIENER_FILT_TAP2_MINV + 1) as u16,
+            WIENER_FILT_TAP2_SUBEXP_K,
+            (rf[2] as i32 - WIENER_FILT_TAP2_MINV) as u16,
+            (f[2] as i32 - WIENER_FILT_TAP2_MINV) as u16,
+        );
+    }
+    *r = *w;
+}
+
+/// `count_wiener_bits` (av1/encoder/pickrst.c): the syntax bit count
+/// [`write_wiener_filter`] would code for `w` against reference `r`
+/// (reference NOT updated).
+pub fn count_wiener_bits(wiener_win: usize, w: &WienerInfoLr, r: &WienerInfoLr) -> i32 {
+    let mut bits = 0;
+    for dir in 0..2 {
+        let (f, rf): (&[i16; 8], &[i16; 8]) = if dir == 0 {
+            (&w.vfilter, &r.vfilter)
+        } else {
+            (&w.hfilter, &r.hfilter)
+        };
+        if wiener_win == WIENER_WIN {
+            bits += count_primitive_refsubexpfin(
+                (WIENER_FILT_TAP0_MAXV - WIENER_FILT_TAP0_MINV + 1) as u16,
+                WIENER_FILT_TAP0_SUBEXP_K,
+                (rf[0] as i32 - WIENER_FILT_TAP0_MINV) as u16,
+                (f[0] as i32 - WIENER_FILT_TAP0_MINV) as u16,
+            );
+        }
+        bits += count_primitive_refsubexpfin(
+            (WIENER_FILT_TAP1_MAXV - WIENER_FILT_TAP1_MINV + 1) as u16,
+            WIENER_FILT_TAP1_SUBEXP_K,
+            (rf[1] as i32 - WIENER_FILT_TAP1_MINV) as u16,
+            (f[1] as i32 - WIENER_FILT_TAP1_MINV) as u16,
+        );
+        bits += count_primitive_refsubexpfin(
+            (WIENER_FILT_TAP2_MAXV - WIENER_FILT_TAP2_MINV + 1) as u16,
+            WIENER_FILT_TAP2_SUBEXP_K,
+            (rf[2] as i32 - WIENER_FILT_TAP2_MINV) as u16,
+            (f[2] as i32 - WIENER_FILT_TAP2_MINV) as u16,
+        );
+    }
+    bits
+}
+
+/// `write_sgrproj_filter` (av1/encoder/bitstream.c): the 4-bit `ep` then the
+/// projection weights coded per the parameter set's radii, delta-coded
+/// against `ref`, which is updated in place.
+pub fn write_sgrproj_filter(enc: &mut OdEcEnc, s: &SgrprojInfoLr, r: &mut SgrprojInfoLr) {
+    write_literal(enc, s.ep, SGRPROJ_PARAMS_BITS);
+    let rad = SGR_PARAMS_R[s.ep as usize];
+    let n0 = (SGRPROJ_PRJ_MAX0 - SGRPROJ_PRJ_MIN0 + 1) as u16;
+    let n1 = (SGRPROJ_PRJ_MAX1 - SGRPROJ_PRJ_MIN1 + 1) as u16;
+    if rad[0] == 0 {
+        debug_assert_eq!(s.xqd[0], 0);
+        write_primitive_refsubexpfin(
+            enc,
+            n1,
+            SGRPROJ_PRJ_SUBEXP_K,
+            (r.xqd[1] - SGRPROJ_PRJ_MIN1) as u16,
+            (s.xqd[1] - SGRPROJ_PRJ_MIN1) as u16,
+        );
+    } else if rad[1] == 0 {
+        write_primitive_refsubexpfin(
+            enc,
+            n0,
+            SGRPROJ_PRJ_SUBEXP_K,
+            (r.xqd[0] - SGRPROJ_PRJ_MIN0) as u16,
+            (s.xqd[0] - SGRPROJ_PRJ_MIN0) as u16,
+        );
+    } else {
+        write_primitive_refsubexpfin(
+            enc,
+            n0,
+            SGRPROJ_PRJ_SUBEXP_K,
+            (r.xqd[0] - SGRPROJ_PRJ_MIN0) as u16,
+            (s.xqd[0] - SGRPROJ_PRJ_MIN0) as u16,
+        );
+        write_primitive_refsubexpfin(
+            enc,
+            n1,
+            SGRPROJ_PRJ_SUBEXP_K,
+            (r.xqd[1] - SGRPROJ_PRJ_MIN1) as u16,
+            (s.xqd[1] - SGRPROJ_PRJ_MIN1) as u16,
+        );
+    }
+    *r = *s;
+}
+
+/// `count_sgrproj_bits` (av1/encoder/pickrst.c): the syntax bit count
+/// [`write_sgrproj_filter`] would code for `s` against reference `r`
+/// (reference NOT updated). Includes the `SGRPROJ_PARAMS_BITS` literal.
+pub fn count_sgrproj_bits(s: &SgrprojInfoLr, r: &SgrprojInfoLr) -> i32 {
+    let mut bits = SGRPROJ_PARAMS_BITS as i32;
+    let rad = SGR_PARAMS_R[s.ep as usize];
+    if rad[0] > 0 {
+        bits += count_primitive_refsubexpfin(
+            (SGRPROJ_PRJ_MAX0 - SGRPROJ_PRJ_MIN0 + 1) as u16,
+            SGRPROJ_PRJ_SUBEXP_K,
+            (r.xqd[0] - SGRPROJ_PRJ_MIN0) as u16,
+            (s.xqd[0] - SGRPROJ_PRJ_MIN0) as u16,
+        );
+    }
+    if rad[1] > 0 {
+        bits += count_primitive_refsubexpfin(
+            (SGRPROJ_PRJ_MAX1 - SGRPROJ_PRJ_MIN1 + 1) as u16,
+            SGRPROJ_PRJ_SUBEXP_K,
+            (r.xqd[1] - SGRPROJ_PRJ_MIN1) as u16,
+            (s.xqd[1] - SGRPROJ_PRJ_MIN1) as u16,
+        );
+    }
+    bits
+}
+
+/// `loop_restoration_write_sb_coeffs` (av1/encoder/bitstream.c): one
+/// restoration unit's parameters, dispatched on the plane's
+/// `frame_restoration_type`. The mirror of [`read_lr_unit`]; `cdf` is the
+/// matching per-tile CDF instance, adapted in place like `aom_write_symbol`
+/// iff `allow_update_cdf` (the writer's `w->allow_update_cdf` gate).
+#[allow(clippy::too_many_arguments)]
+pub fn write_lr_unit(
+    enc: &mut OdEcEnc,
+    u: &LrUnitInfo,
+    frame_restoration_type: u8,
+    plane: usize,
+    refs: &mut LrRefState,
+    switchable_cdf: &mut [u16],
+    wiener_cdf: &mut [u16],
+    sgrproj_cdf: &mut [u16],
+    allow_update_cdf: bool,
+) {
+    debug_assert_ne!(frame_restoration_type, RESTORE_NONE);
+    let wiener_win = if plane > 0 {
+        WIENER_WIN_CHROMA
+    } else {
+        WIENER_WIN
+    };
+    let mut sym = |enc: &mut OdEcEnc, symb: i32, cdf: &mut [u16], nsymbs: usize| {
+        enc.encode_cdf_q15(symb, &cdf[..nsymbs], nsymbs as i32);
+        if allow_update_cdf {
+            update_cdf(cdf, symb, nsymbs);
+        }
+    };
+    match frame_restoration_type {
+        RESTORE_SWITCHABLE => {
+            sym(
+                enc,
+                u.restoration_type as i32,
+                switchable_cdf,
+                RESTORE_SWITCHABLE_TYPES,
+            );
+            match u.restoration_type {
+                RESTORE_WIENER => {
+                    write_wiener_filter(enc, wiener_win, &u.wiener, &mut refs.wiener[plane]);
+                }
+                RESTORE_SGRPROJ => {
+                    write_sgrproj_filter(enc, &u.sgrproj, &mut refs.sgrproj[plane]);
+                }
+                _ => debug_assert_eq!(u.restoration_type, RESTORE_NONE),
+            }
+        }
+        RESTORE_WIENER => {
+            sym(
+                enc,
+                (u.restoration_type == RESTORE_WIENER) as i32,
+                wiener_cdf,
+                2,
+            );
+            if u.restoration_type == RESTORE_WIENER {
+                write_wiener_filter(enc, wiener_win, &u.wiener, &mut refs.wiener[plane]);
+            }
+        }
+        _ => {
+            debug_assert_eq!(frame_restoration_type, RESTORE_SGRPROJ);
+            sym(
+                enc,
+                (u.restoration_type == RESTORE_SGRPROJ) as i32,
+                sgrproj_cdf,
+                2,
+            );
+            if u.restoration_type == RESTORE_SGRPROJ {
+                write_sgrproj_filter(enc, &u.sgrproj, &mut refs.sgrproj[plane]);
+            }
+        }
+    }
 }
