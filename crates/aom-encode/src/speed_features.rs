@@ -195,6 +195,16 @@ pub struct SpeedFeatures {
     /// `tx_sf.use_chroma_trellis_rd_mult` — allintra base 1
     /// (speed_features.c:370). Chroma trellis rd-mult table select.
     pub use_chroma_trellis_rd_mult: bool,
+    /// `tx_sf.use_rd_based_breakout_for_intra_tx_search` — default 0
+    /// (init_tx_sf:2472); allintra speed>=3 -> 1 (speed_features.c:460).
+    /// Tightens the intra tx-size depth loop's early-exit threshold to
+    /// `AOMMIN(ref_best_rd, best_rd)` (tx_search.c:3030) and switches the
+    /// winner-mode re-eval's ref_best_rd from INT64_MAX to the running best
+    /// (intra_mode_search.c:1201). DELIBERATELY left false here at speed 3
+    /// (empirically a byte no-op on the speed-3 gate grid with the current
+    /// single-pass search); the KB-8 chunk-2d-iv speed-4 flip sets it and
+    /// re-verifies the speed-3 gate.
+    pub use_rd_based_breakout_for_intra_tx_search: bool,
 
     // ---- tx_sf.tx_type_search --------------------------------------------
     /// `tx_sf.tx_type_search.ml_tx_split_thresh` — default 8500
@@ -316,6 +326,7 @@ impl SpeedFeatures {
             intra_tx_size_search_init_depth_sqr: 1, // allintra base (:367)
             model_based_prune_tx_search_level: 1, // allintra base (:368)
             use_chroma_trellis_rd_mult: true, // allintra base (:370)
+            use_rd_based_breakout_for_intra_tx_search: false, // init_tx_sf:2472 (see field doc — speed>=3 flip deferred to KB-8 2d-iv)
             // tx_sf.tx_type_search
             tx_ml_tx_split_thresh: 8500, // init_tx_sf:2458
             prune_2d_txfm_mode: TX_TYPE_PRUNE_1, // init_tx_sf:2457
@@ -588,6 +599,8 @@ impl SpeedFeatures {
             // Non-screen textured envelope; screen-content would thread the real
             // cpi->use_screen_content_tools here.
             use_screen_content_tools: false,
+            use_rd_based_breakout_for_intra_tx_search: self
+                .use_rd_based_breakout_for_intra_tx_search,
         }
     }
 }

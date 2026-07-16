@@ -426,6 +426,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 speed: 0,
                 mb_to_right_edge: 1 << 12,
                 mb_to_bottom_edge: 1 << 12,
+                winner_mode: None,
             };
             let mut uv_env = UvRdEnv {
                 sb_size: 12,

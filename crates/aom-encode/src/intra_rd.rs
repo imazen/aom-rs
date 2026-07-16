@@ -812,6 +812,80 @@ pub struct IntraSbySearchCfg<'a> {
     /// blocks, this port's txb-walk scope).
     pub mb_to_right_edge: i32,
     pub mb_to_bottom_edge: i32,
+    /// The winner-mode two-pass bundle (KB-8): `None` = single-pass with
+    /// `pol` + `USE_FULL_RD` (speed 0..=3, byte-identical to the pre-two-pass
+    /// search); `Some` = MODE_EVAL first pass -> top-N winner stats ->
+    /// WINNER_MODE_EVAL re-eval (speed>=4 all-intra).
+    pub winner_mode: Option<&'a WinnerModeCfg<'a>>,
+}
+
+/// The winner-mode two-pass configuration (KB-8, speed>=4 all-intra): the
+/// per-stage policy/method bundle `set_mode_eval_params` (rdopt_utils.h:546)
+/// derives. `None` on [`IntraSbySearchCfg::winner_mode`] = single-pass
+/// (speed 0..=3 — byte-identical to the pre-two-pass search).
+pub struct WinnerModeCfg<'a> {
+    /// The MODE_EVAL first-pass tx policy (`use_default_intra_tx_type=1`,
+    /// MODE_EVAL coeff-opt/tx-domain columns) — used for the whole candidate
+    /// loop AND the post-loop filter-intra search (C keeps MODE_EVAL params
+    /// through both, intra_mode_search.c:1515..1685).
+    pub mode_eval_pol: &'a TxTypeSearchPolicy,
+    /// The WINNER_MODE_EVAL second-pass tx policy (full tx-type set,
+    /// UINT_MAX coeff-opt columns ⇒ trellis always).
+    pub winner_pol: &'a TxTypeSearchPolicy,
+    /// First-pass tx-size method: `tx_size_search_methods[tx_size_search_level]
+    /// [MODE_EVAL]` = `USE_LARGESTALL` at speed 4 (level 0, enable gate on).
+    pub mode_eval_tx_size_method: usize,
+    /// Second-pass method: `[WINNER_MODE_EVAL]` = `USE_FULL_RD` at speed 4.
+    pub winner_tx_size_method: usize,
+    /// `winner_mode_count_allowed[multi_winner_mode_type]` (rdopt_utils.h:236):
+    /// 3 for MULTI_WINNER_MODE_DEFAULT (speed 4), 2 for FAST (speed 5).
+    pub max_winner_count: usize,
+}
+
+/// One stored winner (`WinnerModeStats`, block.h): the mbmi fields the
+/// second pass restores before re-evaluating. `rd` is the FIRST-pass
+/// (ALLINTRA-variance-factored) rd used for ranking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WinnerModeEntry {
+    pub mode: usize,
+    pub angle_delta: i32,
+    pub use_filter_intra: bool,
+    pub filter_intra_mode: usize,
+    pub rd: i64,
+}
+
+/// `store_winner_mode_stats` (rdopt_utils.h:679), intra-frame scope (the
+/// inter rate bookkeeping and palette color-map copy are out of scope; the
+/// `multi_winner_mode_type == OFF` early return is modelled by the caller
+/// only invoking this when the two-pass is configured). Insertion sort by
+/// ascending `rd` with C's exact semantics: the insert position is the FIRST
+/// index whose stored rd is STRICTLY greater (ties keep earlier entries
+/// ahead); a full list whose entries are all <= this_rd rejects the
+/// candidate; insertion shifts the tail and drops the overflow.
+pub fn store_winner_mode_stats(
+    list: &mut Vec<WinnerModeEntry>,
+    max_count: usize,
+    entry: WinnerModeEntry,
+) {
+    if entry.rd == i64::MAX {
+        return;
+    }
+    debug_assert!(list.len() <= max_count);
+    let mut mode_idx = 0usize;
+    if !list.is_empty() {
+        while mode_idx < list.len() {
+            if list[mode_idx].rd > entry.rd {
+                break;
+            }
+            mode_idx += 1;
+        }
+        if mode_idx == max_count {
+            // No stored mode has higher rd cost than this_rd.
+            return;
+        }
+    }
+    list.insert(mode_idx, entry);
+    list.truncate(max_count);
 }
 
 /// The winning candidate of one [`rd_pick_intra_sby_mode_y`] search — the
@@ -899,6 +973,21 @@ pub fn rd_pick_intra_sby_mode_y(
     let (above_ctx, left_ctx) = get_y_mode_ctx(cfg.above_mode, cfg.left_mode);
     let bmode_costs = &cfg.mode_costs.y_mode_costs[above_ctx][left_ctx];
 
+    // Per-pass eval params (set_mode_eval_params, rdopt_utils.h:546): the
+    // candidate loop + filter-intra search run under MODE_EVAL when the
+    // winner-mode two-pass is configured, else the caller's (DEFAULT_EVAL)
+    // policy. `tx_mode_search_type = select_tx_mode(cm, method)` couples the
+    // tx-size-cost gating to the stage's method: USE_LARGESTALL ⇒
+    // TX_MODE_LARGEST ⇒ NOT select (tx_size_cost = 0 during the first pass).
+    let select_default = env.tx_mode_is_select;
+    let (pass_pol, pass_method) = match cfg.winner_mode {
+        Some(wm) => (wm.mode_eval_pol, wm.mode_eval_tx_size_method),
+        None => (cfg.pol, crate::tx_search::USE_FULL_RD),
+    };
+    env.tx_mode_is_select = select_default && pass_method != crate::tx_search::USE_LARGESTALL;
+    // zero_winner_mode_stats + x->winner_mode_count = 0 (:1520-1521).
+    let mut winner_stats: Vec<WinnerModeEntry> = Vec::new();
+
     let mut best_rd = best_rd_in;
     let mut best: Option<IntraSbyBest> = None;
     let mut best_model_rd = i64::MAX;
@@ -957,11 +1046,11 @@ pub fn rd_pick_intra_sby_mode_y(
             env,
             recon,
             best_rd,
-            cfg.pol,
+            pass_pol,
             cfg.source_variance,
             cfg.enable_tx64,
             cfg.enable_rect_tx,
-            crate::tx_search::USE_FULL_RD, // single-pass DEFAULT_EVAL (speed 0..=3); KB-8 chunk 2d threads the stage method
+            pass_method,
         ) else {
             continue; // this_rate_tokenonly == INT_MAX
         };
@@ -1023,7 +1112,21 @@ pub fn rd_pick_intra_sby_mode_y(
 
         intra_modes_rd_cost[mode][(luma_delta_angle + MAX_ANGLE_DELTA + 1) as usize] = this_rd;
 
-        // store_winner_mode_stats: hard no-op at speed 0 (MULTI_WINNER_MODE_OFF).
+        // store_winner_mode_stats (intra_mode_search.c:1646): hard no-op when
+        // the two-pass is off (MULTI_WINNER_MODE_OFF, speed 0..=3).
+        if let Some(wm) = cfg.winner_mode {
+            store_winner_mode_stats(
+                &mut winner_stats,
+                wm.max_winner_count,
+                WinnerModeEntry {
+                    mode,
+                    angle_delta: luma_delta_angle,
+                    use_filter_intra: false,
+                    filter_intra_mode: 0,
+                    rd: this_rd,
+                },
+            );
+        }
 
         if this_rd < best_rd {
             best_rd = this_rd;
@@ -1048,7 +1151,9 @@ pub fn rd_pick_intra_sby_mode_y(
 
     // Filter-intra search: LIVE at speed 0 (intra_mode_search.c:1672 —
     // beat_best_rd && av1_filter_intra_allowed_bsize; the seq-level flag and
-    // the mode-info cost gate share the enable_filter_intra tool flag).
+    // the mode-info cost gate share the enable_filter_intra tool flag). Runs
+    // under the SAME (first-pass) eval params; its candidates also feed the
+    // winner-stats list (intra_mode_search.c:293).
     if best.is_some() && filter_intra_allowed_bsize(cfg.enable_filter_intra, bsize) {
         let best_mode_so_far = best.as_ref().map_or(0, |b| b.mode);
         let mode_cost_dc = bmode_costs[0];
@@ -1061,9 +1166,121 @@ pub fn rd_pick_intra_sby_mode_y(
             best_mode_so_far,
             &mut best_rd,
             &mut best_model_rd,
+            pass_pol,
+            pass_method,
+            &mut winner_stats,
         ) {
             best = Some(fi);
         }
+    }
+
+    // Winner-mode processing (intra_mode_search.c:1689-1737): re-evaluate the
+    // stored top-N first-pass winners under WINNER_MODE_EVAL params (full
+    // tx-type set + full-RD tx-size sweep + always-on trellis). Gated on
+    // `beat_best_rd` (C returns INT64_MAX before this when nothing beat the
+    // caller's best_rd — `best.is_some()` here). `is_winner_mode_processing_
+    // enabled` is 1 unconditionally on this path at speed>=4 (fast_intra_tx_
+    // type_search=2, use_intra_{dct_only,default_tx_only}=0, bypass level 0).
+    // NOTE the C asymmetry: the re-eval rd (intra_block_yrd :1216) gets NO
+    // ALLINTRA variance factor, yet compares against the factored first-pass
+    // best_rd.
+    if let Some(wm) = cfg.winner_mode {
+        if best.is_some() {
+            // WINNER pass: USE_FULL_RD ⇒ TX_MODE_SELECT (non-lossless).
+            env.tx_mode_is_select =
+                select_default && wm.winner_tx_size_method != crate::tx_search::USE_LARGESTALL;
+            for entry in winner_stats.iter() {
+                // *mbmi = x->winner_mode_stats[mode_idx].mbmi (:1697).
+                env.mode = entry.mode;
+                env.angle_delta = entry.angle_delta;
+                env.use_filter_intra = entry.use_filter_intra;
+                env.filter_intra_mode = entry.filter_intra_mode;
+                // intra_block_yrd (:1188): ref_best_rd = use_rd_based_breakout
+                // _for_intra_tx_search ? *best_rd : INT64_MAX (:1201; the sf is
+                // ON at speed>=3, carried on the winner pol).
+                let ref_rd = if wm.winner_pol.use_rd_based_breakout_for_intra_tx_search {
+                    best_rd
+                } else {
+                    i64::MAX
+                };
+                let Some(choice) = pick_uniform_tx_size_type_yrd_intra(
+                    env,
+                    recon,
+                    ref_rd,
+                    wm.winner_pol,
+                    cfg.source_variance,
+                    cfg.enable_tx64,
+                    cfg.enable_rect_tx,
+                    wm.winner_tx_size_method,
+                ) else {
+                    continue; // rd_stats.rate == INT_MAX (:1204)
+                };
+                let mut this_rate_tokenonly = choice.stats.rate;
+                if !env.lossless && block_signals_txsize(bsize) {
+                    this_rate_tokenonly -= tx_size_cost(
+                        env.tx_size_costs,
+                        env.tx_mode_is_select,
+                        bsize,
+                        choice.best_tx_size,
+                        env.tx_size_ctx,
+                    );
+                }
+                let this_rate = choice.stats.rate
+                    + if entry.use_filter_intra {
+                        intra_mode_info_cost_y(
+                            cfg.mode_costs,
+                            bmode_costs[0],
+                            0, // DC_PRED
+                            bsize,
+                            0,
+                            true,
+                            entry.filter_intra_mode,
+                            false,
+                            cfg.try_palette,
+                            cfg.palette_bsize_ctx,
+                            cfg.palette_mode_ctx,
+                            cfg.enable_filter_intra,
+                            cfg.allow_intrabc,
+                        )
+                    } else {
+                        intra_mode_info_cost_y(
+                            cfg.mode_costs,
+                            bmode_costs[entry.mode],
+                            entry.mode,
+                            bsize,
+                            entry.angle_delta,
+                            false,
+                            0,
+                            false,
+                            cfg.try_palette,
+                            cfg.palette_bsize_ctx,
+                            cfg.palette_mode_ctx,
+                            cfg.enable_filter_intra,
+                            cfg.allow_intrabc,
+                        )
+                    };
+                let this_rd = rd::rdcost(env.rdmult, this_rate, choice.stats.dist);
+                if this_rd < best_rd {
+                    best_rd = this_rd;
+                    best = Some(IntraSbyBest {
+                        mode: entry.mode,
+                        angle_delta: entry.angle_delta,
+                        tx_size: choice.best_tx_size,
+                        winners: choice.winners,
+                        rate: this_rate,
+                        rate_tokenonly: this_rate_tokenonly,
+                        dist: choice.stats.dist,
+                        skippable: choice.stats.skip_txfm,
+                        best_rd: this_rd,
+                        use_filter_intra: entry.use_filter_intra,
+                        filter_intra_mode: entry.filter_intra_mode,
+                    });
+                }
+            }
+        }
+        // Leave env's tx-mode select gating as the caller provided it (the C
+        // resets to DEFAULT_EVAL right after this returns, rdopt.c:3659).
+        env.tx_mode_is_select = select_default;
     }
 
     IntraSbyOutcome {
@@ -1146,6 +1363,9 @@ pub fn rd_pick_filter_intra_sby_y(
     best_mode_so_far: usize,
     best_rd: &mut i64,
     best_model_rd: &mut i64,
+    pass_pol: &TxTypeSearchPolicy,
+    pass_method: usize,
+    winner_stats: &mut Vec<WinnerModeEntry>,
 ) -> Option<IntraSbyBest> {
     if cfg.gates.prune_filter_intra_level == 2 {
         return None;
@@ -1170,11 +1390,11 @@ pub fn rd_pick_filter_intra_sby_y(
             env,
             recon,
             *best_rd,
-            cfg.pol,
+            pass_pol,
             cfg.source_variance,
             cfg.enable_tx64,
             cfg.enable_rect_tx,
-            crate::tx_search::USE_FULL_RD, // filter-intra search; KB-8 chunk 2d threads the stage method
+            pass_method,
         ) else {
             continue; // rate == INT_MAX
         };
@@ -1223,7 +1443,22 @@ pub fn rd_pick_filter_intra_sby_y(
             );
             this_rd = apply_variance_factor(this_rd, factor);
         }
-        // store_winner_mode_stats: hard no-op at speed 0.
+        // store_winner_mode_stats (intra_mode_search.c:293): the filter-intra
+        // candidates feed the same winner list (no-op when two-pass is off —
+        // the caller passes max 0... gated on winner_mode instead).
+        if let Some(wm) = cfg.winner_mode {
+            store_winner_mode_stats(
+                winner_stats,
+                wm.max_winner_count,
+                WinnerModeEntry {
+                    mode: 0, // DC_PRED (mbmi->mode)
+                    angle_delta: env.angle_delta,
+                    use_filter_intra: true,
+                    filter_intra_mode: fi_mode,
+                    rd: this_rd,
+                },
+            );
+        }
         if this_rd < *best_rd {
             *best_rd = this_rd;
             selected = Some(IntraSbyBest {
@@ -1242,4 +1477,64 @@ pub fn rd_pick_filter_intra_sby_y(
         }
     }
     selected
+}
+
+#[cfg(test)]
+mod winner_stats_tests {
+    use super::*;
+
+    fn e(mode: usize, rd: i64) -> WinnerModeEntry {
+        WinnerModeEntry {
+            mode,
+            angle_delta: 0,
+            use_filter_intra: false,
+            filter_intra_mode: 0,
+            rd,
+        }
+    }
+    fn rds(list: &[WinnerModeEntry]) -> Vec<(usize, i64)> {
+        list.iter().map(|w| (w.mode, w.rd)).collect()
+    }
+
+    /// KB-8 chunk 2d-ii: `store_winner_mode_stats` reproduces the C insertion
+    /// semantics (rdopt_utils.h:679) — ascending-rd insertion at the first
+    /// STRICTLY-greater slot, INT64_MAX rejection, full-list rejection when no
+    /// stored rd exceeds the candidate, tail-drop on overflow, and tie-stable
+    /// ordering (equal rds keep the earlier entry ahead).
+    #[test]
+    fn store_winner_mode_stats_matches_c_semantics() {
+        let max = 3usize; // winner_mode_count_allowed[MULTI_WINNER_MODE_DEFAULT]
+        let mut l = Vec::new();
+        // INT64_MAX rejected outright.
+        store_winner_mode_stats(&mut l, max, e(9, i64::MAX));
+        assert!(l.is_empty());
+        // Fill ascending out of order: 50, 10, 30 -> sorted [10,30,50].
+        store_winner_mode_stats(&mut l, max, e(1, 50));
+        store_winner_mode_stats(&mut l, max, e(2, 10));
+        store_winner_mode_stats(&mut l, max, e(3, 30));
+        assert_eq!(rds(&l), [(2, 10), (3, 30), (1, 50)]);
+        // Worse than the full list's tail: rejected (C: mode_idx == max).
+        store_winner_mode_stats(&mut l, max, e(4, 60));
+        assert_eq!(rds(&l), [(2, 10), (3, 30), (1, 50)]);
+        // Equal to the tail: ALSO rejected (strictly-greater compare — the
+        // scan runs past the equal slot to mode_idx == max).
+        store_winner_mode_stats(&mut l, max, e(5, 50));
+        assert_eq!(rds(&l), [(2, 10), (3, 30), (1, 50)]);
+        // Mid insert evicts the tail.
+        store_winner_mode_stats(&mut l, max, e(6, 20));
+        assert_eq!(rds(&l), [(2, 10), (6, 20), (3, 30)]);
+        // Tie with a NON-tail entry: goes AFTER it (first strictly-greater
+        // slot), evicting the tail.
+        store_winner_mode_stats(&mut l, max, e(7, 20));
+        assert_eq!(rds(&l), [(2, 10), (6, 20), (7, 20)]);
+        // Best-so-far inserts at the head.
+        store_winner_mode_stats(&mut l, max, e(8, 5));
+        assert_eq!(rds(&l), [(8, 5), (2, 10), (6, 20)]);
+        // max_count = 1 degenerates to strict-best tracking.
+        let mut one = Vec::new();
+        store_winner_mode_stats(&mut one, 1, e(1, 100));
+        store_winner_mode_stats(&mut one, 1, e(2, 100)); // tie: rejected
+        store_winner_mode_stats(&mut one, 1, e(3, 99));
+        assert_eq!(rds(&one), [(3, 99)]);
+    }
 }

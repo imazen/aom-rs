@@ -611,6 +611,15 @@ pub struct TxTypeSearchPolicy {
     /// input, threaded alongside `use_default_intra_tx_type`. False on the
     /// non-screen textured envelope.
     pub use_screen_content_tools: bool,
+    /// sf `tx_sf.use_rd_based_breakout_for_intra_tx_search` — default 0
+    /// (init_tx_sf:2472), allintra speed>=3 -> 1 (speed_features.c:460). Two
+    /// consumers: (a) the tx-size depth loop's per-depth early-exit threshold
+    /// becomes `AOMMIN(ref_best_rd, best_rd)` (tx_search.c:3030); (b) the
+    /// winner-mode re-eval `intra_block_yrd` passes the running `*best_rd`
+    /// instead of INT64_MAX (intra_mode_search.c:1201). Left false by the
+    /// port's speed 0..=3 derivation (empirically a byte no-op on the speed-3
+    /// gate grid, but kept false until the KB-8 speed-4 flip re-verifies it).
+    pub use_rd_based_breakout_for_intra_tx_search: bool,
 }
 
 impl TxTypeSearchPolicy {
@@ -630,6 +639,7 @@ impl TxTypeSearchPolicy {
             intra_tx_size_init_depth_sqr: 1,
             use_default_intra_tx_type: false,
             use_screen_content_tools: false,
+            use_rd_based_breakout_for_intra_tx_search: false,
         }
     }
 
@@ -1681,8 +1691,15 @@ pub fn choose_tx_size_type_from_rd_intra(
             tx_size = SUB_TX_SIZE_MAP[tx_size];
             continue;
         }
-        // use_rd_based_breakout_for_intra_tx_search = false => ref_best_rd.
-        let (this_rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, ref_best_rd, pol);
+        // rd_thresh (tx_search.c:3030): with use_rd_based_breakout_for_intra_
+        // tx_search ON, tighten the per-depth early-exit to the running
+        // across-depth best; else the caller's ref_best_rd.
+        let rd_thresh = if pol.use_rd_based_breakout_for_intra_tx_search {
+            ref_best_rd.min(best_rd)
+        } else {
+            ref_best_rd
+        };
+        let (this_rd, res) = uniform_txfm_yrd_intra(env, recon, tx_size, rd_thresh, pol);
         rd[depth as usize] = this_rd;
         if this_rd < best_rd {
             let (stats, winners) = res.expect("valid rd implies stats");
