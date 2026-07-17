@@ -18,3 +18,7 @@ avx512 = ["archmage/avx512", "magetypes/avx512"]
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }
+# The search self-consistency test derives the LR mode costs the way the
+# encoder wiring does (av1_fill_lr_rates = cost_tokens_from_cdf over the
+# frame-init LR CDFs).
+aom-txb = { path = "../aom-txb" }

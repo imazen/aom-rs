@@ -38,8 +38,8 @@ const RESTORATION_EXTRA_HORZ: usize = 4;
 /// Working-buffer margins. Horizontal covers the Wiener rounded-width
 /// overhang (reads to plane col +18, writes to +14, both dead) plus the ±4
 /// stripe-swap columns; vertical covers the ±3 context rows + the tap-7 row.
-const MARGIN_H: usize = 32;
-const MARGIN_V: usize = 8;
+pub(crate) const MARGIN_H: usize = 32;
+pub(crate) const MARGIN_V: usize = 8;
 
 /// One plane's restoration inputs: the CDEF output (filter source), the
 /// deblocked pre-CDEF pixels (internal stripe boundary context), the decoded
@@ -74,16 +74,16 @@ pub fn loop_restoration_filter_frame(
     }
 }
 
-struct StripeBoundaries {
-    above: Vec<u16>,
-    below: Vec<u16>,
-    stride: usize,
+pub(crate) struct StripeBoundaries {
+    pub(crate) above: Vec<u16>,
+    pub(crate) below: Vec<u16>,
+    pub(crate) stride: usize,
 }
 
 /// `save_boundary_lines` geometry + both passes for one plane, into u16
 /// boundary buffers (`av1_alloc_restoration_buffers` sizing: stripes counted
 /// on the LUMA extent, stride 32-aligned incl. the ±4 extension columns).
-fn save_boundary_lines(
+pub(crate) fn save_boundary_lines(
     b: &mut StripeBoundaries,
     src: &[u16],
     src_stride: usize,
@@ -201,13 +201,13 @@ fn save_cdef_lines(
 /// Working-buffer coordinates: plane (row, col) — both possibly negative /
 /// past the plane — to a padded-buffer index.
 #[inline]
-fn at(w_stride: usize, row: isize, col: isize) -> usize {
+pub(crate) fn at(w_stride: usize, row: isize, col: isize) -> usize {
     ((row + MARGIN_V as isize) * w_stride as isize + col + MARGIN_H as isize) as usize
 }
 
 /// `av1_extend_frame`: replicate a `RESTORATION_BORDER`-pixel border around
 /// the `[0, w) x [0, h)` plane in the working buffer.
-fn extend_frame(buf: &mut [u16], w: usize, h: usize, w_stride: usize) {
+pub(crate) fn extend_frame(buf: &mut [u16], w: usize, h: usize, w_stride: usize) {
     const B: isize = RESTORATION_BORDER as isize;
     for r in 0..h as isize {
         let first = buf[at(w_stride, r, 0)];
@@ -335,7 +335,7 @@ fn filter_plane(
 /// `av1_loop_restoration_filter_unit`: the per-unit stripe loop with boundary
 /// row swapping. `limits = (v_start, v_end, h_start, h_end)` in plane coords.
 #[allow(clippy::too_many_arguments)]
-fn filter_unit(
+pub(crate) fn filter_unit(
     src: &mut [u16],
     dst: &mut [u16],
     w_stride: usize,

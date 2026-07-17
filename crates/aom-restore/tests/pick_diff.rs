@@ -96,7 +96,7 @@ fn compute_stats_lowbd_matches_c() {
                     let mut m = vec![0i64; win2];
                     let mut h = vec![0i64; win2 * win2];
                     pick::compute_stats(
-                        win, &dgd16, &src16, h_start, h_end, v_start, v_end, stride, stride,
+                        win, &dgd16, 0, &src16, h_start, h_end, v_start, v_end, stride, stride,
                         &mut m, &mut h, downsampled,
                     );
                     let (cm, ch) = c::ref_compute_stats(
@@ -138,8 +138,8 @@ fn compute_stats_highbd_matches_c() {
                     let mut m = vec![0i64; win2];
                     let mut h = vec![0i64; win2 * win2];
                     pick::compute_stats_highbd(
-                        win, &dgd, &src, h_start, h_end, v_start, v_end, stride, stride, &mut m,
-                        &mut h, bd,
+                        win, &dgd, 0, &src, h_start, h_end, v_start, v_end, stride, stride,
+                        &mut m, &mut h, bd,
                     );
                     let (cm, ch) = c::ref_compute_stats_highbd(
                         win, &dgd, &src, h_start, h_end, v_start, v_end, stride, stride, bd,
@@ -378,8 +378,8 @@ fn wiener_solver_invariants() {
             let mut m = vec![0i64; win2];
             let mut h = vec![0i64; win2 * win2];
             pick::compute_stats(
-                win, &dgd, &src, margin, margin + rw, margin, margin + rh, stride, stride, &mut m,
-                &mut h, false,
+                win, &dgd, 0, &src, margin, margin + rw, margin, margin + rh, stride, stride,
+                &mut m, &mut h, false,
             );
             let mut a = [0i32; 7];
             let mut b = [0i32; 7];

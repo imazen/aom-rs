@@ -31,11 +31,19 @@ const NUM_WIENER_ITERS: i32 = 5;
 
 /// `find_average` (pickrst.h): the u8-truncating mean of the lowbd window.
 /// `u16` values in u8 range; identical arithmetic.
-fn find_average(dgd: &[u16], h_start: i32, h_end: i32, v_start: i32, v_end: i32, stride: i32) -> u16 {
+fn find_average(
+    dgd: &[u16],
+    dgd_origin: usize,
+    h_start: i32,
+    h_end: i32,
+    v_start: i32,
+    v_end: i32,
+    stride: i32,
+) -> u16 {
     let mut sum: u64 = 0;
     for i in v_start..v_end {
         for j in h_start..h_end {
-            sum += dgd[(i * stride + j) as usize] as u64;
+            sum += dgd[dgd_origin + (i * stride + j) as usize] as u64;
         }
     }
     (sum / (((v_end - v_start) * (h_end - h_start)) as u64)) as u16
@@ -46,6 +54,7 @@ fn find_average(dgd: &[u16], h_start: i32, h_end: i32, v_start: i32, v_end: i32,
 #[allow(clippy::too_many_arguments)]
 fn acc_stat_one_line(
     dgd: &[u16],
+    dgd_origin: usize,
     src_row: &[u16],
     dgd_stride: i32,
     h_start: i32,
@@ -63,7 +72,11 @@ fn acc_stat_one_line(
         let mut idx = 0usize;
         for k in -wiener_halfwin..=wiener_halfwin {
             for l in -wiener_halfwin..=wiener_halfwin {
-                y[idx] = dgd[((count + l) * dgd_stride + (j + k)) as usize] as i16 - avg as i16;
+                // Window reads may go up to ±3 outside the rect — negative
+                // plane coords land in the extended border BEFORE the
+                // origin (C pointer semantics).
+                let off = dgd_origin as isize + ((count + l) * dgd_stride + (j + k)) as isize;
+                y[idx] = dgd[off as usize] as i16 - avg as i16;
                 idx += 1;
             }
         }
@@ -88,6 +101,7 @@ fn acc_stat_one_line(
 pub fn compute_stats(
     wiener_win: usize,
     dgd: &[u16],
+    dgd_origin: usize,
     src: &[u16],
     h_start: i32,
     h_end: i32,
@@ -101,7 +115,7 @@ pub fn compute_stats(
 ) {
     let wiener_win2 = wiener_win * wiener_win;
     let wiener_halfwin = (wiener_win >> 1) as i32;
-    let avg = find_average(dgd, h_start, h_end, v_start, v_end, dgd_stride);
+    let avg = find_average(dgd, dgd_origin, h_start, h_end, v_start, v_end, dgd_stride);
     let mut m_row = [0i32; WIENER_WIN2];
     let mut h_row = [0i32; WIENER_WIN2 * WIENER_WIN2];
     let mut downsample_factor = if use_downsampled_wiener_stats {
@@ -122,6 +136,7 @@ pub fn compute_stats(
         h_row[..wiener_win2 * wiener_win2].fill(0);
         acc_stat_one_line(
             dgd,
+            dgd_origin,
             &src[(i * src_stride) as usize..],
             dgd_stride,
             h_start,
@@ -154,6 +169,7 @@ pub fn compute_stats(
 /// `find_average_highbd` (pickrst.h).
 fn find_average_highbd(
     dgd: &[u16],
+    dgd_origin: usize,
     h_start: i32,
     h_end: i32,
     v_start: i32,
@@ -161,7 +177,7 @@ fn find_average_highbd(
     stride: i32,
 ) -> u16 {
     // Identical to the lowbd form on u16 planes.
-    find_average(dgd, h_start, h_end, v_start, v_end, stride)
+    find_average(dgd, dgd_origin, h_start, h_end, v_start, v_end, stride)
 }
 
 /// `av1_compute_stats_highbd_c` (pickrst.c): i64 accumulation with the
@@ -170,6 +186,7 @@ fn find_average_highbd(
 pub fn compute_stats_highbd(
     wiener_win: usize,
     dgd: &[u16],
+    dgd_origin: usize,
     src: &[u16],
     h_start: i32,
     h_end: i32,
@@ -183,7 +200,7 @@ pub fn compute_stats_highbd(
 ) {
     let wiener_win2 = wiener_win * wiener_win;
     let wiener_halfwin = (wiener_win >> 1) as i32;
-    let avg = find_average_highbd(dgd, h_start, h_end, v_start, v_end, dgd_stride);
+    let avg = find_average_highbd(dgd, dgd_origin, h_start, h_end, v_start, v_end, dgd_stride);
     let bit_depth_divider: i64 = match bit_depth {
         12 => 16,
         10 => 4,
@@ -199,8 +216,8 @@ pub fn compute_stats_highbd(
             let mut idx = 0usize;
             for k in -wiener_halfwin..=wiener_halfwin {
                 for l in -wiener_halfwin..=wiener_halfwin {
-                    y[idx] =
-                        dgd[((i + l) * dgd_stride + (j + k)) as usize] as i32 - avg as i32;
+                    let off = dgd_origin as isize + ((i + l) * dgd_stride + (j + k)) as isize;
+                    y[idx] = dgd[off as usize] as i32 - avg as i32;
                     idx += 1;
                 }
             }
@@ -748,4 +765,1296 @@ pub fn encode_xq(xq: [i32; 2], ep: usize) -> [i32; 2] {
         xqd[1] = ((1 << SGRPROJ_PRJ_BITS) - xqd[0] - xq[1]).clamp(SGRPROJ_PRJ_MIN1, SGRPROJ_PRJ_MAX1);
     }
     xqd
+}
+
+// ---------------------------------------------------------------------------
+// The per-unit RD search + frame-level decision
+// (`restoration_search` / `av1_pick_filter_restoration`, pickrst.c).
+// ---------------------------------------------------------------------------
+
+use crate::frame::{
+    at, extend_frame, filter_unit, save_boundary_lines, StripeBoundaries, MARGIN_H, MARGIN_V,
+};
+use crate::sgr::{decode_xq, selfguided_restoration};
+use aom_entropy::lr::{
+    count_sgrproj_bits, count_wiener_bits, lr_corners_in_sb, LrFrameConfig,
+    LrUnitInfo, SgrprojInfoLr, WienerInfoLr, RESTORATION_PROC_UNIT_SIZE, RESTORATION_UNITSIZE_MAX,
+    RESTORATION_UNIT_OFFSET, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER,
+    SGRPROJ_PRJ_MAX0, SGRPROJ_PRJ_MAX1, SGRPROJ_PRJ_MIN0, SGRPROJ_PRJ_MIN1, WIENER_WIN_CHROMA,
+};
+
+/// `RESTORE_TYPES` / `RESTORE_SWITCHABLE_TYPES` (enums.h).
+const RESTORE_TYPES: usize = 4;
+const RESTORE_SWITCHABLE_TYPES: usize = 3;
+/// `AV1_PROB_COST_SHIFT` (av1/encoder/cost.h).
+const AV1_PROB_COST_SHIFT: i64 = 9;
+/// `NUM_WIENER_ITERS` neighbours: search penalties (pickrst.c).
+const DUAL_SGR_PENALTY_MULT: f64 = 0.01;
+const WIENER_SGR_PENALTY_MULT: f64 = 0.005;
+/// `RESTORATION_UNITPELS_MAX` (restoration.h): flt scratch sizing.
+const RESTORATION_UNITPELS_MAX: usize =
+    (RESTORATION_UNITSIZE_MAX as usize * 3 / 2 + 2 * 3 + 16)
+        * (RESTORATION_UNITSIZE_MAX as usize * 3 / 2 + 2 * 3 + 8);
+
+/// `sgproj_ep_grp1_seed` / `sgproj_ep_grp2_3` (pickrst.c): the pruned-ep
+/// search ladder.
+const SGRPROJ_EP_GRP1_START_IDX: i32 = 0;
+const SGRPROJ_EP_GRP1_END_IDX: i32 = 9;
+const SGRPROJ_EP_GRP1_SEED: [i32; 4] = [0, 3, 6, 9];
+const SGRPROJ_EP_GRP2_3: [[i32; 14]; 2] = [
+    [10, 10, 11, 11, 12, 12, 13, 13, 13, 13, -1, -1, -1, -1],
+    [14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15],
+];
+
+/// `RDCOST_DBL_WITH_NATIVE_BD_DIST` (av1/encoder/rd.h).
+#[inline]
+fn rdcost_dbl_with_native_bd_dist(rdmult: i64, rate: i64, dist: i64, bd: i32) -> f64 {
+    (rate as f64 * rdmult as f64) / ((1i64 << AV1_PROB_COST_SHIFT) as f64)
+        + ((dist >> (2 * (bd - 8))) as f64) * ((1 << 7) as f64)
+}
+
+/// The `lpf_sf` slice `av1_pick_filter_restoration` consumes
+/// (speed_features.h `LOOP_FILTER_SPEED_FEATURES`), plus the two frame
+/// inputs the pruning heuristics need.
+#[derive(Clone, Copy, Debug)]
+pub struct LrSearchSf {
+    pub disable_wiener_filter: bool,
+    pub disable_sgr_filter: bool,
+    pub disable_loop_restoration_luma: bool,
+    pub disable_loop_restoration_chroma: bool,
+    pub disable_wiener_coeff_refine_search: bool,
+    /// 0 off; 1/2 = the `scale[]` ladder of the src-var prune.
+    pub prune_wiener_based_on_src_var: i32,
+    /// 0 off; 1 = rdcost-ratio gate; 2 = best-rtype gate.
+    pub prune_sgr_based_on_wiener: i32,
+    /// 0 full 16-ep; 1 = seeds+neighbours+groups; >=2 = seeds only.
+    pub enable_sgr_ep_pruning: i32,
+    pub reduce_wiener_window_size: bool,
+    pub use_downsampled_wiener_stats: bool,
+    pub dual_sgr_penalty_level: i32,
+    pub switchable_lr_with_bias_level: i32,
+    /// Luma-scale unit-size search bounds (`min/max_lr_unit_size`).
+    pub min_lr_unit_size: i32,
+    pub max_lr_unit_size: i32,
+}
+
+impl Default for LrSearchSf {
+    /// Speed-0 defaults (speed_features.c framesize-independent tail +
+    /// qindex-dependent size-search init).
+    fn default() -> Self {
+        LrSearchSf {
+            disable_wiener_filter: false,
+            disable_sgr_filter: false,
+            disable_loop_restoration_luma: false,
+            disable_loop_restoration_chroma: false,
+            disable_wiener_coeff_refine_search: false,
+            prune_wiener_based_on_src_var: 0,
+            prune_sgr_based_on_wiener: 0,
+            enable_sgr_ep_pruning: 0,
+            reduce_wiener_window_size: false,
+            use_downsampled_wiener_stats: false,
+            dual_sgr_penalty_level: 0,
+            switchable_lr_with_bias_level: 0,
+            min_lr_unit_size: RESTORATION_PROC_UNIT_SIZE,
+            max_lr_unit_size: RESTORATION_UNITSIZE_MAX,
+        }
+    }
+}
+
+/// One plane's pixels for the search: the ORIGINAL source, the deblocked
+/// (pre-CDEF) recon and the current (post-CDEF) recon — `deblocked` and
+/// `cur` may be the same content when CDEF did not run, matching the C
+/// encoder's two `save_boundary_lines` passes.
+pub struct LrPlanePixels<'a> {
+    pub src: &'a [u16],
+    pub deblocked: &'a [u16],
+    pub cur: &'a [u16],
+    pub stride: usize,
+}
+
+/// Frame-level inputs of `av1_pick_filter_restoration`.
+pub struct LrSearchInput<'a> {
+    pub planes: Vec<LrPlanePixels<'a>>,
+    /// Luma crop dims (the RU grid domain; superres not in this envelope).
+    pub crop_width: i32,
+    pub crop_height: i32,
+    pub ss_x: usize,
+    pub ss_y: usize,
+    pub bit_depth: i32,
+    /// `seq_params->use_highbitdepth` routing: false = the lowbd (u8) C
+    /// arithmetic (bd 8), true = the highbd paths.
+    pub highbd: bool,
+    /// `cpi->rd.RDMULT`.
+    pub rdmult: i64,
+    /// `av1_dc_quant_QTX(base_qindex, 0, bit_depth)` — only read when
+    /// `prune_wiener_based_on_src_var > 0`.
+    pub dc_quant_qtx: i32,
+    /// Superblock geometry: `mib_size_log2` (4=sb64, 5=sb128) and the mi
+    /// grid extent.
+    pub mib_size_log2: i32,
+    pub mi_rows: i32,
+    pub mi_cols: i32,
+    /// Tile bounds in superblock units (`tiles.row_start_sb` pairs), raster
+    /// iterated rows-outer. Single tile: `[(0, sb_rows)]` / `[(0, sb_cols)]`.
+    pub tile_sb_rows: Vec<(i32, i32)>,
+    pub tile_sb_cols: Vec<(i32, i32)>,
+    /// `av1_fill_lr_rates` outputs (cost_tokens_from_cdf of the frame-init
+    /// wiener/sgrproj/switchable restore CDFs).
+    pub wiener_restore_cost: [i32; 2],
+    pub sgrproj_restore_cost: [i32; 2],
+    pub switchable_restore_cost: [i32; 3],
+    pub sf: LrSearchSf,
+}
+
+/// `av1_pick_filter_restoration`'s decision.
+#[derive(Clone, Debug, Default)]
+pub struct LrSearchOutcome {
+    /// The chosen luma restoration unit size (all planes share it, `s = 0`).
+    pub unit_size: i32,
+    pub frame_restoration_type: [u8; 3],
+    /// Per-plane unit params in unit-grid raster order for the chosen size
+    /// (empty when that plane is `RESTORE_NONE`).
+    pub units: [Vec<LrUnitInfo>; 3],
+}
+
+/// `RestUnitSearchInfo` (pickrst.h) — C zero-initializes (memset), so the
+/// wiener/sgrproj members here are ZEROS, not the syntax defaults.
+#[derive(Clone, Copy)]
+struct RestUnitSearchInfo {
+    best_rtype: [u8; 3],
+    wiener: WienerInfoLr,
+    sgrproj: SgrprojInfoLr,
+}
+
+impl Default for RestUnitSearchInfo {
+    fn default() -> Self {
+        RestUnitSearchInfo {
+            best_rtype: [RESTORE_NONE; 3],
+            wiener: WienerInfoLr {
+                vfilter: [0; 8],
+                hfilter: [0; 8],
+            },
+            sgrproj: SgrprojInfoLr { ep: 0, xqd: [0, 0] },
+        }
+    }
+}
+
+/// One plane's staged buffers: the extended dgd (recon) in the padded
+/// frame-walk layout, the trial dst, the stripe boundaries, and the source.
+struct PlaneCtx<'a> {
+    plane: usize,
+    pw: i32,
+    ph: i32,
+    sx: usize,
+    sy: usize,
+    w_stride: usize,
+    dgd_pad: Vec<u16>,
+    dst_pad: Vec<u16>,
+    bnd: StripeBoundaries,
+    src: &'a [u16],
+    src_stride: usize,
+    flt0: Vec<i32>,
+    flt1: Vec<i32>,
+}
+
+impl<'a> PlaneCtx<'a> {
+    /// Stage one plane: pad + `av1_extend_frame` the current recon, build
+    /// the boundary context exactly as the encoder's two
+    /// `av1_loop_restoration_save_boundary_lines` passes do.
+    fn new(input: &LrSearchInput<'a>, plane: usize) -> PlaneCtx<'a> {
+        let p = &input.planes[plane];
+        let (sx, sy) = if plane > 0 {
+            (input.ss_x, input.ss_y)
+        } else {
+            (0, 0)
+        };
+        let pw = (input.crop_width + (1 << sx) - 1) >> sx;
+        let ph = (input.crop_height + (1 << sy) - 1) >> sy;
+        let (pwu, phu) = (pw as usize, ph as usize);
+
+        // Boundary buffers (av1_alloc_restoration_buffers geometry — stripes
+        // counted on the LUMA extent).
+        let mi_h = ((input.crop_height + 7) & !7) as usize;
+        let ext_h = RESTORATION_UNIT_OFFSET as usize + mi_h;
+        let num_stripes = ext_h.div_ceil(64);
+        let b_stride = (pwu + 2 * 4 + 31) & !31;
+        let mut bnd = StripeBoundaries {
+            above: vec![0; num_stripes * 2 * b_stride],
+            below: vec![0; num_stripes * 2 * b_stride],
+            stride: b_stride,
+        };
+        // Encoder ordering (cdef_restoration_frame): pass 0 (internal stripe
+        // context) on the DEBLOCKED frame BEFORE CDEF; pass 1 (frame edges)
+        // on the CURRENT frame after CDEF.
+        save_boundary_lines(&mut bnd, p.deblocked, p.stride, pwu, phu, sy, false);
+        save_boundary_lines(&mut bnd, p.cur, p.stride, pwu, phu, sy, true);
+
+        // Padded dgd + trial dst (frame-walk layout).
+        let w_stride = pwu + 2 * MARGIN_H;
+        let mut dgd_pad = vec![0u16; w_stride * (phu + 2 * MARGIN_V)];
+        for r in 0..phu {
+            dgd_pad[at(w_stride, r as isize, 0)..at(w_stride, r as isize, pw as isize)]
+                .copy_from_slice(&p.cur[r * p.stride..][..pwu]);
+        }
+        extend_frame(&mut dgd_pad, pwu, phu, w_stride);
+        let dst_pad = vec![0u16; w_stride * (phu + 2 * MARGIN_V)];
+
+        PlaneCtx {
+            plane,
+            pw,
+            ph,
+            sx,
+            sy,
+            w_stride,
+            dgd_pad,
+            dst_pad,
+            bnd,
+            src: p.src,
+            src_stride: p.stride,
+            flt0: vec![0i32; RESTORATION_UNITPELS_MAX],
+            flt1: vec![0i32; RESTORATION_UNITPELS_MAX],
+        }
+    }
+
+    /// Padded-buffer element offset of plane coord `(row, col)`.
+    #[inline]
+    fn pad_off(&self, row: i32, col: i32) -> usize {
+        at(self.w_stride, row as isize, col as isize)
+    }
+
+    /// `sse_restoration_unit` (pickrst.c): SSE of source vs the trial dst
+    /// over the unit rect.
+    fn sse_dst(&self, limits: (i32, i32, i32, i32)) -> i64 {
+        let (v0, v1, h0, h1) = limits;
+        let mut sse: i64 = 0;
+        for r in v0..v1 {
+            let s = &self.src[r as usize * self.src_stride..];
+            let d = &self.dst_pad[self.pad_off(r, 0)..];
+            for c in h0..h1 {
+                let e = s[c as usize] as i64 - d[c as usize] as i64;
+                sse += e * e;
+            }
+        }
+        sse
+    }
+
+    /// SSE of source vs the CURRENT recon (RESTORE_NONE) over the rect.
+    fn sse_none(&self, limits: (i32, i32, i32, i32)) -> i64 {
+        let (v0, v1, h0, h1) = limits;
+        let mut sse: i64 = 0;
+        for r in v0..v1 {
+            let s = &self.src[r as usize * self.src_stride..];
+            let d = &self.dgd_pad[self.pad_off(r, 0)..];
+            for c in h0..h1 {
+                let e = s[c as usize] as i64 - d[c as usize] as i64;
+                sse += e * e;
+            }
+        }
+        sse
+    }
+
+    /// `var_restoration_unit` (`aom_var_2d_u8/u16` / (w*h)): source variance
+    /// over the rect.
+    fn src_var(&self, limits: (i32, i32, i32, i32)) -> u64 {
+        let (v0, v1, h0, h1) = limits;
+        let (w, h) = ((h1 - h0) as u64, (v1 - v0) as u64);
+        let mut ss: u64 = 0;
+        let mut s: u64 = 0;
+        for r in v0..v1 {
+            let row = &self.src[r as usize * self.src_stride..];
+            for c in h0..h1 {
+                let v = row[c as usize] as u64;
+                ss += v * v;
+                s += v;
+            }
+        }
+        (ss - s * s / (w * h)) / (w * h)
+    }
+
+    /// `try_restoration_unit` (pickrst.c): run the REAL per-unit filter
+    /// (stripe boundaries, optimized_lr = 0 like the encoder) into the trial
+    /// dst, return the unit SSE vs source.
+    fn try_restoration_unit(
+        &mut self,
+        limits: (i32, i32, i32, i32),
+        rui: &LrUnitInfo,
+        bit_depth: i32,
+    ) -> i64 {
+        filter_unit(
+            &mut self.dgd_pad,
+            &mut self.dst_pad,
+            self.w_stride,
+            rui,
+            &self.bnd,
+            self.ph as usize,
+            self.sx,
+            self.sy,
+            bit_depth,
+            limits,
+            false,
+        );
+        self.sse_dst(limits)
+    }
+}
+
+/// `RestSearchCtxt`'s per-plane mutable search state.
+struct RscState {
+    sse: [i64; RESTORE_SWITCHABLE_TYPES],
+    total_sse: [i64; RESTORE_TYPES],
+    total_bits: [i64; RESTORE_TYPES],
+    ref_wiener: WienerInfoLr,
+    ref_sgrproj: SgrprojInfoLr,
+    switchable_ref_wiener: WienerInfoLr,
+    switchable_ref_sgrproj: SgrprojInfoLr,
+    skip_sgr_eval: bool,
+}
+
+impl RscState {
+    fn new() -> Self {
+        RscState {
+            sse: [0; RESTORE_SWITCHABLE_TYPES],
+            total_sse: [0; RESTORE_TYPES],
+            total_bits: [0; RESTORE_TYPES],
+            ref_wiener: WienerInfoLr::default(),
+            ref_sgrproj: SgrprojInfoLr::default(),
+            switchable_ref_wiener: WienerInfoLr::default(),
+            switchable_ref_sgrproj: SgrprojInfoLr::default(),
+            skip_sgr_eval: false,
+        }
+    }
+
+    /// `rsc_on_tile`.
+    fn on_tile(&mut self) {
+        self.ref_wiener = WienerInfoLr::default();
+        self.ref_sgrproj = SgrprojInfoLr::default();
+        self.switchable_ref_wiener = WienerInfoLr::default();
+        self.switchable_ref_sgrproj = SgrprojInfoLr::default();
+    }
+
+    /// `reset_rsc`.
+    fn reset(&mut self) {
+        self.total_sse = [0; RESTORE_TYPES];
+        self.total_bits = [0; RESTORE_TYPES];
+    }
+}
+
+/// `search_norestore` (pickrst.c).
+fn search_norestore(ctx: &PlaneCtx<'_>, limits: (i32, i32, i32, i32), rsc: &mut RscState) {
+    rsc.sse[RESTORE_NONE as usize] = ctx.sse_none(limits);
+    rsc.total_sse[RESTORE_NONE as usize] += rsc.sse[RESTORE_NONE as usize];
+}
+
+/// `finer_search_wiener` (pickrst.c): the ±{4,2,1} symmetric tap refinement
+/// driven by real filter applications.
+fn finer_search_wiener(
+    ctx: &mut PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    limits: (i32, i32, i32, i32),
+    rui: &mut LrUnitInfo,
+    wiener_win: usize,
+) -> i64 {
+    let plane_off = (WIENER_WIN - wiener_win) >> 1;
+    let mut err = ctx.try_restoration_unit(limits, rui, input.bit_depth);
+    if input.sf.disable_wiener_coeff_refine_search {
+        return err;
+    }
+    let tap_min = [-5i16, -23, -17];
+    let tap_max = [10i16, 8, 46];
+    const START_STEP: i16 = 4;
+
+    // dir 0 = hfilter first (like C), then vfilter, at each step size.
+    let mut s = START_STEP;
+    while s >= 1 {
+        for dir in 0..2 {
+            for p in plane_off..WIENER_HALFWIN {
+                let mut skip = false;
+                loop {
+                    let f = if dir == 0 {
+                        &mut rui.wiener.hfilter
+                    } else {
+                        &mut rui.wiener.vfilter
+                    };
+                    if f[p] - s >= tap_min[p] {
+                        f[p] -= s;
+                        f[WIENER_WIN - p - 1] -= s;
+                        f[WIENER_HALFWIN] += 2 * s;
+                        let err2 = ctx.try_restoration_unit(limits, rui, input.bit_depth);
+                        if err2 > err {
+                            let f = if dir == 0 {
+                                &mut rui.wiener.hfilter
+                            } else {
+                                &mut rui.wiener.vfilter
+                            };
+                            f[p] += s;
+                            f[WIENER_WIN - p - 1] += s;
+                            f[WIENER_HALFWIN] -= 2 * s;
+                        } else {
+                            err = err2;
+                            skip = true;
+                            // At the highest step size continue moving in the
+                            // same direction.
+                            if s == START_STEP {
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+                if skip {
+                    break;
+                }
+                loop {
+                    let f = if dir == 0 {
+                        &mut rui.wiener.hfilter
+                    } else {
+                        &mut rui.wiener.vfilter
+                    };
+                    if f[p] + s <= tap_max[p] {
+                        f[p] += s;
+                        f[WIENER_WIN - p - 1] += s;
+                        f[WIENER_HALFWIN] -= 2 * s;
+                        let err2 = ctx.try_restoration_unit(limits, rui, input.bit_depth);
+                        if err2 > err {
+                            let f = if dir == 0 {
+                                &mut rui.wiener.hfilter
+                            } else {
+                                &mut rui.wiener.vfilter
+                            };
+                            f[p] -= s;
+                            f[WIENER_WIN - p - 1] -= s;
+                            f[WIENER_HALFWIN] += 2 * s;
+                        } else {
+                            err = err2;
+                            if s == START_STEP {
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        s >>= 1;
+    }
+    err
+}
+
+/// `search_wiener` (pickrst.c).
+#[allow(clippy::too_many_arguments)]
+fn search_wiener(
+    ctx: &mut PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    limits: (i32, i32, i32, i32),
+    rsc: &mut RscState,
+    rusi: &mut RestUnitSearchInfo,
+) {
+    let bits_none = input.wiener_restore_cost[0] as i64;
+
+    // Skip Wiener search for low variance contents.
+    if input.sf.prune_wiener_based_on_src_var > 0 {
+        let scale = [0u64, 1, 2];
+        let qs = (input.dc_quant_qtx >> 3) as u64;
+        let thresh = (qs * qs * scale[input.sf.prune_wiener_based_on_src_var as usize]) >> 4;
+        let src_var = ctx.src_var(limits);
+        let prune_wiener = (src_var < thresh) || (rsc.sse[RESTORE_NONE as usize] == 0);
+        if prune_wiener {
+            rsc.total_bits[RESTORE_WIENER as usize] += bits_none;
+            rsc.total_sse[RESTORE_WIENER as usize] += rsc.sse[RESTORE_NONE as usize];
+            rusi.best_rtype[RESTORE_WIENER as usize - 1] = RESTORE_NONE;
+            rsc.sse[RESTORE_WIENER as usize] = i64::MAX;
+            if input.sf.prune_sgr_based_on_wiener == 2 {
+                rsc.skip_sgr_eval = true;
+            }
+            return;
+        }
+    }
+
+    let wiener_win = if ctx.plane == 0 {
+        WIENER_WIN
+    } else {
+        WIENER_WIN_CHROMA
+    };
+    let reduced_wiener_win = if input.sf.reduce_wiener_window_size {
+        if ctx.plane == 0 {
+            WIENER_WIN_REDUCED
+        } else {
+            WIENER_WIN_CHROMA
+        }
+    } else {
+        wiener_win
+    };
+
+    let mut m = [0i64; WIENER_WIN2];
+    let mut h = [0i64; WIENER_WIN2 * WIENER_WIN2];
+    let (v0, v1, h0, h1) = limits;
+    let dgd_origin = ctx.pad_off(0, 0);
+    if input.highbd {
+        compute_stats_highbd(
+            reduced_wiener_win,
+            &ctx.dgd_pad,
+            dgd_origin,
+            ctx.src,
+            h0,
+            h1,
+            v0,
+            v1,
+            ctx.w_stride as i32,
+            ctx.src_stride as i32,
+            &mut m,
+            &mut h,
+            input.bit_depth,
+        );
+    } else {
+        compute_stats(
+            reduced_wiener_win,
+            &ctx.dgd_pad,
+            dgd_origin,
+            ctx.src,
+            h0,
+            h1,
+            v0,
+            v1,
+            ctx.w_stride as i32,
+            ctx.src_stride as i32,
+            &mut m,
+            &mut h,
+            input.sf.use_downsampled_wiener_stats,
+        );
+    }
+
+    let mut vfilter = [0i32; WIENER_WIN];
+    let mut hfilter = [0i32; WIENER_WIN];
+    wiener_decompose_sep_sym(reduced_wiener_win, &m, &h, &mut vfilter, &mut hfilter);
+
+    let mut rui = LrUnitInfo {
+        restoration_type: RESTORE_WIENER,
+        wiener: WienerInfoLr {
+            vfilter: [0; 8],
+            hfilter: [0; 8],
+        },
+        sgrproj: SgrprojInfoLr { ep: 0, xqd: [0, 0] },
+    };
+    finalize_sym_filter(reduced_wiener_win, &vfilter, &mut rui.wiener.vfilter);
+    finalize_sym_filter(reduced_wiener_win, &hfilter, &mut rui.wiener.hfilter);
+
+    // Filter-score gate: revert to identity (NONE) when the learned filter
+    // does not reduce x'Hx - 2x'M.
+    if compute_score(
+        reduced_wiener_win,
+        &m,
+        &h,
+        &rui.wiener.vfilter,
+        &rui.wiener.hfilter,
+    ) > 0
+    {
+        rsc.total_bits[RESTORE_WIENER as usize] += bits_none;
+        rsc.total_sse[RESTORE_WIENER as usize] += rsc.sse[RESTORE_NONE as usize];
+        rusi.best_rtype[RESTORE_WIENER as usize - 1] = RESTORE_NONE;
+        rsc.sse[RESTORE_WIENER as usize] = i64::MAX;
+        if input.sf.prune_sgr_based_on_wiener == 2 {
+            rsc.skip_sgr_eval = true;
+        }
+        return;
+    }
+
+    rsc.sse[RESTORE_WIENER as usize] =
+        finer_search_wiener(ctx, input, limits, &mut rui, reduced_wiener_win);
+    rusi.wiener = rui.wiener;
+
+    let bits_wiener = input.wiener_restore_cost[1] as i64
+        + ((count_wiener_bits(wiener_win, &rusi.wiener, &rsc.ref_wiener) as i64)
+            << AV1_PROB_COST_SHIFT);
+
+    let cost_none = rdcost_dbl_with_native_bd_dist(
+        input.rdmult,
+        bits_none >> 4,
+        rsc.sse[RESTORE_NONE as usize],
+        input.bit_depth,
+    );
+    let cost_wiener = rdcost_dbl_with_native_bd_dist(
+        input.rdmult,
+        bits_wiener >> 4,
+        rsc.sse[RESTORE_WIENER as usize],
+        input.bit_depth,
+    );
+
+    let rtype = if cost_wiener < cost_none {
+        RESTORE_WIENER
+    } else {
+        RESTORE_NONE
+    };
+    rusi.best_rtype[RESTORE_WIENER as usize - 1] = rtype;
+
+    if input.sf.prune_sgr_based_on_wiener == 1 {
+        rsc.skip_sgr_eval = cost_wiener > (1.01 * cost_none);
+    } else if input.sf.prune_sgr_based_on_wiener == 2 {
+        rsc.skip_sgr_eval = rusi.best_rtype[RESTORE_WIENER as usize - 1] == RESTORE_NONE;
+    }
+
+    rsc.total_sse[RESTORE_WIENER as usize] += rsc.sse[rtype as usize];
+    rsc.total_bits[RESTORE_WIENER as usize] += if cost_wiener < cost_none {
+        bits_wiener
+    } else {
+        bits_none
+    };
+    if cost_wiener < cost_none {
+        rsc.ref_wiener = rusi.wiener;
+    }
+}
+
+/// `apply_sgr` (pickrst.c): the SGR passes over the unit in procunit tiles,
+/// producing flt0/flt1 at `flt_stride`.
+#[allow(clippy::too_many_arguments)]
+fn apply_sgr_unit(
+    ctx: &mut PlaneCtx<'_>,
+    ep: usize,
+    dgd_off: usize,
+    width: usize,
+    height: usize,
+    pu_width: usize,
+    pu_height: usize,
+    flt_stride: usize,
+    bit_depth: i32,
+) {
+    let mut i = 0usize;
+    while i < height {
+        let h = pu_height.min(height - i);
+        let mut j = 0usize;
+        while j < width {
+            let w = pu_width.min(width - j);
+            let flt_off = i * flt_stride + j;
+            let (f0, f1) = (&mut ctx.flt0[flt_off..], &mut ctx.flt1[flt_off..]);
+            selfguided_restoration(
+                &ctx.dgd_pad,
+                dgd_off + i * ctx.w_stride + j,
+                ctx.w_stride,
+                w,
+                h,
+                f0,
+                f1,
+                flt_stride,
+                ep,
+                bit_depth,
+            );
+            j += pu_width;
+        }
+        i += pu_height;
+    }
+}
+
+/// `get_pixel_proj_error` (pickrst.c): xqd -> xq, then the exact projected
+/// SSE.
+#[allow(clippy::too_many_arguments)]
+fn get_pixel_proj_error_xqd(
+    ctx: &PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    src_off: usize,
+    dgd_off: usize,
+    width: usize,
+    height: usize,
+    flt_stride: usize,
+    xqd: [i32; 2],
+    ep: usize,
+) -> i64 {
+    let xq = decode_xq(&xqd, ep);
+    pixel_proj_error(
+        ctx.src,
+        src_off,
+        width,
+        height,
+        ctx.src_stride,
+        &ctx.dgd_pad,
+        dgd_off,
+        ctx.w_stride,
+        &ctx.flt0,
+        flt_stride,
+        &ctx.flt1,
+        flt_stride,
+        xq,
+        ep,
+        input.highbd,
+    )
+}
+
+/// `finer_search_pixel_proj_error` (pickrst.c): the ±{2,1} xqd refinement.
+#[allow(clippy::too_many_arguments)]
+fn finer_search_pixel_proj_error(
+    ctx: &PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    src_off: usize,
+    dgd_off: usize,
+    width: usize,
+    height: usize,
+    flt_stride: usize,
+    start_step: i32,
+    xqd: &mut [i32; 2],
+    ep: usize,
+) -> i64 {
+    let mut err =
+        get_pixel_proj_error_xqd(ctx, input, src_off, dgd_off, width, height, flt_stride, *xqd, ep);
+    let (rads, _) = SGR_PARAMS[ep];
+    let tap_min = [SGRPROJ_PRJ_MIN0, SGRPROJ_PRJ_MIN1];
+    let tap_max = [SGRPROJ_PRJ_MAX0, SGRPROJ_PRJ_MAX1];
+    let mut s = start_step;
+    while s >= 1 {
+        for p in 0..2 {
+            if (rads[0] == 0 && p == 0) || (rads[1] == 0 && p == 1) {
+                continue;
+            }
+            let mut skip = false;
+            loop {
+                if xqd[p] - s >= tap_min[p] {
+                    xqd[p] -= s;
+                    let err2 = get_pixel_proj_error_xqd(
+                        ctx, input, src_off, dgd_off, width, height, flt_stride, *xqd, ep,
+                    );
+                    if err2 > err {
+                        xqd[p] += s;
+                    } else {
+                        err = err2;
+                        skip = true;
+                        if s == start_step {
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            if skip {
+                break;
+            }
+            loop {
+                if xqd[p] + s <= tap_max[p] {
+                    xqd[p] += s;
+                    let err2 = get_pixel_proj_error_xqd(
+                        ctx, input, src_off, dgd_off, width, height, flt_stride, *xqd, ep,
+                    );
+                    if err2 > err {
+                        xqd[p] -= s;
+                    } else {
+                        err = err2;
+                        if s == start_step {
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        s >>= 1;
+    }
+    err
+}
+
+/// `compute_sgrproj_err` (pickrst.c) for one `ep`.
+#[allow(clippy::too_many_arguments)]
+fn compute_sgrproj_err(
+    ctx: &mut PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    src_off: usize,
+    dgd_off: usize,
+    width: usize,
+    height: usize,
+    pu_width: usize,
+    pu_height: usize,
+    ep: usize,
+    flt_stride: usize,
+) -> ([i32; 2], i64) {
+    apply_sgr_unit(
+        ctx,
+        ep,
+        dgd_off,
+        width,
+        height,
+        pu_width,
+        pu_height,
+        flt_stride,
+        input.bit_depth,
+    );
+    let exq = get_proj_subspace(
+        ctx.src,
+        src_off,
+        width,
+        height,
+        ctx.src_stride,
+        &ctx.dgd_pad,
+        dgd_off,
+        ctx.w_stride,
+        &ctx.flt0,
+        flt_stride,
+        &ctx.flt1,
+        flt_stride,
+        ep,
+    );
+    let mut exqd = encode_xq(exq, ep);
+    let err = finer_search_pixel_proj_error(
+        ctx, input, src_off, dgd_off, width, height, flt_stride, 2, &mut exqd, ep,
+    );
+    (exqd, err)
+}
+
+/// `search_selfguided_restoration` (pickrst.c): the ep ladder.
+#[allow(clippy::too_many_arguments)]
+fn search_selfguided_restoration(
+    ctx: &mut PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    src_off: usize,
+    dgd_off: usize,
+    width: usize,
+    height: usize,
+    pu_width: usize,
+    pu_height: usize,
+) -> SgrprojInfoLr {
+    let flt_stride = ((width + 7) & !7) + 8;
+    let mut bestep = 0i32;
+    let mut besterr: i64 = -1;
+    let mut bestxqd = [0i32; 2];
+    let consider = |ctx: &mut PlaneCtx<'_>,
+                        ep: i32,
+                        bestep: &mut i32,
+                        besterr: &mut i64,
+                        bestxqd: &mut [i32; 2]| {
+        let (exqd, err) = compute_sgrproj_err(
+            ctx, input, src_off, dgd_off, width, height, pu_width, pu_height, ep as usize,
+            flt_stride,
+        );
+        if *besterr == -1 || err < *besterr {
+            *bestep = ep;
+            *besterr = err;
+            *bestxqd = exqd;
+        }
+    };
+    if input.sf.enable_sgr_ep_pruning == 0 {
+        for ep in 0..16 {
+            consider(ctx, ep, &mut bestep, &mut besterr, &mut bestxqd);
+        }
+    } else {
+        // Evaluate the four group-1 seeds.
+        for &ep in &SGRPROJ_EP_GRP1_SEED {
+            consider(ctx, ep, &mut bestep, &mut besterr, &mut bestxqd);
+        }
+        if input.sf.enable_sgr_ep_pruning < 2 {
+            // Left/right of the winner within group 1.
+            let bestep_ref = bestep;
+            let mut ep = bestep_ref - 1;
+            while ep < bestep_ref + 2 {
+                if ep >= SGRPROJ_EP_GRP1_START_IDX && ep <= SGRPROJ_EP_GRP1_END_IDX {
+                    consider(ctx, ep, &mut bestep, &mut besterr, &mut bestxqd);
+                }
+                ep += 2;
+            }
+            // The two group-2/3 rows indexed by the current winner.
+            for idx in 0..2 {
+                let ep = SGRPROJ_EP_GRP2_3[idx][bestep as usize];
+                consider(ctx, ep, &mut bestep, &mut besterr, &mut bestxqd);
+            }
+        }
+    }
+    SgrprojInfoLr {
+        ep: bestep,
+        xqd: bestxqd,
+    }
+}
+
+/// `search_sgrproj` (pickrst.c).
+fn search_sgrproj(
+    ctx: &mut PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    limits: (i32, i32, i32, i32),
+    rsc: &mut RscState,
+    rusi: &mut RestUnitSearchInfo,
+) {
+    let bits_none = input.sgrproj_restore_cost[0] as i64;
+    if rsc.skip_sgr_eval {
+        rsc.total_bits[RESTORE_SGRPROJ as usize] += bits_none;
+        rsc.total_sse[RESTORE_SGRPROJ as usize] += rsc.sse[RESTORE_NONE as usize];
+        rusi.best_rtype[RESTORE_SGRPROJ as usize - 1] = RESTORE_NONE;
+        rsc.sse[RESTORE_SGRPROJ as usize] = i64::MAX;
+        return;
+    }
+
+    let (v0, v1, h0, h1) = limits;
+    let dgd_off = ctx.pad_off(v0, h0);
+    let src_off = v0 as usize * ctx.src_stride + h0 as usize;
+    let procunit_width = (RESTORATION_PROC_UNIT_SIZE >> ctx.sx) as usize;
+    let procunit_height = (RESTORATION_PROC_UNIT_SIZE >> ctx.sy) as usize;
+
+    rusi.sgrproj = search_selfguided_restoration(
+        ctx,
+        input,
+        src_off,
+        dgd_off,
+        (h1 - h0) as usize,
+        (v1 - v0) as usize,
+        procunit_width,
+        procunit_height,
+    );
+
+    let rui = LrUnitInfo {
+        restoration_type: RESTORE_SGRPROJ,
+        wiener: WienerInfoLr {
+            vfilter: [0; 8],
+            hfilter: [0; 8],
+        },
+        sgrproj: rusi.sgrproj,
+    };
+    rsc.sse[RESTORE_SGRPROJ as usize] = ctx.try_restoration_unit(limits, &rui, input.bit_depth);
+
+    let bits_sgr = input.sgrproj_restore_cost[1] as i64
+        + ((count_sgrproj_bits(&rusi.sgrproj, &rsc.ref_sgrproj) as i64) << AV1_PROB_COST_SHIFT);
+    let cost_none = rdcost_dbl_with_native_bd_dist(
+        input.rdmult,
+        bits_none >> 4,
+        rsc.sse[RESTORE_NONE as usize],
+        input.bit_depth,
+    );
+    let mut cost_sgr = rdcost_dbl_with_native_bd_dist(
+        input.rdmult,
+        bits_sgr >> 4,
+        rsc.sse[RESTORE_SGRPROJ as usize],
+        input.bit_depth,
+    );
+    if rusi.sgrproj.ep < 10 {
+        cost_sgr *= 1.0 + DUAL_SGR_PENALTY_MULT * input.sf.dual_sgr_penalty_level as f64;
+    }
+
+    let rtype = if cost_sgr < cost_none {
+        RESTORE_SGRPROJ
+    } else {
+        RESTORE_NONE
+    };
+    rusi.best_rtype[RESTORE_SGRPROJ as usize - 1] = rtype;
+
+    rsc.total_sse[RESTORE_SGRPROJ as usize] += rsc.sse[if rtype == RESTORE_SGRPROJ {
+        RESTORE_SGRPROJ as usize
+    } else {
+        RESTORE_NONE as usize
+    }];
+    rsc.total_bits[RESTORE_SGRPROJ as usize] += if cost_sgr < cost_none {
+        bits_sgr
+    } else {
+        bits_none
+    };
+    if cost_sgr < cost_none {
+        rsc.ref_sgrproj = rusi.sgrproj;
+    }
+}
+
+/// `search_switchable` (pickrst.c).
+fn search_switchable(
+    ctx: &PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    rsc: &mut RscState,
+    rusi: &mut RestUnitSearchInfo,
+) {
+    let wiener_win = if ctx.plane == 0 {
+        WIENER_WIN
+    } else {
+        WIENER_WIN_CHROMA
+    };
+
+    let mut best_cost = 0.0f64;
+    let mut best_bits: i64 = 0;
+    let mut best_rtype = RESTORE_NONE;
+
+    for r in 0..RESTORE_SWITCHABLE_TYPES as u8 {
+        // Prune on SSE, not on the previous search's pick (see pickrst.c).
+        if r > RESTORE_NONE && rsc.sse[r as usize] > rsc.sse[RESTORE_NONE as usize] {
+            continue;
+        }
+
+        let sse = rsc.sse[r as usize];
+        let coeff_pcost: i64 = match r {
+            RESTORE_NONE => 0,
+            RESTORE_WIENER => {
+                count_wiener_bits(wiener_win, &rusi.wiener, &rsc.switchable_ref_wiener) as i64
+            }
+            _ => count_sgrproj_bits(&rusi.sgrproj, &rsc.switchable_ref_sgrproj) as i64,
+        };
+        let coeff_bits = coeff_pcost << AV1_PROB_COST_SHIFT;
+        let bits = input.switchable_restore_cost[r as usize] as i64 + coeff_bits;
+        let mut cost =
+            rdcost_dbl_with_native_bd_dist(input.rdmult, bits >> 4, sse, input.bit_depth);
+        if r == RESTORE_SGRPROJ && rusi.sgrproj.ep < 10 {
+            cost *= 1.0 + DUAL_SGR_PENALTY_MULT * input.sf.dual_sgr_penalty_level as f64;
+        }
+        if r == RESTORE_WIENER || r == RESTORE_SGRPROJ {
+            cost *= 1.0 + WIENER_SGR_PENALTY_MULT * input.sf.switchable_lr_with_bias_level as f64;
+        }
+        if r == 0 || cost < best_cost {
+            best_cost = cost;
+            best_bits = bits;
+            best_rtype = r;
+        }
+    }
+
+    rusi.best_rtype[RESTORE_SWITCHABLE as usize - 1] = best_rtype;
+
+    rsc.total_sse[RESTORE_SWITCHABLE as usize] += rsc.sse[best_rtype as usize];
+    rsc.total_bits[RESTORE_SWITCHABLE as usize] += best_bits;
+    if best_rtype == RESTORE_WIENER {
+        rsc.switchable_ref_wiener = rusi.wiener;
+    }
+    if best_rtype == RESTORE_SGRPROJ {
+        rsc.switchable_ref_sgrproj = rusi.sgrproj;
+    }
+}
+
+/// `av1_derive_flags_for_lr_processing` (pickrst.c).
+fn derive_flags_for_lr_processing(sf: &LrSearchSf) -> [bool; RESTORE_TYPES] {
+    let w = sf.disable_wiener_filter;
+    let s = sf.disable_sgr_filter;
+    [w && s, w, s, w || s]
+}
+
+/// `restoration_search` (pickrst.c): one plane at one unit size — the
+/// SB-coding-order unit walk running each enabled search fn per unit.
+#[allow(clippy::too_many_arguments)]
+fn restoration_search(
+    ctx: &mut PlaneCtx<'_>,
+    input: &LrSearchInput<'_>,
+    lr_geom: &LrFrameConfig,
+    rsc: &mut RscState,
+    rusi: &mut [RestUnitSearchInfo],
+    disable_lr_filter: &[bool; RESTORE_TYPES],
+) {
+    let plane = ctx.plane;
+    let ru_size = lr_geom.unit_size[plane];
+    let ext_size = ru_size * 3 / 2;
+    let (horz_units, vert_units) = lr_geom.plane_units(plane, input.ss_x, input.ss_y);
+    let plane_num_units = (horz_units * vert_units) as usize;
+    let num_rtypes = if plane_num_units > 1 {
+        RESTORE_TYPES
+    } else {
+        RESTORE_SWITCHABLE_TYPES
+    };
+    let mib_size = 1i32 << input.mib_size_log2;
+
+    rsc.reset();
+
+    for &(sb_row_start, sb_row_end) in &input.tile_sb_rows {
+        for &(sb_col_start, sb_col_end) in &input.tile_sb_cols {
+            // Reset reference parameters for delta-coding at tile start.
+            rsc.on_tile();
+
+            for sb_row in sb_row_start..sb_row_end {
+                let mi_row = sb_row << input.mib_size_log2;
+                for sb_col in sb_col_start..sb_col_end {
+                    let mi_col = sb_col << input.mib_size_log2;
+                    let Some((rcol0, rcol1, rrow0, rrow1)) = lr_corners_in_sb(
+                        lr_geom, plane, input.ss_x, input.ss_y, mi_row, mi_col, mib_size, mib_size,
+                    ) else {
+                        continue;
+                    };
+
+                    for rrow in rrow0..rrow1 {
+                        let y0 = rrow * ru_size;
+                        let remaining_h = ctx.ph - y0;
+                        let h = if remaining_h < ext_size {
+                            remaining_h
+                        } else {
+                            ru_size
+                        };
+                        let mut v_start = y0;
+                        let mut v_end = y0 + h;
+                        debug_assert!(v_end <= ctx.ph);
+                        // Offset upwards to align with the processing stripe.
+                        let voffset = RESTORATION_UNIT_OFFSET >> ctx.sy;
+                        v_start = (v_start - voffset).max(0);
+                        if v_end < ctx.ph {
+                            v_end -= voffset;
+                        }
+
+                        for rcol in rcol0..rcol1 {
+                            let x0 = rcol * ru_size;
+                            let remaining_w = ctx.pw - x0;
+                            let w = if remaining_w < ext_size {
+                                remaining_w
+                            } else {
+                                ru_size
+                            };
+                            let limits = (v_start, v_end, x0, x0 + w);
+                            let unit_idx = (rrow * horz_units + rcol) as usize;
+
+                            rsc.skip_sgr_eval = false;
+                            for r in 0..num_rtypes {
+                                if disable_lr_filter[r] {
+                                    continue;
+                                }
+                                match r {
+                                    0 => search_norestore(ctx, limits, rsc),
+                                    1 => search_wiener(ctx, input, limits, rsc, &mut rusi[unit_idx]),
+                                    2 => search_sgrproj(ctx, input, limits, rsc, &mut rusi[unit_idx]),
+                                    _ => search_switchable(ctx, input, rsc, &mut rusi[unit_idx]),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `copy_unit_info` (pickrst.c).
+fn copy_unit_info(frame_rtype: u8, rusi: &RestUnitSearchInfo) -> LrUnitInfo {
+    debug_assert!(frame_rtype > 0);
+    let rtype = rusi.best_rtype[frame_rtype as usize - 1];
+    let mut u = LrUnitInfo {
+        restoration_type: rtype,
+        wiener: WienerInfoLr {
+            vfilter: [0; 8],
+            hfilter: [0; 8],
+        },
+        sgrproj: SgrprojInfoLr { ep: 0, xqd: [0, 0] },
+    };
+    if rtype == RESTORE_WIENER {
+        u.wiener = rusi.wiener;
+    } else {
+        u.sgrproj = rusi.sgrproj;
+    }
+    u
+}
+
+/// `av1_pick_filter_restoration` (pickrst.c): the frame-level search over
+/// unit sizes and planes. Returns the chosen unit size, per-plane frame
+/// restoration types and per-unit parameters.
+pub fn pick_filter_restoration(input: &LrSearchInput<'_>) -> LrSearchOutcome {
+    let num_planes = input.planes.len();
+    let sb_wide = 1i32 << (input.mib_size_log2 + 2); // block_size_wide[sb_size]
+
+    // The minimum allowed unit size at a syntax level is 1 superblock.
+    let min_lr_unit_size = input.sf.min_lr_unit_size.max(sb_wide);
+    let max_lr_unit_size = input.sf.max_lr_unit_size.max(min_lr_unit_size);
+
+    let mut outcome = LrSearchOutcome {
+        unit_size: max_lr_unit_size,
+        frame_restoration_type: [RESTORE_NONE; 3],
+        units: [Vec::new(), Vec::new(), Vec::new()],
+    };
+
+    // Decide which planes to search.
+    let plane_start = if input.sf.disable_loop_restoration_luma {
+        1usize
+    } else {
+        0
+    };
+    let plane_end = if num_planes == 1 || input.sf.disable_loop_restoration_chroma {
+        0usize
+    } else {
+        2
+    };
+    if plane_start > plane_end {
+        return outcome;
+    }
+
+    let disable_lr_filter = derive_flags_for_lr_processing(&input.sf);
+    // Wiener+SGR both disabled: nothing to search (the C search loop would
+    // skip every fn and pick NONE everywhere).
+    if disable_lr_filter[RESTORE_NONE as usize] {
+        return outcome;
+    }
+
+    // Stage the searched planes (av1_extend_frame + boundary saves happen
+    // once, before the size loop).
+    let mut ctxs: Vec<PlaneCtx<'_>> = (plane_start..=plane_end)
+        .map(|p| PlaneCtx::new(input, p))
+        .collect();
+
+    let mut best_cost = f64::MAX;
+    let mut best_luma_unit_size = max_lr_unit_size;
+    let mut rsc = RscState::new();
+
+    let mut luma_unit_size = max_lr_unit_size;
+    while luma_unit_size >= min_lr_unit_size {
+        let lr_geom = LrFrameConfig {
+            frame_restoration_type: [RESTORE_WIENER; 3], // corners fn ignores this
+            unit_size: [luma_unit_size; 3],
+            crop_width: input.crop_width,
+            crop_height: input.crop_height,
+            superres_denom: 0,
+        };
+
+        let mut bits_this_size: i64 = 0;
+        let mut sse_this_size: i64 = 0;
+        let mut best_rtype: [u8; 3] = [RESTORE_NONE; 3];
+        let mut rusi_this_size: Vec<Vec<RestUnitSearchInfo>> = Vec::new();
+
+        for (ci, plane) in (plane_start..=plane_end).enumerate() {
+            let ctx = &mut ctxs[ci];
+            let (hu, vu) = lr_geom.plane_units(plane, input.ss_x, input.ss_y);
+            let plane_num_units = (hu * vu) as usize;
+            let mut rusi = vec![RestUnitSearchInfo::default(); plane_num_units];
+
+            restoration_search(ctx, input, &lr_geom, &mut rsc, &mut rusi, &disable_lr_filter);
+
+            let num_rtypes = if plane_num_units > 1 {
+                RESTORE_TYPES
+            } else {
+                RESTORE_SWITCHABLE_TYPES
+            };
+            let mut best_cost_this_plane = f64::MAX;
+            for r in 0..num_rtypes {
+                if disable_lr_filter[r] {
+                    continue;
+                }
+                // switchable_lr_with_bias_level restricts to SWITCHABLE.
+                if input.sf.switchable_lr_with_bias_level > 0
+                    && (r == RESTORE_WIENER as usize || r == RESTORE_SGRPROJ as usize)
+                {
+                    continue;
+                }
+                let cost_this_plane = rdcost_dbl_with_native_bd_dist(
+                    input.rdmult,
+                    rsc.total_bits[r] >> 4,
+                    rsc.total_sse[r],
+                    input.bit_depth,
+                );
+                if cost_this_plane < best_cost_this_plane {
+                    best_cost_this_plane = cost_this_plane;
+                    best_rtype[plane] = r as u8;
+                }
+            }
+
+            bits_this_size += rsc.total_bits[best_rtype[plane] as usize];
+            sse_this_size += rsc.total_sse[best_rtype[plane] as usize];
+            rusi_this_size.push(rusi);
+        }
+
+        let cost_this_size = rdcost_dbl_with_native_bd_dist(
+            input.rdmult,
+            bits_this_size >> 4,
+            sse_this_size,
+            input.bit_depth,
+        );
+
+        if cost_this_size < best_cost {
+            best_cost = cost_this_size;
+            best_luma_unit_size = luma_unit_size;
+            // Copy parameters out before the next size overwrites them.
+            let mut all_none = true;
+            for (ci, plane) in (plane_start..=plane_end).enumerate() {
+                outcome.frame_restoration_type[plane] = best_rtype[plane];
+                outcome.units[plane].clear();
+                if best_rtype[plane] != RESTORE_NONE {
+                    all_none = false;
+                    for u in &rusi_this_size[ci] {
+                        outcome.units[plane].push(copy_unit_info(best_rtype[plane], u));
+                    }
+                }
+            }
+            // Heuristic: all NONE at this size -> smaller sizes won't help.
+            if all_none {
+                break;
+            }
+        } else {
+            // Heuristic: worse than the previous (larger) size -> stop.
+            break;
+        }
+
+        luma_unit_size >>= 1;
+    }
+
+    outcome.unit_size = best_luma_unit_size;
+    outcome
 }
