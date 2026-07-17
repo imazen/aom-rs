@@ -316,6 +316,9 @@ fn attempt_case_content(
 /// instead of flat mid-grey 128 -- lets a case stress ONLY the chroma
 /// search's decision space (luma stays whatever `content` produces,
 /// typically flat) while keeping the luma partition/mode landscape trivial.
+///
+/// Thin wrapper over [`attempt_case_content_uv_sep`] feeding `uv_content` to
+/// BOTH chroma planes (U == V) -- byte-identical to every existing caller.
 #[allow(clippy::too_many_arguments)]
 fn attempt_case_content_uv(
     w: usize,
@@ -329,6 +332,34 @@ fn attempt_case_content_uv(
     speed: i32,
     content: impl Fn(usize, usize) -> u8,
     uv_content: impl Fn(usize, usize) -> u8,
+) -> bool {
+    attempt_case_content_uv_sep(
+        w, h, mono, ss_x, ss_y, usage, cq_level, cpu_used, speed, content, &uv_content,
+        &uv_content,
+    )
+}
+
+/// Core of the content-driven e2e attempt with SEPARATE caller-supplied U and V
+/// chroma closures. Real decoded image content has distinct U/V planes (unlike
+/// the synthetic U==V callers routed through [`attempt_case_content_uv`]), which
+/// is what the real-content speed>=1 gate needs. Runs real aomenc
+/// `--cpu-used=cpu_used` for the reference bytes, then this port's own
+/// `SpeedFeatures::set_allintra(speed)` search+pack, and returns whether the
+/// assembled OBU_FRAME payload byte-matches. bd8 only (matches the harness).
+#[allow(clippy::too_many_arguments)]
+fn attempt_case_content_uv_sep(
+    w: usize,
+    h: usize,
+    mono: bool,
+    ss_x: usize,
+    ss_y: usize,
+    usage: u32,
+    cq_level: i32,
+    cpu_used: i32,
+    speed: i32,
+    content: impl Fn(usize, usize) -> u8,
+    u_content: impl Fn(usize, usize) -> u8,
+    v_content: impl Fn(usize, usize) -> u8,
 ) -> bool {
     c::ref_init();
     let mut y = vec![128u16; w * h];
@@ -347,9 +378,8 @@ fn attempt_case_content_uv(
     if !mono {
         for r in 0..ch {
             for col in 0..cw {
-                let val = u16::from(uv_content(r, col));
-                u[r * cw + col] = val;
-                v[r * cw + col] = val;
+                u[r * cw + col] = u16::from(u_content(r, col));
+                v[r * cw + col] = u16::from(v_content(r, col));
             }
         }
     }
@@ -3298,4 +3328,189 @@ fn encoder_gate_speed9_noise_flatuv_allintra() {
         failures.is_empty(),
         "every speed-9 noise/flat-uv cell must byte-match real aomenc; diverging: {failures:?}"
     );
+}
+
+// ============================================================================
+// TASK #39 — REAL-content encode byte-parity at speed >= 1.
+//
+// The encoder byte-matches aomenc on SYNTHETIC content across all 10 speeds
+// (the `encoder_gate_speed{1..9}_textured_allintra` gates), and on REAL content
+// only at speed 0 (KB-6's `encoder_gate_real_image_e2e_kb6_repro` = 30/30).
+// This gate feeds the SAME real conformance-decoded YUV KB-6 uses through the
+// PROVEN speed-N encode path (`attempt_case_content_uv_sep`, the exact function
+// every synthetic speed gate rides) at cpu-used 1..4, mapping which real cells
+// hold and which diverge once speed features engage on real statistics.
+// ============================================================================
+
+fn corpus_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("AOM_CONFORMANCE_DIR") {
+        return std::path::PathBuf::from(d);
+    }
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("conformance")
+        .join("data")
+}
+
+fn ivf_hdr_dims(data: &[u8]) -> (usize, usize) {
+    (
+        u16::from_le_bytes([data[12], data[13]]) as usize,
+        u16::from_le_bytes([data[14], data[15]]) as usize,
+    )
+}
+
+fn ivf_temporal_units(data: &[u8]) -> Vec<Vec<u8>> {
+    assert!(
+        data.len() >= 32 && &data[0..4] == b"DKIF",
+        "not an IVF file"
+    );
+    let hdr_len = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let mut off = hdr_len;
+    let mut tus = Vec::new();
+    while off + 12 <= data.len() {
+        let sz =
+            u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
+        off += 12; // 4-byte size + 8-byte timestamp
+        assert!(off + sz <= data.len(), "IVF frame runs past end of file");
+        tus.push(data[off..off + sz].to_vec());
+        off += sz;
+    }
+    tus
+}
+
+/// **TASK #39 — real-content encoder byte-parity at cpu-used 1..4 (MAP).**
+///
+/// Decodes the same real conformance vectors/crops KB-6 uses (`01-size`,
+/// `00-quantizer`, `23-film_grain` — a frame-size test pattern plus real
+/// photographic + film-grain statistics) to genuine bd8 4:2:0 YUV via the C
+/// decode oracle, then runs this port's full `set_allintra(speed)` search +
+/// pack vs real aomenc `--cpu-used=speed` byte-for-byte, at every
+/// cpu-used ∈ {1,2,3,4} × cq ∈ {12,32,63}. Prints the MATCH/DIFF map.
+///
+/// REPORT-ONLY (captures the map on origin). The only assertion is an
+/// anti-vacuous harness-faithfulness control: the real 64×64 cq20 cell at
+/// **speed 0** MUST byte-match (KB-6 proved 30/30 at speed 0 through the sibling
+/// `run_case`; this control proves `attempt_case_content_uv_sep` reproduces that
+/// exact speed-0 encode on real separate-U/V content). The speed≥1 cells are
+/// NOT yet asserted — each graduates to a byte-match assert as its divergence
+/// root is fixed C-faithfully. When a `DIFF` cell here becomes `MATCH`, promote
+/// it into `byte_exact` below (a match on an un-promoted cell is a signal to
+/// promote, never to relax).
+#[test]
+fn encoder_gate_real_content_speed1to4_e2e() {
+    let dir = corpus_dir();
+    // (vector, crop_w, crop_h, off_x, off_y). crop_w == 0 => FULL frame; else an
+    // even-offset crop. Mirrors KB-6's cell family so the speed-0 (KB-6 30/30)
+    // and speed-1..4 (here) maps are directly comparable on identical pixels.
+    let cells: &[(&str, usize, usize, usize, usize)] = &[
+        ("av1-1-b8-01-size-64x64", 0, 0, 0, 0), // 1 SB, aligned — primary clean signal
+        ("av1-1-b8-01-size-196x196", 0, 0, 0, 0), // partial-SB, multi-SB
+        ("av1-1-b8-00-quantizer-00", 64, 64, 96, 64), // photo, 1-SB aligned crop
+        ("av1-1-b8-00-quantizer-00", 128, 128, 64, 64), // photo, 4-SB aligned crop
+        ("av1-1-b8-23-film_grain-50", 64, 64, 96, 64), // film grain, 1-SB aligned crop
+    ];
+    // Cells already byte-exact at speed 1..4 (graduated as roots land). Empty on
+    // the report-only landing; each entry is a hard byte-match assert below.
+    let byte_exact: &[&str] = &[];
+
+    let mut results: Vec<(String, bool)> = Vec::new();
+    let mut control_ok = false;
+    for &(name, crop_w, crop_h, off_x, off_y) in cells {
+        let path = dir.join(format!("{name}.ivf"));
+        let ivf = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "{name}: conformance vector missing at {path:?} ({e}); fetch via \
+                 `python3 xtask/conformance.py --fetch --scope intra`"
+            )
+        });
+        let (fw, fh) = ivf_hdr_dims(&ivf);
+        let tus = ivf_temporal_units(&ivf);
+        let frame = c::ref_decode_av1_kf(&tus[0], fw, fh);
+        let bd = frame.info[0] as u8;
+        assert_eq!(bd, 8, "{name}: this harness (attempt_case_content_uv_sep) is bd8-only");
+        let mono = frame.info[1] != 0;
+        let ss_x = frame.info[2] as usize;
+        let ss_y = frame.info[3] as usize;
+        let fcw = (fw + ss_x) >> ss_x; // full-frame chroma stride (tight row-major)
+        let (y, u, v) = (frame.y, frame.u, frame.v);
+        let (w, h) = if crop_w == 0 { (fw, fh) } else { (crop_w, crop_h) };
+        assert!(
+            off_x + w <= fw && off_y + h <= fh,
+            "{name}: crop {w}x{h}@{off_x},{off_y} exceeds frame {fw}x{fh}"
+        );
+        assert!(
+            off_x % 2 == 0 && off_y % 2 == 0,
+            "{name}: crop offset must be chroma-aligned (even)"
+        );
+        let (cox, coy) = (off_x >> ss_x, off_y >> ss_y);
+        let y_c = |r: usize, col: usize| y[(r + off_y) * fw + (col + off_x)] as u8;
+        let u_c = |r: usize, col: usize| u[(r + coy) * fcw + (col + cox)] as u8;
+        let v_c = |r: usize, col: usize| v[(r + coy) * fcw + (col + cox)] as u8;
+        let fmt = match (mono, ss_x, ss_y) {
+            (true, _, _) => "mono",
+            (false, 1, 1) => "420",
+            (false, 1, 0) => "422",
+            (false, 0, 0) => "444",
+            _ => "chroma",
+        };
+        let tag = if crop_w == 0 {
+            format!("{name} {fmt}")
+        } else {
+            format!("{name} {fmt} {w}x{h}@{off_x},{off_y}")
+        };
+        // Anti-vacuous harness control (speed 0, NOT the speed>=1 subject).
+        if name == "av1-1-b8-01-size-64x64" {
+            control_ok =
+                attempt_case_content_uv_sep(w, h, mono, ss_x, ss_y, 2, 20, 0, 0, &y_c, &u_c, &v_c);
+        }
+        for &cpu in &[1i32, 2, 3, 4] {
+            for &cq in &[12i32, 32, 63] {
+                let ok = attempt_case_content_uv_sep(
+                    w, h, mono, ss_x, ss_y, 2, cq, cpu, cpu, &y_c, &u_c, &v_c,
+                );
+                results.push((format!("{tag} cpu{cpu} cq{cq}"), ok));
+            }
+        }
+    }
+
+    eprintln!("\n=== TASK#39 real-content speed 1-4 map (MATCH = byte-exact vs real aomenc) ===");
+    for (label, ok) in &results {
+        eprintln!("  {label}: {}", if *ok { "MATCH" } else { "DIFF (speed>=1 real divergence)" });
+    }
+    let matched = results.iter().filter(|(_, ok)| *ok).count();
+    let diverged: Vec<&String> = results
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(n, _)| n)
+        .collect();
+    eprintln!(
+        "TASK#39: {}/{} real-content speed 1-4 cells byte-exact; {} diverge {:?}",
+        matched,
+        results.len(),
+        diverged.len(),
+        diverged
+    );
+
+    // Anti-vacuous harness-faithfulness control (KB-6 = 30/30 at speed 0).
+    assert!(
+        control_ok,
+        "harness faithfulness: real av1-1-b8-01-size-64x64 cq20 at SPEED 0 must byte-match \
+         (KB-6 proved 30/30 at speed 0 via the sibling run_case) — if this fails, \
+         attempt_case_content_uv_sep's speed-0 config diverges from run_case's and the \
+         speed>=1 map below cannot be trusted"
+    );
+
+    // Graduated byte-match asserts: each cell listed in `byte_exact` MUST match.
+    for cell in byte_exact {
+        let ok = results
+            .iter()
+            .find(|(n, _)| n == cell)
+            .map(|(_, ok)| *ok)
+            .unwrap_or_else(|| panic!("graduated cell `{cell}` not found in the map"));
+        assert!(
+            ok,
+            "regression: graduated real-content cell `{cell}` must byte-match real aomenc"
+        );
+    }
 }

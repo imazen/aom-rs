@@ -888,6 +888,38 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   dead on the 8-bit canon grid (nonrd_pickmode.rs:594/460/784); required before any high-bit-depth
   or screen-content speed-8/9 cell.
 
+### KB-13 — Encoder: REAL-content byte-parity at speed >= 1 — MAPPED (24/60 byte-exact at cpu 1..4; report-only gate landed)
+- **Status (2026-07-17):** the encoder byte-matches real conformance-decoded content at speed 0
+  (KB-6, 30/30) but NOT uniformly at speed >= 1. New gate
+  `encoder_gate_real_content_speed1to4_e2e` (encoder_gate_e2e_byte_match.rs) feeds the SAME real
+  YUV KB-6 uses (5 cells: `01-size-64x64` full, `01-size-196x196` full, `00-quantizer-00` 64²+128²
+  crops, `23-film_grain-50` 64² crop) through the PROVEN speed-N encode path
+  (`attempt_case_content_uv_sep` — the exact fn every synthetic speed gate rides, generalized to
+  SEPARATE U/V closures for real content) at cpu-used {1,2,3,4} × cq {12,32,63}.
+- **MAP (24/60 byte-exact vs real aomenc):**
+  - `01-size-64x64` (1-SB, aligned): **12/12 MATCH** — the clean single-SB real cell is byte-exact
+    at every speed 1..4 × cq. The speed-0 roots (KB-6 luma edge filter, AB HORZ_A reuse,
+    OUTPUT_ENABLED tx_type_map, …) carry through to speed 1..4 unbroken here.
+  - `01-size-196x196` (PARTIAL-SB, multi-SB): **0/12** — every cell diverges. `our_tile_bytes` is
+    systematically SMALLER than real (e.g. cq12 cpu1 2200 vs 2379) — the KB-6 "port codes FEWER
+    symbols" signature ⇒ a TILE-DATA partition/mode near-tie flip, NOT a pure-LF issue (LF
+    DISAGREES because the recon differs downstream; first byte-diff is the port-derived header LF
+    byte 2-3). The partial-SB frame-edge path (KB-6's speed-0 CHUNK-series fixes) interacts with
+    speed>=1 partition features (rect-kill / part4 / AB / ext-thresh) unreconciled at edges.
+    HIGHEST-VALUE cluster (12 cells, likely few shared roots).
+  - `00-quantizer-00` 64² crop (photo, 1-SB): 7/12 — DIFF at {cpu1 cq12, cpu2 cq12/cq32, cpu3 cq32,
+    cpu4 cq32}. Interior partition/mode near-ties (KB-2/10/11/12 family).
+  - `00-quantizer-00` 128² crop (photo, 4-SB): 3/12 — mostly DIFF (cq63 matches at cpu1/2).
+  - `23-film_grain-50` 64² crop (1-SB): 4/12 — film-grain near-ties.
+- **Gate is REPORT-ONLY** (map captured on origin): asserts only an anti-vacuous speed-0
+  harness-faithfulness control (real 64² cq20 must byte-match — KB-6 30/30). Speed>=1 cells
+  graduate to byte-match asserts (the `byte_exact` list) as roots land. Harness change:
+  `attempt_case_content_uv` now delegates to `attempt_case_content_uv_sep` (separate U/V) —
+  byte-identical for every existing synthetic caller (U==V), so speeds 0-9 synthetic gates + KB-6
+  speed-0 map stay byte-unchanged.
+- **Tracking:** task **#39**. Next: decode-both localize the 196 cluster (shared root?) then the
+  interior near-ties.
+
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
 Primary config = ALLINTRA (usage=2), speed-0 KEY frame. libaom's own allintra tuning
