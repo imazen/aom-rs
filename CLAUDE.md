@@ -755,8 +755,14 @@ to be done before "the rest"=inter-frame, but lower priority than the primary de
   while dequant still folds `iqmatrix` (`optimize_txb_qm` now takes `Option` for the dist qm).
   tune=IQ / tune=SSIMULACRA2 (QM_PSNR dist, 444-chroma level formula, chroma deltaq,
   sharpness=7) remain out of envelope. See STATUS.md 2026-07-16.
-- **#7 CDEF-strength RD search** — off by default in allintra; only for explicit `--enable-cdef`.
-  Building blocks exist as shims (`cdef_find_dir`, `cdef_filter_8/16`, `shim_encode_cdef`).
+- **#7 CDEF-strength RD search — DONE ✅ (2026-07-17), BIT-IDENTICAL**: full `av1_cdef_search`
+  port (`aom-encode/src/pickcdef.rs`) + the two-pass encode→LF→search→pack architecture
+  (`pack_tile_from_trees`, pack.rs) — 14/14 cells byte-match real aomenc `--enable-cdef=1`
+  (real content 196²/64² cq5..63 with cdef_bits=2 per-unit literals; mono/444/420/bd10
+  synthetic axes). Gate: `encoder_gate_cdef_{real_content,synthetic_axes}_rd_close`
+  (aom-bench, via the rd_close harness + full byte-identity asserts). CDEF stays off by
+  default — the default envelope is untouched. FAST search levels 1..5 ported (table-level
+  unit tests); only FULL (speed 0) is e2e-gated so far. See STATUS.md 2026-07-17.
 - **Loop-restoration (Wiener/SGR) search** — off by default in allintra; only for explicit
   `--enable-restoration`.
 

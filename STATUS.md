@@ -3000,3 +3000,73 @@ inverse-txfm stack (shared decode+encode; i64-sum-exact formulation first,
 i32 only with a range proof), deblock filters (~5-9%), txb trio
 (txb_init_levels / get_nz_mag / get_lower_levels_ctx, encode ~12%),
 forward-txfm stack, cdef_find_dir, variance/SAD family.
+
+## #7 CDEF-strength RD search — BIT-IDENTICAL, first bulk-port family lands directly in PARITY section A (2026-07-17, CDEF bulk track)
+
+- **Scope**: the full `av1_cdef_search` (av1/encoder/pickcdef.c) for the
+  `--enable-cdef=1` (CDEF_ALL) one-pass allintra KEY envelope — the first
+  non-default stills knob of the bulk-port pivot. CDEF stays OFF by default;
+  nothing in the proven byte-exact envelope changes (full aom-encode suite
+  re-verified 20 binaries / 0 failed with the port in tree).
+- **What is ported** (`aom-encode/src/pickcdef.rs`, ~800 lines vs C source,
+  never assumed): the per-64x64-fb MSE grid (`av1_cdef_mse_calc_block` /
+  `cdef_mse_calc_frame`) with the search-specific `av1_cdef_filter_fb` shape
+  (dirinit-cached luma directions shared across all strength indices AND
+  planes of one fb; the bd8 direct-`aom_sse` paths incl. the full-fb vs
+  per-dlist-block split; the high-bitdepth PACKED 16-bit layout +
+  `compute_cdef_dist_highbd` `>> 2*coeff_shift`); `get_cdef_filter_strengths`
+  for FULL + all five FAST levels (priconv/secconv tables);
+  `search_one[_dual]` + `joint_strength_search[_dual]` greedy+refinement with
+  C's exact gates (mono refinement `!fast`-gated, dual unconditional); the
+  0..=3 signaling-bits `RDCOST(rdmult, av1_cost_literal(sb_count*i +
+  nb*6*(1|2)), tot_mse*16)` loop; per-unit best-index stamping; fast-method
+  strength re-mapping. Reuses the bit-exact aom-cdef kernels (`cdef_find_dir`
+  600k-diffed, `cdef_filter_block_16`) — never reimplemented. Documented
+  NOT-ported (dead for this config, verified): CDEF_ADAPTIVE arms,
+  PICK_FROM_Q (speed>=7 rt), rtc paths, the MT walk, the dual/quad SSE merge
+  regroupings (bit-identical totals without them).
+- **Two-pass architecture** (`pack_tile_from_trees`, pack.rs): C searches
+  CDEF AFTER the frame encode but signals the strengths INSIDE the tile data,
+  so the fused search+pack walk cannot write them. The port now mirrors C's
+  real structure: phase 1 = `pack_tile` into a throwaway entropy coder (C's
+  OUTPUT_ENABLED encode pass: recon + one adapted tile ctx), then LF
+  derive+apply (`loop_filter_frame`, gated on nonzero luma levels —
+  encoder.c:2887), then `av1_cdef_search` on (source, deblocked recon) using
+  the frame-level rdmult (`loopfilter_frame` re-loads `td.mb.rdmult =
+  rd.RDMULT` before the filter stage — verified, no per-SB fold leaks), then
+  phase 2 = `pack_tile_from_trees` re-walks the phase-1 trees from a FRESH
+  frame context (C's `av1_pack_bitstream`), interleaving `write_cdef`
+  literals (CDF-free, so both passes adapt through identical symbol streams;
+  per-SB `derive_real_costs(kf)` states match SB-for-SB). The per-unit
+  strength grid rides `MiNbrGrid::cdef` (`CdefPackState`) into `pack_leaf`'s
+  `write_cdef` — C's read of the unit-top-left mbmi (bitstream.c:909-915).
+- **RESULT: 14/14 cells BIT-IDENTICAL to real aomenc on the FIRST complete
+  run** — sizes equal, zensim deltas 0.000, streams byte-equal: real content
+  (`av1-1-b8-01-size-196x196` cq{5,12,20,32,48,63} — cdef_bits=2,
+  four-strength joint sets, per-unit literals genuinely coded;
+  `av1-1-b8-01-size-64x64` cq{12,32,63}) + synthetic mono 128^2 cq{12,48}
+  (single-plane search), 4:4:4 128^2 cq32, 4:2:0 128^2 cq32, bd10 4:2:0
+  128^2 cq32 (16-bit MSE path). Every cell also asserts: the spliced port
+  stream decodes IDENTICALLY through the real C decoder and the port decoder
+  (the signalled CDEF syntax means to C what it means to us), and the
+  derived damping/bits/strength sets equal the real header's.
+- **GATE**: `encoder_gate_cdef_{real_content,synthetic_axes}_rd_close`
+  (aom-bench/tests/encoder_gate_cdef_e2e.rs) through the shared
+  `aom_bench::rd_close` harness — reports the RD table, then asserts full
+  per-cell byte-identity (`assert_all_exact`; an EXACT→CLOSE slip is a
+  regression and fails). PARITY.md: C1 → section A directly (rule 2's B→A
+  citation in the same landing that would have created the B row).
+- **Encoder-side `av1_cdef_frame` apply deliberately NOT invoked** in the
+  encode pipeline: in a single-frame KEY encode nothing consumes the
+  post-CDEF reconstruction (no reference frames, restoration off) and the
+  coded bytes are proven complete without it (the 14/14 byte-identity).
+  The bit-exact apply walk already exists (`aom_cdef::frame::cdef_frame`,
+  the decoder-track landing) — wire it into the encode recon path when the
+  loop-restoration search (which reads the post-CDEF recon as its input)
+  lands, and for CDEF-on encoder-recon MD5 checks.
+- **Follow-ups (documented, not blocking)**: FAST search levels 1..5 are
+  ported + unit-tested but only FULL (speed 0) is e2e-gated — the speed>=1
+  CDEF-on cells need the speed-parameterized pick_cfg derivation threaded
+  into `port_encode_cdef` (the speed gates' harness shape); SB128 CDEF-on
+  (>64 mbmi arms are in place, pack envelope is SB64); CDEF_ADAPTIVE /
+  tune=IQ out of envelope (documented in pickcdef.rs docs).

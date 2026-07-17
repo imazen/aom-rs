@@ -62,6 +62,7 @@ Byte-identity gates landed and green on origin/main. Any regression here is a sh
 | Multi-tile encode (2×1/1×2/2×2, 4:4:4 128²) | `encoder_gate_multitile_e2e` | f6e6319 |
 | qindex-from-cq derivation (#8) | `qindex_from_cq_diff` | (landed pre-pivot) |
 | Gate-3 perf cells byte-verified before timing | `aom-bench` `EncodeCell::assert_byte_exact` | 057bde2 |
+| **CDEF-strength RD search** (`--enable-cdef=1`, #7 / family C1): 14/14 cells — real content 196²/64² cq5..63 (cdef_bits=2 four-strength joint sets, per-unit literals) + mono/4:4:4/4:2:0/bd10 axes; speed-0 FULL search; two-pass encode→LF→search→pack | `encoder_gate_cdef_{real_content,synthetic_axes}_rd_close` (aom-bench; rd_close report + full byte-identity asserts) | 016d4dd + 9850da6 + c9ebf83 |
 
 ### Decoder (vs real `aom_codec_av1_dx`)
 
@@ -76,7 +77,7 @@ Bulk agents append rows here as features land (rule 2). Empty at pivot start.
 
 | Component | Knobs | Cells | size_delta | zensim_drop | Harness ref (test) | Date | Notes |
 |---|---|---|---|---|---|---|---|
-| _(none yet)_ | | | | | | | |
+| _(none — the first bulk family, CDEF search, measured 14/14 BIT-IDENTICAL on its first complete run and landed directly in section A per rule 2; its rd_close table: every cell 0.00% / 0.000 / EXACT)_ | | | | | | | |
 
 ## Section C — ABSENT (to port), by family
 
@@ -86,14 +87,17 @@ points are libaom v3.14.1 (`reference/libaom`). Defaults verified in
 `av1/av1_cx_iface.c` (allintra override block :3065–3078 sets ONLY `enable_cdef=0`,
 `screen_detection_mode=ANTIALIASING_AWARE`, `qm_min=4`, `qm_max=10`).
 
-### C1 — CDEF strength search — ABSENT (M) — bulk agent live
-- `--enable-cdef` / `AV1E_SET_ENABLE_CDEF` (0/1/2/3=adaptive). **Allintra default OFF**;
-  `tune=IQ/SSIMULACRA2` flips to CDEF_ADAPTIVE (off at cq≤32).
-- C: `av1/encoder/pickcdef.c` `av1_cdef_search` (per-64×64 strength RD), `av1_pick_cdef_from_qp`
-  (fast/adaptive), `lpf_sf.cdef_pick_method` (FAST_SEARCH_LVL1 at speed≥1).
-- Port has: `cdef_find_dir` + `cdef_filter_8/16` kernels bit-exact both tracks (aom-cdef),
-  decode-side frame walk, `encode_cdef` header writer, `shim_encode_cdef`. Missing: the
-  search itself + encoder frame application + mse accumulation.
+### C1 — CDEF strength search — **PORTED, BIT-IDENTICAL → section A** (2026-07-17)
+- Landed 016d4dd (`aom-encode/src/pickcdef.rs`, the full `av1_cdef_search` + FAST-level
+  tables) + 9850da6 (`pack_tile_from_trees` two-pass pack + `write_cdef` literal wiring) +
+  c9ebf83 (the byte-identity gate, 14/14 EXACT). See the section A row + STATUS.md
+  2026-07-17 for the full inventory.
+- Remaining sub-scope (honest fractions): e2e-gated = speed-0 `CDEF_FULL_SEARCH` only;
+  `CDEF_FAST_SEARCH_LVL1..5` are ported + table-unit-tested but not yet e2e-gated
+  (cheap extension: CDEF-on cells at `--cpu-used=1..6`); `CDEF_PICK_FROM_Q`
+  (speed≥7 rt) + `CDEF_ADAPTIVE` (`tune=IQ/SSIMULACRA2`, off at cq≤32) NOT ported
+  (documented-dead for `--enable-cdef=1`); SB128 CDEF-on blocked on the pack's SB64
+  envelope (the search's >64-fb arms are already in place).
 
 ### C2 — Loop-restoration search (Wiener/SGR) — ABSENT (L, decompose) — bulk agent live
 - `--enable-restoration` / `AV1E_SET_ENABLE_RESTORATION`. **Allintra config default is ON
