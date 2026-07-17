@@ -404,6 +404,299 @@ pub fn resize_plane(
     }
 }
 
+// ---- highbd (10/12-bit) variants (resize.c CONFIG_AV1_HIGHBITDEPTH) ----------
+// Structurally identical to the 8-bit path above (same filter banks, same delta/
+// offset/x1/x2, same down2 half-filters, same resize_multistep control flow);
+// they differ ONLY in the pixel type (u16) and the clamp bound (`(1<<bd)-1` via
+// clip_pixel_highbd instead of clip_pixel's 255). The bd==8 arm is cross-checked
+// against the proven 8-bit `resize_plane` in the differential.
+
+#[inline]
+fn clip_pixel_highbd(val: i32, bd: i32) -> u16 {
+    val.clamp(0, (1 << bd) - 1) as u16
+}
+
+/// `highbd_interpolate_core` (resize.c:679).
+fn highbd_interpolate_core(
+    input: &[u16],
+    in_length: i32,
+    output: &mut [u16],
+    out_length: i32,
+    bd: i32,
+    interp_filters: &[[i16; SUBPEL_TAPS]; 64],
+) {
+    let interp_taps = SUBPEL_TAPS as i32;
+    let delta: i32 = ((((in_length as u32) << RS_SCALE_SUBPEL_BITS) + (out_length as u32) / 2)
+        / out_length as u32) as i32;
+    let offset: i32 = if in_length > out_length {
+        (((in_length - out_length) << (RS_SCALE_SUBPEL_BITS - 1)) + out_length / 2) / out_length
+    } else {
+        -((((out_length - in_length) << (RS_SCALE_SUBPEL_BITS - 1)) + out_length / 2) / out_length)
+    };
+
+    let sample = |int_pel: i32, sub_pel: i32, clamp_lo: bool, clamp_hi: bool| -> u16 {
+        let filter = &interp_filters[sub_pel as usize];
+        let mut sum: i32 = 0;
+        for k in 0..interp_taps {
+            let mut pk = int_pel - interp_taps / 2 + 1 + k;
+            if clamp_lo && clamp_hi {
+                pk = pk.clamp(0, in_length - 1);
+            } else if clamp_lo {
+                pk = pk.max(0);
+            } else if clamp_hi {
+                pk = pk.min(in_length - 1);
+            }
+            sum += filter[k as usize] as i32 * input[pk as usize] as i32;
+        }
+        clip_pixel_highbd(round_power_of_two(sum, FILTER_BITS), bd)
+    };
+
+    let mut x = 0i32;
+    let mut y = offset + RS_SCALE_EXTRA_OFF;
+    while (y >> RS_SCALE_SUBPEL_BITS) < (interp_taps / 2 - 1) {
+        x += 1;
+        y += delta;
+    }
+    let x1 = x;
+    x = out_length - 1;
+    y = delta * x + offset + RS_SCALE_EXTRA_OFF;
+    while (y >> RS_SCALE_SUBPEL_BITS) + interp_taps / 2 >= in_length {
+        x -= 1;
+        y -= delta;
+    }
+    let x2 = x;
+
+    let mut optr = 0usize;
+    if x1 > x2 {
+        x = 0;
+        y = offset + RS_SCALE_EXTRA_OFF;
+        while x < out_length {
+            let int_pel = y >> RS_SCALE_SUBPEL_BITS;
+            let sub_pel = (y >> RS_SCALE_EXTRA_BITS) & RS_SUBPEL_MASK;
+            output[optr] = sample(int_pel, sub_pel, true, true);
+            optr += 1;
+            x += 1;
+            y += delta;
+        }
+    } else {
+        x = 0;
+        y = offset + RS_SCALE_EXTRA_OFF;
+        while x < x1 {
+            let int_pel = y >> RS_SCALE_SUBPEL_BITS;
+            let sub_pel = (y >> RS_SCALE_EXTRA_BITS) & RS_SUBPEL_MASK;
+            output[optr] = sample(int_pel, sub_pel, true, false);
+            optr += 1;
+            x += 1;
+            y += delta;
+        }
+        while x <= x2 {
+            let int_pel = y >> RS_SCALE_SUBPEL_BITS;
+            let sub_pel = (y >> RS_SCALE_EXTRA_BITS) & RS_SUBPEL_MASK;
+            output[optr] = sample(int_pel, sub_pel, false, false);
+            optr += 1;
+            x += 1;
+            y += delta;
+        }
+        while x < out_length {
+            let int_pel = y >> RS_SCALE_SUBPEL_BITS;
+            let sub_pel = (y >> RS_SCALE_EXTRA_BITS) & RS_SUBPEL_MASK;
+            output[optr] = sample(int_pel, sub_pel, false, true);
+            optr += 1;
+            x += 1;
+            y += delta;
+        }
+    }
+}
+
+fn highbd_interpolate(input: &[u16], in_length: i32, output: &mut [u16], out_length: i32, bd: i32) {
+    let interp_filters = choose_interp_filter(in_length, out_length);
+    highbd_interpolate_core(input, in_length, output, out_length, bd, interp_filters);
+}
+
+/// `highbd_down2_symeven` (resize.c:771).
+fn highbd_down2_symeven(input: &[u16], length: i32, output: &mut [u16], bd: i32) {
+    let filter = &DOWN2_SYMEVEN_HALF_FILTER;
+    let filter_len_half = filter.len() as i32;
+    let mut l1 = filter_len_half;
+    let mut l2 = length - filter_len_half;
+    l1 += l1 & 1;
+    l2 += l2 & 1;
+    let mut optr = 0usize;
+    let at = |i: i32| -> i32 { input[i as usize] as i32 };
+    if l1 > l2 {
+        let mut i = 0;
+        while i < length {
+            let mut sum = 1 << (FILTER_BITS - 1);
+            for j in 0..filter_len_half {
+                sum += (at((i - j).max(0)) + at((i + 1 + j).min(length - 1)))
+                    * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+    } else {
+        let mut i = 0;
+        while i < l1 {
+            let mut sum = 1 << (FILTER_BITS - 1);
+            for j in 0..filter_len_half {
+                sum += (at((i - j).max(0)) + at(i + 1 + j)) * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+        while i < l2 {
+            let mut sum = 1 << (FILTER_BITS - 1);
+            for j in 0..filter_len_half {
+                sum += (at(i - j) + at(i + 1 + j)) * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+        while i < length {
+            let mut sum = 1 << (FILTER_BITS - 1);
+            for j in 0..filter_len_half {
+                sum += (at(i - j) + at((i + 1 + j).min(length - 1))) * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+    }
+}
+
+/// `highbd_down2_symodd` (resize.c:826).
+fn highbd_down2_symodd(input: &[u16], length: i32, output: &mut [u16], bd: i32) {
+    let filter = &DOWN2_SYMODD_HALF_FILTER;
+    let filter_len_half = filter.len() as i32;
+    let mut l1 = filter_len_half - 1;
+    let mut l2 = length - filter_len_half + 1;
+    l1 += l1 & 1;
+    l2 += l2 & 1;
+    let mut optr = 0usize;
+    let at = |i: i32| -> i32 { input[i as usize] as i32 };
+    if l1 > l2 {
+        let mut i = 0;
+        while i < length {
+            let mut sum = (1 << (FILTER_BITS - 1)) + at(i) * filter[0] as i32;
+            for j in 1..filter_len_half {
+                let lo = if i - j < 0 { 0 } else { i - j };
+                let hi = if i + j >= length { length - 1 } else { i + j };
+                sum += (at(lo) + at(hi)) * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+    } else {
+        let mut i = 0;
+        while i < l1 {
+            let mut sum = (1 << (FILTER_BITS - 1)) + at(i) * filter[0] as i32;
+            for j in 1..filter_len_half {
+                let lo = if i - j < 0 { 0 } else { i - j };
+                sum += (at(lo) + at(i + j)) * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+        while i < l2 {
+            let mut sum = (1 << (FILTER_BITS - 1)) + at(i) * filter[0] as i32;
+            for j in 1..filter_len_half {
+                sum += (at(i - j) + at(i + j)) * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+        while i < length {
+            let mut sum = (1 << (FILTER_BITS - 1)) + at(i) * filter[0] as i32;
+            for j in 1..filter_len_half {
+                let hi = if i + j >= length { length - 1 } else { i + j };
+                sum += (at(i - j) + at(hi)) * filter[j as usize] as i32;
+            }
+            sum >>= FILTER_BITS;
+            output[optr] = clip_pixel_highbd(sum, bd);
+            optr += 1;
+            i += 2;
+        }
+    }
+}
+
+/// `highbd_resize_multistep` (resize.c:879).
+fn highbd_resize_multistep(input: &[u16], length: i32, output: &mut [u16], olength: i32, bd: i32) {
+    if length == olength {
+        output[..length as usize].copy_from_slice(&input[..length as usize]);
+        return;
+    }
+    let steps = get_down2_steps(length, olength);
+    if steps > 0 {
+        let mut filteredlength = length;
+        let mut cur: Vec<u16> = input[..length as usize].to_vec();
+        for _ in 0..steps {
+            let proj = get_down2_length(filteredlength, 1);
+            let mut out = vec![0u16; proj as usize];
+            if filteredlength & 1 == 1 {
+                highbd_down2_symodd(&cur, filteredlength, &mut out, bd);
+            } else {
+                highbd_down2_symeven(&cur, filteredlength, &mut out, bd);
+            }
+            cur = out;
+            filteredlength = proj;
+        }
+        if filteredlength != olength {
+            highbd_interpolate(&cur, filteredlength, output, olength, bd);
+        } else {
+            output[..olength as usize].copy_from_slice(&cur[..olength as usize]);
+        }
+    } else {
+        highbd_interpolate(input, length, output, olength, bd);
+    }
+}
+
+/// `highbd_resize_plane` (resize.c:935) — the bd>8 arm of the encoder source
+/// downscale. Byte-identical to the C via the exported
+/// `av1_resize_and_extend_frame_nonnormative` (`aom_sys_ref::ref_highbd_resize_plane`).
+pub fn highbd_resize_plane(
+    input: &[u16],
+    height: i32,
+    width: i32,
+    in_stride: i32,
+    output: &mut [u16],
+    height2: i32,
+    width2: i32,
+    out_stride: i32,
+    bd: i32,
+) {
+    debug_assert!(width > 0 && height > 0 && width2 > 0 && height2 > 0);
+    let mut intbuf = vec![0u16; (width2 * height) as usize];
+    for i in 0..height {
+        let row_in = &input[(i * in_stride) as usize..];
+        let row_out = &mut intbuf[(i * width2) as usize..((i + 1) * width2) as usize];
+        highbd_resize_multistep(row_in, width, row_out, width2, bd);
+    }
+    let mut arrbuf = vec![0u16; height as usize];
+    let mut arrbuf2 = vec![0u16; height2 as usize];
+    for i in 0..width2 {
+        for r in 0..height {
+            arrbuf[r as usize] = intbuf[(r * width2 + i) as usize];
+        }
+        highbd_resize_multistep(&arrbuf, height, &mut arrbuf2, height2, bd);
+        for r in 0..height2 {
+            output[(r * out_stride + i) as usize] = arrbuf2[r as usize];
+        }
+    }
+}
+
 pub(crate) static FILTER_500: [[i16; 8]; 64] = [
     [-3, 0, 35, 64, 35, 0, -3, 0],
     [-3, 0, 34, 64, 36, 0, -3, 0],

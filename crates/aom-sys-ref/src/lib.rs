@@ -12476,3 +12476,49 @@ pub fn ref_calculate_scaled_superres_width(width: i32, superres_denom: i32) -> i
     unsafe { av1_calculate_scaled_superres_size(&mut w, &mut h, superres_denom) };
     w
 }
+
+extern "C" {
+    // shim/dec_shim.c: drives the file-static highbd_resize_plane via the
+    // exported av1_resize_and_extend_frame_nonnormative (highbd YV12, 1 plane).
+    fn shim_highbd_resize_plane(
+        input: *const u16,
+        height: i32,
+        width: i32,
+        in_stride: i32,
+        output: *mut u16,
+        height2: i32,
+        width2: i32,
+        bd: i32,
+    ) -> i64;
+}
+
+/// Oracle: libaom `highbd_resize_plane` (bd>8 encoder source downscale), reached
+/// through the exported `av1_resize_and_extend_frame_nonnormative`. Returns the
+/// downscaled plane (`width2 * height2` u16, tightly packed). `ref_init` first —
+/// the wrapper's border extend is RTCD-dispatched.
+pub fn ref_highbd_resize_plane(
+    input: &[u16],
+    height: i32,
+    width: i32,
+    in_stride: i32,
+    height2: i32,
+    width2: i32,
+    bd: i32,
+) -> Vec<u16> {
+    ref_init();
+    let mut out = vec![0u16; (width2 * height2) as usize];
+    let rc = unsafe {
+        shim_highbd_resize_plane(
+            input.as_ptr(),
+            height,
+            width,
+            in_stride,
+            out.as_mut_ptr(),
+            height2,
+            width2,
+            bd,
+        )
+    };
+    assert_eq!(rc, 0, "shim_highbd_resize_plane failed ({rc})");
+    out
+}

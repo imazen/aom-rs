@@ -2944,3 +2944,35 @@ long shim_encode_av1_kf_tune(const uint16_t *y, const uint16_t *u,
   aom_img_free(img);
   return rc ? rc : total;
 }
+
+/* ---- Oracle for the STATIC highbd_resize_plane (av1/common/resize.c) --------
+ * highbd_resize_plane is file-static, so drive it through the EXPORTED
+ * av1_resize_and_extend_frame_nonnormative, which dispatches to it for a
+ * HIGHBITDEPTH buffer. Single monochrome luma plane (num_planes=1). */
+bool av1_resize_and_extend_frame_nonnormative(const YV12_BUFFER_CONFIG *src,
+                                              YV12_BUFFER_CONFIG *dst, int bd,
+                                              int num_planes);
+
+long shim_highbd_resize_plane(const uint16_t *in, int height, int width,
+                              int in_stride, uint16_t *out, int height2,
+                              int width2, int bd) {
+  YV12_BUFFER_CONFIG src, dst;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  if (aom_alloc_frame_buffer(&src, width, height, 1, 1, 1, 32, 0, false, 0))
+    return -1;
+  if (aom_alloc_frame_buffer(&dst, width2, height2, 1, 1, 1, 32, 0, false, 0)) {
+    aom_free_frame_buffer(&src);
+    return -2;
+  }
+  lrf_load_plane(&src, 0, in, in_stride, 1);
+  if (!av1_resize_and_extend_frame_nonnormative(&src, &dst, bd, 1)) {
+    aom_free_frame_buffer(&src);
+    aom_free_frame_buffer(&dst);
+    return -3;
+  }
+  lrf_store_plane(&dst, 0, out, width2, 1);
+  aom_free_frame_buffer(&src);
+  aom_free_frame_buffer(&dst);
+  return 0;
+}
