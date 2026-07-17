@@ -776,6 +776,30 @@ envelope); grain composed with CDEF/LR/segmentation/palette is orthogonal
 chunk: superres, `disable_cdf_update`, 4:2:2-chroma-deblock (nonzero chroma
 levels), mixed-lossless-segments, and multi-tile-GROUP still rejected.
 
+## C6 superres FIXED bd10/12 highbd source-downscale — byte-exact (2026-07-17, encoder track)
+
+**bd10/12 highbd downscale is in.** The FIXED-denom superres source downscale now
+dispatches on bit depth: the gate's `downscale_plane` routes bd8 → `resize_plane`,
+bd10/12 → `highbd_resize_plane` (CHUNK-1/2 kernels, already differentially bit-exact
+vs C). The superres gate's bd8-only assert lifts to bd 8/10/12; the optimized-scaler
+corner assert is now bd8-only (bd10/12 always take the non-normative path). Gate
+`encoder_gate_superres_fixed_highbd_rd_close`: **16/16 cells BYTE-IDENTICAL** (bd10 &
+bd12 × {4:2:0 denoms 9/12/14 × cq{20,48}} + {mono denoms 9/12 × cq32}). The bd10/12
+KEY encode envelope is itself byte-exact (KB-4), so the two compose to byte-identical
+superres streams.
+
+Carried a byte-NEUTRAL latent-bug fix in aom-dist `highbd_variance64`: the 8-lane SIMD
+kernel requires `w % 8 == 0`, but the frame-edge visible-only SSE
+(`pixel_dist_visible_only`) can pass an arbitrary visible width ≥ 8 that is not a
+multiple of 8 (e.g. a 64-wide txb at coded col 64 on a superres frame downscaled to
+width 114 → visible 50), which panicked. Non-multiples now route to the scalar twin
+(bit-identical to the SIMD kernel on multiple-of-8 widths). NEUTRAL: mult-of-8 widths
+still take the identical SIMD path; only the previously-panicking edge is newly handled
+— verified full workspace suite 0-failed in BOTH dispatch modes (default SIMD +
+`AOM_FORCE_SCALAR`).
+
+---
+
 ## Superres upscaling applied — `superres scaled` rejection DROPPED (2026-07-15, decoder track)
 
 **Normative superres is in** (3380a91): superres-scaled KEY streams

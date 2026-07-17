@@ -175,7 +175,15 @@ pub fn highbd_sad_avg(
 /// docs); width 4 and the `AOM_FORCE_SCALAR` pin run the scalar twin.
 fn highbd_variance64(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> (u64, i64) {
     let _ = aom_dispatch::scalar_forced(); // one-time AOM_FORCE_SCALAR pin
-    if w < 8 {
+    // The SIMD kernel processes 8 lanes at a time and requires `w % 8 == 0`.
+    // Fully-visible txb variances are always power-of-two widths, but the
+    // frame-edge visible-only SSE (`dist_block_px_domain` -> C's
+    // `pixel_dist_visible_only`) can pass an arbitrary `visible_cols` >= 8 that
+    // is not a multiple of 8 (e.g. a 64-wide txb at coded col 64 on a superres
+    // frame downscaled to width 114 -> visible 50). The scalar twin is
+    // bit-identical to the SIMD kernel on multiple-of-8 widths and correct for
+    // the rest, so route non-multiples through it.
+    if w < 8 || !w.is_multiple_of(8) {
         return highbd_variance64_scalar(a, a_stride, b, b_stride, w, h);
     }
     archmage::incant!(

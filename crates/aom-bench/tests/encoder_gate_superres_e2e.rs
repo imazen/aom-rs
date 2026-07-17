@@ -45,7 +45,7 @@ use aom_encode::pack::{PackCfg, pack_tile, pack_tile_from_trees};
 use aom_encode::partition_pick::PickFrameCfg;
 use aom_encode::rd::{EncMode, FrameUpdateType, TuneMetric, av1_compute_rd_mult_based_on_qindex};
 use aom_encode::real_costs::derive_real_costs;
-use aom_encode::resize::{coded_superres_width, resize_plane};
+use aom_encode::resize::{coded_superres_width, highbd_resize_plane, resize_plane};
 use aom_encode::speed_features::SpeedFeatures;
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::header::{
@@ -173,6 +173,29 @@ fn downscale_plane_bd8(src: &[u16], w: usize, h: usize, coded_w: usize) -> Vec<u
     out_u8.iter().map(|&p| u16::from(p)).collect()
 }
 
+/// Downscale one tight plane (`w x h` u16) horizontally to `coded_w x h`,
+/// dispatching on bit depth: bd8 uses the 8-bit `resize_plane`, bd10/12 the
+/// `highbd_resize_plane` arm (both CHUNK-1/2 kernels, bit-exact vs C). Superres
+/// is horizontal-only: `height2 == height`, an identity vertical pass.
+fn downscale_plane(src: &[u16], w: usize, h: usize, coded_w: usize, bd: u8) -> Vec<u16> {
+    if bd == 8 {
+        return downscale_plane_bd8(src, w, h, coded_w);
+    }
+    let mut out = vec![0u16; coded_w * h];
+    highbd_resize_plane(
+        src,
+        h as i32,
+        w as i32,
+        w as i32,
+        &mut out,
+        h as i32,
+        coded_w as i32,
+        coded_w as i32,
+        i32::from(bd),
+    );
+    out
+}
+
 /// The port's superres encode: downscale the source to the coded width, encode
 /// the coded frame with the ordinary two-pass (encode → deblock → repack)
 /// pipeline, and assemble a frame OBU whose header signals the superres denom.
@@ -180,10 +203,7 @@ fn downscale_plane_bd8(src: &[u16], w: usize, h: usize, coded_w: usize) -> Vec<u
 fn port_encode_superres(cell: &EncodeCell, denom: i32, bootstrap: &[u8]) -> Vec<u8> {
     let (w, h, mono, ss_x, ss_y, bd) = (cell.w, cell.h, cell.mono, cell.ss_x, cell.ss_y, cell.bd);
     assert_eq!(cell.speed, 0, "superres gate runs at speed 0");
-    assert_eq!(
-        bd, 8,
-        "this gate is 8-bit (highbd downscale is a follow-up)"
-    );
+    assert!(matches!(bd, 8 | 10 | 12), "superres gate supports bd 8/10/12");
 
     let obus = walk_obus(bootstrap);
     let seq_payload = obus
@@ -218,9 +238,10 @@ fn port_encode_superres(cell: &EncodeCell, denom: i32, bootstrap: &[u8]) -> Vec<
         cell.label
     );
     assert!(
-        !superres_uses_optimized_scaler_8bit(w as i32, coded_w as i32),
-        "{}: this cell hits the 8-bit optimized scaler (denom-16-even corner); \
-         out of scope for the non-normative kernel gate",
+        bd != 8 || !superres_uses_optimized_scaler_8bit(w as i32, coded_w as i32),
+        "{}: this bd8 cell hits the optimized scaler (denom-16-even corner); \
+         out of scope for the non-normative kernel gate (bd10/12 always use \
+         the non-normative path)",
         cell.label
     );
 
@@ -330,13 +351,13 @@ fn port_encode_superres(cell: &EncodeCell, denom: i32, bootstrap: &[u8]) -> Vec<
     let full_cw = if mono { 0 } else { (w + ss_x) >> ss_x };
     let ch = if mono { 0 } else { (h + ss_y) >> ss_y };
     let coded_cw = if mono { 0 } else { (coded_w + ss_x) >> ss_x };
-    let ds_y = downscale_plane_bd8(&cell.y, w, h, coded_w);
+    let ds_y = downscale_plane(&cell.y, w, h, coded_w, bd);
     let (ds_u, ds_v) = if mono {
         (Vec::new(), Vec::new())
     } else {
         (
-            downscale_plane_bd8(&cell.u, full_cw, ch, coded_cw),
-            downscale_plane_bd8(&cell.v, full_cw, ch, coded_cw),
+            downscale_plane(&cell.u, full_cw, ch, coded_cw, bd),
+            downscale_plane(&cell.v, full_cw, ch, coded_cw, bd),
         )
     };
 
@@ -704,6 +725,106 @@ fn encoder_gate_superres_fixed_mono_rd_close() {
     );
     eprintln!(
         "superres FIXED mono: {exact}/{} cells BYTE-IDENTICAL",
+        results.len()
+    );
+    assert_all_exact(&results);
+}
+
+/// Textured synthetic cell (bd-aware; chroma is deliberately NOT an affine
+/// function of luma so CfL doesn't trivialize it) — the same generator family
+/// as the byte-exact chroma-ss / CDEF synthetic gates. 4:2:0 or monochrome.
+fn synth_superres_cell(label: &str, sz: usize, mono: bool, cq: i32, bd: u8) -> EncodeCell {
+    let maxv = (1u16 << bd) - 1;
+    let mask = u32::from(maxv);
+    let (w, h) = (sz, sz);
+    let mut y = vec![0u16; w * h];
+    for r in 0..h {
+        for col in 0..w {
+            let base = ((r * 37 + col * 23) as u32) & mask;
+            let hf = if (r ^ col) & 1 == 1 { mask / 12 } else { 0 };
+            y[r * w + col] = ((base ^ hf) as u16).min(maxv);
+        }
+    }
+    let (cw, ch) = if mono { (0, 0) } else { ((w + 1) >> 1, (h + 1) >> 1) };
+    let mut u = vec![0u16; cw * ch];
+    let mut v = vec![0u16; cw * ch];
+    if !mono {
+        for r in 0..ch {
+            for col in 0..cw {
+                let base = ((r * 19 + col * 29) as u32) & mask;
+                let hf = if (r + col) % 3 == 0 { mask / 20 } else { 0 };
+                u[r * cw + col] = ((base ^ hf) as u16).min(maxv);
+                let base2 = (((r + 7) * 19 + (col + 3) * 29) as u32) & mask;
+                let hf2 = if (r + col + 10) % 3 == 0 { mask / 20 } else { 0 };
+                v[r * cw + col] = ((base2 ^ hf2) as u16).min(maxv);
+            }
+        }
+    }
+    EncodeCell {
+        label: label.to_string(),
+        w,
+        h,
+        mono,
+        ss_x: 1,
+        ss_y: 1,
+        usage: 2,
+        cq_level: cq,
+        speed: 0,
+        bd,
+        y,
+        u,
+        v,
+    }
+}
+
+/// bd10/12 FIXED superres — the highbd source-downscale arm (`highbd_resize_plane`,
+/// CHUNK-2, bit-exact vs C). Textured synthetic 4:2:0 + mono content, denoms
+/// {9,12,14}, aggressive-web cq. The bd10/12 KEY encode envelope is itself
+/// byte-exact (KB-4), so the two compose to byte-identical superres streams.
+#[test]
+fn encoder_gate_superres_fixed_highbd_rd_close() {
+    let mut results = Vec::new();
+    let mut exact = 0usize;
+    for &bd in &[10u8, 12] {
+        // 4:2:0 across denom × cq
+        for &denom in &[9i32, 12, 14] {
+            for &cq in &[20i32, 48] {
+                let cell = synth_superres_cell(
+                    &format!("superres_synth_b{bd}_420_128_d{denom}_cq{cq:02}"),
+                    128,
+                    false,
+                    cq,
+                    bd,
+                );
+                let r = run_superres_cell(&cell, denom);
+                if r.bit_identical {
+                    exact += 1;
+                }
+                results.push(r);
+            }
+        }
+        // monochrome (single-plane highbd downscale)
+        for &denom in &[9i32, 12] {
+            let cell = synth_superres_cell(
+                &format!("superres_synth_b{bd}_mono_128_d{denom}_cq32"),
+                128,
+                true,
+                32,
+                bd,
+            );
+            let r = run_superres_cell(&cell, denom);
+            if r.bit_identical {
+                exact += 1;
+            }
+            results.push(r);
+        }
+    }
+    eprintln!(
+        "{}",
+        aom_bench::rd_close::render_table(&results, &RdBands::default())
+    );
+    eprintln!(
+        "superres FIXED highbd (bd10/12): {exact}/{} cells BYTE-IDENTICAL",
         results.len()
     );
     assert_all_exact(&results);
