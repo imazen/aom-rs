@@ -35,6 +35,12 @@ pub struct OdEcEnc {
     rng: u16,
     cnt: i32,
     error: bool,
+    /// `aom_writer.allow_update_cdf` (bitwriter.h): `aom_write_symbol`
+    /// adapts the CDF iff this is set — C's write_modes clears it when the
+    /// frame header codes `disable_cdf_update` (`--cdf-update-mode=0`).
+    /// Default TRUE (the adapting form, byte-identical to the pre-flag
+    /// behavior); mirrors `OdEcDec::allow_update_cdf` on the read side.
+    pub allow_update_cdf: bool,
 }
 
 impl Default for OdEcEnc {
@@ -52,6 +58,7 @@ impl OdEcEnc {
             rng: 0x8000,
             cnt: -9,
             error: false,
+            allow_update_cdf: true,
         };
         e.reset();
         e

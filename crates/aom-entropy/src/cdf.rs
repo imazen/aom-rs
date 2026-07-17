@@ -30,10 +30,17 @@ pub fn update_cdf(cdf: &mut [u16], val: i32, nsymbs: usize) {
     cdf[nsymbs] += (count < 32) as u16;
 }
 
-/// `aom_write_symbol` with CDF adaptation enabled.
+/// `aom_write_symbol` (`aom_dsp/bitwriter.h`): encode one symbol, then adapt
+/// the CDF *iff* `enc.allow_update_cdf` — the exact C gate
+/// `if (w->allow_update_cdf) update_cdf(cdf, symb, nsymbs);`. When the frame
+/// codes `disable_cdf_update` the tile writer clears the flag (C's
+/// write_modes) and every symbol write leaves its CDF at the initial value —
+/// matching what the decoder will do on the read side.
 pub fn write_symbol(enc: &mut OdEcEnc, symb: i32, cdf: &mut [u16], nsymbs: usize) {
     enc.encode_cdf_q15(symb, &cdf[..nsymbs], nsymbs as i32);
-    update_cdf(cdf, symb, nsymbs);
+    if enc.allow_update_cdf {
+        update_cdf(cdf, symb, nsymbs);
+    }
 }
 
 /// `aom_read_symbol` (`aom_dsp/bitreader.h`): decode one symbol, then adapt the
