@@ -175,6 +175,40 @@ pub struct SpeedFeatures {
     /// `av1_prune_partitions_by_max_min_bsize` then forces square-split-only
     /// where `bsize_1d > max_partition_size_1d`. BLOCK_SIZE enum value.
     pub default_max_partition_size: usize,
+    /// `part_sf.default_min_partition_size` — default BLOCK_4X4
+    /// (init_part_sf:2285); allintra speed>=7 -> BLOCK_8X8 (:570; also the
+    /// framesize-dep speed>=6 1080p+ arm :312, out of this grid's range).
+    /// `set_max_min_partition_size` AOMMAXes it with the CLI floor
+    /// (BLOCK_4X4 default). On the VAR_BASED_PARTITION path it is
+    /// assertion-only (`av1_rd_use_partition` asserts `bsize >= min`; the
+    /// KEY variance tree never stamps below BLOCK_8X8) — the RD search's
+    /// `av1_prune_partitions_by_max_min_bsize` floor never runs at speed>=7.
+    /// BLOCK_SIZE enum value.
+    pub default_min_partition_size: usize,
+    /// `part_sf.partition_search_type` — default SEARCH_PARTITION (= 0,
+    /// init_part_sf:2284); allintra speed>=7 -> VAR_BASED_PARTITION (= 2,
+    /// :571). THE structural speed-7 flip: `encode_rd_sb`
+    /// (encodeframe.c:876-895) replaces the RD partition search
+    /// (`av1_rd_pick_partition`) with `av1_choose_var_based_partitioning`
+    /// (fix the tree from variance thresholds —
+    /// [`crate::var_part::choose_var_based_partitioning_key`]) +
+    /// `av1_rd_use_partition` (RD mode search over the fixed tree —
+    /// `rd_use_partition_real`). Consumed by `pack::pack_tile`'s per-SB
+    /// branch. NOTE: `use_nonrd_pick_mode` stays 0 until speed 8 — the
+    /// per-leaf mode search at speed 7 is still the full RD one.
+    pub partition_search_type: i32,
+
+    // ---- rt_sf ------------------------------------------------------------
+    /// `rt_sf.var_part_split_threshold_shift` — default 5 (init_rt_sf:2085);
+    /// allintra speed>=7 -> 7 (:574), speed>=8 -> 8 (:581), speed>=9 -> 7 again (:601).
+    /// Consumed by `set_vbp_thresholds`' NON-key arm (`thresholds[3] =
+    /// threshold_base << shift`) and by `set_vbp_thresholds_key_frame` ONLY
+    /// under `rt_sf.force_large_partition_blocks_intra` (var_based_part.c:
+    /// 539-544) — which stays 0 on allintra KEY below speed 8/720p
+    /// (speed_features.c:327). **Byte-INERT on this port's KEY envelope**
+    /// (carried for provenance + the speed-8/9 arms; see
+    /// [`crate::var_part`] module docs).
+    pub var_part_split_threshold_shift: i32,
 
     // ---- intra_sf --------------------------------------------------------
     /// `intra_sf.intra_pruning_with_hog` — allintra base 1
@@ -423,6 +457,10 @@ impl SpeedFeatures {
             prune_sub_8x8_partition_level: 0, // init_part_sf:2321
             prune_part4_search: 2, // allintra base (:355; init default 0)
             default_max_partition_size: 15, // BLOCK_LARGEST = BLOCK_128X128 (init_part_sf:2286)
+            default_min_partition_size: 0, // BLOCK_4X4 (init_part_sf:2285)
+            partition_search_type: 0, // SEARCH_PARTITION (init_part_sf:2284)
+            // rt_sf
+            var_part_split_threshold_shift: 5, // init_rt_sf:2085
             // intra_sf
             intra_pruning_with_hog: 1, // allintra base (speed_features.c:360)
             chroma_intra_pruning_with_hog: 0, // init_intra_sf default (off)
@@ -800,6 +838,47 @@ impl SpeedFeatures {
             sf.multi_winner_mode_type = 0; // MULTI_WINNER_MODE_OFF
             sf.prune_winner_mode_eval_level = 1;
             sf.dc_blk_pred_level = 1;
+        }
+
+        // ---- if (speed >= 7) { ... } (speed_features.c:569-575). "The
+        //      following should make all-intra mode speed 7 approximately
+        //      equal to real-time speed 6" — the STRUCTURAL flip from the
+        //      RD partition search to the variance-based fixed tree. Five
+        //      deltas total (KB-11):
+        //
+        //   LIVE on the allintra KEY path:
+        //     - `part_sf.partition_search_type = VAR_BASED_PARTITION` (:571)
+        //       — `encode_rd_sb` runs `av1_choose_var_based_partitioning`
+        //       ([`crate::var_part`]) + `av1_rd_use_partition`
+        //       (`partition_pick::rd_use_partition_real`) instead of
+        //       `av1_rd_pick_partition`. Two knock-on effects beyond the
+        //       walk itself: (a) `x->intra_sb_rdmult_modifier` stays at its
+        //       per-SB reset value 128 (encodeframe.c:1303) because only
+        //       av1_rd_pick_partition's SB root recomputes it
+        //       (partition_search.c:5710-5722) — `setup_block_rdmult`'s
+        //       ALLINTRA fold `rdmult * 128 >> 7` is IDENTITY at speed>=7;
+        //       (b) none of the RD-search partition machinery (CNN prune,
+        //       rect kills, 4-way/AB stages, max/min bsize clamps) runs.
+        //     - `part_sf.default_min_partition_size = BLOCK_8X8` (:570) —
+        //       assertion-only on this path (field doc).
+        //
+        //   INERT on this path (verified against source):
+        //     - `lpf_sf.cdef_pick_method = CDEF_PICK_FROM_Q` (:572) — CDEF
+        //       off in the allintra default envelope (same provenance-only
+        //       treatment as the speed-3/6 LVL3/LVL4 steps above).
+        //     - `rt_sf.mode_search_skip_flags |= FLAG_SKIP_INTRA_DIRMISMATCH`
+        //       (:573) — the sole consumer is
+        //       `search_intra_modes_in_interframe` (rdopt.c:5824, the
+        //       INTER-frame intra search); the KEY-frame intra search
+        //       (av1_rd_pick_intra_mode_sb) never reads it. Not carried as a
+        //       field (no reachable consumer to wire).
+        //     - `rt_sf.var_part_split_threshold_shift = 7` (:574) — dead on
+        //       KEY frames while `force_large_partition_blocks_intra == 0`
+        //       (field doc); carried for provenance.
+        if speed >= 7 {
+            sf.default_min_partition_size = 3; // BLOCK_8X8 (:570)
+            sf.partition_search_type = 2; // VAR_BASED_PARTITION (:571)
+            sf.var_part_split_threshold_shift = 7; // :574 (inert on KEY)
         }
 
         // The unconditional tail of set_allintra_speed_features_framesize_
@@ -1295,6 +1374,53 @@ mod tests {
             sf5.tx_type_search_policy_for_stage(DEFAULT_EVAL, false, 0).predict_dc_level,
             0
         );
+    }
+
+    /// The speed-7 all-intra deltas, asserted against the source values
+    /// (`set_allintra_*` speed>=7 block, speed_features.c:569-575). The
+    /// speed-7 flip is STRUCTURAL — `partition_search_type =
+    /// VAR_BASED_PARTITION` replaces the RD partition search with the
+    /// variance-based fixed tree (`var_part` + `rd_use_partition_real`) —
+    /// while everything else (the whole speed-6 field set, incl. the intra
+    /// loop, tx policy, and winner-mode restructure) carries over unchanged.
+    /// `cdef_pick_method = CDEF_PICK_FROM_Q` (:572, CDEF off in allintra)
+    /// and `mode_search_skip_flags |= FLAG_SKIP_INTRA_DIRMISMATCH` (:573,
+    /// consumer is the inter-frame intra search only) are byte-inert on the
+    /// KEY envelope — comment-tracked in `set_allintra`, not asserted here.
+    #[test]
+    fn speed7_allintra_deltas_match_source() {
+        let sf = SpeedFeatures::set_allintra(7, false, false);
+        // part_sf (:570-571).
+        assert_eq!(sf.default_min_partition_size, 3); // BLOCK_8X8 (:570)
+        assert_eq!(sf.partition_search_type, 2); // VAR_BASED_PARTITION (:571)
+        // rt_sf (:574; inert on KEY while force_large_partition_blocks_intra
+        // stays 0 — var_part module docs).
+        assert_eq!(sf.var_part_split_threshold_shift, 7);
+        // The full speed-6 delta set carries over unchanged (:527-564 —
+        // no speed-7 line touches any of these).
+        assert!(sf.prune_smooth_intra_mode_for_chroma);
+        assert_eq!(sf.prune_filter_intra_level, 2);
+        assert_eq!(sf.chroma_intra_pruning_with_hog, 0);
+        assert_eq!(sf.intra_pruning_with_hog, 4);
+        assert_eq!(sf.cfl_search_range, 1);
+        assert_eq!(sf.top_intra_model_count_allowed, 2);
+        assert!(sf.adapt_top_model_rd_count_using_neighbors);
+        assert!(sf.prune_luma_odd_delta_angles_in_intra);
+        assert_eq!(sf.default_max_partition_size, 9); // BLOCK_32X32
+        assert_eq!(sf.winner_mode_tx_type_pruning, 3);
+        assert!(!sf.prune_tx_type_est_rd);
+        assert!(sf.prune_intra_tx_depths_using_nn);
+        assert_eq!(sf.perform_coeff_opt, 6);
+        assert_eq!(sf.tx_domain_dist_level, 3);
+        assert_eq!(sf.multi_winner_mode_type, 0);
+        assert_eq!(sf.prune_winner_mode_eval_level, 1);
+        assert_eq!(sf.dc_blk_pred_level, 1);
+        // Speed 6 (regression guard): every speed-7-only field at its
+        // speed-6 value.
+        let sf6 = SpeedFeatures::set_allintra(6, false, false);
+        assert_eq!(sf6.default_min_partition_size, 0); // BLOCK_4X4
+        assert_eq!(sf6.partition_search_type, 0); // SEARCH_PARTITION
+        assert_eq!(sf6.var_part_split_threshold_shift, 5); // init_rt_sf:2085
     }
 
     /// KB-8 chunk 2a: the stage-aware [`SpeedFeatures::tx_type_search_policy_for_stage`]
