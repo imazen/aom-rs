@@ -443,3 +443,39 @@ fn toggles_c11_cdf_update_mode_0() {
     };
     run_grid_and_gate("c11_cdf0", &knobs, true);
 }
+
+/// C9 `--disable-trellis-quant=1` (AV1E_SET_DISABLE_TRELLIS_QUANT):
+/// NO_TRELLIS_OPT — trellis off in BOTH the search and the pack
+/// (init_rd_sf, speed_features.c:2494).
+///
+/// HANDOFF: written under the shutdown directive — compile-checked, NOT yet
+/// run. Expected EXACT (pure deterministic policy shrink, same shape as the
+/// other C9 arms); if a cell comes out non-EXACT, drop `expect_exact` and
+/// record the closeness numbers per PARITY rule 2 before landing claims.
+#[test]
+fn toggles_c9_trellis_quant_off() {
+    let knobs = ToggleKnobs {
+        disable_trellis_quant: 1,
+        ..Default::default()
+    };
+    run_grid_and_gate("c9_trellis1", &knobs, true);
+}
+
+/// C9 `--disable-trellis-quant=2`: FINAL_PASS_TRELLIS_OPT — the search
+/// evaluates WITHOUT trellis (`is_trellis_used(., DRY_RUN_NORMAL) = false`)
+/// while the pack's final quantize runs WITH it (OUTPUT_ENABLED arm).
+///
+/// HANDOFF: compile-checked, NOT yet run (shutdown directive) — same
+/// expectation + fallback as `toggles_c9_trellis_quant_off`. NOTE
+/// `--disable-trellis-quant=0` (FULL) is NOT celled: vs the default (3,
+/// NO_ESTIMATE_YRD) it differs only in `estimate_yrd_for_sb`, which is
+/// inter-only — the C stream would not change and the anti-vacuity witness
+/// correctly refuses vacuous cells.
+#[test]
+fn toggles_c9_trellis_quant_final_pass_only() {
+    let knobs = ToggleKnobs {
+        disable_trellis_quant: 2,
+        ..Default::default()
+    };
+    run_grid_and_gate("c9_trellis2", &knobs, true);
+}

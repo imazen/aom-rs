@@ -336,6 +336,32 @@ pub struct ToggleKnobs {
     /// `PickFrameCfg::palette_costs`; the search still requires the frame's
     /// `allow_screen_content_tools`, exactly as C). Default OFF.
     pub enable_palette: bool,
+    /// `--disable-trellis-quant` (default 3): 0 = FULL_TRELLIS_OPT,
+    /// 1 = NO_TRELLIS_OPT, 2 = FINAL_PASS_TRELLIS_OPT (trellis only in the
+    /// OUTPUT_ENABLED pack pass), 3 = NO_ESTIMATE_YRD_TRELLIS_OPT
+    /// (default; ≈ FULL on the intra envelope — estimate_yrd_for_sb is
+    /// inter-only). Mapping: init_rd_sf (speed_features.c:2479-2498);
+    /// search-side `skip_trellis = !is_trellis_used(opt, DRY_RUN_NORMAL)`,
+    /// pack-side `enable_optimize_b` (is_trellis_used(opt, OUTPUT_ENABLED)).
+    pub disable_trellis_quant: u32,
+    /// `--coeff-cost-upd-freq` / `--mode-cost-upd-freq` (default 0 =
+    /// COST_UPD_SB; 1 SBROW / 2 TILE / 3 OFF).
+    /// HANDOFF: C ctrls emitted below; the PORT-side gate is NOT wired yet —
+    /// pack.rs's per-SB `derive_real_costs(kf, ..)` rebuild (the sb_real
+    /// block) must split per table set and gate: SB = rebuild every SB
+    /// (current behavior); SBROW = rebuild only at `c == 0` in pack_tile's
+    /// SB loop (skip_cost_update's mi_col-at-tile-start arm); TILE/OFF =
+    /// never rebuild (single-tile ⇒ identical outcomes; frame-init tables
+    /// throughout). coeff gates `sb_env.{coeff_costs_*, tx_type_costs}`,
+    /// mode gates `sb_pick_cfg.{mode_costs, tx_size_costs, skip_costs, ...}`
+    /// — derive_real_costs returns both halves; USE the rebuilt half only
+    /// when its knob says so. ALSO: C skips ALL cost updates when
+    /// disable_cdf_update (av1_set_cost_upd_freq's early return,
+    /// encodeframe_utils.c:1629) — the port is equivalent by construction
+    /// (kf never adapts ⇒ rebuild == frame-init), keep it that way.
+    pub coeff_cost_upd_freq: u32,
+    /// See `coeff_cost_upd_freq`.
+    pub mode_cost_upd_freq: u32,
 }
 
 impl Default for ToggleKnobs {
@@ -363,6 +389,9 @@ impl Default for ToggleKnobs {
             enable_tx_size_search: true,
             cdf_update_mode: 1,
             enable_palette: false,
+            disable_trellis_quant: 3,
+            coeff_cost_upd_freq: 0,
+            mode_cost_upd_freq: 0,
         }
     }
 }
@@ -378,6 +407,18 @@ fn dim_to_bsize(px: usize) -> usize {
         64 => 12,  // BLOCK_64X64
         128 => 15, // BLOCK_128X128
         _ => panic!("partition size {px}px is not a square BLOCK dimension"),
+    }
+}
+
+/// `init_rd_sf` (speed_features.c:2479-2498), non-lossless arm:
+/// `--disable-trellis-quant` value → `TRELLIS_OPT_TYPE`.
+fn trellis_opt_of_knob(v: u32) -> TrellisOptType {
+    match v {
+        0 => TrellisOptType::FullTrellisOpt,
+        1 => TrellisOptType::NoTrellisOpt,
+        2 => TrellisOptType::FinalPassTrellisOpt,
+        3 => TrellisOptType::NoEstimateYrdTrellisOpt,
+        _ => panic!("--disable-trellis-quant {v} out of range 0..=3"),
     }
 }
 
@@ -490,6 +531,21 @@ impl ToggleKnobs {
         }
         if self.cdf_update_mode != d.cdf_update_mode {
             out.push((AV1E_SET_CDF_UPDATE_MODE, self.cdf_update_mode as i32));
+        }
+        if self.disable_trellis_quant != d.disable_trellis_quant {
+            out.push((
+                AV1E_SET_DISABLE_TRELLIS_QUANT,
+                self.disable_trellis_quant as i32,
+            ));
+        }
+        if self.coeff_cost_upd_freq != d.coeff_cost_upd_freq {
+            out.push((
+                AV1E_SET_COEFF_COST_UPD_FREQ,
+                self.coeff_cost_upd_freq as i32,
+            ));
+        }
+        if self.mode_cost_upd_freq != d.mode_cost_upd_freq {
+            out.push((AV1E_SET_MODE_COST_UPD_FREQ, self.mode_cost_upd_freq as i32));
         }
         out
     }
@@ -972,10 +1028,15 @@ impl EncodeCell {
             rows_v: &rows_v,
             rdmult,
             sharpness: 0,
+            // init_rd_sf: lossless forces NO_TRELLIS_OPT for every knob
+            // value; else the knob maps per trellis_opt_of_knob. The stock
+            // default (3, NO_ESTIMATE_YRD) is pack-equivalent to the prior
+            // hardcoded FullTrellisOpt (is_trellis_used(OUTPUT_ENABLED) is
+            // true for both; estimate_yrd_for_sb is inter-only).
             enable_optimize_b: if p.coded_lossless {
                 TrellisOptType::NoTrellisOpt
             } else {
-                TrellisOptType::FullTrellisOpt
+                trellis_opt_of_knob(knobs.disable_trellis_quant)
             },
             // Stock encode is QM-off (the allintra default; QM cells live in
             // the qm_encode_witness gate, not this harness).
@@ -995,6 +1056,13 @@ impl EncodeCell {
             pol.use_intra_dct_only = knobs.use_intra_dct_only;
             pol.use_default_intra_tx_type |= knobs.use_intra_default_tx_only;
             pol.enable_tx_size_search = knobs.enable_tx_size_search;
+            // `--disable-trellis-quant` (init_rd_sf): the search runs
+            // trellis iff is_trellis_used(opt, DRY_RUN_NORMAL) — FULL(0)/
+            // NO_ESTIMATE_YRD(3) yes, NO(1)/FINAL_PASS(2) no.
+            pol.skip_trellis = !aom_encode::encode_intra::is_trellis_used(
+                trellis_opt_of_knob(knobs.disable_trellis_quant),
+                false,
+            );
             pol
         };
         // Chroma-loop tool toggles ride on the UvLoopPolicy (the sf-driven

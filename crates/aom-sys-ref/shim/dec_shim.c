@@ -786,6 +786,10 @@ int shim_cx_ctrl_id_by_probe(int probe) {
     case 18: return AV1E_SET_ENABLE_DIAGONAL_INTRA;
     case 19: return AV1E_SET_ENABLE_DIRECTIONAL_INTRA;
     case 20: return AV1E_SET_ENABLE_TX_SIZE_SEARCH;
+    case 21: return AV1E_SET_DISABLE_TRELLIS_QUANT;
+    case 22: return AV1E_SET_COEFF_COST_UPD_FREQ;
+    case 23: return AV1E_SET_MODE_COST_UPD_FREQ;
+    case 24: return AV1E_SET_DV_COST_UPD_FREQ;
     default: return -1;
   }
 }

@@ -8571,10 +8571,22 @@ pub mod cx_ctrl {
     /// `--enable-tx-size-search` (default 1; 0 forces the largest tx size
     /// per block -> frame header `tx_mode = TX_MODE_LARGEST`).
     pub const AV1E_SET_ENABLE_TX_SIZE_SEARCH: i32 = 146;
+    /// `--disable-trellis-quant` (default 3 = NO_ESTIMATE_YRD_TRELLIS_OPT;
+    /// 0 = FULL, 1 = NO, 2 = FINAL_PASS — init_rd_sf, speed_features.c:2479).
+    pub const AV1E_SET_DISABLE_TRELLIS_QUANT: i32 = 62;
+    /// `--coeff-cost-upd-freq` (default 0 = COST_UPD_SB; 1 SBROW / 2 TILE /
+    /// 3 OFF). NOTE: C skips ALL cost updates when disable_cdf_update
+    /// (av1_set_cost_upd_freq's early return).
+    pub const AV1E_SET_COEFF_COST_UPD_FREQ: i32 = 126;
+    /// `--mode-cost-upd-freq` (same value space as coeff).
+    pub const AV1E_SET_MODE_COST_UPD_FREQ: i32 = 127;
+    /// `--dv-cost-upd-freq` — DV costs are intrabc-only: INERT on this
+    /// envelope (intrabc off); the ctrl exists for completeness.
+    pub const AV1E_SET_DV_COST_UPD_FREQ: i32 = 142;
 
     /// `(probe_index, constant)` table for the header cross-check test —
     /// probe order matches `shim_cx_ctrl_id_by_probe` (dec_shim.c).
-    pub const PROBE_TABLE: [(i32, i32); 21] = [
+    pub const PROBE_TABLE: [(i32, i32); 25] = [
         (0, AV1E_SET_CDF_UPDATE_MODE),
         (1, AV1E_SET_ENABLE_RECT_PARTITIONS),
         (2, AV1E_SET_ENABLE_AB_PARTITIONS),
@@ -8596,6 +8608,10 @@ pub mod cx_ctrl {
         (18, AV1E_SET_ENABLE_DIAGONAL_INTRA),
         (19, AV1E_SET_ENABLE_DIRECTIONAL_INTRA),
         (20, AV1E_SET_ENABLE_TX_SIZE_SEARCH),
+        (21, AV1E_SET_DISABLE_TRELLIS_QUANT),
+        (22, AV1E_SET_COEFF_COST_UPD_FREQ),
+        (23, AV1E_SET_MODE_COST_UPD_FREQ),
+        (24, AV1E_SET_DV_COST_UPD_FREQ),
     ];
 }
 
