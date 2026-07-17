@@ -75,6 +75,7 @@ Byte-identity gates landed and green on origin/main. Any regression here is a sh
 | **Loop-restoration RD search** (`--enable-restoration=1`, family C2): 8/8 cells BYTE-IDENTICAL + 8/8 decisions equal C's — real content 64² cq{12,32,48}, 196² cq{20,48} (partial-SB edges), 352×288 cq{32,55} (multi-unit size-descent grids), b10 352×288 cq32; decision shapes covered: all-NONE, WIENER-luma, SGRPROJ-luma, WIENER-all-3-planes, mixed SGR-luma+WIENER-chroma (b10), unit-size descent picking 128; allintra speed-0 full search (all 16 SGR eps, ±{4,2,1} Wiener tap refine, 256→128→64 size loop) | `lr_restoration_gate.rs::lr_restoration_search_rd_close_vs_real_aomenc` (aom-bench; rd_close report + full byte-identity + decision-equality asserts) | e24cf09 + 96d3464 + dfd757e + 96534c4 |
 | **tune=IQ / tune=SSIMULACRA2 family** (`--tune=iq` / `--tune=ssimulacra2`, family C4): each bundle piece e2e byte-identical — QM-level formulas (`aom_get_qmlevel_luma_ssimulacra2` + `_444_chroma`), QM-PSNR dist metric (trellis + tx-search transform-domain distortion QM-weighted), `--sharpness` 0..7, `--enable-chroma-deltaq`, `--enable-adaptive-sharpness`, Variance-Boost `--deltaq-mode=6` — PLUS the **full composite bundle** (54/54 cells: mono/420/444 × 64/128/192 × cq12/32/50, CDEF overridden off = the separate C1 track, symbol-inert). All OFF by default (`TuneKnobs::default()` = PSNR). Anti-vacuous witnesses for sharpness/adaptive/variance-boost + `tune_shim_smoke` | `encoder_gate_tune_iq_e2e` (9 tests) + `qm_level_diff` + `tune_shim_smoke` | 2026-07-17 |
 | **Superres encoder-side, FIXED denom, bd8** (`--superres-mode=fixed --superres-denominator=D`, family C6): **13/13 cells BYTE-IDENTICAL** — real-content 196² 4:2:0 (denoms 9/12/14 × cq{20,32,48}) + mono (denoms 9/12 × cq{20,48}). The source is downscaled horizontally to the coded `FrameWidth` via the ported non-normative `av1_resize_plane` (`aom_encode::resize`, differentially bit-exact vs the exported C symbol — interpolate 5-band + down2_symeven/symodd + resize_multistep + `coded_superres_width`), encoded at the reduced width (existing speed-0 KEY machinery, mi grid sized to coded_w), superres denom + upscaled width signalled in the header (`write_superres_scale`); port+C decoders agree on the upscaled recon. Superres OFF by default. **Anti-vacuity**: `scale_denominator == D`, `coded_w < w`. **Follow-ups (Section C6)**: highbd (10/12-bit) downscale (`highbd_resize_plane`), the 8-bit denom-16-even-width optimized-scaler corner (`av1_resize_and_extend_frame`), and AUTO/QTHRESH/RANDOM denom selection + the recode loop. | `encoder_gate_superres_{fixed_real_content,fixed_mono}_rd_close` (aom-bench; rd_close report + full byte-identity asserts) | 2505b49f (kernel) + (this landing) |
+| **C7 film-grain table-inject** (`--film-grain-table` / `AV1E_SET_FILM_GRAIN_TABLE`): the port's OWN grain-table reader + lookup (`aom-encode/src/grain_table.rs`, port of `aom_dsp/grain_table.c` `aom_film_grain_table_read`/`_lookup`) → `FilmGrainParams` → the already-bit-exact `write_film_grain_params` header writer. Byte-identical vs real aomenc on 4:2:0 bd8 REAL content (64² cq20/32, 128² cq12) + mono/444/bd10 synthetic × built-in test vectors 1/2/6/15 (rich full-chroma / max-lag / chroma-points-absent / chroma-scaling-from-luma). Grain is decode-side synthesis → coded tiles UNCHANGED (the C shim replicates the plain `encode_kf_pass` control set so only the seq present bit + frame grain block are added). No-bootstrap-leak witness: injecting a different vector's params DIVERGES. | `film_grain_gate.rs::film_grain_table_inject_{420_real,format_axes}` + `film_grain_no_bootstrap_leak_witness` (aom-bench) | (this landing) |
 
 ### Decoder (vs real `aom_codec_av1_dx`)
 
@@ -250,13 +251,30 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   4. `av1_superres_in_recode_allowed` is AUTO+non-SOLO+frames_to_key>1 only → never for FIXED
      stills; the recode loop (`SUPERRES_AUTO_DUAL`) is an AUTO-mode multi-pass follow-up. (M)
 
-### C7 — Film grain / denoise estimation — ABSENT (S table-inject, L estimation)
-- `--film-grain-test` / `--film-grain-table`: inject grain params → header. C:
-  `grain_test_vectors.h`, `bitstream.c` `write_film_grain_params` (:2529). Port already
-  has the `write_film_grain_params` header writer bit-exact — the remaining lift is
-  param plumbing + a gate. (S)
-- `--denoise-noise-level/-block-size`, `--enable-dnl-denoising`: noise-model estimation +
-  source denoise + grain fit. C: `aom_dsp/noise_model.c` (`aom_denoise_and_model_*`). (L)
+### C7 — Film grain / denoise estimation — table-inject DONE (byte-exact → section A); estimation ABSENT (L)
+- **`--film-grain-table` — DONE (this landing, → section A).** Ported `aom_dsp/grain_table.c`
+  (`aom_film_grain_table_read` + `grain_table_entry_read` + `aom_film_grain_table_lookup`, plus
+  `_write` for fixtures/round-trip) as `aom-encode/src/grain_table.rs`; wired
+  `EncodeCell::port_encode_film_grain` to inject the port's own table-derived `FilmGrainParams`
+  into the frame header (context fields from the cell), written by the already-bit-exact
+  `write_film_grain_params`. Gate `film_grain_gate.rs` byte-matches real aomenc
+  `--film-grain-table` (C shims `shim_write_grain_table_test_vector` +
+  `shim_encode_av1_kf_film_grain_table`, the latter replicating the plain `encode_kf_pass`
+  control set so grain adds ONLY header bytes). See the section-A row.
+  - `--film-grain-test` (`AV1E_SET_FILM_GRAIN_TEST_VECTOR`, built-in `grain_test_vectors.h`)
+    shares the identical param-plumbing + writer; the table-inject gate uses those 16 vectors as
+    the shared fixture source (via the C `aom_film_grain_table_write`), so the test-vector param
+    set is transitively covered. A direct `--film-grain-test` e2e gate (reusing the existing
+    `ref_encode_av1_kf_film_grain` shim) is a trivial follow-up if a distinct knob is wanted.
+- `--denoise-noise-level/-block-size`, `--enable-dnl-denoising`: noise-model ESTIMATION +
+  source denoise + grain fit. C: `aom_dsp/noise_model.c` (`aom_denoise_and_model_run` →
+  `aom_flat_block_finder_*` → `aom_wiener_denoise_2d` (FFT) → `aom_noise_model_*` →
+  `aom_noise_model_get_grain_parameters`). (L — **all `double`/FFT float math**, so a byte-exact
+  `--denoise-noise-level` stream is float-determinism-gated; the realistic deliverable is
+  per-kernel DIFFERENTIAL validation against the exported `aom_noise_*`/`aom_flat_block_finder_*`
+  `_c` functions. Decompose: (2) `noise_strength_solver` (linear system), (3) `flat_block_finder`
+  (planar-model + threshold), (4) `noise_model` (AR estimate + `get_grain_parameters` quantize),
+  (5) `wiener_denoise_2d` + FFT, (6) `denoise_and_model_run` orchestrator + encoder wiring.)
 
 ### C8 — Partition controls — disable arms DONE (byte-exact); SB128 remains
 - **DONE (this landing, → section A):** `--enable-rect-partitions=0`, `--enable-ab-partitions=0`,

@@ -5,6 +5,15 @@ Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
 
 ## Done (bit-exact vs C oracle, differential-fuzz verified)
 
+- **C7 film-grain table-inject** (`--film-grain-table`, encoder side) — the port's own
+  grain-table reader/lookup (`aom-encode/src/grain_table.rs`, port of `aom_dsp/grain_table.c`)
+  feeds the already-bit-exact `write_film_grain_params` header writer. E2E byte-identical vs real
+  aomenc `--film-grain-table` across 4:2:0/mono/4:4:4/bd10 × built-in test vectors 1/2/6/15.
+  Gate: `crates/aom-bench/tests/film_grain_gate.rs` (+ no-bootstrap-leak witness). Root fix during
+  landing: the grain C shim must replicate the plain `encode_kf_pass` control set (CDEF/restoration/
+  deltaq/aq off) — grain is decode-side synthesis, so the coded tiles MUST equal the plain encode
+  (the port reproduces plain tiles + injects the header grain block). Grain ESTIMATION
+  (`--denoise-noise-level`, `aom_dsp/noise_model.c`) remains ABSENT — L, float/FFT-gated (see PARITY C7).
 - **Forward 1-D transforms** (`av1_fwd_txfm1d.c`), all 12 kernels:
   `fdct{4,8,16,32,64}`, `fadst{4,8,16}`, `fidentity{4,8,16,32}`.
   Harness: `crates/aom-transform/tests/txfm1d_diff.rs`. Coverage: 4.8M

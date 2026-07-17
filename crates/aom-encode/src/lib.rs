@@ -19,6 +19,7 @@ pub mod ab_nn_weights;
 pub mod cnn_partition;
 pub mod encode_intra;
 pub mod encode_sb;
+pub mod grain_table;
 pub mod hog;
 pub mod intra_rd;
 pub mod intra_tx_nn_weights;

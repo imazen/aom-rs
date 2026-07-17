@@ -44,8 +44,9 @@ use aom_encode::real_costs::derive_real_costs;
 use aom_encode::speed_features::SpeedFeatures;
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::header::{
-    CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
-    RestorationHeader, TileInfoHeader, read_sequence_header_obu, read_uncompressed_header,
+    CdefHeader, FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
+    LoopfilterHeader, RestorationHeader, TileInfoHeader, read_sequence_header_obu,
+    read_uncompressed_header,
 };
 use aom_entropy::obu::read_obu_header;
 use aom_entropy::partition::KfFrameContext;
@@ -831,6 +832,22 @@ impl EncodeCell {
         self.port_encode_with(bootstrap, &ToggleKnobs::default())
     }
 
+    /// [`Self::port_encode`] with a port-DERIVED film-grain params block injected
+    /// into the frame header (the C7 `--film-grain-table` parity path). `grain`
+    /// is the params the port looked up from the grain table
+    /// ([`aom_encode::grain_table`]) — NOT read from `bootstrap`; the harness
+    /// overwrites the frame header's grain block with `grain` (context fields
+    /// `monochrome`/`subsampling_*`/`is_inter_frame` set from this cell) and
+    /// forces `film_grain_params_present`, so a byte-match vs a real
+    /// `--film-grain-table` encode proves the port's own table→params→header
+    /// chain (rule 4: no bootstrap leak — the bootstrap's grain bits are never
+    /// read on this path). The coded tile bytes are the ordinary port encode
+    /// (grain is decode-side synthesis, so the `-table` path leaves them
+    /// unchanged). Requires `bootstrap` to be a film-grain stream (asserted).
+    pub fn port_encode_film_grain(&self, bootstrap: &[u8], grain: &FilmGrainParams) -> Vec<u8> {
+        self.port_encode_full(bootstrap, &ToggleKnobs::default(), false, Some(grain))
+    }
+
     /// [`Self::port_encode`] with explicit CLI-toggle knobs threaded into
     /// the port's search config ([`ToggleKnobs`]; the toggle-sweep port
     /// side). `ToggleKnobs::default()` == `port_encode`. `knobs.enable_palette`
@@ -838,7 +855,7 @@ impl EncodeCell {
     /// side's `--enable-palette=1`; the search still requires the frame's
     /// `allow_screen_content_tools`, exactly as C).
     pub fn port_encode_with(&self, bootstrap: &[u8], knobs: &ToggleKnobs) -> Vec<u8> {
-        self.port_encode_impl(bootstrap, knobs, false)
+        self.port_encode_full(bootstrap, knobs, false, None)
     }
 
     /// [`Self::port_encode`] plus the loop-restoration ENCODER stage
@@ -852,10 +869,16 @@ impl EncodeCell {
     /// `enable_restoration=1` stream ([`Self::c_encode_lr`]); the
     /// restoration DECISIONS are never copied from it.
     pub fn port_encode_lr(&self, bootstrap: &[u8]) -> Vec<u8> {
-        self.port_encode_impl(bootstrap, &ToggleKnobs::default(), true)
+        self.port_encode_full(bootstrap, &ToggleKnobs::default(), true, None)
     }
 
-    fn port_encode_impl(&self, bootstrap: &[u8], knobs: &ToggleKnobs, lr_stage: bool) -> Vec<u8> {
+    fn port_encode_full(
+        &self,
+        bootstrap: &[u8],
+        knobs: &ToggleKnobs,
+        lr_stage: bool,
+        film_grain: Option<&FilmGrainParams>,
+    ) -> Vec<u8> {
         let (w, h, mono, ss_x, ss_y, bd) = (self.w, self.h, self.mono, self.ss_x, self.ss_y, self.bd);
         let obus = walk_obus(bootstrap);
         let seq_payload = obus
@@ -931,7 +954,11 @@ impl EncodeCell {
                 subsampling_y: cc.subsampling_y,
                 ..Default::default()
             },
-            film_grain_params_present: seq.film_grain_params_present,
+            // On the film-grain injection path the port derives the grain block
+            // itself (below) — tell the header reader to SKIP the bootstrap's
+            // grain bits (rule 4: no bootstrap leak; also avoids depending on the
+            // reader's grain seq-context, which this cfg doesn't populate).
+            film_grain_params_present: seq.film_grain_params_present && film_grain.is_none(),
             ..Default::default()
         };
 
@@ -939,6 +966,25 @@ impl EncodeCell {
         let mut p = read_uncompressed_header(&mut rb, &cfg);
         assert!(!p.prefix.show_existing_frame);
         assert_eq!(p.prefix.frame_type, 0, "frame_type must be KEY");
+        if let Some(grain) = film_grain {
+            // The bootstrap MUST be a film-grain stream (its seq header carries
+            // the present bit the C encoder set) — no seq bootstrap leak, we just
+            // confirm the config we are matching.
+            assert!(
+                seq.film_grain_params_present,
+                "{}: port_encode_film_grain needs a film-grain bootstrap",
+                self.label
+            );
+            let mut g = grain.clone();
+            // Context fields are NOT in the grain table — set from THIS cell's
+            // config, exactly as C derives them from the seq/frame header.
+            g.monochrome = mono;
+            g.subsampling_x = ss_x as i32;
+            g.subsampling_y = ss_y as i32;
+            g.is_inter_frame = false; // KEY frame
+            p.film_grain = g;
+            p.film_grain_params_present = true;
+        }
         assert!(
             p.quant.base_qindex > 0,
             "lossless cells are out of this harness's scope"

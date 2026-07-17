@@ -2494,6 +2494,160 @@ long shim_encode_av1_kf_film_grain(const uint16_t *y, const uint16_t *u,
   return rc ? rc : total;
 }
 
+#include "aom_dsp/grain_table.h"
+#include "av1/encoder/grain_test_vectors.h"
+
+/* Serialize libaom's built-in film_grain_test_vectors[idx-1] (idx in 1..16) to
+ * `path` as a canonical `filmgrn1` grain table, via the REAL
+ * aom_film_grain_table_write. This gives a shared on-disk fixture that BOTH real
+ * aomenc (--film-grain-table / AV1E_SET_FILM_GRAIN_TABLE) and the port's ported
+ * reader (aom_encode::grain_table::read_film_grain_table) consume, so the file
+ * format itself is C's output (no hand-authoring). The single entry spans
+ * [0, INT64_MAX) so a still at time 0 always looks it up. Returns 0 on success,
+ * negative on error. Append-only decoder-track addition. */
+int shim_write_grain_table_test_vector(int idx, const char *path) {
+  if (idx < 1 || idx > 16) return -1;
+  aom_film_grain_table_t t;
+  memset(&t, 0, sizeof(t));
+  aom_film_grain_table_append(&t, 0, INT64_MAX, &film_grain_test_vectors[idx - 1]);
+  struct aom_internal_error_info err;
+  memset(&err, 0, sizeof(err));
+  aom_codec_err_t e = aom_film_grain_table_write(&t, path, &err);
+  aom_film_grain_table_free(&t);
+  return e == AOM_CODEC_OK ? 0 : -2;
+}
+
+/* Encode one KEY frame WITH a film-grain TABLE: identical single-pass setup to
+ * shim_encode_av1_kf_film_grain, but the grain params come from the file at
+ * `table_path` via AV1E_SET_FILM_GRAIN_TABLE (const char*, the --film-grain-table
+ * path) instead of a built-in test-vector index. The encoder reads the table
+ * (aom_film_grain_table_read), looks up the per-frame entry
+ * (aom_film_grain_table_lookup), and writes the params into the frame header;
+ * the coded picture is NOT altered (grain is decode-side synthesis). Planes are
+ * u16 row-major tight. Returns the bitstream length or a negative error code.
+ * Append-only decoder-track addition. */
+long shim_encode_av1_kf_film_grain_table(const uint16_t *y, const uint16_t *u,
+                                         const uint16_t *v, int w, int h, int bd,
+                                         int mono, int ss_x, int ss_y,
+                                         int cq_level, int cpu_used, int usage,
+                                         const char *table_path, uint8_t *out,
+                                         size_t out_cap) {
+  aom_codec_iface_t *iface = aom_codec_av1_cx();
+  aom_codec_enc_cfg_t cfg;
+  if (aom_codec_enc_config_default(iface, &cfg, (unsigned int)usage)) return -1;
+  cfg.g_w = w;
+  cfg.g_h = h;
+  cfg.g_limit = 1;
+  cfg.g_lag_in_frames = 0;
+  cfg.g_threads = 1;
+  cfg.g_pass = AOM_RC_ONE_PASS;
+  cfg.rc_end_usage = AOM_Q;
+  cfg.monochrome = mono;
+  cfg.g_input_bit_depth = bd;
+  if (bd == 8) {
+    cfg.g_bit_depth = AOM_BITS_8;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else if (bd == 10) {
+    cfg.g_bit_depth = AOM_BITS_10;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else {
+    cfg.g_bit_depth = AOM_BITS_12;
+    cfg.g_profile = 2;
+  }
+  if (!mono && ss_x == 1 && ss_y == 0) cfg.g_profile = 2; /* 4:2:2 */
+
+  aom_img_fmt_t fmt;
+  if (mono || (ss_x == 1 && ss_y == 1))
+    fmt = AOM_IMG_FMT_I420;
+  else if (ss_x == 1)
+    fmt = AOM_IMG_FMT_I422;
+  else
+    fmt = AOM_IMG_FMT_I444;
+  if (bd > 8) fmt |= AOM_IMG_FMT_HIGHBITDEPTH;
+  aom_image_t *img = aom_img_alloc(NULL, fmt, w, h, 32);
+  if (!img) return -4;
+  img->monochrome = mono;
+  img->bit_depth = bd;
+  const int cw = mono ? 0 : (w + ss_x) >> ss_x;
+  const int ch = mono ? 0 : (h + ss_y) >> ss_y;
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    const uint16_t *src = plane == 0 ? y : (plane == 1 ? u : v);
+    const int pw = plane == 0 ? w : cw;
+    const int ph = plane == 0 ? h : ch;
+    for (int r = 0; r < ph; r++) {
+      if (bd > 8) {
+        uint16_t *row =
+            (uint16_t *)(img->planes[plane] + (size_t)r * img->stride[plane]);
+        for (int c = 0; c < pw; c++) row[c] = src[(size_t)r * pw + c];
+      } else {
+        uint8_t *row = img->planes[plane] + (size_t)r * img->stride[plane];
+        for (int c = 0; c < pw; c++) row[c] = (uint8_t)src[(size_t)r * pw + c];
+      }
+    }
+  }
+
+  aom_codec_ctx_t ctx;
+  aom_codec_flags_t flags = bd > 8 ? AOM_CODEC_USE_HIGHBITDEPTH : 0;
+  if (aom_codec_enc_init(&ctx, iface, &cfg, flags)) {
+    aom_img_free(img);
+    return -2;
+  }
+  /* CRITICAL: replicate encode_kf_pass's EXACT base control set (the plain
+   * bootstrap c_encode uses: --enable-cdef=0 --enable-restoration=0
+   * --sb-size=64 --tile-columns=0 --tile-rows=0 --deltaq-mode=0 --aq-mode=0
+   * --enable-palette=0 --enable-intrabc=0 --lossless=0) so the ONLY difference
+   * between this stream and the plain c_encode is the film-grain table. Without
+   * these, the encoder falls back to the ALLINTRA defaults (restoration ON,
+   * etc.) and codes DIFFERENT tiles — the grain params are decode-side only, so
+   * the coded picture MUST match the plain encode for the port to reproduce it. */
+#define C7CTRL(id, val)                        \
+  do {                                         \
+    if (aom_codec_control(&ctx, (id), (val))) {\
+      aom_codec_destroy(&ctx);                 \
+      aom_img_free(img);                       \
+      return -3;                               \
+    }                                          \
+  } while (0)
+  C7CTRL(AOME_SET_CPUUSED, cpu_used);
+  C7CTRL(AOME_SET_CQ_LEVEL, cq_level);
+  C7CTRL(AV1E_SET_ENABLE_CDEF, 0);
+  C7CTRL(AV1E_SET_ENABLE_RESTORATION, 0);
+  C7CTRL(AV1E_SET_SUPERBLOCK_SIZE, AOM_SUPERBLOCK_SIZE_64X64);
+  C7CTRL(AV1E_SET_TILE_COLUMNS, 0);
+  C7CTRL(AV1E_SET_TILE_ROWS, 0);
+  C7CTRL(AV1E_SET_DELTAQ_MODE, 0);
+  C7CTRL(AV1E_SET_AQ_MODE, 0);
+  C7CTRL(AV1E_SET_ENABLE_PALETTE, 0);
+  C7CTRL(AV1E_SET_ENABLE_INTRABC, 0);
+  C7CTRL(AV1E_SET_LOSSLESS, 0);
+  C7CTRL(AV1E_SET_FILM_GRAIN_TABLE, table_path);
+#undef C7CTRL
+
+  long total = 0;
+  int rc = 0;
+  for (int pass = 0; pass < 2 && rc == 0; pass++) {
+    if (aom_codec_encode(&ctx, pass == 0 ? img : NULL, 0, 1,
+                         pass == 0 ? AOM_EFLAG_FORCE_KF : 0)) {
+      rc = -5;
+      break;
+    }
+    aom_codec_iter_t iter = NULL;
+    const aom_codec_cx_pkt_t *pkt;
+    while ((pkt = aom_codec_get_cx_data(&ctx, &iter)) != NULL) {
+      if (pkt->kind != AOM_CODEC_CX_FRAME_PKT) continue;
+      if ((size_t)total + pkt->data.frame.sz > out_cap) {
+        rc = -6;
+        break;
+      }
+      memcpy(out + total, pkt->data.frame.buf, pkt->data.frame.sz);
+      total += (long)pkt->data.frame.sz;
+    }
+  }
+  aom_codec_destroy(&ctx);
+  aom_img_free(img);
+  return rc ? rc : total;
+}
+
 /* Encode one KEY frame WITH fixed-denominator superres: the REAL
  * aom_codec_av1_cx public API with AV1E_SET_SUPERRES_MODE = AOM_SUPERRES_FIXED
  * and AV1E_SET_SUPERRES_DENOMINATOR = superres_denom (9..16). The encoder codes

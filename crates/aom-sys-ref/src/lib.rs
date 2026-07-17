@@ -11863,6 +11863,101 @@ pub fn ref_encode_av1_kf_film_grain(
     out
 }
 
+// ---------------------------------------------------------------------------
+// dec_shim.c (append-only): the --film-grain-table (AV1E_SET_FILM_GRAIN_TABLE)
+// path. `shim_write_grain_table_test_vector` serializes a built-in test vector
+// to a canonical `filmgrn1` file via the REAL aom_film_grain_table_write;
+// `shim_encode_av1_kf_film_grain_table` encodes a KEY frame reading grain params
+// from that file. Both feed the C7 table-inject byte-exactness gate.
+// ---------------------------------------------------------------------------
+unsafe extern "C" {
+    fn shim_write_grain_table_test_vector(idx: i32, path: *const core::ffi::c_char) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_av1_kf_film_grain_table(
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        usage: i32,
+        table_path: *const core::ffi::c_char,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
+}
+
+/// Write libaom's built-in `film_grain_test_vectors[idx-1]` (`idx` in `1..=16`)
+/// to `path` as a canonical `filmgrn1` grain-table file, via the REAL
+/// `aom_film_grain_table_write` (dec_shim.c `shim_write_grain_table_test_vector`).
+/// The single entry spans `[0, i64::MAX)`. Panics on error.
+pub fn ref_write_grain_table_test_vector(idx: i32, path: &std::path::Path) {
+    let cpath = std::ffi::CString::new(path.as_os_str().to_str().expect("utf8 path"))
+        .expect("path has interior NUL");
+    let rc = unsafe { shim_write_grain_table_test_vector(idx, cpath.as_ptr()) };
+    assert_eq!(rc, 0, "shim_write_grain_table_test_vector({idx}) failed ({rc})");
+}
+
+/// Encode a single KEY frame WITH a film-grain TABLE via the REAL
+/// `aom_codec_av1_cx` (dec_shim.c `shim_encode_av1_kf_film_grain_table`): sets
+/// `AV1E_SET_FILM_GRAIN_TABLE = table_path` (the `--film-grain-table` path), so
+/// the stream carries `film_grain_params_present=1` + the per-frame grain params
+/// looked up from the file. Planes are `u16` row-major tight. Returns the bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_av1_kf_film_grain_table(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    usage: u32,
+    table_path: &std::path::Path,
+) -> Vec<u8> {
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+    };
+    assert_eq!(y.len(), w * h);
+    assert!(mono || (u.len() == cw * ch && v.len() == cw * ch));
+    let cpath = std::ffi::CString::new(table_path.as_os_str().to_str().expect("utf8 path"))
+        .expect("path has interior NUL");
+    let mut out = vec![0u8; w * h * 8 + 65536];
+    let n = unsafe {
+        shim_encode_av1_kf_film_grain_table(
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            usage as i32,
+            cpath.as_ptr(),
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    };
+    assert!(n > 0, "shim_encode_av1_kf_film_grain_table failed ({n})");
+    out.truncate(n as usize);
+    out
+}
+
 /// The REAL exported `aom_count_primitive_refsubexpfin`
 /// (aom_dsp/binary_codes_writer.c): coded bit count of
 /// `aom_write_primitive_refsubexpfin(n, k, ref, v)`.
