@@ -917,8 +917,23 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   `attempt_case_content_uv` now delegates to `attempt_case_content_uv_sep` (separate U/V) —
   byte-identical for every existing synthetic caller (U==V), so speeds 0-9 synthetic gates + KB-6
   speed-0 map stay byte-unchanged.
-- **Tracking:** task **#39**. Next: decode-both localize the 196 cluster (shared root?) then the
-  interior near-ties.
+- **LOCALIZED (2026-07-17, decode-both via `localize_real_speed`, kb6_real_rd_localize.rs):** EVERY
+  DIFF is a PARTITION near-tie at **BLOCK_16X16 (bsize=6)** or BLOCK_8X8, NOT a frame-edge/partial-SB
+  issue (the 196 first-divergences are all INTERIOR nodes inside SB(0,0), mi_col 6..12, never the
+  mi_col=48 edge). The port systematically picks a MORE-COMPLEX partition than C — mostly an **AB
+  partition** (HORZ_A/HORZ_B/VERT_A) or SPLIT — where C picks a simpler one:
+  - 196 cpu1 cq32 (0,12): real VERT_B / ours HORZ_B; 196 cpu1 cq12 (0,12): real SPLIT / ours HORZ_B;
+    196 cpu4 cq32 (12,8): real VERT / ours SPLIT.
+  - quant128 cpu1 cq32 (0,8): real VERT / ours VERT_A; quant128 cpu1 cq12 (4,12): real HORZ_B / ours SPLIT.
+  - quant64 cpu1 cq12 (0,12): real HORZ / ours HORZ_A; quant64 cpu2 cq32 (4,8): real SPLIT / ours HORZ_B.
+  - film64 cpu1 cq12 (4,6) 8X8: real NONE / ours VERT.
+  The port's chosen partition codes FEWER total bytes (map signature) yet C picks a different one ⇒
+  **C PRUNES the port's cheaper candidate at speed>=1** (KB-3/KB-7 pattern: a partition C's search
+  never evaluates because a speed-feature prune killed it; the port under-prunes). Consumer:
+  `prune_ab_partitions` / `predict_ab_partition_prune` (ab_nn_prune.rs) + the rect/split prunes.
+  Shared-root candidate (AB / rect / split pruning at speed 1..4), NOT scattered RD noise.
+- **Tracking:** task **#39**. Next: sibling-C RD/prune dump at a representative 16X16 node (the
+  KB-3/KB-7 method) to find which prune C applies that the port doesn't; graduate the cells it closes.
 
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 

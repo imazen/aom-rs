@@ -241,6 +241,26 @@ fn localize_real(
     off_x: usize,
     off_y: usize,
 ) -> bool {
+    localize_real_speed(name, cq_level, crop_w, crop_h, off_x, off_y, 0)
+}
+
+/// Speed-parameterized core of [`localize_real`]. `cpu_used` selects BOTH the
+/// aomenc reference speed and this port's `SpeedFeatures::set_allintra(cpu_used)`
+/// — used by the TASK #39 real-content speed>=1 localization. `localize_real`
+/// (above) == speed 0. Faithful to `attempt_case_content_uv_sep`'s speed-N
+/// config for cpu_used 1..=4 (rd_pick_partition path; the sf-derived pol/hog/
+/// rect fields all read `speed`; `max_partition_size` stays BLOCK_64X64 through
+/// speed 5 so the literal 15 is correct here).
+#[allow(clippy::too_many_arguments)]
+fn localize_real_speed(
+    name: &str,
+    cq_level: i32,
+    crop_w: usize,
+    crop_h: usize,
+    off_x: usize,
+    off_y: usize,
+    cpu_used: i32,
+) -> bool {
     c::ref_init();
     let dir = corpus_dir();
     let path = dir.join(format!("{name}.ivf"));
@@ -301,7 +321,7 @@ fn localize_real(
         ss_x as i32,
         ss_y as i32,
         cq_level,
-        0,
+        cpu_used,
         false,
         false,
         usage,
@@ -465,7 +485,7 @@ fn localize_real(
         extend_plane(&mut src_v_strided, cw, ch);
     }
 
-    let speed = 0i32;
+    let speed = cpu_used;
     let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
     let env = SbEncodeEnv {
         sb_size: SB,
@@ -915,4 +935,51 @@ fn kb6_characterize_196_partial_sb() {
         "KB-6 196x196 cq48 REGRESSED: the tokenize write-ctx fix (encode_sb.rs \
          Step 4) previously made this cell byte-match real aomenc (map 30/30)."
     );
+}
+
+// ============================================================================
+// TASK #39 — real-content speed>=1 localization. Decode-both (port decoder is
+// bit-exact) pins the FIRST divergent SB/leaf for representative DIFF cells
+// from `encoder_gate_real_content_speed1to4_e2e`'s map, classifying each
+// (partition flip / leaf mode-tx / recon) so the encoder track can root-cause.
+// Report-only diagnostics — the gate is encoder_gate_real_content_speed1to4_e2e.
+// ============================================================================
+
+/// The 196x196 PARTIAL-SB cluster (0/12 in the map — all cpu 1..4 × cq diverge).
+/// KB-6 made this cell byte-exact at speed 0; here at speed>=1 it regresses. This
+/// pins the first divergence at three (cpu,cq) points to see whether it's ONE
+/// shared root across speeds or per-speed near-ties. Report-only.
+#[test]
+fn task39_localize_196_partial_sb_speed() {
+    for (cpu, cq) in [(1i32, 32i32), (1, 12), (4, 32)] {
+        eprintln!("\n########## TASK#39 196x196 cpu{cpu} cq{cq} ##########");
+        let matched = localize_real_speed("av1-1-b8-01-size-196x196", cq, 0, 0, 0, 0, cpu);
+        eprintln!(
+            "=== TASK#39 196x196 cpu{cpu} cq{cq}: {} ===",
+            if matched { "MATCH" } else { "DIVERGE (see first divergence above)" }
+        );
+    }
+}
+
+/// Interior multi-SB (quantizer 128x128@64,64, 4 aligned SBs — no partial edge)
+/// + interior 1-SB near-ties (quantizer/film 64x64 crops). These isolate the
+/// speed>=1 INTERIOR partition/mode near-ties (KB-2/10/11/12 family) from the
+/// 196 partial-SB edge path. Report-only.
+#[test]
+fn task39_localize_interior_speed() {
+    let cells: &[(&str, i32, usize, usize, usize, usize, i32)] = &[
+        ("av1-1-b8-00-quantizer-00", 32, 128, 128, 64, 64, 1), // 4-SB interior
+        ("av1-1-b8-00-quantizer-00", 12, 128, 128, 64, 64, 1),
+        ("av1-1-b8-00-quantizer-00", 12, 64, 64, 96, 64, 1), // 1-SB interior
+        ("av1-1-b8-00-quantizer-00", 32, 64, 64, 96, 64, 2),
+        ("av1-1-b8-23-film_grain-50", 12, 64, 64, 96, 64, 1),
+    ];
+    for &(name, cq, cw, ch, ox, oy, cpu) in cells {
+        eprintln!("\n########## TASK#39 {name} {cw}x{ch}@{ox},{oy} cpu{cpu} cq{cq} ##########");
+        let matched = localize_real_speed(name, cq, cw, ch, ox, oy, cpu);
+        eprintln!(
+            "=== TASK#39 {name} {cw}x{ch}@{ox},{oy} cpu{cpu} cq{cq}: {} ===",
+            if matched { "MATCH" } else { "DIVERGE (see first divergence above)" }
+        );
+    }
 }
