@@ -41,3 +41,45 @@ fn get_deltaq_offset_matches_c() {
         "av1_get_deltaq_offset diverged from C on {mismatches}/{checked} cases"
     );
 }
+
+/// Structural smoke test for the wiener-map per-SB qindex chain
+/// ([`WeberVarMap::av1_get_sbq_perceptual_ai`]) — bounds + the
+/// perceptual-AI direction. A uniform map (one 64x64 SB = 64 8x8 blocks):
+/// raising `norm_wiener_variance` relative to the SB's wiener var raises
+/// beta, which lowers (or holds) the qindex. Byte-exactness of the chain is
+/// gated e2e vs `aomenc --deltaq-mode=3`; this only catches gross regressions.
+#[test]
+fn sbq_perceptual_ai_bounds_and_direction() {
+    use aom_encode::allintra_vis::{WeberStats, WeberVarMap, DELTA_Q_RES_PERCEPTUAL};
+    let mi = 16; // one BLOCK_64X64 SB
+    let blk = WeberStats {
+        src_variance: 4000,
+        rec_variance: 3600,
+        src_pix_max: 200,
+        rec_pix_max: 190,
+        distortion: 800,
+        satd: 5000,
+        max_scale: 6.0,
+    };
+    let mk = |norm: i64| WeberVarMap {
+        stats: vec![blk; (mi * mi) as usize],
+        mi_rows: mi,
+        mi_cols: mi,
+        norm_wiener_variance: norm,
+    };
+    let base = 128;
+    let mut prev = i32::MAX;
+    for &norm in &[1i64, 100, 1_000, 10_000, 100_000, 1_000_000] {
+        let q = mk(norm).av1_get_sbq_perceptual_ai(base, 8, DELTA_Q_RES_PERCEPTUAL, mi, mi, 0, 0);
+        assert!((1..=255).contains(&q), "qindex {q} out of range for norm {norm}");
+        // Monotone non-increasing in norm (higher norm => higher beta => finer q).
+        assert!(
+            q <= prev,
+            "qindex must be non-increasing in norm: norm={norm} q={q} prev={prev}"
+        );
+        prev = q;
+    }
+    // base_qindex 0 keeps qindex >= MINQ (no forced +1).
+    let q0 = mk(1000).av1_get_sbq_perceptual_ai(0, 8, DELTA_Q_RES_PERCEPTUAL, mi, mi, 0, 0);
+    assert!((0..=255).contains(&q0));
+}

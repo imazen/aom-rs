@@ -224,3 +224,220 @@ pub fn setup_delta_q_variance_boost(
     let boosted = av1_get_sbq_variance_boost(base_qindex, bd, deltaq_strength, variance);
     av1_adjust_q_from_delta_q_res(delta_q_res, current_base_qindex, boosted)
 }
+
+// ===========================================================================
+// `--deltaq-mode=3` (DELTA_Q_PERCEPTUAL_AI, family C5): the wiener-variance
+// per-superblock qindex map. Ports (libaom v3.14.1, allintra_vis.c):
+//   - `WeberStats` (encoder.h:2363): the per-8x8 source/recon statistics.
+//   - `get_satd` / `get_sse` / `get_max_scale` / `get_window_wiener_var` /
+//     `get_var_perceptual_ai` (:93-246): the map-window reductions.
+//   - `av1_get_sbq_perceptual_ai` (:743): the per-SB qindex from the wiener
+//     variance vs the frame `norm_wiener_variance`, via `av1_get_deltaq_offset`.
+// The heavy preprocessing that BUILDS the map + `norm_wiener_variance`
+// (`av1_set_mb_wiener_variance`) lands separately. All f64 `sqrt`/`log`/`exp`
+// resolve to the same glibc libm as the C build (same envelope note as the
+// Variance-Boost `log2`), so the byte gates hold locally.
+// ===========================================================================
+
+/// `DEFAULT_DELTA_Q_RES_PERCEPTUAL` (enums.h:499) — the CONSTANT delta-q grid
+/// resolution for `DELTA_Q_PERCEPTUAL` / `DELTA_Q_PERCEPTUAL_AI`
+/// (encodeframe.c:2289-2290), unlike Variance Boost's qindex-dependent res.
+pub const DELTA_Q_RES_PERCEPTUAL: i32 = 4;
+
+/// `mi_size_wide[BLOCK_8X8]` — the `weber_bsize` mi step the per-8x8 wiener
+/// map is indexed on (`cpi->weber_bsize = BLOCK_8X8`, allintra_vis.c:66).
+const WEBER_MI_STEP: i32 = 2;
+
+/// `WeberStats` (encoder.h:2363): the per-8x8 source/recon statistics
+/// `av1_set_mb_wiener_variance` fills for the perceptual-AI delta-q map.
+/// `mb_wiener_variance` (the struct's first field) is written but never read
+/// by any map reduction, so it is omitted here.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WeberStats {
+    pub src_variance: i64,
+    pub rec_variance: i64,
+    pub src_pix_max: i16,
+    pub rec_pix_max: i16,
+    pub distortion: i64,
+    pub satd: i64,
+    pub max_scale: f64,
+}
+
+/// The frame-level wiener-variance map + normalizer that the per-SB
+/// perceptual-AI qindex reads (`cpi->mb_weber_stats` + `norm_wiener_variance`).
+/// `stats` is laid out exactly as C's `aom_calloc(mi_rows*mi_cols)` and indexed
+/// `(mi_row/2)*mi_cols + mi_col/2` (`frame_info.mi_cols == mi_params.mi_cols`,
+/// encoder.c:1102). Bounds come from the same `mi_cols`/`mi_rows`.
+pub struct WeberVarMap {
+    pub stats: Vec<WeberStats>,
+    pub mi_rows: i32,
+    pub mi_cols: i32,
+    pub norm_wiener_variance: i64,
+}
+
+impl WeberVarMap {
+    #[inline]
+    fn at(&self, row: i32, col: i32) -> &WeberStats {
+        &self.stats[((row / WEBER_MI_STEP) * self.mi_cols + col / WEBER_MI_STEP) as usize]
+    }
+
+    /// `get_satd` (allintra_vis.c:93): mean `.satd` over the in-frame 8x8
+    /// blocks of the `mi_wide`×`mi_high` window, `>= 1`. The `(int)` casts on
+    /// the divide + return are replicated (the accumulation is i64).
+    // Consumed by the norm computation in `av1_set_mb_wiener_variance` (the
+    // preprocessing that BUILDS this map, landing in the next chunk).
+    #[allow(dead_code)]
+    fn get_satd(&self, mi_wide: i32, mi_high: i32, mi_row: i32, mi_col: i32) -> i64 {
+        let mut satd: i64 = 0;
+        let mut mb_count: i32 = 0;
+        let mut row = mi_row;
+        while row < mi_row + mi_high {
+            let mut col = mi_col;
+            while col < mi_col + mi_wide {
+                if !(row >= self.mi_rows || col >= self.mi_cols) {
+                    satd += self.at(row, col).satd;
+                    mb_count += 1;
+                }
+                col += WEBER_MI_STEP;
+            }
+            row += WEBER_MI_STEP;
+        }
+        if mb_count != 0 {
+            satd = i64::from((satd / i64::from(mb_count)) as i32);
+        }
+        satd.max(1)
+    }
+
+    /// `get_sse` (allintra_vis.c:121): mean `.distortion` over the window,
+    /// `>= 1` (same `(int)`-cast structure as [`Self::get_satd`]).
+    // Consumed by the norm computation in `av1_set_mb_wiener_variance` (next chunk).
+    #[allow(dead_code)]
+    fn get_sse(&self, mi_wide: i32, mi_high: i32, mi_row: i32, mi_col: i32) -> i64 {
+        let mut distortion: i64 = 0;
+        let mut mb_count: i32 = 0;
+        let mut row = mi_row;
+        while row < mi_row + mi_high {
+            let mut col = mi_col;
+            while col < mi_col + mi_wide {
+                if !(row >= self.mi_rows || col >= self.mi_cols) {
+                    distortion += self.at(row, col).distortion;
+                    mb_count += 1;
+                }
+                col += WEBER_MI_STEP;
+            }
+            row += WEBER_MI_STEP;
+        }
+        if mb_count != 0 {
+            distortion = i64::from((distortion / i64::from(mb_count)) as i32);
+        }
+        distortion.max(1)
+    }
+
+    /// `get_max_scale` (allintra_vis.c:150): the min `.max_scale >= 1.0` over
+    /// the window, seeded at `10.0` (blocks with `max_scale < 1.0` skipped).
+    fn get_max_scale(&self, mi_wide: i32, mi_high: i32, mi_row: i32, mi_col: i32) -> f64 {
+        let mut min_max_scale = 10.0f64;
+        let mut row = mi_row;
+        while row < mi_row + mi_high {
+            let mut col = mi_col;
+            while col < mi_col + mi_wide {
+                if !(row >= self.mi_rows || col >= self.mi_cols) {
+                    let ms = self.at(row, col).max_scale;
+                    if ms >= 1.0 && ms < min_max_scale {
+                        min_max_scale = ms;
+                    }
+                }
+                col += WEBER_MI_STEP;
+            }
+            row += WEBER_MI_STEP;
+        }
+        min_max_scale
+    }
+
+    /// `get_window_wiener_var` (allintra_vis.c:173): the wiener-variance
+    /// estimate over one window — a distortion/contrast ratio with a `0.1`
+    /// regularizer, `/ mb_count`, `>= 1`. All accumulators start at `1.0`.
+    fn get_window_wiener_var(&self, mi_wide: i32, mi_high: i32, mi_row: i32, mi_col: i32) -> i32 {
+        let mut mb_count: i32 = 0;
+        let mut base_num = 1.0f64;
+        let mut base_den = 1.0f64;
+        let mut base_reg = 1.0f64;
+        let mut row = mi_row;
+        while row < mi_row + mi_high {
+            let mut col = mi_col;
+            while col < mi_col + mi_wide {
+                if !(row >= self.mi_rows || col >= self.mi_cols) {
+                    let w = self.at(row, col);
+                    base_num += (w.distortion as f64)
+                        * (w.src_variance as f64).sqrt()
+                        * f64::from(w.rec_pix_max);
+                    base_den += (f64::from(w.rec_pix_max) * (w.src_variance as f64).sqrt()
+                        - f64::from(w.src_pix_max) * (w.rec_variance as f64).sqrt())
+                    .abs();
+                    base_reg += (w.distortion as f64).sqrt() * f64::from(w.src_pix_max).sqrt() * 0.1;
+                    mb_count += 1;
+                }
+                col += WEBER_MI_STEP;
+            }
+            row += WEBER_MI_STEP;
+        }
+        let sb_wiener_var = (((base_num + base_reg) / (base_den + base_reg)) / mb_count as f64) as i32;
+        sb_wiener_var.max(1)
+    }
+
+    /// `get_var_perceptual_ai` (allintra_vis.c:216): the window wiener var of
+    /// the SB, min'd with the four half-SB-shifted neighbour windows that stay
+    /// in frame — a spatial smoothing that damps isolated peaks.
+    fn get_var_perceptual_ai(&self, mi_wide: i32, mi_high: i32, mi_row: i32, mi_col: i32) -> i32 {
+        let mut sb = self.get_window_wiener_var(mi_wide, mi_high, mi_row, mi_col);
+        if mi_row >= mi_high / 2 {
+            sb = sb.min(self.get_window_wiener_var(mi_wide, mi_high, mi_row - mi_high / 2, mi_col));
+        }
+        if mi_row <= self.mi_rows - mi_high - (mi_high / 2) {
+            sb = sb.min(self.get_window_wiener_var(mi_wide, mi_high, mi_row + mi_high / 2, mi_col));
+        }
+        if mi_col >= mi_wide / 2 {
+            sb = sb.min(self.get_window_wiener_var(mi_wide, mi_high, mi_row, mi_col - mi_wide / 2));
+        }
+        if mi_col <= self.mi_cols - mi_wide - (mi_wide / 2) {
+            sb = sb.min(self.get_window_wiener_var(mi_wide, mi_high, mi_row, mi_col + mi_wide / 2));
+        }
+        sb
+    }
+
+    /// `av1_get_sbq_perceptual_ai` (allintra_vis.c:743, the default
+    /// non-rate-guide arm): the per-SB qindex. `beta = norm / sb_wiener_var`,
+    /// floored by `1/min_max_scale`, clamped to `[0.25, 4]`, mapped to a
+    /// qindex offset ([`av1_get_deltaq_offset`]), clamped to
+    /// `±(delta_q_res*20 - 1)`, then to `[MINQ(+1), MAXQ]`. `bit_depth` is
+    /// the raw 8/10/12; `mi_wide`/`mi_high` are the SB's mi extent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn av1_get_sbq_perceptual_ai(
+        &self,
+        base_qindex: i32,
+        bit_depth: u8,
+        delta_q_res: i32,
+        mi_wide: i32,
+        mi_high: i32,
+        mi_row: i32,
+        mi_col: i32,
+    ) -> i32 {
+        let sb_wiener_var = self.get_var_perceptual_ai(mi_wide, mi_high, mi_row, mi_col);
+        let mut beta = self.norm_wiener_variance as f64 / f64::from(sb_wiener_var);
+        let min_max_scale = self.get_max_scale(mi_wide, mi_high, mi_row, mi_col).max(1.0);
+        beta = 1.0 / (1.0 / beta).min(min_max_scale);
+        // Cap so the delta q stays near the base q.
+        beta = beta.min(4.0);
+        beta = beta.max(0.25);
+        let mut offset = av1_get_deltaq_offset(bit_depth, base_qindex, beta);
+        offset = offset.min(delta_q_res * 20 - 1);
+        offset = offset.max(-delta_q_res * 20 + 1);
+        let mut qindex = base_qindex + offset;
+        qindex = qindex.min(MAXQ);
+        qindex = qindex.max(MINQ);
+        if base_qindex > MINQ {
+            qindex = qindex.max(MINQ + 1);
+        }
+        qindex
+    }
+}
