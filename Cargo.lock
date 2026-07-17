@@ -188,8 +188,11 @@ dependencies = [
 name = "aom-txb"
 version = "0.0.1"
 dependencies = [
+ "aom-dispatch",
  "aom-entropy",
  "aom-sys-ref",
+ "archmage",
+ "magetypes",
 ]
 
 [[package]]

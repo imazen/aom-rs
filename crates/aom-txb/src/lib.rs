@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+mod simd;
 mod tables;
 pub use tables::nz_map_ctx_offset;
 mod scan;
@@ -137,7 +138,23 @@ pub fn txb_bhl(tx_size: usize) -> u32 {
 /// (transposed-layout) coefficient buffer. `levels` must be at least
 /// `TX_PAD_2D` bytes; only the region libaom writes is touched — callers may
 /// rely on the exact write footprint (verified by the differential harness).
+///
+/// SIMD-dispatched (Gate 3): the magetypes i32x8 kernel covers every txb
+/// geometry (heights >= 8 column-chunked; height 4 as two-column vectors) —
+/// bit-identical on the FULL i32 domain (`simd.rs` module docs) and pinned
+/// by `txb_diff.rs` (this entry vs the REAL C kernel) +
+/// `txb_init_levels_simd_diff.rs` (vs [`txb_init_levels_scalar`] at every
+/// token permutation). The `AOM_FORCE_SCALAR` pin runs the scalar twin.
 pub fn txb_init_levels(coeff: &[i32], width: usize, height: usize, levels: &mut [u8]) {
+    let _ = aom_dispatch::scalar_forced(); // one-time AOM_FORCE_SCALAR pin
+    archmage::incant!(
+        simd::txb_init_levels_impl(coeff, width, height, levels),
+        [v3, neon, wasm128, scalar]
+    )
+}
+
+/// The scalar transcription (the reference twin — never SIMD-routed).
+pub fn txb_init_levels_scalar(coeff: &[i32], width: usize, height: usize, levels: &mut [u8]) {
     let stride = height + TX_PAD_HOR;
     // memset(levels + stride*width, 0, TX_PAD_BOTTOM*stride + TX_PAD_END)
     let tail = stride * width;

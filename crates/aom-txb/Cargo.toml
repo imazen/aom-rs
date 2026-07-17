@@ -6,6 +6,15 @@ license.workspace = true
 
 [dependencies]
 aom-entropy = { path = "../aom-entropy" }
+# Safe SIMD (Gate 3) — same pattern as aom-quant/aom-cdef: ONE registry
+# archmage universe so the AOM_FORCE_SCALAR pin reaches this crate.
+archmage = "0.9.27"
+magetypes = "0.9.27"
+aom-dispatch = { path = "../aom-dispatch" }
+
+[features]
+default = ["avx512"]
+avx512 = ["archmage/avx512", "magetypes/avx512"]
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }
