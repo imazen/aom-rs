@@ -429,6 +429,7 @@ impl CPick<'_> {
         let re = ReencodeParams {
             sharpness: self.o.sharpness,
             enable_optimize_b: self.enable_optimize_b,
+            tune: Default::default(),
         };
         let outcome = rd_pick_intra_mode_sb(
             &mut y_env,
@@ -1438,6 +1439,8 @@ fn rd_pick_partition_real_matches_c_recursion() {
             coeff_costs_uv: &coeff_costs_uv,
             tx_type_costs: &ttc_dummy,
             qm_levels: None,
+            tune: Default::default(),
+            deltaq: None,
         };
         let cfg = PickFrameCfg {
             intra_tools: Default::default(),

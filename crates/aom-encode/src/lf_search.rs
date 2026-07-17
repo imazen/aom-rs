@@ -371,6 +371,43 @@ fn search_filter_level(
 /// selects the ALLINTRA-vs-GOOD sharpness derivation (`sharpness` is this
 /// port's `--sharpness`-equivalent input, 0 for every case actually
 /// exercised so far).
+/// The frame LF `sharpness_level` derivation (`av1_pick_filter_level`,
+/// picklpf.c:220-247), shared by every pick method:
+///
+/// - `lf->sharpness_level = oxcf.algo_cfg.sharpness` when the encode mode is
+///   ALLINTRA **or** the tuning is IQ / SSIMULACRA2 (:226-230); every other
+///   mode forces 0 (frames serve as references).
+/// - `--enable-adaptive-sharpness` (:232-247) then caps it by base qindex —
+///   "lf sharpness 1 is visually closer to 7 than to 0", so the cap picks
+///   only {7, 1, 0}: `qindex <= 112 -> 7`, `<= 160 -> 1`, else `0`;
+///   `sharpness_level = min(sharpness_level, cap)`.
+///
+/// Returns the final `sharpness_level` for the frame header + LF limits.
+pub fn frame_lf_sharpness(
+    allintra: bool,
+    iq_or_ssimulacra2_tune: bool,
+    sharpness_cfg: i32,
+    enable_adaptive_sharpness: bool,
+    base_qindex: i32,
+) -> i32 {
+    let mut level = if allintra || iq_or_ssimulacra2_tune {
+        sharpness_cfg
+    } else {
+        0
+    };
+    if enable_adaptive_sharpness {
+        let max_lf_sharpness = if base_qindex <= 112 {
+            7
+        } else if base_qindex <= 160 {
+            1
+        } else {
+            0
+        };
+        level = level.min(max_lf_sharpness);
+    }
+    level
+}
+
 pub fn pick_filter_level(
     f: &LfSearchFrame,
     allintra: bool,

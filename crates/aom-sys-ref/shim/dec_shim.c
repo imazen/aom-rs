@@ -2621,3 +2621,172 @@ long shim_encode_av1_kf_superres(const uint16_t *y, const uint16_t *u,
   aom_img_free(img);
   return rc ? rc : total;
 }
+
+/* ------------------------------------------------------------------ */
+/* 5. tune=IQ / tune=SSIMULACRA2 knob-explicit KEY encode (C4 family)  */
+/* ------------------------------------------------------------------ */
+
+/* Single-pass KEY encode with the full tune=IQ / tune=SSIMULACRA2 knob set
+ * exposed explicitly (the C4 stills-quality family, PARITY.md). Baseline
+ * controls match shim_encode_av1_kf (--sb-size=64, single tile,
+ * --enable-restoration=0, --aq-mode=0, no palette/intrabc, one-pass,
+ * end-usage=q); the tune knobs layer on top:
+ *
+ *   - `tuning` >= 0 issues AOME_SET_TUNING FIRST (AOM_TUNE_IQ=10 /
+ *     AOM_TUNE_SSIMULACRA2=11), which runs handle_tuning
+ *     (av1_cx_iface.c:1938): the whole bundle (enable_qm=1 qm 2..10,
+ *     sharpness=7, dist_metric=QM_PSNR, enable_cdef=CDEF_ADAPTIVE,
+ *     enable_chroma_deltaq=1, deltaq_mode=6, +adaptive sharpness for IQ).
+ *   - Every knob >= 0 below is then issued AFTER the tuning control, so
+ *     explicit values OVERRIDE the bundle (the aomenc CLI order semantics);
+ *     pass -1 to keep the bundle's (or the usage default's) value. This is
+ *     what lets a gate isolate ONE bundle piece at a time.
+ *   - enable_qm >= 0 issues AV1E_SET_ENABLE_QM (+ QM_MIN/QM_MAX only when
+ *     enabling, both must then be >= 0).
+ *
+ * Planes are u16 row-major tight (u/v ignored when mono). Self-contained
+ * (mirrors encode_av1_kf_impl's single-pass setup + encode loop); every
+ * existing encode entry point is UNCHANGED. Returns the bitstream length or
+ * a negative error code. Append-only C4-track addition. */
+long shim_encode_av1_kf_tune(const uint16_t *y, const uint16_t *u,
+                             const uint16_t *v, int w, int h, int bd, int mono,
+                             int ss_x, int ss_y, int cq_level, int cpu_used,
+                             int usage, int tuning, int sharpness,
+                             int enable_adaptive_sharpness, int dist_metric,
+                             int enable_chroma_deltaq, int deltaq_mode,
+                             int deltaq_strength, int enable_qm, int qm_min,
+                             int qm_max, int enable_cdef, uint8_t *out,
+                             size_t out_cap) {
+  aom_codec_iface_t *iface = aom_codec_av1_cx();
+  aom_codec_enc_cfg_t cfg;
+  if (aom_codec_enc_config_default(iface, &cfg, (unsigned int)usage)) return -1;
+  cfg.g_w = w;
+  cfg.g_h = h;
+  cfg.g_limit = 1;
+  cfg.g_lag_in_frames = 0;
+  cfg.g_threads = 1;
+  cfg.g_pass = AOM_RC_ONE_PASS;
+  cfg.rc_end_usage = AOM_Q;
+  cfg.monochrome = mono;
+  cfg.g_input_bit_depth = bd;
+  if (bd == 8) {
+    cfg.g_bit_depth = AOM_BITS_8;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else if (bd == 10) {
+    cfg.g_bit_depth = AOM_BITS_10;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else {
+    cfg.g_bit_depth = AOM_BITS_12;
+    cfg.g_profile = 2;
+  }
+  if (!mono && ss_x == 1 && ss_y == 0) cfg.g_profile = 2; /* 4:2:2 */
+
+  aom_img_fmt_t fmt;
+  if (mono || (ss_x == 1 && ss_y == 1))
+    fmt = AOM_IMG_FMT_I420;
+  else if (ss_x == 1)
+    fmt = AOM_IMG_FMT_I422;
+  else
+    fmt = AOM_IMG_FMT_I444;
+  if (bd > 8) fmt |= AOM_IMG_FMT_HIGHBITDEPTH;
+  aom_image_t *img = aom_img_alloc(NULL, fmt, w, h, 32);
+  if (!img) return -4;
+  img->monochrome = mono;
+  img->bit_depth = bd;
+  const int cw = mono ? 0 : (w + ss_x) >> ss_x;
+  const int ch = mono ? 0 : (h + ss_y) >> ss_y;
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    const uint16_t *src = plane == 0 ? y : (plane == 1 ? u : v);
+    const int pw = plane == 0 ? w : cw;
+    const int ph = plane == 0 ? h : ch;
+    for (int r = 0; r < ph; r++) {
+      if (bd > 8) {
+        uint16_t *row =
+            (uint16_t *)(img->planes[plane] + (size_t)r * img->stride[plane]);
+        for (int c = 0; c < pw; c++) row[c] = src[(size_t)r * pw + c];
+      } else {
+        uint8_t *row = img->planes[plane] + (size_t)r * img->stride[plane];
+        for (int c = 0; c < pw; c++) row[c] = (uint8_t)src[(size_t)r * pw + c];
+      }
+    }
+  }
+
+  aom_codec_ctx_t ctx;
+  aom_codec_flags_t flags = bd > 8 ? AOM_CODEC_USE_HIGHBITDEPTH : 0;
+  if (aom_codec_enc_init(&ctx, iface, &cfg, flags)) {
+    aom_img_free(img);
+    return -2;
+  }
+#define TRYCTRL_TUNE(id, val)                   \
+  do {                                          \
+    if (aom_codec_control(&ctx, (id), (val))) { \
+      aom_codec_destroy(&ctx);                  \
+      aom_img_free(img);                        \
+      return -3;                                \
+    }                                           \
+  } while (0)
+  TRYCTRL_TUNE(AOME_SET_CPUUSED, cpu_used);
+  TRYCTRL_TUNE(AOME_SET_CQ_LEVEL, cq_level);
+  TRYCTRL_TUNE(AV1E_SET_ENABLE_RESTORATION, 0);
+  TRYCTRL_TUNE(AV1E_SET_SUPERBLOCK_SIZE, AOM_SUPERBLOCK_SIZE_64X64);
+  TRYCTRL_TUNE(AV1E_SET_TILE_COLUMNS, 0);
+  TRYCTRL_TUNE(AV1E_SET_TILE_ROWS, 0);
+  TRYCTRL_TUNE(AV1E_SET_AQ_MODE, 0);
+  TRYCTRL_TUNE(AV1E_SET_ENABLE_PALETTE, 0);
+  TRYCTRL_TUNE(AV1E_SET_ENABLE_INTRABC, 0);
+  /* The tune FIRST (installs the handle_tuning bundle) ... */
+  if (tuning >= 0) TRYCTRL_TUNE(AOME_SET_TUNING, tuning);
+  /* ... then the explicit per-knob overrides, aomenc-CLI-order semantics. */
+  if (sharpness >= 0) TRYCTRL_TUNE(AOME_SET_SHARPNESS, (unsigned int)sharpness);
+  if (enable_adaptive_sharpness >= 0)
+    TRYCTRL_TUNE(AV1E_SET_ENABLE_ADAPTIVE_SHARPNESS, enable_adaptive_sharpness);
+  /* dist_metric has NO aom_codec_control id — it is only reachable through
+   * the string-option interface (encoder_set_option, av1_cx_iface.c:4503:
+   * "dist-metric" = "psnr" | "qm-psnr"). */
+  if (dist_metric >= 0) {
+    if (aom_codec_set_option(&ctx, "dist-metric",
+                             dist_metric == 1 ? "qm-psnr" : "psnr")) {
+      aom_codec_destroy(&ctx);
+      aom_img_free(img);
+      return -3;
+    }
+  }
+  if (enable_chroma_deltaq >= 0)
+    TRYCTRL_TUNE(AV1E_SET_ENABLE_CHROMA_DELTAQ, enable_chroma_deltaq);
+  if (deltaq_mode >= 0) TRYCTRL_TUNE(AV1E_SET_DELTAQ_MODE, deltaq_mode);
+  if (deltaq_strength >= 0)
+    TRYCTRL_TUNE(AV1E_SET_DELTAQ_STRENGTH, deltaq_strength);
+  if (enable_qm >= 0) {
+    TRYCTRL_TUNE(AV1E_SET_ENABLE_QM, enable_qm);
+    if (enable_qm) {
+      TRYCTRL_TUNE(AV1E_SET_QM_MIN, qm_min);
+      TRYCTRL_TUNE(AV1E_SET_QM_MAX, qm_max);
+    }
+  }
+  if (enable_cdef >= 0) TRYCTRL_TUNE(AV1E_SET_ENABLE_CDEF, enable_cdef);
+#undef TRYCTRL_TUNE
+
+  long total = 0;
+  int rc = 0;
+  for (int pass = 0; pass < 2 && rc == 0; pass++) {
+    if (aom_codec_encode(&ctx, pass == 0 ? img : NULL, 0, 1,
+                         pass == 0 ? AOM_EFLAG_FORCE_KF : 0)) {
+      rc = -5;
+      break;
+    }
+    aom_codec_iter_t iter = NULL;
+    const aom_codec_cx_pkt_t *pkt;
+    while ((pkt = aom_codec_get_cx_data(&ctx, &iter)) != NULL) {
+      if (pkt->kind != AOM_CODEC_CX_FRAME_PKT) continue;
+      if ((size_t)total + pkt->data.frame.sz > out_cap) {
+        rc = -6;
+        break;
+      }
+      memcpy(out + total, pkt->data.frame.buf, pkt->data.frame.sz);
+      total += (long)pkt->data.frame.sz;
+    }
+  }
+  aom_codec_destroy(&ctx);
+  aom_img_free(img);
+  return rc ? rc : total;
+}

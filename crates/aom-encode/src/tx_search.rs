@@ -471,8 +471,8 @@ fn pixel_diff_stats(
 
 use crate::rd::rdcost;
 use crate::{
-    BlockContext, OptimizeInputs, QuantKind, QuantParams, XformQuantOptResult,
-    dist_block_tx_domain, xform_quant, xform_quant_optimize,
+    BlockContext, OptimizeInputs, QuantKind, QuantParams, XformQuantOptResult, xform_quant,
+    xform_quant_optimize,
 };
 use aom_txb::{
     CoeffCostSet, CoeffCostTables, TxTypeCosts, cost_coeffs_txb, cost_coeffs_txb_laplacian,
@@ -614,8 +614,15 @@ fn prune_txk_type_intra(
     allowed_tx_mask: u16,
     prune_factor: i64,
     txk_map: &mut [usize; TX_TYPES],
+    use_qm_dist_metric: bool,
 ) -> u16 {
-    let qp_b = QuantParams::from_plane_rows(inp.rows, QuantKind::B, inp.bd, inp.lossless);
+    // C's prune_txk_type also runs av1_setup_qmatrix per tx type
+    // (tx_search.c:1349): QM shapes the B-quant estimate AND (under the
+    // QM-PSNR metric) the tx-domain distortion, exactly like the main loop.
+    let mut qp_b = QuantParams::from_plane_rows(inp.rows, QuantKind::B, inp.bd, inp.lossless);
+    if let Some(level) = inp.qm_level {
+        qp_b = qp_b.with_qm(level, inp.plane);
+    }
     let (txb_skip_ctx, dc_sign_ctx) = aom_txb::get_txb_ctx(
         inp.bctx.plane_bsize,
         tx_size,
@@ -658,8 +665,17 @@ fn prune_txk_type_intra(
             inp.filter_intra_mode,
             inp.mode,
         );
-        // tx-domain dist (dist_block_tx_domain — QM off on this envelope).
-        let (dist, _sse) = crate::dist_block_tx_domain(&xq.coeff, &xq.dqcoeff, tx_size, inp.bd);
+        // tx-domain dist — the QM-PSNR metric weights it by the per-transform
+        // forward matrix (same gate as the main loop, tx_search.c:1361).
+        let (dist, _sse) = crate::dist_block_tx_domain_qm(
+            &xq.coeff,
+            &xq.dqcoeff,
+            tx_size,
+            inp.bd,
+            crate::dist_qmatrix(&qp_b, tx_size, tx_type),
+            aom_txb::scan(tx_size, tx_type),
+            use_qm_dist_metric,
+        );
 
         txk_map[num_cand] = tx_type;
         rds[num_cand] = rdcost(inp.rdmult, rate_cost, dist);
@@ -692,13 +708,15 @@ fn prune_txk_type_intra(
 /// `x->rdmult` (encodetxb.h `plane_rd_mult` tables; luma-intra entry is 17 in
 /// BOTH the default and `use_chroma_trellis_rd_mult` tables, so the speed-0
 /// allintra sf `use_chroma_trellis_rd_mult = 1` is a no-op for luma):
-/// `ROUND_POWER_OF_TWO(rdmult * (8 - sharpness) * (17 << (2*(bd-8))), 5)`
-/// (`rshift = 5` — PSNR tuning; IQ/SSIMULACRA2 use 7, out of scope).
+/// `ROUND_POWER_OF_TWO(rdmult * (8 - sharpness) * (17 << (2*(bd-8))), rshift)`
+/// where `rshift = 5` for the PSNR-family tunes and **7** for
+/// `tune=IQ`/`tune=SSIMULACRA2` (`iq_tuning`; txb_rdopt.c:378-386 — the
+/// larger shift biases the trellis towards keeping more coefficients).
 #[inline]
-pub fn trellis_rdmult_intra_y(rdmult: i32, sharpness: i32, bd: u8) -> i64 {
+pub fn trellis_rdmult_intra_y(rdmult: i32, sharpness: i32, bd: u8, iq_tuning: bool) -> i64 {
     round_power_of_two_i64(
         (rdmult as i64) * ((8 - sharpness) as i64) * ((17i64) << (2 * (bd as i32 - 8))),
-        5,
+        if iq_tuning { 7 } else { 5 },
     )
 }
 
@@ -713,7 +731,9 @@ pub fn trellis_rdmult_intra_y(rdmult: i32, sharpness: i32, bd: u8) -> i64 {
 ///   speed_features.c:2474; absent from `set_good_speed_features_framesize_
 ///   independent`), so the GOOD KEY-frame envelope uses **20** for chroma.
 ///
-/// Luma is 17 in both tables — the flag only matters for chroma.
+/// Luma is 17 in both tables — the flag only matters for chroma. `iq_tuning`
+/// selects the `tune=IQ`/`tune=SSIMULACRA2` `rshift = 7` arm (vs the default
+/// 5; txb_rdopt.c:378-386).
 #[inline]
 pub fn trellis_rdmult_intra(
     rdmult: i32,
@@ -721,6 +741,7 @@ pub fn trellis_rdmult_intra(
     bd: u8,
     plane: usize,
     use_chroma_trellis_rd_mult: bool,
+    iq_tuning: bool,
 ) -> i64 {
     let mult: i64 = if plane == 0 {
         17
@@ -731,7 +752,7 @@ pub fn trellis_rdmult_intra(
     };
     round_power_of_two_i64(
         (rdmult as i64) * ((8 - sharpness) as i64) * (mult << (2 * (bd as i32 - 8))),
-        5,
+        if iq_tuning { 7 } else { 5 },
     )
 }
 
@@ -847,6 +868,18 @@ pub struct TxTypeSearchPolicy {
     /// USE_LARGESTALL), the winner-mode sf derivation (partition_pick.rs,
     /// level 3), and the leaf `tx_mode_is_select` init (partition_pick.rs).
     pub enable_tx_size_search: bool,
+    /// `txfm_params->use_qm_dist_metric` (`set_mode_eval_params`,
+    /// rdopt_utils.h:554: `dist_metric == AOM_DIST_METRIC_QM_PSNR`). Gates the
+    /// QM-weighted transform-domain distortion in the search
+    /// ([`crate::dist_block_tx_domain_qm`]) and upgrades the trellis to the
+    /// QM-PSNR arm ([`crate::QuantParams::with_qm_dist_metric`]). Callers set
+    /// it via [`Self::with_tune_knobs`] so the tx-domain-distortion force
+    /// (rdopt_utils.h:516-522) is applied consistently. Default false (PSNR).
+    pub use_qm_dist_metric: bool,
+    /// `tune_cfg.tuning ∈ {AOM_TUNE_IQ, AOM_TUNE_SSIMULACRA2}` — selects the
+    /// trellis `rshift = 7` (vs 5) arm in [`trellis_rdmult_intra`]
+    /// (txb_rdopt.c:378-386). Default false (PSNR-family tunes).
+    pub iq_tuning: bool,
 }
 
 impl TxTypeSearchPolicy {
@@ -874,7 +907,26 @@ impl TxTypeSearchPolicy {
             enable_flip_idtx: true,    // --enable-flip-idtx CLI default
             use_intra_dct_only: false, // --use-intra-dct-only CLI default
             enable_tx_size_search: true, // --enable-tx-size-search CLI default
+            use_qm_dist_metric: false, // AOM_DIST_METRIC_PSNR (default)
+            iq_tuning: false,          // AOM_TUNE_PSNR-family (default)
         }
+    }
+
+    /// Apply the `oxcf.tune_cfg` knobs ([`crate::TuneKnobs`]) to a derived
+    /// policy. Under the QM-PSNR distortion metric C FORCES transform-domain
+    /// distortion on unconditionally — `set_tx_domain_dist_params`'s early
+    /// return (`use_transform_domain_distortion = 1`,
+    /// `tx_domain_dist_threshold = 0`, rdopt_utils.h:516-522) — because the
+    /// QM-weighted PSNR is computed in transform space. A default
+    /// (`TuneKnobs::default()`) input returns the policy unchanged.
+    pub fn with_tune_knobs(mut self, tune: crate::TuneKnobs) -> Self {
+        self.use_qm_dist_metric = tune.use_qm_dist_metric;
+        self.iq_tuning = tune.iq_tuning;
+        if tune.use_qm_dist_metric {
+            self.use_transform_domain_distortion = 1;
+            self.tx_domain_dist_threshold = 0;
+        }
+        self
     }
 
     /// Speed-0 usage-GOOD defaults — the KEY-frame encoder-gate envelope
@@ -1154,7 +1206,14 @@ pub fn search_tx_type_intra(
         // inter-only territory, EXT_TX_SET_ALL16).
         debug_assert!(allowed_tx_mask.count_ones() <= 7);
         let pf = PRUNE_FACTORS[pol.prune_2d_txfm_mode as usize];
-        let prune = prune_txk_type_intra(inp, tx_size, allowed_tx_mask, pf, &mut txk_map);
+        let prune = prune_txk_type_intra(
+            inp,
+            tx_size,
+            allowed_tx_mask,
+            pf,
+            &mut txk_map,
+            pol.use_qm_dist_metric,
+        );
         allowed_tx_mask &= !prune;
         // "Need to have at least one transform type allowed" (tx_search.c:1944):
         // prune_txk_type always keeps txk_map[0], so the mask stays non-empty.
@@ -1187,6 +1246,11 @@ pub fn search_tx_type_intra(
     let mut qp = QuantParams::from_plane_rows(inp.rows, kind, inp.bd, inp.lossless);
     if let Some(level) = inp.qm_level {
         qp = qp.with_qm(level, inp.plane);
+        if pol.use_qm_dist_metric {
+            // AOM_DIST_METRIC_QM_PSNR: the trellis weights its distortion by
+            // the forward matrix (av1_optimize_txb, txb_rdopt.c:346-351).
+            qp = qp.with_qm_dist_metric();
+        }
     }
     let trellis_rdmult = trellis_rdmult_intra(
         inp.rdmult,
@@ -1194,6 +1258,7 @@ pub fn search_tx_type_intra(
         inp.bd,
         inp.plane,
         pol.use_chroma_trellis_rd_mult,
+        pol.iq_tuning,
     );
     let opt = OptimizeInputs {
         cost: inp.coeff_costs,
@@ -1310,11 +1375,25 @@ pub fn search_tx_type_intra(
             continue;
         }
 
-        // Distortion.
+        // Distortion. The transform-domain arms carry the per-(tx_size,
+        // tx_type) forward matrix C threads via `quant_param.qmatrix`
+        // (av1_setup_qmatrix inside the loop, tx_search.c:2204-2249) — only
+        // weighted under the QM-PSNR metric (`dist_block_tx_domain`'s
+        // `qmatrix == NULL || !use_qm_dist_metric` gate, :1150/:1159).
+        let dqm = crate::dist_qmatrix(&qp, tx_size, tx_type);
+        let dscan = aom_txb::scan(tx_size, tx_type);
         let (dist, sse): (i64, i64) = if res.eob == 0 {
             (block_sse, block_sse)
         } else if use_transform_domain_distortion {
-            dist_block_tx_domain(&res.coeff, &res.dqcoeff, tx_size, inp.bd)
+            crate::dist_block_tx_domain_qm(
+                &res.coeff,
+                &res.dqcoeff,
+                tx_size,
+                inp.bd,
+                dqm,
+                dscan,
+                pol.use_qm_dist_metric,
+            )
         } else {
             // Pixel-domain with the 64-pt / high-energy tx-domain hybrid.
             let high_energy_thresh = 128i64 * 128 * TX_SIZE_2D_TBL[tx_size];
@@ -1324,7 +1403,15 @@ pub fn search_tx_type_intra(
             let mut s_tx = i64::MAX;
             let mut sse_diff = i64::MAX;
             if is_tx64 || is_high_energy {
-                let (dt, st) = dist_block_tx_domain(&res.coeff, &res.dqcoeff, tx_size, inp.bd);
+                let (dt, st) = crate::dist_block_tx_domain_qm(
+                    &res.coeff,
+                    &res.dqcoeff,
+                    tx_size,
+                    inp.bd,
+                    dqm,
+                    dscan,
+                    pol.use_qm_dist_metric,
+                );
                 d = dt;
                 s_tx = st;
                 sse_diff = block_sse - st;

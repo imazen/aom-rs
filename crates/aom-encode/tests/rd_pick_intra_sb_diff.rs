@@ -481,6 +481,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             let re = ReencodeParams {
                 sharpness: 0,
                 enable_optimize_b: TrellisOptType::FullTrellisOpt,
+                tune: Default::default(),
             };
             let got = {
                 let uv_args = if mono {

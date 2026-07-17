@@ -311,6 +311,33 @@ pub struct SbEncodeEnv<'a> {
     /// Frame QM levels (`qmatrix_level_{y,u,v}`), `None` = QM off — threaded
     /// into every leaf re-encode (search context-prop AND pack output).
     pub qm_levels: Option<[usize; 3]>,
+    /// `oxcf.tune_cfg` knobs ([`crate::TuneKnobs`]): QM-PSNR trellis/search
+    /// distortion metric + the IQ/SSIMULACRA2 trellis rshift. `Default` =
+    /// the PSNR envelope (byte-identical to the pre-tune path).
+    pub tune: crate::TuneKnobs,
+    /// `--deltaq-mode=6` (DELTA_Q_VARIANCE_BOOST) frame context — `Some`
+    /// makes [`crate::pack::pack_tile`] derive a per-superblock qindex from
+    /// source variance (`setup_delta_q`, encodeframe.c:341) and re-select
+    /// quantizer rows + rdmult per SB. `None` (default) = the proven
+    /// fixed-qindex envelope, byte-identical.
+    pub deltaq: Option<DeltaQFrameCtx<'a>>,
+}
+
+/// The frame-level inputs of the per-SB Variance Boost delta-q derivation
+/// (`cm->delta_q_info` + the quantizer tables `av1_init_plane_quantizers`
+/// re-selects rows from at each SB's adjusted qindex).
+#[derive(Clone, Copy)]
+pub struct DeltaQFrameCtx<'a> {
+    /// The frame quantizer tables ([`aom_quant::av1_build_quantizer`] output)
+    /// — per-SB rows are re-selected from these at the adjusted qindex.
+    pub quants: &'a aom_quant::Quants,
+    pub deq: &'a aom_quant::Dequants,
+    /// `quant_params->base_qindex`.
+    pub base_qindex: i32,
+    /// `delta_q_info.delta_q_res` ([`crate::allintra_vis::variance_boost_delta_q_res`]).
+    pub delta_q_res: i32,
+    /// `--deltaq-strength` percent (default 100).
+    pub deltaq_strength: u32,
 }
 
 /// One leaf's re-encode outputs (differential visibility).
@@ -534,6 +561,7 @@ pub fn encode_b_intra_dry(
                 map: &p.color_map,
                 map_stride: crate::tx_search::BLK_W_B[bsize],
             }),
+        tune: env.tune,
     };
     let mut y_out = if output_enabled {
         // OUTPUT_ENABLED: the eob-0 -> DCT_DCT resets land in the frame-map
@@ -661,6 +689,7 @@ pub fn encode_b_intra_dry(
             // (the chroma final pack must trellis, the search must not).
             dry_run_output_enabled: output_enabled,
             use_chroma_trellis_rd_mult: env.use_chroma_trellis_rd_mult,
+            tune: env.tune,
         };
         u_out = Some(encode_intra_block_plane_uv(
             &uv_env, &uv_winner, &prm, 1, recon_u, cfl,

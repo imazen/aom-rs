@@ -279,3 +279,74 @@ pub fn aom_get_qmlevel_allintra(qindex: i32, first: i32, last: i32) -> i32 {
     };
     qm_level.clamp(first, last)
 }
+
+/// `QM_FIRST_IQ_SSIMULACRA2` (`av1/common/quant_common.h:41`) — the `qm_min`
+/// the `tune=IQ` / `tune=SSIMULACRA2` bundle installs (`handle_tuning`,
+/// av1_cx_iface.c:1947).
+pub const QM_FIRST_IQ_SSIMULACRA2: i32 = 2;
+/// `QM_LAST_IQ_SSIMULACRA2` (`av1/common/quant_common.h:42`) — the matching
+/// `qm_max`.
+pub const QM_LAST_IQ_SSIMULACRA2: i32 = 10;
+
+/// `aom_get_qmlevel_luma_ssimulacra2` (`av1/common/quant_common.h:111`) — the
+/// LUMA QM level for `tune=SSIMULACRA2` (`av1_set_quantizer` selects it as
+/// `get_luma_qmlevel` for that tune only; `tune=IQ` keeps
+/// [`aom_get_qmlevel_allintra`] for luma). Empirically derived on Daala
+/// subset1 for maximum SSIMULACRA 2; a decreasing step function of qindex
+/// spanning levels 2..=10 (clamped to `[first, last]`). Bit-exact with the C
+/// `static inline` (gated by `qm_level_diff`).
+#[inline]
+pub fn aom_get_qmlevel_luma_ssimulacra2(qindex: i32, first: i32, last: i32) -> i32 {
+    let qm_level = if qindex <= 40 {
+        10
+    } else if qindex <= 60 {
+        9
+    } else if qindex <= 90 {
+        8
+    } else if qindex <= 120 {
+        7
+    } else if qindex <= 130 {
+        6
+    } else if qindex <= 140 {
+        5
+    } else if qindex <= 160 {
+        4
+    } else if qindex <= 200 {
+        3
+    } else {
+        2
+    };
+    qm_level.clamp(first, last)
+}
+
+/// `aom_get_qmlevel_444_chroma` (`av1/common/quant_common.h:150`) — the CHROMA
+/// QM level for **4:4:4** subsampling under `tune=IQ` / `tune=SSIMULACRA2`
+/// (`av1_set_quantizer`: full-resolution chroma has 4x the coefficients of
+/// 4:2:0, so lower/steeper levels match the equivalent 4:2:0 scaling; all
+/// other subsamplings keep [`aom_get_qmlevel_allintra`] for chroma). A
+/// decreasing step function of qindex spanning levels 2..=10 (clamped to
+/// `[first, last]`). Bit-exact with the C `static inline` (gated by
+/// `qm_level_diff`).
+#[inline]
+pub fn aom_get_qmlevel_444_chroma(qindex: i32, first: i32, last: i32) -> i32 {
+    let chroma_qm_level = if qindex <= 12 {
+        10
+    } else if qindex <= 24 {
+        9
+    } else if qindex <= 32 {
+        8
+    } else if qindex <= 36 {
+        7
+    } else if qindex <= 44 {
+        6
+    } else if qindex <= 48 {
+        5
+    } else if qindex <= 56 {
+        4
+    } else if qindex <= 88 {
+        3
+    } else {
+        2
+    };
+    chroma_qm_level.clamp(first, last)
+}

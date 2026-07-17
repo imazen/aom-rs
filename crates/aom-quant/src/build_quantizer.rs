@@ -293,3 +293,158 @@ pub fn set_q_index<'a>(
         _ => panic!("plane must be 0..3"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// av1_set_quantizer — the frame quantizer settings (chroma delta-q + QM levels)
+// ---------------------------------------------------------------------------
+
+/// The encoder tuning arms `av1_set_quantizer` branches on
+/// (`aom_tune_metric`, aom/aomcx.h — only the IQ/SSIMULACRA2 distinction
+/// matters here; every other tune takes the `Psnr` arm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuantTuning {
+    /// Every tune other than IQ / SSIMULACRA2.
+    Psnr,
+    /// `AOM_TUNE_IQ` (10).
+    Iq,
+    /// `AOM_TUNE_SSIMULACRA2` (11).
+    Ssimulacra2,
+}
+
+/// `av1_set_quantizer`'s outputs (av1/encoder/av1_quantize.c:878): the frame
+/// `CommonQuantParams` fields the header + quantizer build consume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuantizerSettings {
+    /// `quant_params->base_qindex = AOMMAX(delta_q_present_flag, q)`.
+    pub base_qindex: i32,
+    /// `y_dc_delta_q` (always 0 on this path).
+    pub y_dc_delta_q: i32,
+    pub u_dc_delta_q: i32,
+    pub u_ac_delta_q: i32,
+    pub v_dc_delta_q: i32,
+    pub v_ac_delta_q: i32,
+    /// `qmatrix_level_{y,u,v}` — ALWAYS computed (C does so regardless of
+    /// `enable_qm`; they only reach the bitstream when `using_qmatrix`).
+    pub qmatrix_level_y: i32,
+    pub qmatrix_level_u: i32,
+    pub qmatrix_level_v: i32,
+}
+
+/// `av1_set_quantizer` (av1/encoder/av1_quantize.c:878-1032) minus the
+/// HDR-deltaq arm (`enable_hdr_deltaq` — 10-bit BT.2020-only, out of the
+/// stills envelope): the frame base qindex, the chroma delta-q derivation,
+/// and the QM-level formula selection.
+///
+/// Chroma delta-q (`--enable-chroma-deltaq`, disabled in lossless `q == 0`):
+/// - tune=IQ/SSIMULACRA2 (empirically derived ramps, av1_quantize.c:891-956):
+///   - 4:2:0 (ss 1,1): `dc = ac = -clamp(base/2 - 14, 0, offset)` with
+///     `offset = 20` for SSIMULACRA2 else `16` (chroma quality boost).
+///   - 4:2:2 (ss 1,0): `dc = 0, ac = clamp(base/2, 0, 6)`.
+///   - 4:4:4 (ss 0,0): `dc = 0, ac = clamp(base/2, 0, 24)`.
+/// - other tunes: the constant `2/2/2/2` (av1_quantize.c:961-965).
+///
+/// QM levels (av1_quantize.c:987-1031):
+/// - tune=IQ/SSIMULACRA2: luma = `aom_get_qmlevel_luma_ssimulacra2` for
+///   SSIMULACRA2, `aom_get_qmlevel_allintra` for IQ; chroma =
+///   `aom_get_qmlevel_444_chroma` at 4:4:4, else `aom_get_qmlevel_allintra`.
+/// - else allintra: `aom_get_qmlevel_allintra` both.
+/// - else: `aom_get_qmlevel` both.
+/// Chroma levels evaluate at `base_qindex + {u,v}_ac_delta_q`; `v` mirrors
+/// `u` unless `separate_uv_delta_q`.
+///
+/// `mono` frames take `ss_x = ss_y = 1` in C (the 4:2:0 arm computes values;
+/// the header writer never codes them for a single-plane stream).
+#[allow(clippy::too_many_arguments)]
+pub fn av1_set_quantizer(
+    min_qmlevel: i32,
+    max_qmlevel: i32,
+    q: i32,
+    enable_chroma_deltaq: bool,
+    is_allintra: bool,
+    tuning: QuantTuning,
+    ss_x: i32,
+    ss_y: i32,
+    separate_uv_delta_q: bool,
+    delta_q_present: bool,
+) -> QuantizerSettings {
+    use crate::quant_common::{
+        aom_get_qmlevel, aom_get_qmlevel_444_chroma, aom_get_qmlevel_allintra,
+        aom_get_qmlevel_luma_ssimulacra2,
+    };
+    let base_qindex = (delta_q_present as i32).max(q);
+    let iq_family = matches!(tuning, QuantTuning::Iq | QuantTuning::Ssimulacra2);
+
+    let (u_dc, u_ac, v_dc, v_ac) = if enable_chroma_deltaq && q != 0 {
+        if iq_family {
+            let (dc, ac) = if ss_x == 1 && ss_y == 1 {
+                // 4:2:0 (and mono): constant chroma boost, ramped down at
+                // very low qindexes.
+                let offset = if tuning == QuantTuning::Ssimulacra2 {
+                    20
+                } else {
+                    16
+                };
+                let dc = -((base_qindex / 2) - 14).clamp(0, offset);
+                (dc, dc)
+            } else if ss_x == 1 && ss_y == 0 {
+                // 4:2:2: constant chroma AC increase with low-q ramp-down.
+                (0, (base_qindex / 2).clamp(0, 6))
+            } else if ss_x == 0 && ss_y == 0 {
+                // 4:4:4: constant chroma AC increase with low-q ramp-down.
+                (0, (base_qindex / 2).clamp(0, 24))
+            } else {
+                // 4:4:0 — unreachable through the codec API (no such fmt).
+                (0, 0)
+            };
+            (dc, ac, dc, ac)
+        } else {
+            // TODO(aomedia:2717) arm in C: constant 2 everywhere.
+            (2, 2, 2, 2)
+        }
+    } else {
+        (0, 0, 0, 0)
+    };
+
+    // Select the luma/chroma QM formulas (function-pointer selection in C).
+    let luma = |qi: i32| -> i32 {
+        match tuning {
+            QuantTuning::Ssimulacra2 => aom_get_qmlevel_luma_ssimulacra2(qi, min_qmlevel, max_qmlevel),
+            QuantTuning::Iq => aom_get_qmlevel_allintra(qi, min_qmlevel, max_qmlevel),
+            QuantTuning::Psnr if is_allintra => aom_get_qmlevel_allintra(qi, min_qmlevel, max_qmlevel),
+            QuantTuning::Psnr => aom_get_qmlevel(qi, min_qmlevel, max_qmlevel),
+        }
+    };
+    let chroma = |qi: i32| -> i32 {
+        if iq_family {
+            if ss_x == 0 && ss_y == 0 {
+                aom_get_qmlevel_444_chroma(qi, min_qmlevel, max_qmlevel)
+            } else {
+                aom_get_qmlevel_allintra(qi, min_qmlevel, max_qmlevel)
+            }
+        } else if is_allintra {
+            aom_get_qmlevel_allintra(qi, min_qmlevel, max_qmlevel)
+        } else {
+            aom_get_qmlevel(qi, min_qmlevel, max_qmlevel)
+        }
+    };
+
+    let qmatrix_level_y = luma(base_qindex);
+    let qmatrix_level_u = chroma(base_qindex + u_ac);
+    let qmatrix_level_v = if separate_uv_delta_q {
+        chroma(base_qindex + v_ac)
+    } else {
+        qmatrix_level_u
+    };
+
+    QuantizerSettings {
+        base_qindex,
+        y_dc_delta_q: 0,
+        u_dc_delta_q: u_dc,
+        u_ac_delta_q: u_ac,
+        v_dc_delta_q: v_dc,
+        v_ac_delta_q: v_ac,
+        qmatrix_level_y,
+        qmatrix_level_u,
+        qmatrix_level_v,
+    }
+}

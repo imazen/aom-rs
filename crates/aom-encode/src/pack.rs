@@ -110,9 +110,16 @@ pub struct PackCfg {
     /// `!cm->features.disable_cdf_update` — whether symbol writes adapt
     /// their CDFs.
     pub allow_update_cdf: bool,
-    /// The frame's `current_base_qindex` (no delta-q in this envelope, so
-    /// every block's `current_qindex` is this constant).
+    /// The frame's `current_base_qindex` init (`quant_params->base_qindex`;
+    /// with delta-q off every block's `current_qindex` is this constant).
     pub base_qindex: i32,
+    /// `delta_q_info.delta_q_present_flag` — per-SB delta-q signaling
+    /// (`--deltaq-mode=6`; requires [`SbEncodeEnv::deltaq`] to derive the
+    /// per-SB qindexes). False = the proven envelope, byte-identical.
+    pub delta_q_present: bool,
+    /// `delta_q_info.delta_q_res` (1/2/4/8) — read only when
+    /// `delta_q_present`.
+    pub delta_q_res: i32,
     /// `cm->features.allow_screen_content_tools` — gates PALETTE mode per
     /// block (`av1_allow_palette`, also needs the block's own bsize in
     /// `[BLOCK_8X8, 64x64]`). When true, every eligible DC-predicted block
@@ -238,11 +245,11 @@ pub fn kf_block_state(cfg: &PackCfg, env: &SbEncodeEnv, mib_size: i32) -> KfBloc
         coded_lossless: env.lossless,
         allow_intrabc: false,
         cdef_bits: 0,
-        dq_present: false,
+        dq_present: cfg.delta_q_present,
         dlf_present: false,
         dlf_multi: false,
         num_planes: if env.monochrome { 1 } else { 3 },
-        dq_res: 0,
+        dq_res: cfg.delta_q_res,
         dlf_res: 0,
         monochrome: env.monochrome,
         is_chroma_ref: true,
@@ -281,6 +288,7 @@ pub fn pack_leaf(
     mi_row: i32,
     mi_col: i32,
     partition: usize,
+    sb_current_qindex: i32,
 ) {
     let bsize = winner.bsize;
     let mi_w = MI_SIZE_WIDE_B[bsize];
@@ -318,7 +326,7 @@ pub fn pack_leaf(
         segment_id: 0,
         skip: i32::from(winner.skip_txfm),
         cdef_strength,
-        current_qindex: cfg.base_qindex,
+        current_qindex: sb_current_qindex,
         delta_lf: [0; 4],
         delta_lf_from_base: 0,
         use_intrabc: 0,
@@ -577,6 +585,7 @@ pub fn pack_sb(
     mi_row: i32,
     mi_col: i32,
     bsize: usize,
+    sb_current_qindex: i32,
 ) {
     if mi_row >= env.mi_rows || mi_col >= env.mi_cols {
         return;
@@ -668,6 +677,7 @@ pub fn pack_sb(
                 mi_row,
                 mi_col,
                 PARTITION_NONE as usize,
+                sb_current_qindex,
             );
         }
         SbTree::Split(children) => {
@@ -677,6 +687,7 @@ pub fn pack_sb(
                 pack_sb(
                     enc, env, cfg, kf, kfs, tile, nbr, recon_y, recon_u, recon_v, cfl, child, y, x,
                     subsize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -698,6 +709,7 @@ pub fn pack_sb(
                 mi_row,
                 mi_col,
                 PARTITION_HORZ as usize,
+                sb_current_qindex,
             );
             if mi_row + hbs < env.mi_rows {
                 pack_leaf(
@@ -716,6 +728,7 @@ pub fn pack_sb(
                     mi_row + hbs,
                     mi_col,
                     PARTITION_HORZ as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -737,6 +750,7 @@ pub fn pack_sb(
                 mi_row,
                 mi_col,
                 PARTITION_VERT as usize,
+                sb_current_qindex,
             );
             if mi_col + hbs < env.mi_cols {
                 pack_leaf(
@@ -755,6 +769,7 @@ pub fn pack_sb(
                     mi_row,
                     mi_col + hbs,
                     PARTITION_VERT as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -783,6 +798,7 @@ pub fn pack_sb(
                     this_mi_row,
                     mi_col,
                     PARTITION_HORZ_4 as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -811,6 +827,7 @@ pub fn pack_sb(
                     mi_row,
                     this_mi_col,
                     PARTITION_VERT_4 as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -840,6 +857,7 @@ pub fn pack_sb(
                     r,
                     c,
                     PARTITION_HORZ_A as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -867,6 +885,7 @@ pub fn pack_sb(
                     r,
                     c,
                     PARTITION_HORZ_B as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -895,6 +914,7 @@ pub fn pack_sb(
                     r,
                     c,
                     PARTITION_VERT_A as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -923,6 +943,7 @@ pub fn pack_sb(
                     r,
                     c,
                     PARTITION_VERT_B as usize,
+                    sb_current_qindex,
                 );
             }
         }
@@ -1078,6 +1099,16 @@ pub fn pack_tile_lr(
     } else {
         None
     };
+    // Variance Boost delta-q: the SEARCH-side running `xd->current_base_qindex`
+    // (reset to base at the tile start, encodeframe.c:1235; advanced per SB by
+    // `av1_update_state` — unconditionally on this KEY-intra envelope, where
+    // the SB-root `skip_txfm` is structurally 0 so the `bsize != sb_size ||
+    // !skip` gate always passes). The WRITE side keeps its own identical
+    // tracker inside [`KfBlockState`] (`write_delta_q_params`' semantics).
+    let mut search_base_qindex = env
+        .deltaq
+        .map(|d| d.base_qindex)
+        .unwrap_or(pack_cfg.base_qindex);
 
     for r in 0..n_sb_rows {
         search_tile.left_ectx = [[0; 32]; 3];
@@ -1090,6 +1121,61 @@ pub fn pack_tile_lr(
         for c in 0..n_sb_cols {
             let mi_row = mi_row0 + r * sb_mi;
             let mi_col = mi_col0 + c * sb_mi;
+
+            // `setup_delta_q` (encodeframe.c:341, DELTA_Q_VARIANCE_BOOST):
+            // derive this SB's qindex from source variance against the
+            // running base, re-select the quantizer rows
+            // (`av1_init_plane_quantizers` -> `set_q_index`) and recompute
+            // the SB base rdmult from the ADJUSTED qindex (the allintra
+            // variance modifier below folds on top, exactly C's
+            // init_plane_quantizers -> setup_block_rdmult order).
+            let (sb_current_qindex, dq_rows) = if let Some(dq) = &env.deltaq {
+                let sb_off = env.base_y
+                    + (mi_row as usize * 4) * env.stride
+                    + mi_col as usize * 4;
+                let adjusted = crate::allintra_vis::setup_delta_q_variance_boost(
+                    env.src_y,
+                    sb_off,
+                    env.stride,
+                    env.bd,
+                    dq.base_qindex,
+                    dq.deltaq_strength,
+                    dq.delta_q_res,
+                    search_base_qindex,
+                );
+                // av1_update_state: advance the running base (see the init
+                // comment for the always-true gate on this envelope).
+                search_base_qindex = adjusted;
+                let rows = (
+                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 0),
+                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 1),
+                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 2),
+                );
+                (adjusted, Some(rows))
+            } else {
+                (pack_cfg.base_qindex, None)
+            };
+            let sb_base_rdmult = if env.deltaq.is_some() {
+                // av1_compute_rd_mult at the SB's adjusted qindex
+                // (qindex_rdmult = qindex + y_dc_delta_q, y_dc_delta_q == 0).
+                crate::rd::av1_compute_rd_mult_based_on_qindex(
+                    env.bd,
+                    crate::rd::FrameUpdateType::Kf,
+                    sb_current_qindex,
+                    if env.tune.iq_tuning {
+                        crate::rd::TuneMetric::Iq
+                    } else {
+                        crate::rd::TuneMetric::Psnr
+                    },
+                    if pick_cfg.allintra {
+                        crate::rd::EncMode::Allintra
+                    } else {
+                        crate::rd::EncMode::Good
+                    },
+                )
+            } else {
+                env.rdmult
+            };
 
             // ALLINTRA SB-root rdmult modifier (setup_block_rdmult,
             // partition_search.c:652/5710-5722): computed ONCE per SB from
@@ -1117,9 +1203,9 @@ pub fn pack_tile_lr(
                     env.bd,
                 );
                 let modifier = crate::partition_pick::intra_sb_rdmult_modifier(var_min, var_max);
-                crate::partition_pick::fold_intra_sb_rdmult(env.rdmult, modifier)
+                crate::partition_pick::fold_intra_sb_rdmult(sb_base_rdmult, modifier)
             } else {
-                env.rdmult
+                sb_base_rdmult
             };
             // Coefficient AND mode cost update, `INTERNAL_COST_UPD_SB` (speed 0's
             // default; `av1_set_cost_upd_freq` -> `av1_fill_coeff_costs(&x->coeff_costs,
@@ -1147,17 +1233,25 @@ pub fn pack_tile_lr(
             let cost_upd_off = pick_cfg.allintra && pick_cfg.speed >= 9;
             let sb_real = (!cost_upd_off)
                 .then(|| crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra));
+            // Variance-Boost delta-q per-SB quantizer rows (None = identity when
+            // delta-q is off — env.rows_* — so speeds 0-9 stay byte-unchanged).
             let sb_env = if let Some(sb_real) = &sb_real {
                 SbEncodeEnv {
                     rdmult: sb_rdmult,
                     coeff_costs_y: &sb_real.coeff_costs_y,
                     coeff_costs_uv: &sb_real.coeff_costs_uv,
                     tx_type_costs: &sb_real.tx_type_costs_y,
+                    rows_y: dq_rows.as_ref().map(|r| &r.0).unwrap_or(env.rows_y),
+                    rows_u: dq_rows.as_ref().map(|r| &r.1).unwrap_or(env.rows_u),
+                    rows_v: dq_rows.as_ref().map(|r| &r.2).unwrap_or(env.rows_v),
                     ..*env
                 }
             } else {
                 SbEncodeEnv {
                     rdmult: sb_rdmult,
+                    rows_y: dq_rows.as_ref().map(|r| &r.0).unwrap_or(env.rows_y),
+                    rows_u: dq_rows.as_ref().map(|r| &r.1).unwrap_or(env.rows_u),
+                    rows_v: dq_rows.as_ref().map(|r| &r.2).unwrap_or(env.rows_v),
                     ..*env
                 }
             };
@@ -1339,6 +1433,7 @@ pub fn pack_tile_lr(
                 mi_row,
                 mi_col,
                 sb_size,
+                sb_current_qindex,
             );
             trees.push(tree);
         }
@@ -1409,6 +1504,16 @@ pub fn pack_tile_from_trees(
         nbr.cdef = Some(c);
     }
 
+    // Variance-Boost delta-q running base (mirrors pack_tile's tracker): reset
+    // to base at the tile start, advanced per SB by setup_delta_q_variance_boost
+    // below. With delta-q OFF this stays the constant base_qindex and every
+    // derivation below reduces to pack_tile's `deltaq: None` arm — byte-identical
+    // to the pre-tune CDEF repack path.
+    let mut search_base_qindex = env
+        .deltaq
+        .map(|d| d.base_qindex)
+        .unwrap_or(pack_cfg.base_qindex);
+
     for r in 0..n_sb_rows {
         pack_tile_ctx.left_ectx = [[0; 32]; 3];
         pack_tile_ctx.left_pctx = [0; 32];
@@ -1418,9 +1523,60 @@ pub fn pack_tile_from_trees(
             let mi_row = mi_row0 + r * sb_mi;
             let mi_col = mi_col0 + c * sb_mi;
 
+            // Per-SB delta-q (Variance Boost) derivation — mirrors pack_tile's
+            // (same source-only inputs → identical per-SB qindex sequence as
+            // phase 1). With delta-q OFF this is (base_qindex, None) and
+            // `sb_base_rdmult == env.rdmult`, i.e. byte-identical to the prior
+            // CDEF-repack behaviour.
+            let (sb_current_qindex, dq_rows) = if let Some(dq) = &env.deltaq {
+                let sb_off =
+                    env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+                let adjusted = crate::allintra_vis::setup_delta_q_variance_boost(
+                    env.src_y,
+                    sb_off,
+                    env.stride,
+                    env.bd,
+                    dq.base_qindex,
+                    dq.deltaq_strength,
+                    dq.delta_q_res,
+                    search_base_qindex,
+                );
+                search_base_qindex = adjusted;
+                let rows = (
+                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 0),
+                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 1),
+                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 2),
+                );
+                (adjusted, Some(rows))
+            } else {
+                (pack_cfg.base_qindex, None)
+            };
+            let sb_base_rdmult = if env.deltaq.is_some() {
+                crate::rd::av1_compute_rd_mult_based_on_qindex(
+                    env.bd,
+                    crate::rd::FrameUpdateType::Kf,
+                    sb_current_qindex,
+                    if env.tune.iq_tuning {
+                        crate::rd::TuneMetric::Iq
+                    } else {
+                        crate::rd::TuneMetric::Psnr
+                    },
+                    if pick_cfg.allintra {
+                        crate::rd::EncMode::Allintra
+                    } else {
+                        crate::rd::EncMode::Good
+                    },
+                )
+            } else {
+                env.rdmult
+            };
+
             // Identical per-SB folds to pack_tile's (same inputs → same
             // values as phase 1 derived at this SB): the ALLINTRA rdmult
-            // modifier and the INTERNAL_COST_UPD_SB cost refresh.
+            // modifier and the INTERNAL_COST_UPD_SB cost refresh. The CDEF
+            // repack runs speed-0 only (VAR_BASED_PARTITION is speed>=7), so
+            // the ALLINTRA fold is unconditional here — folding onto the
+            // delta-q-adjusted `sb_base_rdmult` (== env.rdmult when off).
             let sb_rdmult = if pick_cfg.allintra {
                 let mi_w = MI_SIZE_WIDE_B[sb_size] as i32;
                 let mi_h = MI_SIZE_HIGH_B[sb_size] as i32;
@@ -1438,9 +1594,9 @@ pub fn pack_tile_from_trees(
                     env.bd,
                 );
                 let modifier = crate::partition_pick::intra_sb_rdmult_modifier(var_min, var_max);
-                crate::partition_pick::fold_intra_sb_rdmult(env.rdmult, modifier)
+                crate::partition_pick::fold_intra_sb_rdmult(sb_base_rdmult, modifier)
             } else {
-                env.rdmult
+                sb_base_rdmult
             };
             // KB-12: allintra speed >= 9 flips coeff/mode_cost_upd_level to
             // INTERNAL_COST_UPD_OFF for <4k (set_allintra_speed_feature_
@@ -1453,17 +1609,25 @@ pub fn pack_tile_from_trees(
             let cost_upd_off = pick_cfg.allintra && pick_cfg.speed >= 9;
             let sb_real = (!cost_upd_off)
                 .then(|| crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra));
+            // Variance-Boost delta-q per-SB quantizer rows (None = identity when
+            // delta-q is off — env.rows_* — so speeds 0-9 stay byte-unchanged).
             let sb_env = if let Some(sb_real) = &sb_real {
                 SbEncodeEnv {
                     rdmult: sb_rdmult,
                     coeff_costs_y: &sb_real.coeff_costs_y,
                     coeff_costs_uv: &sb_real.coeff_costs_uv,
                     tx_type_costs: &sb_real.tx_type_costs_y,
+                    rows_y: dq_rows.as_ref().map(|r| &r.0).unwrap_or(env.rows_y),
+                    rows_u: dq_rows.as_ref().map(|r| &r.1).unwrap_or(env.rows_u),
+                    rows_v: dq_rows.as_ref().map(|r| &r.2).unwrap_or(env.rows_v),
                     ..*env
                 }
             } else {
                 SbEncodeEnv {
                     rdmult: sb_rdmult,
+                    rows_y: dq_rows.as_ref().map(|r| &r.0).unwrap_or(env.rows_y),
+                    rows_u: dq_rows.as_ref().map(|r| &r.1).unwrap_or(env.rows_u),
+                    rows_v: dq_rows.as_ref().map(|r| &r.2).unwrap_or(env.rows_v),
                     ..*env
                 }
             };
@@ -1486,6 +1650,7 @@ pub fn pack_tile_from_trees(
                 mi_row,
                 mi_col,
                 sb_size,
+                sb_current_qindex,
             );
         }
     }

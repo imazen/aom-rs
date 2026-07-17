@@ -267,7 +267,7 @@ fn search_tx_type_intra_matches_c_chain() {
             let qstep_c = (i32::from(plane_rows_c[6 * 8 + 1]) >> dequant_shift) as u64;
             let skip_trellis_c = !((mse_c as u64) <= 3200u64 * qstep_c * qstep_c);
             let kind_c = if skip_trellis_c { 1 } else { 0 }; // B : FP
-            let trellis_rdmult = trellis_rdmult_intra_y(rdmult, 0, bd);
+            let trellis_rdmult = trellis_rdmult_intra_y(rdmult, 0, bd, false);
             let (txb_skip_ctx_c, dc_sign_ctx_c) =
                 c::ref_get_txb_ctx(bsize, tx_size, 0, &above, &left);
 

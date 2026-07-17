@@ -7406,6 +7406,8 @@ extern "C" {
     fn shim_qm_giqmatrix(q: i32, c: i32, t: i32, out: *mut u8, out_cap: i32) -> i32;
     fn shim_get_qmlevel(qindex: i32, first: i32, last: i32) -> i32;
     fn shim_get_qmlevel_allintra(qindex: i32, first: i32, last: i32) -> i32;
+    fn shim_get_qmlevel_luma_ssimulacra2(qindex: i32, first: i32, last: i32) -> i32;
+    fn shim_get_qmlevel_444_chroma(qindex: i32, first: i32, last: i32) -> i32;
 }
 
 /// Real libaom `aom_get_qmlevel` (default-tune qindex -> QM level).
@@ -7416,6 +7418,18 @@ pub fn ref_get_qmlevel(qindex: i32, first: i32, last: i32) -> i32 {
 /// Real libaom `aom_get_qmlevel_allintra` (all-intra qindex -> QM level).
 pub fn ref_get_qmlevel_allintra(qindex: i32, first: i32, last: i32) -> i32 {
     unsafe { shim_get_qmlevel_allintra(qindex, first, last) }
+}
+
+/// Real libaom `aom_get_qmlevel_luma_ssimulacra2` (tune=SSIMULACRA2 luma
+/// qindex -> QM level).
+pub fn ref_get_qmlevel_luma_ssimulacra2(qindex: i32, first: i32, last: i32) -> i32 {
+    unsafe { shim_get_qmlevel_luma_ssimulacra2(qindex, first, last) }
+}
+
+/// Real libaom `aom_get_qmlevel_444_chroma` (tune=IQ/SSIMULACRA2 4:4:4 chroma
+/// qindex -> QM level).
+pub fn ref_get_qmlevel_444_chroma(qindex: i32, first: i32, last: i32) -> i32 {
+    unsafe { shim_get_qmlevel_444_chroma(qindex, first, last) }
 }
 
 /// Real libaom forward QM matrix for (qm level `q`, plane group `c` in
@@ -12143,4 +12157,159 @@ pub fn ref_selfguided_restoration(
             highbd as i32,
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// tune=IQ / tune=SSIMULACRA2 knob-explicit encode (C4 stills-quality family)
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" {
+    fn shim_encode_av1_kf_tune(
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        usage: i32,
+        tuning: i32,
+        sharpness: i32,
+        enable_adaptive_sharpness: i32,
+        dist_metric: i32,
+        enable_chroma_deltaq: i32,
+        deltaq_mode: i32,
+        deltaq_strength: i32,
+        enable_qm: i32,
+        qm_min: i32,
+        qm_max: i32,
+        enable_cdef: i32,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
+}
+
+/// `AOM_TUNE_IQ` (aom/aomcx.h:1786).
+pub const AOM_TUNE_IQ: i32 = 10;
+/// `AOM_TUNE_SSIMULACRA2` (aom/aomcx.h:1803).
+pub const AOM_TUNE_SSIMULACRA2: i32 = 11;
+/// `AOM_DIST_METRIC_PSNR` (aom/aomcx.h:1816).
+pub const AOM_DIST_METRIC_PSNR: i32 = 0;
+/// `AOM_DIST_METRIC_QM_PSNR` (aom/aomcx.h:1820).
+pub const AOM_DIST_METRIC_QM_PSNR: i32 = 1;
+/// `CDEF_ADAPTIVE` (av1/encoder/pickcdef.h:28) — the `--enable-cdef=3` arm
+/// the tune=IQ/SSIMULACRA2 bundle installs.
+pub const CDEF_CONTROL_ADAPTIVE: i32 = 3;
+
+/// The explicit knob set of [`ref_encode_av1_kf_tune`]. Every field follows
+/// the shim's `-1 = leave the (tuning-bundle or usage) default` convention;
+/// `Default` = all `-1` (a stock encode, byte-identical to
+/// `ref_encode_av1_kf` modulo the deltaq-mode default the base shim pins to 0
+/// — pass `deltaq_mode: 0` to reproduce the base envelope exactly).
+#[derive(Clone, Copy, Debug)]
+pub struct RefTuneKnobs {
+    /// `AOME_SET_TUNING` (issued FIRST, so it installs the `handle_tuning`
+    /// bundle which later explicit knobs override): [`AOM_TUNE_IQ`] /
+    /// [`AOM_TUNE_SSIMULACRA2`].
+    pub tuning: i32,
+    /// `AOME_SET_SHARPNESS` 0..=7.
+    pub sharpness: i32,
+    /// `AV1E_SET_ENABLE_ADAPTIVE_SHARPNESS` 0/1.
+    pub enable_adaptive_sharpness: i32,
+    /// `AV1E_SET_DIST_METRIC`: [`AOM_DIST_METRIC_PSNR`] /
+    /// [`AOM_DIST_METRIC_QM_PSNR`].
+    pub dist_metric: i32,
+    /// `AV1E_SET_ENABLE_CHROMA_DELTAQ` 0/1.
+    pub enable_chroma_deltaq: i32,
+    /// `AV1E_SET_DELTAQ_MODE` (0 = off, 6 = DELTA_Q_VARIANCE_BOOST).
+    pub deltaq_mode: i32,
+    /// `AV1E_SET_DELTAQ_STRENGTH` (percent, default 100).
+    pub deltaq_strength: i32,
+    /// `AV1E_SET_ENABLE_QM` 0/1 (when 1, `qm_min`/`qm_max` must be set).
+    pub enable_qm: i32,
+    /// `AV1E_SET_QM_MIN` (only issued when `enable_qm == 1`).
+    pub qm_min: i32,
+    /// `AV1E_SET_QM_MAX` (only issued when `enable_qm == 1`).
+    pub qm_max: i32,
+    /// `AV1E_SET_ENABLE_CDEF` 0/1/2/3 ([`CDEF_CONTROL_ADAPTIVE`]).
+    pub enable_cdef: i32,
+}
+
+impl Default for RefTuneKnobs {
+    fn default() -> Self {
+        RefTuneKnobs {
+            tuning: -1,
+            sharpness: -1,
+            enable_adaptive_sharpness: -1,
+            dist_metric: -1,
+            enable_chroma_deltaq: -1,
+            deltaq_mode: -1,
+            deltaq_strength: -1,
+            enable_qm: -1,
+            qm_min: -1,
+            qm_max: -1,
+            enable_cdef: -1,
+        }
+    }
+}
+
+/// Real single-pass KEY encode with the tune=IQ / tune=SSIMULACRA2 knob set
+/// (see `shim_encode_av1_kf_tune`): baseline controls match
+/// [`ref_encode_av1_kf`] (`--sb-size=64`, single tile, restoration/aq off, no
+/// palette/intrabc, end-usage=q), with `knobs` layered on top — the tuning
+/// control first (installs the whole `handle_tuning` bundle), then each
+/// explicit knob (>= 0) as an override, exactly the aomenc CLI ordering.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_av1_kf_tune(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    usage: u32,
+    knobs: &RefTuneKnobs,
+) -> Vec<u8> {
+    let mut out = vec![0u8; (w * h * 8).max(1 << 20)];
+    let n = unsafe {
+        shim_encode_av1_kf_tune(
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            usage as i32,
+            knobs.tuning,
+            knobs.sharpness,
+            knobs.enable_adaptive_sharpness,
+            knobs.dist_metric,
+            knobs.enable_chroma_deltaq,
+            knobs.deltaq_mode,
+            knobs.deltaq_strength,
+            knobs.enable_qm,
+            knobs.qm_min,
+            knobs.qm_max,
+            knobs.enable_cdef,
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    };
+    assert!(n > 0, "shim_encode_av1_kf_tune failed ({n})");
+    out.truncate(n as usize);
+    out
 }

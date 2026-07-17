@@ -49,3 +49,16 @@ int shim_get_qmlevel(int qindex, int first, int last) {
 int shim_get_qmlevel_allintra(int qindex, int first, int last) {
   return aom_get_qmlevel_allintra(qindex, first, last);
 }
+
+/* The tune=IQ / tune=SSIMULACRA2 QM-level formulas (av1_set_quantizer selects
+ * aom_get_qmlevel_luma_ssimulacra2 for tune=SSIMULACRA2 luma, and
+ * aom_get_qmlevel_444_chroma for 4:4:4 chroma under BOTH tunes). Both are
+ * `static inline` in quant_common.h; the wrappers call them so the
+ * differential exercises the genuine C formulas. Append-only additions. */
+int shim_get_qmlevel_luma_ssimulacra2(int qindex, int first, int last) {
+  return aom_get_qmlevel_luma_ssimulacra2(qindex, first, last);
+}
+
+int shim_get_qmlevel_444_chroma(int qindex, int first, int last) {
+  return aom_get_qmlevel_444_chroma(qindex, first, last);
+}

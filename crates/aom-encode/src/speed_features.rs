@@ -943,8 +943,9 @@ impl SpeedFeatures {
     /// `enable_winner_mode_for_use_tx_domain_dist` gates); the tx-size search
     /// method, tx-type set (`use_default_intra_tx_type`) and tx-type prune are
     /// carried by their own structs and threaded separately (KB-8 chunks 2b/2c).
-    /// The `use_qm_dist_metric` branch (forces tx-domain dist on) is out of scope
-    /// — QM is OFF on the allintra envelope (CLAUDE.md primary-envelope note).
+    /// The `use_qm_dist_metric` branch (forces tx-domain dist on) is applied by
+    /// [`TxTypeSearchPolicy::with_tune_knobs`] on the derived policy — the
+    /// derivation itself stays metric-agnostic (PSNR defaults).
     pub fn tx_type_search_policy_for_stage(
         &self,
         stage: usize,
@@ -979,6 +980,12 @@ impl SpeedFeatures {
             // Non-screen textured envelope; screen-content would thread the real
             // cpi->use_screen_content_tools here.
             use_screen_content_tools: false,
+            // oxcf.tune_cfg knobs: the PSNR defaults here; callers apply
+            // `TxTypeSearchPolicy::with_tune_knobs` for tune=IQ/SSIMULACRA2 /
+            // --dist-metric=qm-psnr configs (which also forces the tx-domain
+            // distortion columns per rdopt_utils.h:516-522).
+            use_qm_dist_metric: false,
+            iq_tuning: false,
             use_rd_based_breakout_for_intra_tx_search: self
                 .use_rd_based_breakout_for_intra_tx_search,
             prune_tx_type_est_rd: self.prune_tx_type_est_rd,

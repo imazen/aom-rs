@@ -13,6 +13,7 @@
 //! forward transform lands.
 #![forbid(unsafe_code)]
 
+pub mod allintra_vis;
 pub mod ab_nn_prune;
 pub mod ab_nn_weights;
 pub mod cnn_partition;
@@ -47,7 +48,7 @@ use aom_entropy::enc::OdEcEnc;
 use aom_quant::{
     aom_highbd_quantize_b_no_qmatrix, aom_highbd_quantize_b_qm, aom_quantize_b_no_qmatrix,
     aom_quantize_b_qm, av1_highbd_quantize_dc, av1_highbd_quantize_fp_no_qmatrix,
-    av1_highbd_quantize_fp_qm, av1_quantize_dc, av1_quantize_fp_no_qmatrix, av1_quantize_fp_qm,
+    av1_highbd_quantize_fp_qm, av1_quantize_dc, av1_quantize_fp_qm,
 };
 use aom_transform::inv_txfm2d::{av1_fwht4x4, av1_inv_txfm2d_add};
 use aom_transform::txfm2d::av1_fwd_txfm2d;
@@ -88,6 +89,26 @@ pub enum QuantKind {
     Dc,
 }
 
+/// The `oxcf.tune_cfg` knobs the block-coefficient pipeline reads (`TuneCfg`,
+/// av1/encoder/encoder.h) — threaded from the frame config into the trellis
+/// and the tx-search distortion. `Default` = the PSNR-tune envelope (both
+/// false), byte-identical to the pre-tune path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TuneKnobs {
+    /// `tune_cfg.dist_metric == AOM_DIST_METRIC_QM_PSNR` (`--dist-metric=qm-psnr`,
+    /// also installed by `tune=IQ`/`tune=SSIMULACRA2` via `handle_tuning`).
+    /// Weights the trellis distortion by the forward QM (`av1_optimize_txb`,
+    /// txb_rdopt.c:346-351) and the tx-search transform-domain distortion by
+    /// [`aom_dist::block_error_qm`] (tx_search.c:1150/:1159), and forces
+    /// transform-domain distortion on (`set_tx_domain_dist_params`,
+    /// rdopt_utils.h:516-522).
+    pub use_qm_dist_metric: bool,
+    /// `tune_cfg.tuning ∈ {AOM_TUNE_IQ, AOM_TUNE_SSIMULACRA2}` — the
+    /// `av1_optimize_txb` trellis `rshift = 7` (vs 5) arm (txb_rdopt.c:378-386),
+    /// biasing the trellis towards keeping more coefficients.
+    pub iq_tuning: bool,
+}
+
 /// Frame-level quantization-matrix context for one plane — `av1_setup_qmatrix`'s
 /// inputs (`av1_quantize.c:370`). When present on [`QuantParams`], the effective
 /// per-transform `qmatrix`/`iqmatrix` slices are selected INSIDE
@@ -101,6 +122,13 @@ pub struct QmCtx {
     pub qm_level: usize,
     /// Plane index (0=Y, 1=U, 2=V) — the selectors group `plane >= 1` as chroma.
     pub plane: usize,
+    /// `tune_cfg.dist_metric == AOM_DIST_METRIC_QM_PSNR`: the trellis weights
+    /// its DISTORTION by the forward matrix (C selects `qmatrix` in
+    /// `av1_optimize_txb` only under this metric, txb_rdopt.c:346-351; the
+    /// production default PSNR metric runs the trellis with `qmatrix = NULL`
+    /// while dequant still folds `iqmatrix`). Set via
+    /// [`QuantParams::with_qm_dist_metric`].
+    pub use_qm_dist_metric: bool,
 }
 
 /// The `[dc, ac]` quantizer parameter tables (the `*_QTX` fields libaom's
@@ -185,7 +213,25 @@ impl<'a> QuantParams<'a> {
     /// 1-D / identity transforms still resolve to the flat quantizer per
     /// transform, exactly as C.
     pub fn with_qm(mut self, qm_level: usize, plane: usize) -> Self {
-        self.qm_ctx = Some(QmCtx { qm_level, plane });
+        self.qm_ctx = Some(QmCtx {
+            qm_level,
+            plane,
+            use_qm_dist_metric: false,
+        });
+        self
+    }
+
+    /// Mark the QM-PSNR distortion metric on an attached frame QM context
+    /// (`tune_cfg.dist_metric == AOM_DIST_METRIC_QM_PSNR`): the trellis then
+    /// weights its distortion by the forward matrix (see [`QmCtx`]). A no-op
+    /// without [`Self::with_qm`] — exactly C, where `av1_get_qmatrix` resolves
+    /// the flat NULL matrix when QM is off (`av1_use_qmatrix` false loads the
+    /// `NUM_QM_LEVELS - 1` seg matrices, quant_common.c:243/:256), so the
+    /// QM-PSNR metric degrades to unweighted distortion.
+    pub fn with_qm_dist_metric(mut self) -> Self {
+        if let Some(cx) = &mut self.qm_ctx {
+            cx.use_qm_dist_metric = true;
+        }
         self
     }
 }
@@ -489,16 +535,21 @@ pub fn xform_quant_optimize(
     // Same av1_setup_qmatrix selection the quantize above used — the trellis
     // (optimize_txb_qm's get_dqv) must fold the SAME per-position inverse.
     //
-    // The trellis DISTORTION qm, however, mirrors C's `av1_optimize_txb`
-    // (txb_rdopt.c): the forward matrix is selected there ONLY under
-    // `dist_metric == AOM_DIST_METRIC_QM_PSNR` (tune=IQ / SSIMULACRA2 — out
-    // of this envelope). On the production QM path (`qm_ctx`, default PSNR
-    // metric) the trellis distortion is UNWEIGHTED (`qmatrix = NULL` in C),
-    // while the dequant still folds the inverse matrix. The explicit-slice
-    // path (`qp.qm`/`qp.iqm`, kernel-diff tests) keeps weighting the
-    // distortion — it models the QM_PSNR arm the C shim oracle validates.
+    // The trellis DISTORTION qm mirrors C's `av1_optimize_txb` (txb_rdopt.c:
+    // 346-351): the forward matrix is selected there ONLY under `dist_metric
+    // == AOM_DIST_METRIC_QM_PSNR` (`--dist-metric=qm-psnr`, installed by
+    // tune=IQ / SSIMULACRA2 — [`QmCtx::use_qm_dist_metric`]). On the
+    // production QM path with the default PSNR metric the trellis distortion
+    // is UNWEIGHTED (`qmatrix = NULL` in C), while the dequant still folds
+    // the inverse matrix. The explicit-slice path (`qp.qm`/`qp.iqm`,
+    // kernel-diff tests) keeps weighting the distortion — it models the
+    // QM_PSNR arm the C shim oracle validates.
     let (qm_sel, iqm_sel) = resolve_qm(qp, tx_size, tx_type);
-    let trellis_dist_qm = if qp.qm_ctx.is_some() { None } else { qm_sel };
+    let trellis_dist_qm = match qp.qm_ctx {
+        Some(cx) if cx.use_qm_dist_metric => qm_sel,
+        Some(_) => None,
+        None => qm_sel,
+    };
     let res = match (trellis_dist_qm, iqm_sel) {
         (qm, Some(iqm)) => optimize_txb_qm(
             tx_size,
@@ -788,6 +839,49 @@ pub fn dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, bd: 
         right_signed_shift_i64(dist, shift),
         right_signed_shift_i64(sse, shift),
     )
+}
+
+/// `dist_block_tx_domain` (av1/encoder/tx_search.c:1131) with the QM-PSNR
+/// distortion-metric arm: when a per-transform forward matrix resolves AND the
+/// QM-PSNR metric is active, the block error is QM-weighted
+/// ([`aom_dist::block_error_qm`], scan-indexed — C passes `xd->bd` for highbd
+/// and a literal 8 for lowbd, which `bd` covers directly); otherwise this is
+/// exactly [`dist_block_tx_domain`] (C's `qmatrix == NULL ||
+/// !use_qm_dist_metric` fallthrough at :1150/:1159). Same
+/// `(MAX_TX_SCALE - tx_scale) * 2` normalization on both arms.
+pub fn dist_block_tx_domain_qm(
+    coeff: &[i32],
+    dqcoeff: &[i32],
+    tx_size: usize,
+    bd: u8,
+    qmatrix: Option<&[u8]>,
+    scan: &[i16],
+    use_qm_dist_metric: bool,
+) -> (i64, i64) {
+    let qm = match qmatrix {
+        Some(qm) if use_qm_dist_metric => qm,
+        _ => return dist_block_tx_domain(coeff, dqcoeff, tx_size, bd),
+    };
+    let n = txb_wide(tx_size) * txb_high(tx_size);
+    let (dist, sse) = aom_dist::block_error_qm(&coeff[..n], &dqcoeff[..n], qm, &scan[..n], bd);
+    let shift = (1 - tx_scale(tx_size)) * 2;
+    (
+        right_signed_shift_i64(dist, shift),
+        right_signed_shift_i64(sse, shift),
+    )
+}
+
+/// Resolve the per-transform FORWARD QM slice for the tx-search distortion —
+/// the `quant_param.qmatrix` C threads from `av1_setup_qmatrix` into
+/// `dist_block_tx_domain` (tx_search.c:2204-2249): `Some` only when the
+/// [`QuantParams`] carries a frame QM context resolving a genuine matrix for
+/// `(tx_size, tx_type)` (2-D transforms below the flat level).
+pub fn dist_qmatrix<'a>(
+    qp: &QuantParams<'a>,
+    tx_size: usize,
+    tx_type: usize,
+) -> Option<&'a [u8]> {
+    resolve_qm(qp, tx_size, tx_type).0
 }
 
 /// Coefficient-level per-transform-block RD cost — the core of the speed-0 intra

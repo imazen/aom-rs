@@ -1069,6 +1069,8 @@ impl EncodeCell {
             // Stock encode is QM-off (the allintra default; QM cells live in
             // the qm_encode_witness gate, not this harness).
             qm_levels: None,
+            tune: Default::default(),
+            deltaq: None,
             use_chroma_trellis_rd_mult: allintra,
             coeff_costs_y: &real.coeff_costs_y,
             coeff_costs_uv: &real.coeff_costs_uv,
@@ -1156,6 +1158,8 @@ impl EncodeCell {
             signal_gate: qindex > 0,
             allow_update_cdf: !p.prefix.disable_cdf_update,
             base_qindex: qindex,
+            delta_q_present: false,
+            delta_q_res: 0,
             allow_screen_content_tools: p.allow_screen_content_tools,
         };
 

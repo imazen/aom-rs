@@ -855,9 +855,17 @@ fn leaf_pick_sb_modes(
             p.use_intra_dct_only = cfg.pol.use_intra_dct_only;
         }
         mode_eval_pol.use_default_intra_tx_type |= cfg.pol.use_default_intra_tx_type;
+        // The stage-derived policies also inherit the frame's tune knobs from
+        // cfg.pol (set_mode_eval_params re-derives use_qm_dist_metric from
+        // oxcf per stage, rdopt_utils.h:554 — carrying the caller's flags is
+        // the same resolution). with_tune_knobs preserves the toggles above.
+        let tune = crate::TuneKnobs {
+            use_qm_dist_metric: cfg.pol.use_qm_dist_metric,
+            iq_tuning: cfg.pol.iq_tuning,
+        };
         (
-            mode_eval_pol,
-            winner_pol,
+            mode_eval_pol.with_tune_knobs(tune),
+            winner_pol.with_tune_knobs(tune),
             sf.tx_size_search_method_for_stage(MODE_EVAL),
             sf.tx_size_search_method_for_stage(WINNER_MODE_EVAL),
             sf.winner_mode_count_allowed(),
@@ -1088,6 +1096,7 @@ fn leaf_pick_sb_modes(
     let re = ReencodeParams {
         sharpness: env.sharpness,
         enable_optimize_b: env.enable_optimize_b,
+        tune: env.tune,
     };
 
     // `intra_sf.prune_chroma_modes_using_luma_winner` (speed_features.c:480) —

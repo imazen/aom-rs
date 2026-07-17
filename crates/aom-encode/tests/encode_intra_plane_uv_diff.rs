@@ -319,6 +319,7 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
                 enable_optimize_b: opt_type,
                 dry_run_output_enabled: dry_out,
                 use_chroma_trellis_rd_mult,
+                tune: Default::default(),
             };
 
             let cenv = CUvEnv {
