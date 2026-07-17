@@ -18,3 +18,16 @@ All agent WIP is COMMITTED on worktree branches (coordinator salvage pass ran; `
 - `worktree-agent-a6595a97…` @ 5442f88 + `agent-a0734761…` @ 9f6dad0 — tune=IQ (original + Opus successor).
 - `worktree-agent-a27658295…` @ 72df1c4 — speed-8/9: no code yet; KB-12 prep-facts in CLAUDE.md KB-11.
 FIRST ACTION next session: push LR's validated stack (its HANDOFF-LR.md has the recipe), then work the HANDOFF-*.md docs per worktree.
+
+## ALL DUMPS COMPLETE (2026-07-17) — every family has committed code + a HANDOFF doc
+Branch tips (all under refs/heads/worktree-agent-*, recoverable from the shared store; NONE pushed except LR-ready):
+| Family | Branch tip | Code state | Handoff doc |
+|---|---|---|---|
+| LR search | a3bee0d | 5-commit stack 8/8 byte-identical PUSH-READY + chunk-5 arms unvalidated | HANDOFF-LR.md |
+| Toggles C8-C11 | 27a6705 | 22/30 knobs, 20 EXACT (60/60 cells), +1 real disable_cdf_update bug fixed; needs 1 suite→push | HANDOFF-TOGGLES.md |
+| tune=IQ/SSIM2 | a04104d | 6-piece WIP, 6 conflicts resolved, OFF-by-default; NEVER COMPILED | HANDOFF-TUNE.md |
+| Screen palette+intrabc | 70d1323 | salvaged WIP | HANDOFF-SCREEN.md |
+| Transform-SIMD | ccf030b | salvaged WIP | HANDOFF-TXSIMD.md |
+| Speed-8/9 nonrd | b5b8f7d | nonrd_pickmode.rs +880 (estimate arm), walk + pack wiring; NEVER COMPILED — 2 known blockers: pack.rs Option type-err L1003-1009 + nonrd_use_partition_real undispatched; nonrd KEY chroma = Y-only+uv-DC (resolved) | HANDOFF-SPEED89.md |
+
+RESUME ORDER next session (highest ROI first): (1) push LR's validated stack (recipe in HANDOFF-LR.md — it's proven 8/8). (2) toggles: one `cargo test --workspace` → rebase → push (20 EXACT ready). (3) each remaining family: read its HANDOFF-*.md, fix compile blockers, validate, land. All new/successor agents → Opus (Fable 5 is spend-capped). Frugal = full invested scope, one suite at end (memory aom-rs-frugal-agents).
