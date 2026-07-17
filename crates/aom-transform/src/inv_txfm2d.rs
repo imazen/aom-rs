@@ -20,7 +20,7 @@ use crate::{
 
 type Txfm1d = fn(&[i32], &mut [i32], i32, &[i8]);
 
-const INV_COS_BIT: i32 = 12;
+pub(crate) const INV_COS_BIT: i32 = 12;
 
 // av1_inv_txfm_shift_ls[tx_size][0..2]
 #[rustfmt::skip]
@@ -65,6 +65,9 @@ struct Cfg {
     shift: [i8; 2],
     func_col: Txfm1d,
     func_row: Txfm1d,
+    /// Raw TXFM_TYPE ids (0..=11) — the SIMD per-kernel dispatch keys.
+    txfm_type_col: i32,
+    txfm_type_row: i32,
     ud_flip: bool,
     lr_flip: bool,
     valid: bool,
@@ -81,6 +84,8 @@ fn get_inv_txfm_cfg(tx_type: usize, tx_size: usize) -> Cfg {
         shift: INV_SHIFT[tx_size],
         func_col: if valid { inv_txfm_func(txfm_type_col) } else { av1_idct4 },
         func_row: if valid { inv_txfm_func(txfm_type_row) } else { av1_idct4 },
+        txfm_type_col,
+        txfm_type_row,
         ud_flip,
         lr_flip,
         valid,
@@ -196,42 +201,80 @@ pub fn av1_inv_txfm2d_add(
     let mut temp_in = [0i32; 64];
     let mut temp_out = [0i32; 64];
 
-    // Rows
-    for r in 0..row_n {
-        let ti = &mut temp_in[0..col_n];
-        if rect_type.abs() == 1 {
-            for c in 0..col_n {
-                ti[c] = round_shift(
-                    mod_input[c * row_n + r] as i64 * NEW_INV_SQRT2 as i64,
-                    NEW_SQRT2_BITS,
-                );
+    // Rows — the SIMD row pass (8-row lane batches) is bit-identical to this
+    // scalar loop (crate::simd docs + differentials); it declines (false) when
+    // the row kernel isn't ported / row_n < 8 / SIMD unavailable or pinned off.
+    #[cfg(target_arch = "x86_64")]
+    let rows_done = crate::simd::try_inv_row_pass(
+        cfg.txfm_type_row,
+        &mod_input,
+        &mut buf,
+        col_n,
+        row_n,
+        rect_type.abs() == 1,
+        -(shift[0] as i32),
+        (bd + 8) as i8,
+        &stage_range_row,
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    let rows_done = false;
+    if !rows_done {
+        for r in 0..row_n {
+            let ti = &mut temp_in[0..col_n];
+            if rect_type.abs() == 1 {
+                for c in 0..col_n {
+                    ti[c] = round_shift(
+                        mod_input[c * row_n + r] as i64 * NEW_INV_SQRT2 as i64,
+                        NEW_SQRT2_BITS,
+                    );
+                }
+            } else {
+                for c in 0..col_n {
+                    ti[c] = mod_input[c * row_n + r];
+                }
             }
-        } else {
-            for c in 0..col_n {
-                ti[c] = mod_input[c * row_n + r];
-            }
+            clamp_buf(ti, (bd + 8) as i8);
+            (cfg.func_row)(ti, &mut buf[r * col_n..r * col_n + col_n], INV_COS_BIT, &stage_range_row);
+            round_shift_array(&mut buf[r * col_n..r * col_n + col_n], -(shift[0] as i32));
         }
-        clamp_buf(ti, (bd + 8) as i8);
-        (cfg.func_row)(ti, &mut buf[r * col_n..r * col_n + col_n], INV_COS_BIT, &stage_range_row);
-        round_shift_array(&mut buf[r * col_n..r * col_n + col_n], -(shift[0] as i32));
     }
 
-    // Columns
+    // Columns — same contract: the SIMD column pass (8-column lane batches)
+    // is bit-identical to the scalar loop and declines when not applicable.
     let col_clamp = (bd + 6).max(16) as i8;
-    for c in 0..col_n {
-        let ti = &mut temp_in[0..row_n];
-        for r in 0..row_n {
-            let cc = if cfg.lr_flip { col_n - c - 1 } else { c };
-            ti[r] = buf[r * col_n + cc];
-        }
-        clamp_buf(ti, col_clamp);
-        let to = &mut temp_out[0..row_n];
-        (cfg.func_col)(ti, to, INV_COS_BIT, &stage_range_col);
-        round_shift_array(to, -(shift[1] as i32));
-        for r in 0..row_n {
-            let src = if cfg.ud_flip { to[row_n - r - 1] } else { to[r] };
-            let idx = r * stride + c;
-            output[idx] = highbd_clip_pixel_add(output[idx], src, bd);
+    #[cfg(target_arch = "x86_64")]
+    let cols_done = crate::simd::try_inv_col_pass(
+        cfg.txfm_type_col,
+        &buf,
+        output,
+        stride,
+        col_n,
+        row_n,
+        -(shift[1] as i32),
+        col_clamp,
+        &stage_range_col,
+        cfg.ud_flip,
+        cfg.lr_flip,
+        bd,
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    let cols_done = false;
+    if !cols_done {
+        for c in 0..col_n {
+            let ti = &mut temp_in[0..row_n];
+            for r in 0..row_n {
+                let cc = if cfg.lr_flip { col_n - c - 1 } else { c };
+                ti[r] = buf[r * col_n + cc];
+            }
+            clamp_buf(ti, col_clamp);
+            let to = &mut temp_out[0..row_n];
+            (cfg.func_col)(ti, to, INV_COS_BIT, &stage_range_col);
+            round_shift_array(to, -(shift[1] as i32));
+            for r in 0..row_n {
+                let src = if cfg.ud_flip { to[row_n - r - 1] } else { to[r] };
+                let idx = r * stride + c;
+                output[idx] = highbd_clip_pixel_add(output[idx], src, bd);
+            }
         }
     }
 }

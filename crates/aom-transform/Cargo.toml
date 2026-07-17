@@ -5,6 +5,18 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Safe SIMD (Gate 3): archmage tokens/dispatch + magetypes generic vector
+# types. ONE archmage universe workspace-wide (registry version — never a
+# path dep) so aom-dispatch's AOM_FORCE_SCALAR pin reaches this crate.
+archmage = "0.9.27"
+magetypes = "0.9.27"
+aom-dispatch = { path = "../aom-dispatch" }
+
+[features]
+# AVX-512 tiers (X64V4Token codegen). Default-on: runtime dispatch decides,
+# so the binary stays portable; disable to cut compile time on non-x86.
+default = ["avx512"]
+avx512 = ["archmage/avx512", "magetypes/avx512"]
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }

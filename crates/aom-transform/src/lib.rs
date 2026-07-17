@@ -10,6 +10,8 @@ pub mod cospi;
 pub mod fdct;
 pub mod inv_txfm1d_gen;
 pub mod inv_txfm2d;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod simd;
 pub mod special;
 pub mod txfm1d_gen;
 pub mod txfm2d;

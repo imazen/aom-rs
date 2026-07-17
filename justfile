@@ -32,3 +32,12 @@ profile kind side cell iters:
     valgrind --tool=callgrind --callgrind-out-file=/tmp/cg_{{cell}}_{{side}}.out \
         ./target/profiling/gate3_profile {{kind}} {{side}} {{cell}} {{iters}}
     callgrind_annotate --threshold=95 /tmp/cg_{{cell}}_{{side}}.out | head -60
+
+# Regenerate the transform 1-D kernels (scalar + AVX2 lane twins) from the
+# extracted C. Scalar output must be byte-identical to the committed files
+# (verified: `diff` after regenerating). The lane files are the SIMD twins.
+gen-txfm1d:
+    python3 xtask/transpile_txfm1d.py --inv reference/extracted/idct4.c reference/extracted/idct8.c reference/extracted/idct16.c reference/extracted/idct32.c reference/extracted/idct64.c reference/extracted/iadst8.c reference/extracted/iadst16.c > crates/aom-transform/src/inv_txfm1d_gen.rs
+    python3 xtask/transpile_txfm1d.py reference/extracted/fdct8.c reference/extracted/fdct16.c reference/extracted/fdct32.c reference/extracted/fdct64.c reference/extracted/fadst8.c reference/extracted/fadst16.c > crates/aom-transform/src/txfm1d_gen.rs
+    python3 xtask/transpile_txfm1d.py --inv --lanes reference/extracted/idct4.c reference/extracted/idct8.c reference/extracted/idct16.c reference/extracted/idct32.c reference/extracted/idct64.c reference/extracted/iadst8.c reference/extracted/iadst16.c > crates/aom-transform/src/simd/inv1d_v3_gen.rs
+    python3 xtask/transpile_txfm1d.py --lanes reference/extracted/fdct8.c reference/extracted/fdct16.c reference/extracted/fdct32.c reference/extracted/fdct64.c reference/extracted/fadst8.c reference/extracted/fadst16.c > crates/aom-transform/src/simd/txfm1d_v3_gen.rs
