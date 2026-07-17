@@ -1,0 +1,41 @@
+cell,width,height,megapixels,decoder,scope,min_ms_per_frame,mean_ms_per_frame,mpx_s_min,mpx_s_mean,correctness,note
+small-352x288-q00,352,288,0.1014,aom-rs,first-KEY,12.2694,13.1310,8.26,7.72,byte-identical(aom==rav1d),conformance KEY frame0 (KEY,INTER vector; frame0 only)
+small-352x288-q00,352,288,0.1014,rav1d-safe,first-KEY,8.7621,9.5982,11.57,10.56,byte-identical(aom==rav1d),conformance KEY frame0 (KEY,INTER vector; frame0 only)
+small-352x288-q00,352,288,0.1014,aomdec-internal,first-KEY,11.0840,11.0840,9.15,9.15,aomdec==dav1d md5 1998867ce2f47e15728862d6b55de0b4,aomdec --summary internal decode time (excludes process startup)
+small-352x288-q00,352,288,0.1014,dav1d-wall,first-KEY,18.1870,18.1870,5.57,5.57,aomdec==dav1d md5 1998867ce2f47e15728862d6b55de0b4,wall-clock incl. process startup (cross-process; directional)
+small-352x288-q00,352,288,0.1014,aomdec-wall,first-KEY,18.6390,18.6390,5.44,5.44,aomdec==dav1d md5 1998867ce2f47e15728862d6b55de0b4,wall-clock incl. process startup (cross-process; directional)
+small-352x288-q32,352,288,0.1014,aom-rs,first-KEY,5.8774,6.0218,17.25,16.83,byte-identical(aom==rav1d),conformance KEY frame0
+small-352x288-q32,352,288,0.1014,rav1d-safe,first-KEY,3.9722,4.1310,25.52,24.54,byte-identical(aom==rav1d),conformance KEY frame0
+small-352x288-q32,352,288,0.1014,aomdec-internal,first-KEY,5.6460,5.6460,17.96,17.96,aomdec==dav1d md5 ae694cf33adf2abae14d9827b120d783,aomdec --summary internal decode time (excludes process startup)
+small-352x288-q32,352,288,0.1014,dav1d-wall,first-KEY,11.4400,11.4400,8.86,8.86,aomdec==dav1d md5 ae694cf33adf2abae14d9827b120d783,wall-clock incl. process startup (cross-process; directional)
+small-352x288-q32,352,288,0.1014,aomdec-wall,first-KEY,12.2820,12.2820,8.25,8.25,aomdec==dav1d md5 ae694cf33adf2abae14d9827b120d783,wall-clock incl. process startup (cross-process; directional)
+small-352x288-q63,352,288,0.1014,aom-rs,first-KEY,2.4179,2.4477,41.93,41.42,byte-identical(aom==rav1d),conformance KEY frame0 (aggressive q; >64-block path)
+small-352x288-q63,352,288,0.1014,rav1d-safe,first-KEY,1.5339,1.5623,66.09,64.89,byte-identical(aom==rav1d),conformance KEY frame0 (aggressive q; >64-block path)
+small-352x288-q63,352,288,0.1014,aomdec-internal,first-KEY,2.9210,2.9210,34.71,34.71,aomdec==dav1d md5 af57402f541c571ee7ee04ebed6a2f0e,aomdec --summary internal decode time (excludes process startup)
+small-352x288-q63,352,288,0.1014,dav1d-wall,first-KEY,10.0360,10.0360,10.10,10.10,aomdec==dav1d md5 af57402f541c571ee7ee04ebed6a2f0e,wall-clock incl. process startup (cross-process; directional)
+small-352x288-q63,352,288,0.1014,aomdec-wall,first-KEY,9.2720,9.2720,10.93,10.93,aomdec==dav1d md5 af57402f541c571ee7ee04ebed6a2f0e,wall-clock incl. process startup (cross-process; directional)
+2K-1920x1080-conf-intrabc,1920,1080,2.0736,aom-rs,first-KEY,66.3982,67.8940,31.23,30.54,byte-identical(aom==rav1d),conformance intra KEY frame0 (screen-content/intrabc, real bitstream)
+2K-1920x1080-conf-intrabc,1920,1080,2.0736,rav1d-safe,first-KEY,35.5697,36.5076,58.30,56.80,byte-identical(aom==rav1d),conformance intra KEY frame0 (screen-content/intrabc, real bitstream)
+2K-1920x1080-conf-intrabc,1920,1080,2.0736,aomdec-internal,first-KEY,42.0690,42.0690,49.29,49.29,aomdec==dav1d md5 4013774063f11a76ceed39509652ac89,aomdec --summary internal decode time (excludes process startup)
+2K-1920x1080-conf-intrabc,1920,1080,2.0736,dav1d-wall,first-KEY,40.2960,40.2960,51.46,51.46,aomdec==dav1d md5 4013774063f11a76ceed39509652ac89,wall-clock incl. process startup (cross-process; directional)
+2K-1920x1080-conf-intrabc,1920,1080,2.0736,aomdec-wall,first-KEY,56.8460,56.8460,36.48,36.48,aomdec==dav1d md5 4013774063f11a76ceed39509652ac89,wall-clock incl. process startup (cross-process; directional)
+2K-1920x1080-photo-cq20,1920,1080,2.0736,aom-rs,first-KEY,82.4656,84.3237,25.15,24.59,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+2K-1920x1080-photo-cq20,1920,1080,2.0736,rav1d-safe,first-KEY,38.2740,39.8992,54.18,51.97,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+2K-1920x1080-photo-cq20,1920,1080,2.0736,aomdec-internal,first-KEY,47.6220,47.6220,43.54,43.54,aomdec==dav1d md5 3972fbc340257ed1b3ee66fe1026eca4,aomdec --summary internal decode time (excludes process startup)
+2K-1920x1080-photo-cq20,1920,1080,2.0736,dav1d-wall,first-KEY,36.0720,36.0720,57.49,57.49,aomdec==dav1d md5 3972fbc340257ed1b3ee66fe1026eca4,wall-clock incl. process startup (cross-process; directional)
+2K-1920x1080-photo-cq20,1920,1080,2.0736,aomdec-wall,first-KEY,55.6810,55.6810,37.24,37.24,aomdec==dav1d md5 3972fbc340257ed1b3ee66fe1026eca4,wall-clock incl. process startup (cross-process; directional)
+2K-1920x1080-photo-cq40,1920,1080,2.0736,aom-rs,first-KEY,58.4217,61.2126,35.49,33.88,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+2K-1920x1080-photo-cq40,1920,1080,2.0736,rav1d-safe,first-KEY,26.3071,27.5072,78.82,75.38,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+2K-1920x1080-photo-cq40,1920,1080,2.0736,aomdec-internal,first-KEY,35.6800,35.6800,58.12,58.12,aomdec==dav1d md5 4df80936c0da6fa76d2e37c088251464,aomdec --summary internal decode time (excludes process startup)
+2K-1920x1080-photo-cq40,1920,1080,2.0736,dav1d-wall,first-KEY,31.5950,31.5950,65.63,65.63,aomdec==dav1d md5 4df80936c0da6fa76d2e37c088251464,wall-clock incl. process startup (cross-process; directional)
+2K-1920x1080-photo-cq40,1920,1080,2.0736,aomdec-wall,first-KEY,47.6290,47.6290,43.54,43.54,aomdec==dav1d md5 4df80936c0da6fa76d2e37c088251464,wall-clock incl. process startup (cross-process; directional)
+4K-3840x2160-photo-cq20,3840,2160,8.2944,aom-rs,first-KEY,432.8989,446.9504,19.16,18.56,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+4K-3840x2160-photo-cq20,3840,2160,8.2944,rav1d-safe,first-KEY,199.6021,212.0492,41.55,39.12,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+4K-3840x2160-photo-cq20,3840,2160,8.2944,aomdec-internal,first-KEY,214.4320,214.4320,38.68,38.68,aomdec==dav1d md5 b945694190d5d4260173d4d923e5df14,aomdec --summary internal decode time (excludes process startup)
+4K-3840x2160-photo-cq20,3840,2160,8.2944,dav1d-wall,first-KEY,140.9170,140.9170,58.86,58.86,aomdec==dav1d md5 b945694190d5d4260173d4d923e5df14,wall-clock incl. process startup (cross-process; directional)
+4K-3840x2160-photo-cq20,3840,2160,8.2944,aomdec-wall,first-KEY,239.5150,239.5150,34.63,34.63,aomdec==dav1d md5 b945694190d5d4260173d4d923e5df14,wall-clock incl. process startup (cross-process; directional)
+4K-3840x2160-photo-cq40,3840,2160,8.2944,aom-rs,first-KEY,290.0538,308.4669,28.60,26.89,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+4K-3840x2160-photo-cq40,3840,2160,8.2944,rav1d-safe,first-KEY,128.5558,142.6638,64.52,58.14,byte-identical(aom==rav1d),aomenc allintra KEY, photographic gb82 25-tile mosaic
+4K-3840x2160-photo-cq40,3840,2160,8.2944,aomdec-internal,first-KEY,140.2770,140.2770,59.13,59.13,aomdec==dav1d md5 b59081660a97c6c269c3c76b7de59ad3,aomdec --summary internal decode time (excludes process startup)
+4K-3840x2160-photo-cq40,3840,2160,8.2944,dav1d-wall,first-KEY,95.5810,95.5810,86.78,86.78,aomdec==dav1d md5 b59081660a97c6c269c3c76b7de59ad3,wall-clock incl. process startup (cross-process; directional)
+4K-3840x2160-photo-cq40,3840,2160,8.2944,aomdec-wall,first-KEY,167.3880,167.3880,49.55,49.55,aomdec==dav1d md5 b59081660a97c6c269c3c76b7de59ad3,wall-clock incl. process startup (cross-process; directional)

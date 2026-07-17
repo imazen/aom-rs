@@ -1,0 +1,75 @@
+[zenbench] calibration: int=0.28ns/iter mem_bw=79.8GiB/s mem_lat=14.5ns
+[zenbench] timer resolution: 20ns, loop overhead: 0.27ns/iter, TSC: unavailable (using Instant)
+
+═══════════════════════════════════════════════════════════════
+  zenbench  1784271332-36bab4
+  git: f9bbd8e22505180770f2eb158107da3f1e69c63b
+═══════════════════════════════════════════════════════════════
+
+  small-352x288-q00  30 rounds × 1 calls
+                 mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       13.1 ±0.2ms  [12.7–13.7]ms      7.72M
+  ╰─ rav1d-safe    9.6 ±0.2ms  [-29.3%–-28.2%]    10.6M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 10.6 Mops/s
+  aom-rs      ███████████████████████████████████████ 7.72 Mops/s
+
+  small-352x288-q32  30 rounds × 1 calls
+                 mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       6.0 ±0.1ms  [6.0–6.1]ms        16.8M
+  ╰─ rav1d-safe   4.1 ±0.1ms  [-32.2%–-30.6%]    24.5M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 24.5 Mops/s
+  aom-rs      █████████████████████████████████████ 16.8 Mops/s
+
+  small-352x288-q63  30 rounds × 1 calls
+                 mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       2.4 ±0.0ms  [2.4–2.5]ms        41.4M
+  ╰─ rav1d-safe   1.6 ±0.0ms  [-36.7%–-35.7%]    64.9M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 64.9 Mops/s
+  aom-rs      ██████████████████████████████████ 41.4 Mops/s
+
+  2K-1920x1080-conf-intrabc  30 rounds × 1 calls
+                 mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       67.9 ±0.6ms  [67.2–68.8]ms      30.5M
+  ╰─ rav1d-safe   36.5 ±0.6ms  [-46.4%–-45.7%]    56.8M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 56.8 Mops/s
+  aom-rs      █████████████████████████████ 30.5 Mops/s
+
+  2K-1920x1080-photo-cq20  30 rounds × 1 calls
+                 mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       84.3 ±1.2ms  [83.8–84.9]ms      24.6M
+  ╰─ rav1d-safe   39.9 ±0.9ms  [-53.6%–-52.3%]    52.0M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 52.0 Mops/s
+  aom-rs      ██████████████████████████ 24.6 Mops/s
+
+  2K-1920x1080-photo-cq40  30 rounds × 1 calls
+                 mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       61.2 ±0.9ms  [60.6–61.9]ms      33.9M
+  ╰─ rav1d-safe   27.5 ±0.4ms  [-55.7%–-54.3%]    75.4M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 75.4 Mops/s
+  aom-rs      ████████████████████████ 33.9 Mops/s
+
+  4K-3840x2160-photo-cq20  16 rounds × 1 calls
+                  mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       447.0 ±9.4ms  [441.9–453.0]ms    18.6M
+  ╰─ rav1d-safe   212.0 ±3.0ms  [-53.6%–-51.1%]    39.1M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 39.1 Mops/s
+  aom-rs      ██████████████████████████ 18.6 Mops/s
+
+  4K-3840x2160-photo-cq40  23 rounds × 1 calls
+                   mean ±mad ms  95% CI vs base     ops/s
+  ├─ aom-rs       308.5 ±11.3ms  [303.4–314.1]ms    26.9M
+  ╰─ rav1d-safe    142.7 ±6.4ms  [-54.9%–-52.4%]    58.1M
+
+  rav1d-safe  ██████████████████████████████████████████████████████ 58.1 Mops/s
+  aom-rs      █████████████████████████ 26.9 Mops/s
+
+  total: 42.2s
+═══════════════════════════════════════════════════════════════
+  filter: cargo bench -- --group=NAME  format: --format=llm|csv|md|json

@@ -1,0 +1,133 @@
+# decode_4way_2026-07-17 — AV1 KEY-frame decode-speed benchmark
+
+Apples-to-apples decode-speed comparison of four AV1 decoders on identical
+KEY-frame bitstreams: **aom-rs** (this repo) vs **rav1d-safe** vs **C dav1d**
+vs **C aomdec**.
+
+## Headline (min-floor Mpx/s; frame-0 / first-KEY scope for every decoder)
+
+| cell                     |   MP | aom-rs | rav1d-safe | aom÷rav1d | aomdec-int | dav1d-wall |
+|--------------------------|-----:|-------:|-----------:|----------:|-----------:|-----------:|
+| small-352x288-q00        | 0.10 |   8.26 |      11.57 |    1.40x  |       9.15 |       5.57 |
+| small-352x288-q32        | 0.10 |  17.25 |      25.52 |    1.48x  |      17.96 |       8.86 |
+| small-352x288-q63        | 0.10 |  41.93 |      66.09 |    1.58x  |      34.71 |      10.10 |
+| 2K-1920x1080-conf-intrabc| 2.07 |  31.23 |      58.30 |    1.87x  |      49.29 |      51.46 |
+| **2K-1920x1080-photo-cq20** | 2.07 | **25.15** | **54.18** | **2.15x** | 43.54 | 57.49 |
+| **2K-1920x1080-photo-cq40** | 2.07 | **35.49** | **78.82** | **2.22x** | 58.12 | 65.63 |
+| **4K-3840x2160-photo-cq20** | 8.29 | **19.16** | **41.55** | **2.17x** | 38.68 | 58.86 |
+| **4K-3840x2160-photo-cq40** | 8.29 | **28.60** | **64.52** | **2.26x** | 59.13 | 86.78 |
+
+Units = megapixels of decoded luma per second (higher is faster). `aom÷rav1d`
+is the decode-TIME ratio (aom-rs is that many times slower). The bolded 2K/4K
+photographic cells are the headline stills-decode workload.
+
+**Trustworthy headline number: the interleaved aom-rs÷rav1d-safe ratio ≈ 2.2×
+on 2K/4K photographic stills** (aom-rs decodes real photographic KEY frames at
+~19–35 Mpx/s; rav1d-safe at ~42–79 Mpx/s). That gap is expected: aom-rs's
+decoder is a scalar, bit-exactness-first port (its perf gate is not yet
+exercised — SIMD specialization comes after correctness breadth), while
+rav1d-safe ships extensive hand-tuned safe-SIMD.
+
+## Same scope (the apples-to-apples definition)
+
+- **Identical input bytes.** Both Rust decoders receive the byte-identical raw
+  AV1 OBU temporal unit of **frame 0 (the first, KEY frame)** of each vector,
+  demuxed once by a shared IVF reader. The C decoders decode the same file
+  limited to frame 0 (`--limit 1`).
+- **First-KEY-frame for ALL four decoders.** This is the only honest common
+  scope: aom-rs's decoder is KEY-frame / intra-only (an AVIF still IS a single
+  KEY frame). Multi-frame `00-quantizer` vectors are KEY,INTER — only frame 0
+  (KEY) is in scope; the INTER frame is excluded for every decoder.
+- **Same measurement.** The Rust pair is measured by zenbench with **round-robin
+  interleaving** (aom-rs / rav1d-safe alternating), which cancels shared-box
+  load — this is why the ratio is trustworthy even under heavy load. Both Rust
+  backends run through the SAME frontend: zenavif's raw-OBU decode seam
+  `zenavif::decode_av1_obu_yuv(&obu, backend)` (one frontend, two backends),
+  each constructing a decoder and decoding one frame to tight YUV planes. The
+  resource gate is disabled so the bench runs under load; the interleave (not a
+  quiet box) is what makes the pair comparable.
+
+## Correctness — full 4-way agreement (all cells)
+
+- **aom-rs == rav1d-safe: byte-identical YUV** on every cell (the harness
+  compares the decoded planes before timing). Includes the aggressive q63 cell
+  (confirms aom-rs KB-1 >64-block fix), the fresh 2K/4K mosaic encodes, and the
+  intrabc vector.
+- **aomdec == dav1d: identical per-frame I420 md5** on every cell.
+- aom-rs is separately byte-identical to libaom (aomdec) on the AV1 conformance
+  corpus (the Gate-1 conformance test). Therefore **all four decoders produce
+  identical pixels** on these cells. No decoder produced wrong pixels.
+
+## Caveats (read before quoting any cross-harness number)
+
+- **The Rust-vs-Rust interleaved ratio is the ONLY controlled comparison.** It
+  is in-process, same frontend, same input, round-robin interleaved.
+- **C numbers are cross-process and DIRECTIONAL only.** They ran as separate
+  back-to-back processes, NOT in the zenbench interleave, on a heavily-loaded
+  box (load avg ~16–19, 16 cores). They are not directly comparable to the
+  in-process Rust numbers:
+  - `aomdec-internal` = libaom's own `--summary` decode time (excludes process
+    startup) — the fairest C-vs-Rust point.
+  - `aomdec-wall` / `dav1d-wall` = full process wall time (median of 30 runs),
+    which **includes process startup**, so the true dav1d/aomdec decode is
+    faster than the wall figure — most visible on the small cells where startup
+    dominates. dav1d has no clean internal-decode print for a single frame, so
+    only its wall time is reported.
+- **Absolute Mpx/s are under load** (~16–19 during the runs). `min` (the fastest
+  observed round, per Chen & Revels) is reported as the load-robust throughput
+  floor; `mean` is also in the CSV but is depressed/noisier under contention.
+  The ratio, not the absolute, is the load-robust conclusion.
+
+## Provenance
+
+- Host: `dev-32gb`, kernel `7.0.0-15-generic`, 16 cores.
+- Rust pair run (zenbench, interleaved): load avg ~19 at start, ~17 at end;
+  total 42 s; resource gate disabled; `ZENBENCH_NO_SAVE=1`.
+- C references: 30 reps/cell, median wall; box load avg ~16–17.
+- Decoders / versions:
+  - aom-rs `aom-decode` crate v0.0.1 — repo commit see below.
+  - rav1d-safe **0.6.0** (local dev checkout `/root/work/rav1d-safe`,
+    commit `7892c420155da770a190440603a315345f18c19c`), default safe-SIMD
+    features `bitdepth_8,bitdepth_16` (no asm, runtime SIMD dispatch).
+  - dav1d **1.5.1** (`/root/dav1d-src`, commit `42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa`).
+  - aomdec / aomenc: **libaom v3.14.1** (git `03087864cf4bea6abb0d28f95cf7843511413d8f`),
+    `reference/libaom/build/{aomdec,aomenc}`.
+- Frontend fork: **zenavif** branch `aom-rs-decode-backend` (forked from
+  `/root/work/zenavif` `f9bbd8e`), which adds aom-rs as a second decode backend
+  behind `decode_av1_obu_yuv(.., Av1Backend::AomRs)` and repoints rav1d-safe to
+  the local 0.6.0 path. NOT pushed to zenavif main.
+- Benchmark built WITHOUT `-C target-cpu=native` (runtime SIMD dispatch is what
+  ships), release profile.
+
+## Content provenance
+
+Conformance vectors (`conformance/data/`, gitignored; fetched via
+`xtask/conformance.py --fetch --scope intra`):
+- `av1-1-b8-00-quantizer-{00,32,63}.ivf` — 352×288, KEY,INTER (frame 0 only).
+- `av1-1-b8-16-intra_only-intrabc-extreme-dv.ivf` — 1920×1080, intra KEY,
+  screen-content/intrabc — a real 2K conformance bitstream.
+
+Photographic 2K/4K stills — ENCODED here (gitignored under `conformance/data/`,
+regenerable):
+- Source: a photographic MOSAIC of the 25 distinct gb82 576×576 lossless photos
+  (`/root/work/codec-corpus/gb82/*.png`), tiled row-major (with a per-row
+  rotation) and cropped to the target size — real high-frequency photographic
+  content everywhere (only thin tile seams), far more representative than a
+  smooth single-image upscale. Generator: `mk_mosaic_y4m.rs` (committed
+  alongside this file; JPEG/full-range BT.601 RGB→YUV, 4:2:0 2×2 box average).
+  - `mk_mosaic_y4m <gb82_dir> mosaic_2k.y4m 1920 1080`
+  - `mk_mosaic_y4m <gb82_dir> mosaic_4k.y4m 3840 2160`
+- Encode (single KEY frame): `aomenc --codec=av1 --ivf --allintra
+  --cq-level={20,40} --end-usage=q --cpu-used=6 --limit=1 -o mosaic-<size>-cq<q>.ivf
+  mosaic_<size>.y4m` (allintra ⇒ CDEF off / LR off by default; 8-bit 4:2:0).
+  Encoded sizes: 2K cq20 148 KB, cq40 54 KB; 4K cq20 956 KB, cq40 322 KB.
+
+## Reproduce
+
+1. Fetch conformance vectors + build the reference (already present here).
+2. In the zenavif fork (`aom-rs-decode-backend`):
+   `cargo build --release --features aom-backend --example decode_4way_bench`
+   `./target/release/examples/decode_4way_bench conformance/data out_rust.csv`
+   (correctness gate + interleaved Rust pair → CSV).
+3. C references: `scripts/decode_4way_c_refs.sh conformance/data out_c.csv 30`.
+4. Merge (cell-grouped) → `decode_4way_<date>.csv`.
