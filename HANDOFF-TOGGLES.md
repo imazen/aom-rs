@@ -1,124 +1,106 @@
-# HANDOFF — TOGGLE SWEEP (C8/C9/C10/C11), 2026-07-17
+# HANDOFF — TOGGLE SWEEP (C8/C9/C10/C11) — remaining items
 
-Agent shut down mid-sweep by directive. State below is exact. Branch:
-`worktree-agent-adb54d0b877f65828`, 5 commits on top of 90e69e8 (KB-10):
+**LANDED 2026-07-17.** The C8-C11 toggle sweep is on `origin/main`: 23 knob arms
+BYTE-IDENTICAL vs real aomenc (hard `bit_identical` pins in
+`crates/aom-bench/tests/toggles_rd_close.rs`, 25 tests) + 1 pinned-open
+(`--use-intra-dct-only`). All landed toggles are rows in PARITY.md §A; the
+mechanism notes live in STATUS.md's TOGGLE-SWEEP sections. This file now tracks
+ONLY the genuinely-remaining items.
 
-```
-6e32167 wip: batch-E toggle roughs — trellis arms wired; cost-upd design   (NOT test-run)
-bffd4d9 feat: TOGGLE SWEEP — 21 toggle byte-gates (20 EXACT + 1 pinned-open) (validated)
-a6f5b04 feat: generic ctrl-pair encode oracle (shim_encode_av1_kf_ctrls)     (validated)
-2c39484 feat: CLI toggle threading — IntraToolCfg / tx policy / CDF gate     (validated)
-31ff88a feat: writer-side allow_update_cdf on OdEcEnc                        (validated)
-```
+The two `--disable-trellis-quant=1/2` arms landed EXACT this pickup; `=2`
+(FINAL_PASS) needed a real encoder fix (5a644c6): `encode_b_intra_dry` had
+hardcoded `dry_run_output_enabled: false`, so the OUTPUT_ENABLED pack pass did
+not apply FINAL_PASS trellis. Byte-inert for every other trellis mode (the flag
+is dead outside FINAL_PASS).
 
-**NOT PUSHED to main** (shutdown before the landing gate). **Validation state,
-honestly:** every toggle test in `toggles_rd_close.rs` up through bffd4d9 ran
-green (23 tests; log `/root/.claude/jobs/3651b35b/tmp/`); the FULL workspace
-suite over the final tree was interrupted ~15/19 crates in, **0 failures at
-kill** (`toggles_fullsuite_final2.log`); an earlier full suite over batch-A
-passed 519/0. 6e32167's two trellis tests are compile-checked only.
-**Next agent: run `cargo test --workspace` once; if green, rebase + push all
-five to main** (`git push origin HEAD:main` after rebase; verify
-`git merge-base --is-ancestor HEAD origin/main`).
+## Genuinely-remaining toggle work
 
-## Per-toggle state (the full C8-C11 list)
+| Toggle (ctrl) | State | What's needed |
+|---|---|---|
+| `--use-intra-dct-only=1` (119) | **PINNED-OPEN** (1 cell: 64²cq32) | Deep near-tie; see the sibling-C localization below. Cell stays pinned (fails on movement either way). |
+| `--sb-size=128` encode | **UNSTARTED (M)** | decoder+entropy are SB-generic (798ec25); encoder walk/harness are SB-64-only. Own chunk: aom-bench SB_MI/SB consts + partition_pick sb_size plumbing + shim `ref_encode_av1_kf_sb128` (exists). |
+| `--coeff/mode-cost-upd-freq` (126/127) | **C-SIDE ONLY** (6e32167) | C ctrls emitted from the knobs; the port-side gate is UNWIRED. Design (in the ToggleKnobs doc comment): split pack.rs's per-SB `derive_real_costs` rebuild per table set — SB=every SB (current), SBROW=only at `c==0`, TILE/OFF=never (single-tile ⇒ identical). Add a `cost_upd: CostUpdCfg` (Default) field in one sweep across PackCfg literal sites. |
+| `--quant-b-adapt` | **INERT standalone; needs kernel for the combo** | VERIFIED against C: at the default speed-0 allintra envelope trellis is ON, so the encode uses `AV1_XFORM_QUANT_FP` (encodemb.c:406-412, `USE_B_QUANT_NO_TRELLIS ? QUANT_B : QUANT_FP` gated on `!use_trellis`) — `quant_b_adapt` only feeds `AV1_XFORM_QUANT_B`, so it is INERT on the primary config (a standalone cell is vacuous — the witness refuses it). It is LIVE only combined with `--disable-trellis-quant=1/2` (QUANT_B path), and porting it then needs the `aom_quantize_b_adaptive` kernel family in aom-quant (av1_quantize.c:311 `use_quant_b_adapt` arm) + policy plumb. |
 
-| Toggle (ctrl) | State | Port threading | Validation |
-|---|---|---|---|
-| `--enable-rect-partitions=0` (73) | **DONE** | PickFrameCfg (pre-existing) | EXACT 3/3, pinned |
-| `--enable-ab-partitions=0` (74) | **DONE** | PickFrameCfg | EXACT 3/3, pinned |
-| `--enable-1to4-partitions=0` (75) | **DONE** | PickFrameCfg | EXACT 3/3, pinned |
-| `--min-partition-size` (76) | **DONE** | px→BLOCK via C set_max_min_partition_size (harness) | EXACT 3/3 (16px), pinned |
-| `--max-partition-size` (77) | **DONE** | same (min(sf_default,dim,sb)) | EXACT 3/3 (32px), pinned |
-| square-only 8..32 interaction | **DONE** | all of the above | EXACT 3/3, pinned |
-| `--sb-size=128` encode | **UNSTARTED (M)** | decoder+entropy are SB-generic (798ec25); encoder walk/harness SB-64-only. Own chunk; touch aom-bench SB_MI/SB consts + partition_pick sb_size plumbing + shim `ref_encode_av1_kf_sb128` (exists) | — |
-| `--enable-tx64=0` (80) | **DONE** | PickFrameCfg (pre-existing) | EXACT 3/3, pinned |
-| `--enable-rect-tx=0` (82) | **DONE** | PickFrameCfg | EXACT 3/3, pinned |
-| `--enable-flip-idtx=0` (81) | **DONE** | TxTypeSearchPolicy→TxMaskParams (2c39484) | EXACT 3/3, pinned |
-| `--use-intra-dct-only=1` (119) | **PINNED-OPEN** | threaded (same path as flip-idtx) | 64²cq32 OUT of band (+2.23%/−3.588), cq63 EXACT, 128² CLOSE — see below |
-| `--use-intra-default-tx-only=1` (121) | **DONE** | pol.use_default_intra_tx_type OR-arm (MODE_EVAL, rdopt_utils.h:579) | EXACT 3/3, pinned |
-| `--reduced-tx-type-set=1` (118) | **DONE** | bootstrap frame-header bit, asserted == knob | EXACT 3/3, pinned |
-| `--enable-tx-size-search=0` (146) | **DONE** | pol.enable_tx_size_search → LARGESTALL single-pass + sf level 3 + tx_mode_is_select AND (2c39484). Assert is ONE-directional (C demotes SELECT→LARGEST post-hoc on zero-split frames) | EXACT 3/3, pinned |
-| `--disable-trellis-quant=1/2` (62) | **DONE (EXACT 3/3 each)** | knob→trellis_opt_of_knob→pol.skip_trellis + env.enable_optimize_b; `=2` needed the FINAL_PASS pack-trellis fix (5a644c6) | EXACT, pinned (toggles_c9_trellis_quant_off/_final_pass_only) |
-| `--disable-trellis-quant=0` | inert-vs-default on intra | — | not celled (witness would refuse: estimate_yrd_for_sb is inter-only) |
-| `--quant-b-adapt` | **UNSTARTED (S–M)** | needs the `quantize_b_adaptive` kernel family in aom-quant + policy plumb | — |
-| `--enable-smooth-intra=0` (99) | **DONE** | IntraToolCfg→IntraSbyGates + UvLoopPolicy | EXACT 3/3, pinned |
-| `--enable-paeth-intra=0` (100) | **DONE** | same | EXACT 3/3, pinned |
-| `--enable-cfl-intra=0` (101) | **DONE** | UvLoopPolicy.enable_cfl_intra | EXACT 3/3, pinned |
-| `--enable-directional-intra=0` (145) | **DONE** | IntraToolCfg + UvLoopPolicy | EXACT 3/3, pinned |
-| `--enable-diagonal-intra=0` (141) | **DONE** | same | EXACT 3/3, pinned |
-| `--enable-angle-delta=0` (106) | **DONE** | same | EXACT 3/3, pinned |
-| `--enable-filter-intra=0` (98) | **DONE** | seq bit knob-driven, bootstrap ASSERTED equal; costs+gates+pack pre-threaded | EXACT 3/3, pinned |
-| `--enable-intra-edge-filter=0` (78) | **DONE** | env.disable_edge_filter knob-driven, seq bit asserted | EXACT 3/3, pinned |
-| `--cdf-update-mode=0` (44) | **DONE + REAL BUG FIX** | OdEcEnc.allow_update_cdf gate in write_symbol (31ff88a) + pack_tile sets it (2c39484) | EXACT 3/3, pinned. Pre-fix: zensim −264 (pack adapted partition/mode CDFs unconditionally) |
-| `--coeff/mode-cost-upd-freq` (126/127) | **C-SIDE ONLY** (6e32167) | port gate UNWIRED — full design in ToggleKnobs doc (`HANDOFF:`): split pack.rs sb_real rebuild per table set; SB=every SB (current), SBROW=only at `c==0`, TILE/OFF=never (single-tile equal). PackCfg literal sites all break on new fields — add `cost_upd: CostUpdCfg` (Default) in one sweep | — |
-| `--dv-cost-upd-freq` (142) | inert on envelope (intrabc off) | ctrl id present for completeness | not cellable (witness) |
-| `--min-q/--max-q/--min-cr` | **DEFERRED** | qindex flows from bootstrap (Gate-3 caveat) — a cell would be vacuous port-side; needs the #8-family self-derived qindex first | — |
-| `--full-still-picture-hdr` / annexb | **DEFERRED** | OBU framing only; port emits frame OBU payload, seq spliced from C | — |
-| cost-upd default arm (SB) | proven | modeled by pack.rs per-SB derive_real_costs | pre-existing multi-SB byte gates |
+## Verified-INERT on this envelope (documented, NOT remaining work)
 
-## The dct-only pinned-open investigation (exact state)
+| Toggle | Why inert / vacuous (verified vs C / harness) |
+|---|---|
+| `--disable-trellis-quant=0` (FULL) | vs the default (3, NO_ESTIMATE_YRD) differs only in `estimate_yrd_for_sb`, which is inter-only → the C stream never changes → the anti-vacuity witness (correctly) refuses the cell. |
+| `--min-q/--max-q/--min-cr` | The toggle harness BOOTSTRAPS qindex from the C parse (`aom-bench/src/lib.rs` `qindex = p.quant.base_qindex`), so a clamp changes C's qindex AND the port follows it — the cell would byte-match but exercises NO port-specific min/max-q logic (the port doesn't self-derive qindex). Vacuous port-side until the #8 self-derived-qindex path drives the harness. |
+| `--full-still-picture-hdr` / annexb | OBU-framing only. The port emits the frame-OBU PAYLOAD (the byte-compared unit); annexb changes container framing / temporal delimiters / size fields, not the frame-OBU payload — nothing for the port to reproduce here (seq spliced from C). |
+| `--dv-cost-upd-freq` (142) | DV costs are intrabc-only → INERT on the KEY allintra envelope (intrabc off) → not cellable (witness refuses). The ctrl id is present for completeness. |
 
-Everything below is measured, in `toggles_c9_intra_dct_only_pinned_open`'s doc
-+ PARITY.md section B:
-- Y recon IDENTICAL port-vs-C on the divergent cell; chroma diverges from
-  mi(0,0): real uv=D45/aduv2 (eob 1) vs port uv=V/aduv0 (eob 78); real
-  winners frame-wide are derived-type==DCT modes = DCT-forced-search shape.
-- Port's UV force IS live e2e (5093 gated mask calls counted); port's V rd
-  1872917 beats DC 2157931; D45+CFL come out gated/never-evaluated in the
-  port loop (visits dump).
-- The REAL `get_tx_mask` facade confirms C forces DCT on the UV mask
-  (uv V: 0x0002→0x0001) with the PAETH reduced-set empty-mask RESET
-  (uv PAETH keeps derived ADST_ADST even under dct_only) — port matches.
-- Five layer differentials now SWEEP the knob (oracle chains thread it into
-  the REAL facades): txb search, luma yrd depth loop, luma mode loop, full
-  leaf, UV txb walk, UV mode loop — ALL GREEN. ⇒ the divergence is a
-  port+oracle SHARED mis-model of the REAL UV loop under dct_only.
-- **Next step (unstarted): sibling-C instrumented dump** (KB-2/KB-7 method)
-  of the mi(0,0) UV candidate list (uv_mode, this_rate, this_dist, this_rd)
-  for `av1-1-b8-01-size-64x64` cq32 allintra speed-0 with
-  AV1E_SET_INTRA_DCT_ONLY=1, then diff against the port's visits (dump via
-  a temporary eprintln in rd_pick_intra_sbuv_mode — pattern used and
-  removed this session). Suspects, in order: the CfL alpha-search gating
-  under the knob (port CfL visits = None where real picks CFL at mi 14,0);
-  the mode_rate early-RDCOST prune interacting with different best_rd
-  trajectories; an angle-sweep gate difference.
+## The `--use-intra-dct-only` pinned-open — sibling-C dump DONE (2026-07-17)
 
-## Validation recipe (per toggle — how everything above was proven)
+Cell: `av1-1-b8-01-size-64x64`, full 64×64, cq32 (qindex 128), allintra speed-0,
+`AV1E_SET_INTRA_DCT_ONLY=1`. 64²cq63 EXACT, 128²cq12 CLOSE; only 64²cq32 diverges
+(+2.23% size, +3.588 zensim OUT of band). Y recon IDENTICAL; the divergence is
+the mi(0,0) 32×32 chroma UV mode.
 
-1. Cell = `run_toggle_cell` in `crates/aom-bench/tests/toggles_rd_close.rs`:
-   C encode via `EncodeCell::c_encode_ctrls(knobs.c_ctrls())` (real
-   aom_codec_av1_cx + ctrl pairs), port via `port_encode_with(&c_tu, &knobs)`,
-   compare via `rd_close::compare_cell`. Grid = 64²cq32 + 64²cq63 + 128²cq12
-   real content (`GRID`).
-2. **Anti-vacuity witness is mandatory**: `run_grid_and_gate` panics unless
-   the knob CHANGED the C stream on ≥1 cell. Never trust an EXACT verdict
-   without it.
+Sibling-C dump method (used + REVERTED this session — do not re-derive from
+scratch): ar-swap a throwaway `libaom.a` (compile ONE instrumented TU with the
+cmake flags from `build/CMakeFiles/aom_av1_encoder.dir/flags.make`, `ar r` it
+into a copy of `reference/libaom/build/libaom.a`) and temporarily repoint
+`aom-sys-ref/build.rs`'s `build_dir` at it, then run the pinned test so
+`c_encode_ctrls` drives the instrumented C. Byte-inert `fprintf`s in
+`intra_mode_search.c` (`av1_rd_pick_intra_sbuv_mode` loop) + `tx_search.c`
+(`av1_txfm_uvrd` / the txb `block_sse`).
+
+**Measured (cq32 mi(0,0) 32×32):**
+- C evaluates ONLY DC (this_rd 2157931) and **D45/aduv2 (this_rd 1985157 — WINS)**.
+  Every other UV mode is rejected: V/H/directionals at `rd_pick_intra_angle_sbuv`
+  anglefail (its inner `av1_txfm_rd_in_plane` returns INT_MAX for plane U);
+  SMOOTH/PAETH at txfmfail. (CFL: no eval, cfl branch drop.)
+- The PORT instead ACCEPTS V (uv_mode=1, aduv0, DCT-forced tx_type=0, eob=1,
+  **dist=0**, rate 20508 → this_rd 1872917) and V WINS.
+- **Decisive:** C's V prediction `block_sse`=1048576 == the port's V sse=1048576
+  ⇒ the PREDICTION MATCHES. This is NOT a prediction bug (the earlier "port CfL /
+  angle-gate" suspects are ruled out).
+- **Root:** the port's `txfm_rd_in_plane_uv_p` computes V's DCT dist=0 and ACCEPTS
+  V, where C's `av1_txfm_rd_in_plane` REJECTS the identical V (same prediction,
+  same DCT tx). This is a tx-search RD-eval / early-out mis-model shared by the
+  port AND the `txfm_uvrd_diff` oracle — which is exactly why the five layer
+  differentials are all green yet disagree with the full encoder.
+
+**Next step:** dump C's per-txb V DCT dist + quantized coeffs inside
+`av1_txfm_rd_in_plane` / `search_txk_type` (the INT_MAX path fires BEFORE
+`av1_txfm_uvrd`'s merge, so a dump at the merge misses it — instrument the txb
+level), and the port's `search_tx_type_intra` V winner, to find why the SAME DCT
+residual (same prediction) yields dist=0 + accept in the port but INT_MAX-rd +
+reject in C. The fix must be applied to BOTH the port and the differential oracle
+(shared mis-model), then the pinned test graduates to a `bit_identical` assert.
+
+## Validation recipe (how everything was proven)
+
+1. Cell = `run_toggle_cell` (`toggles_rd_close.rs`): C encode via
+   `EncodeCell::c_encode_ctrls(knobs.c_ctrls())` (real `aom_codec_av1_cx` + ctrl
+   pairs), port via `port_encode_with(&c_tu, &knobs)`, compare via
+   `rd_close::compare_cell`. Grid = 64²cq32 + 64²cq63 + 128²cq12 real content.
+2. **Anti-vacuity witness is mandatory**: `run_grid_and_gate` panics unless the
+   knob CHANGED the C stream on ≥1 cell. Never trust an EXACT verdict without it.
 3. EXACT cells get `expect_exact=true` (hard `bit_identical` pin). Divergent
-   knobs get a pinned-open test (fails on movement EITHER way) + a PARITY
-   section-B row with numbers + localization.
-4. Ctrl ids: `aom_sys_ref::cx_ctrl` — ANY new id must get a
-   `shim_cx_ctrl_id_by_probe` arm + PROBE_TABLE entry
-   (`cx_ctrl_ids_match_reference_headers` cross-checks vs pinned headers).
-5. C defaults all verified in `av1_cx_iface.c` `default_extra_cfg`
-   (:280-400): every enable_* = 1, min/max part 4/128, dct/default-tx/reduced
-   = 0, tx-size-search = 1, cdf-update = 1, trellis-quant = 3, cost-upd = SB.
-   Allintra override block touches NONE of them (PARITY.md header note).
-6. Seq/frame-header knobs (filter-intra, edge-filter, reduced-tx-set,
-   tx_mode, disable_cdf_update): port side is KNOB-driven with the bootstrap
-   header bit ASSERTED equal — never silently bootstrap-flowed (PARITY rule
-   4). The tx_mode assert must stay ONE-directional (C's post-hoc
+   knobs get a pinned-open test (fails on movement either way) + a PARITY §B row.
+4. Ctrl ids: `aom_sys_ref::cx_ctrl` — a new id needs a `shim_cx_ctrl_id_by_probe`
+   arm + PROBE_TABLE entry (`cx_ctrl_ids_match_reference_headers` cross-checks).
+5. C defaults verified in `av1_cx_iface.c` `default_extra_cfg`: enable_* = 1,
+   min/max part 4/128, dct/default-tx/reduced = 0, tx-size-search = 1,
+   cdf-update = 1, trellis-quant = 3, cost-upd = SB. The allintra override block
+   touches NONE of them.
+6. Seq/frame-header knobs (filter-intra, edge-filter, reduced-tx-set, tx_mode,
+   disable_cdf_update): port side is KNOB-driven with the bootstrap header bit
+   ASSERTED equal. The tx_mode assert stays ONE-directional (C's post-hoc
    SELECT→LARGEST demotion on zero-split frames).
 
-## Gotchas discovered (do not re-lose)
+## Gotchas (do not re-lose)
 
-- `write_coeffs_txb_full` keeps its explicit `allow_update_cdf` param —
-  redundant with the new `OdEcEnc` flag but consistent (both from the same
-  header bit). Unifying is optional cleanup.
+- `write_coeffs_txb_full` keeps its explicit `allow_update_cdf` param — redundant
+  with the `OdEcEnc` flag but consistent (both from the same header bit).
 - C FORBIDS `--enable-tx64=0` + `--enable-tx-size-search=0` together
   (encodeframe.c:2461 assert) — never grid that combo.
-- `pkill -f "cargo test"` in a multi-agent repo can kill sibling agents'
-  suites — scope kill patterns to this worktree's target path.
-- aom-bench's stock `max_partition_size` was an unfaithful flat 15; it is
-  now C-derived min(sf_default, dim, sb)=12 at SB64 — outcome-identical
-  (consumers OR with `bsize == sb_size`), proven by the gates.
+- aom-bench's `max_partition_size` is C-derived `min(sf_default, dim, sb)`=12 at
+  SB64 — outcome-identical (consumers OR with `bsize == sb_size`).
+- Sibling-C encoder instrumentation must NOT touch `reference/libaom` in place
+  (worktree isolation blocks it, and it is the shared differential oracle). Use
+  the ar-swap-into-a-throwaway + build.rs-repoint pattern above; revert both
+  (build.rs edit + `cargo clean -p aom-sys-ref`) before landing.

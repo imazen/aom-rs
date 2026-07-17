@@ -3346,8 +3346,22 @@ verdict on a cell the knob never reaches proves nothing).
   now SWEEP `use_intra_dct_only` with the oracle chain threading it into the
   REAL `get_tx_mask` facades (all green; the mask itself verified vs the REAL
   facade incl. the PAETH reduced-set empty-mask reset) ⇒ a shared port+oracle
-  mis-model of the REAL UV loop under the knob. Next step: sibling-C
-  instrumented dump of the mi(0,0) UV candidate rds (KB-2/KB-7 method).
+  mis-model of the REAL UV loop under the knob. **Sibling-C dump DONE
+  2026-07-17** (throwaway ar-swapped libaom, intra_mode_search.c + tx_search.c
+  fprintf-instrumented, cq32 mi(0,0) 32×32; reverted after): C evaluates ONLY
+  DC (this_rd 2157931) + D45/aduv2 (this_rd 1985157, WINS); C rejects V and the
+  other directionals at `rd_pick_intra_angle_sbuv` anglefail (its
+  `av1_txfm_rd_in_plane` returns INT_MAX). The port ACCEPTS V (uv_mode=1, aduv0,
+  DCT tx_type=0, eob=1, **dist=0**, this_rd 1872917) so V WINS. Decisive: C's V
+  prediction `block_sse`=1048576 == the port's V sse ⇒ the **prediction MATCHES
+  — NOT a pred bug**. Root: the port's `txfm_rd_in_plane_uv_p` accepts V with
+  DCT-dist 0 where C's `av1_txfm_rd_in_plane` rejects the identical V (same
+  pred, same DCT) — a tx-search RD-eval/early-out mis-model shared by the port
+  AND the `txfm_uvrd_diff` oracle (hence the green differential). Next: dump C's
+  per-txb V DCT dist/coeffs inside `av1_txfm_rd_in_plane`/`search_txk_type` (the
+  INT_MAX path fires before av1_txfm_uvrd's merge) vs the port's
+  `search_tx_type_intra` V winner — find why the same DCT residual yields dist=0
+  in the port and INT_MAX-rd in C. Cell stays pinned-open.
 - **Remaining in the toggle families:** `--quant-b-adapt` (S–M),
   cost-upd-freq non-default arms (S–M), min/max-q clamps (S), SB128 encode
   (M, own chunk) — PARITY.md C8/C9/C11. (`--enable-tx-size-search=0`,
