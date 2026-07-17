@@ -17,6 +17,11 @@ aom-quant = { path = "../aom-quant" }
 # dev-dependency isolation the shipping crates use: all unsafe stays inside
 # aom-sys-ref, and nothing here ships.
 aom-sys-ref = { path = "../aom-sys-ref" }
+# The CDEF RD-close gate's LF apply step (loop_filter_frame on the port's own
+# recon, between the encode pass and the CDEF search) — dev-only would suffice
+# today, but the harness itself will grow a stock post-filter path, so a
+# regular dep matches aom-encode's own use of the crate.
+aom-loopfilter = { path = "../aom-loopfilter" }
 # RD-closeness scoring for the stills-parity bulk-port harness (rd_close):
 # perceptual quality of port-vs-C reconstructions against the source.
 # Latest on lib.rs verified 2026-07-16.

@@ -59,6 +59,7 @@ dependencies = [
  "aom-decode",
  "aom-encode",
  "aom-entropy",
+ "aom-loopfilter",
  "aom-quant",
  "aom-sys-ref",
  "zenbench",
