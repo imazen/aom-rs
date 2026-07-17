@@ -12330,3 +12330,54 @@ extern "C" {
 pub fn ref_av1_get_deltaq_offset(bit_depth: u8, qindex: i32, beta: f64) -> i32 {
     unsafe { av1_get_deltaq_offset(i32::from(bit_depth), qindex, beta) }
 }
+
+// ---- av1/common/resize.c: encoder-side source downscale (exported C) ----
+extern "C" {
+    fn av1_resize_plane(
+        input: *const u8,
+        height: i32,
+        width: i32,
+        in_stride: i32,
+        output: *mut u8,
+        height2: i32,
+        width2: i32,
+        out_stride: i32,
+    ) -> bool;
+    fn av1_calculate_scaled_superres_size(width: *mut i32, height: *mut i32, superres_denom: i32);
+}
+
+/// Oracle: exported libaom `av1_resize_plane` (non-normative encoder resize).
+/// Returns the downscaled plane (`width2 * height2` bytes, tightly packed).
+pub fn ref_resize_plane(
+    input: &[u8],
+    height: i32,
+    width: i32,
+    in_stride: i32,
+    height2: i32,
+    width2: i32,
+) -> Vec<u8> {
+    let mut out = vec![0u8; (width2 * height2) as usize];
+    let ok = unsafe {
+        av1_resize_plane(
+            input.as_ptr(),
+            height,
+            width,
+            in_stride,
+            out.as_mut_ptr(),
+            height2,
+            width2,
+            width2,
+        )
+    };
+    assert!(ok, "av1_resize_plane failed");
+    out
+}
+
+/// Oracle: exported libaom `av1_calculate_scaled_superres_size` — the coded
+/// (downscaled) width for a given superres denominator (horizontal only).
+pub fn ref_calculate_scaled_superres_width(width: i32, superres_denom: i32) -> i32 {
+    let mut w = width;
+    let mut h = width; // height is ignored by the C fn (void)
+    unsafe { av1_calculate_scaled_superres_size(&mut w, &mut h, superres_denom) };
+    w
+}
