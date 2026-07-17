@@ -3623,6 +3623,8 @@ pub fn rd_use_partition_real(
                     subsize,
                     w0.mode as u8,
                     w0.uv_mode as u8,
+                    w0.palette_y.as_ref(),
+                    w0.palette_uv.as_ref(),
                     env.mi_rows,
                     env.mi_cols,
                 );
