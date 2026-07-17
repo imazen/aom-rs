@@ -3288,9 +3288,7 @@ BETTER), `text_420_128_cq20` same size, +0.19 zensim. Anti-vacuous witnesses: sc
 detection asserted fired per cell; C(palette-on) != C(palette-off); PORT(palette-on)
 != PORT(palette-off) — the port's search provably picks palette.
 
-**Honest gaps:** the two 128² CLOSE cells are within band but not byte-exact
-(multi-SB neighbour-cache near-ties — first localization candidates if byte-exactness
-is scheduled); speeds 1-5 palette sf levels are wired but only speed 0 is gate-covered;
+**Honest gaps:** speeds 1-5 palette sf levels are wired but only speed 0 is gate-covered;
 `av1_search_palette_mode[_luma]` (inter-frame callers) out of stills scope; UV palette
 + 4:2:2 not gate-covered (machinery is subsampling-generic); palette winner-mode
 interaction at speed>=4 wired per C but not gate-covered.
@@ -3477,3 +3475,32 @@ arms ported (`lr_search_sf_allintra`) but NOT e2e-gated yet; GOOD-mode setters n
 LR-off in C (sf disable + seq-bit clear). Follow-ups: speed-arm cells, format cells,
 `pack_tile_from_trees` repack unification (drop the second search), SIMD for
 `compute_stats` (the search hot spot) on the Gate-3 track.
+## #29 pickup — palette exactness pin + intrabc 3b VERIFY-hazards resolved (2026-07-17)
+
+**Palette (localized + graduated + pinned):** the 2 former "128² CLOSE" cells were
+decode-both localized (`rd_close_palette::decode_diff_palette_close_cells`) to genuine
+palette-induced AB/4-way partition RD near-ties — NOT multi-SB neighbour-cache bugs as the
+prior gap note guessed:
+- `ui_420_128_cq32`   — first divergence (mi 0,0) BLOCK_32X32 real HORZ_B vs port HORZ_4.
+- `text_420_128_cq20` — first divergence (mi 8,20) BLOCK_16X16 real VERT vs port VERT_A.
+Both are BYTE-EXACT with palette OFF (localizer's palette-OFF control), and the palette
+machinery is verified C-faithful (`av1_allow_palette`; `av1_get_palette_bsize_ctx` =
+`num_pels_log2[bsize]−num_pels_log2[8X8]`; `av1_get_palette_mode_ctx` above+left count;
+k-means rtcd-validated; mid-search neighbour palette threaded at every `grid.stamp`). Same
+class as the KB-10/KB-11 pinned near-ties → PINNED, closing needs a sibling-C per-candidate
+partition-RD dump. The 5 EXACT cells + control are now HARD byte-identity asserts in the gate;
+the localizer asserts the divergence PRESENT (self-promotes on any fix). See KB-P29.
+
+**IntraBC chunk 3b skeleton — VERIFY hazards resolved (still UNWIRED, envelope-inert):**
+- `set_mv_search_range`: MAX_FULL_PEL_VAL = **1023** verified vs mcomp_structs.h
+  (MAX_MVSEARCH_STEPS=11); dropped the predecessor's misleading dead 2047 const.
+- `intrabc_predict_chroma`: differential-tested byte-identical to the conformance-bit-exact
+  decoder `intrabc_chroma_predict` over full-pel DVs × {420,422,444} × bd{8,10,12}
+  (`intrabc_search::tests::intrabc_chroma_predict_matches_decoder`). Derivation proven equal.
+- dv_ref 4-tuple order (nearest,near): already C-validated by `aom-entropy/tests/dv_ref_diff.rs`.
+- `DEFAULT_TXFM_PARTITION_CDF`: byte-identical to the decoder's `default_txfm_partition_cdf`.
+Still PINNED (the L piece, `// HANDOFF:` in-file + HANDOFF-SCREEN.md): the coeff arm
+(skip-arm-only today, biased), hbd sse scaling, NSTEP diamond/mesh full-pel search, and the
+whole 8-step integration map (ModeGrid dvs/skips → LeafWinner → rd_pick hook →
+`encode_b_intra_dry` intrabc arm → pack → frame hash-table plumbing → harness knob → gate).
+Do NOT run an intrabc RD-closeness gate until the coeff arm lands.

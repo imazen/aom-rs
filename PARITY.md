@@ -85,7 +85,7 @@ Bulk agents append rows here as features land (rule 2). Empty at pivot start.
 
 | Component | Knobs | Cells | size_delta | zensim_drop | Harness ref (test) | Date | Notes |
 |---|---|---|---|---|---|---|---|
-| Palette RD search (Y `av1_rd_pick_palette_intra_sby` + UV `_sbuv`: dim-1/2 k-means, top-colours, colour/map costs, header-rd gating + chroma early-term, palette recon + pack syntax/map tokens, neighbour cache/ctx grids) | `PickFrameCfg::palette_costs = Some` (= `--enable-palette=1`; OFF everywhere else) | 6 screen (text/UI, mono+420, 64²/128², cq12..63) + 1 real-content control | **5/7 EXACT (byte-identical)**; worst +2.55% | worst +0.190 (one cell −1.041 = port better) | `rd_close_palette::palette_y_rd_close_gate` (aom-bench) | 2026-07-17 | speed-0 sf levels (search 0 / size-search 1 / chroma early-term 1); speeds 1–5 levels wired untested-by-gate. Fixed latent UV no-palette-flag under-cost on screen frames (per-leaf `try_palette`). (CDEF search + loop-restoration search, the first two bulk families, went straight to section A — 14/14 and 8/8 EXACT.) |
+| Palette RD search (Y `av1_rd_pick_palette_intra_sby` + UV `_sbuv`: dim-1/2 k-means, top-colours, colour/map costs, header-rd gating + chroma early-term, palette recon + pack syntax/map tokens, neighbour cache/ctx grids) | `PickFrameCfg::palette_costs = Some` (= `--enable-palette=1`; OFF everywhere else) | 6 screen (text/UI, mono+420, 64²/128², cq12..63) + 1 real-content control | **5/7 EXACT (byte-identical)**; worst +2.55% | worst +0.190 (one cell −1.041 = port better) | `rd_close_palette::palette_y_rd_close_gate` (aom-bench) | 2026-07-17 | speed-0 sf levels (search 0 / size-search 1 / chroma early-term 1); speeds 1–5 levels wired untested-by-gate. Fixed latent UV no-palette-flag under-cost on screen frames (per-leaf `try_palette`). **The 5 EXACT cells are now HARD byte-identity asserts (Section-A-grade regression guards) inside the gate** (2026-07-17 pickup). **The 2 CLOSE 128² cells (`ui_420_128_cq32`, `text_420_128_cq20`) are PINNED** — decode-both localized to genuine palette-induced AB/4-way partition near-ties (`ui`: (mi 0,0) BLOCK_32X32 real HORZ_B vs port HORZ_4; `text`: (mi 8,20) BLOCK_16X16 real VERT vs port VERT_A); both are byte-exact with palette OFF and the palette machinery (`av1_allow_palette` / `av1_get_palette_bsize_ctx`/`_mode_ctx` / k-means / neighbour cache+ctx stamping) is verified C-faithful — same class as the KB-10/KB-11 pinned near-ties (closing needs a sibling-C per-candidate partition-RD dump). Regression-guarded by `decode_diff_palette_close_cells` (asserts the divergence PRESENT → self-promotes on any fix). (CDEF search + loop-restoration search, the first two bulk families, went straight to section A — 14/14 and 8/8 EXACT.) |
 | C9 `--use-intra-dct-only=1` (PINNED-OPEN: luma byte-faithful, chroma UV-mode-loop divergence) | `AV1E_SET_INTRA_DCT_ONLY=1` | 64²cq32 / 64²cq63 / 128²cq12 (real content) | +2.23% / 0 (EXACT) / −1.40% | +3.588 (OUT of band) / 0 / +0.333 | `toggles_rd_close::toggles_c9_intra_dct_only_pinned_open` | 2026-07-17 | Y recon identical; first divergent leaf mi(0,0) 32×32: real uv=D45/aduv2 (eob 1) vs port uv=V (eob 78); real winners are derived-type==DCT modes (DCT-forced-search signature). Port UV txb eval + UV mode loop both match the C-pieces oracles under the knob (txfm_uvrd_diff / intra_sbuv_mode_loop_diff sweep green; mask verified vs the REAL facade incl. the PAETH reduced-set reset) ⇒ shared port+oracle mis-model of the REAL UV loop. **Sibling-C dump DONE 2026-07-17** (throwaway ar-swapped libaom, intra_mode_search.c + tx_search.c instrumented, cq32 mi(0,0) 32×32): C evaluates only DC (this_rd 2157931) and D45 (aduv2, this_rd 1985157 — wins); C REJECTS V/H/directionals via `rd_pick_intra_angle_sbuv` anglefail (its inner `av1_txfm_rd_in_plane` returns INT_MAX) and SMOOTH/PAETH via txfmfail. The port instead ACCEPTS V (uv_mode=1, aduv0, DCT-forced tx_type=0, eob=1, **dist=0**, rate 20508 → this_rd 1872917) and V wins. Decisive: C's V prediction `block_sse`=1048576 == the port's V sse=1048576 ⇒ **the prediction MATCHES; NOT a pred bug**. Root = the port's `txfm_rd_in_plane_uv_p` computes V's DCT dist=0 / accepts where C's `av1_txfm_rd_in_plane` rejects V (same pred, same DCT) — a tx-search RD-eval / early-out mis-model shared by the port AND the txfm_uvrd_diff oracle (which is why the differential is green). NEXT: dump C's per-txb V DCT dist/coeffs inside `av1_txfm_rd_in_plane`/`search_txk_type` (the INT_MAX path fires before av1_txfm_uvrd's merge) vs the port's `search_tx_type_intra` V winner, to find why the same DCT residual yields dist=0 in the port and INT_MAX-rd in C. |
 
 ## Section C — ABSENT (to port), by family
@@ -150,13 +150,22 @@ points are libaom v3.14.1 (`reference/libaom`). Defaults verified in
   intrabc decode + **chunk 3a landed 2026-07-17** (`aom-encode/src/intrabc_search.rs`:
   CRC-32C + the full source-frame hash-table build/query + `av1_fill_dv_costs`/
   `av1_build_nmv_cost_table` DV cost tables + the mv_cost/mv_err_cost/mvsad_err_cost
-  forms + variance/SAD metrics, unit-gated). Missing: 3b `rd_pick_intrabc_mode_sb`
-  (dv-ref via the ported `dv_ref.rs` `find_dv_ref_mvs`/`find_ref_dv` + per-direction
-  ABOVE/LEFT mv limits + the hash candidate loop with `get_mvpred_var_cost`), 3c the
-  intrabc RD/recon/pack (skip + no-skip arms, recon-copy prediction incl. the chroma
-  2-tap at odd 420 DVs — decoder-side `intrabc_chroma_predict` is the reference —
-  and is_inter var-tx/skip pack syntax), then the NSTEP diamond + intrabc mesh
-  full-pel search (hash-only covers exact repeats first). (L, decomposed)
+  forms + variance/SAD metrics, unit-gated). **Chunk 3b SKELETON landed + VERIFY-hazards
+  resolved 2026-07-17 (pickup)** — `rd_pick_intrabc_mode_sb` (dv-ref via the C-validated
+  `aom-entropy/src/dv_ref.rs` `find_dv_ref_mvs`/`find_ref_dv`, tuple order locked by
+  `dv_ref_diff.rs`; per-direction ABOVE/LEFT mv limits; `set_mv_search_range` with
+  MAX_FULL_PEL_VAL=**1023** verified vs mcomp_structs.h; the hash candidate loop with
+  variance + `mv_err_cost`; `is_dv_valid`) + `intrabc_predict_luma`/`intrabc_predict_chroma`
+  (the 2-tap chroma predictor is now differential-tested byte-identical to the
+  conformance-bit-exact decoder `intrabc_chroma_predict` over full-pel DVs × {420,422,444}
+  × bd{8,10,12}) + `DEFAULT_TXFM_PARTITION_CDF` (byte-identical to the decoder's default).
+  **The skeleton is UNWIRED (rd_pick.rs step 6 no-op) → envelope-inert, zero byte-visible
+  effect.** PINNED / still MISSING (the L piece): the coeff arm (currently SKIP-arm-only,
+  biased — `// HANDOFF:` in-file: per-txb `xform_quant_optimize` + txfm_partition/inter-tx
+  costs + `min(skip,coeff)`), the hbd sse scaling, the NSTEP diamond + mesh full-pel search,
+  and the whole 8-step integration map (ModeGrid dvs/skips, LeafWinner fields, rd_pick hook,
+  `encode_b_intra_dry` intrabc arm, pack, frame hash-table plumbing, harness knob, gate) —
+  see `HANDOFF-SCREEN.md`. Do NOT run an RD-closeness gate until the coeff arm lands. (L)
 - Screen detection: `--screen-detection-mode` (allintra default ANTIALIASING_AWARE=2).
   C: `av1/encoder/encoder.c` `av1_set_screen_content_options`. Port takes
   `allow_screen_content_tools` as an input — the detection itself is unported. (S–M)

@@ -804,6 +804,28 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
     updates inline as it walks — the pack IS the walk; the port's search/pack split
     needs rethinking for this path, or model it as search==pack in one pass).
 
+### KB-P29 — Encoder: palette 128² AB/4-way partition near-tie (2 cells) — PINNED (genuine; palette machinery C-faithful)
+- **Status (2026-07-17 pickup):** the palette-Y+UV RD search (#29, PARITY Section B) is 5/7
+  byte-exact — those 5 cells are now HARD byte-identity asserts in
+  `rd_close_palette::palette_y_rd_close_gate`. The 2 remaining CLOSE cells (`ui_420_128_cq32`,
+  `text_420_128_cq20`, both 128² 4:2:0) are PINNED as genuine palette-induced AB/4-way partition
+  RD near-ties, NOT a palette-cost bug.
+- **Decode-both localized** (`decode_diff_palette_close_cells`, the regression guard):
+  `ui` diverges at (mi 0,0) BLOCK_32X32 real PARTITION_HORZ_B vs port PARTITION_HORZ_4;
+  `text` at (mi 8,20) BLOCK_16X16 real PARTITION_VERT vs port PARTITION_VERT_A.
+- **Both cells are BYTE-EXACT with palette OFF** (the localizer's palette-OFF control proves it),
+  so partition/mode/tx are correct; the palette contribution alone tips the AB/4-way tie. The
+  palette machinery is verified C-faithful: `av1_allow_palette`, `av1_get_palette_bsize_ctx`
+  (`num_pels_log2[bsize] − num_pels_log2[8X8]`), `av1_get_palette_mode_ctx` (above+left palette
+  count), k-means (rtcd-validated), and mid-search neighbour palette cache/ctx stamping (the
+  winner's palette is threaded at every `grid.stamp`) all match C; the byte-exact 64² palette
+  cells exercise the same non-square block sizes. Same class as the KB-10/KB-11 pinned near-ties.
+- **Next step (deferred, the close move):** sibling-C per-candidate partition-RD dump at the two
+  divergent nodes (the KB-2/3/7 method) — compare C's HORZ_B-vs-HORZ_4 / VERT-vs-VERT_A RD with
+  palette ON to find whether a specific leaf's palette RD/flag (or a pruning gate) tips it. The
+  localizer asserts the divergence PRESENT, so any fix self-promotes the cell into
+  `BYTE_EXACT_CELLS`.
+
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
 Primary config = ALLINTRA (usage=2), speed-0 KEY frame. libaom's own allintra tuning
