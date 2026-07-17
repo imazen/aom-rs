@@ -284,9 +284,6 @@ impl WeberVarMap {
     /// `get_satd` (allintra_vis.c:93): mean `.satd` over the in-frame 8x8
     /// blocks of the `mi_wide`×`mi_high` window, `>= 1`. The `(int)` casts on
     /// the divide + return are replicated (the accumulation is i64).
-    // Consumed by the norm computation in `av1_set_mb_wiener_variance` (the
-    // preprocessing that BUILDS this map, landing in the next chunk).
-    #[allow(dead_code)]
     fn get_satd(&self, mi_wide: i32, mi_high: i32, mi_row: i32, mi_col: i32) -> i64 {
         let mut satd: i64 = 0;
         let mut mb_count: i32 = 0;
@@ -310,8 +307,6 @@ impl WeberVarMap {
 
     /// `get_sse` (allintra_vis.c:121): mean `.distortion` over the window,
     /// `>= 1` (same `(int)`-cast structure as [`Self::get_satd`]).
-    // Consumed by the norm computation in `av1_set_mb_wiener_variance` (next chunk).
-    #[allow(dead_code)]
     fn get_sse(&self, mi_wide: i32, mi_high: i32, mi_row: i32, mi_col: i32) -> i64 {
         let mut distortion: i64 = 0;
         let mut mb_count: i32 = 0;
@@ -440,4 +435,270 @@ impl WeberVarMap {
         }
         qindex
     }
+}
+
+impl WeberVarMap {
+    /// `estimate_wiener_var_norm` (allintra_vis.c:490): the first estimate of
+    /// `norm_wiener_variance` — a satd/sqrt(sse)-weighted geometric mean of the
+    /// per-SB wiener variance (`exp(sum(w*ln(var)) / sum(w))`), `>= 1`.
+    fn estimate_norm(&self, sb_mi: i32) -> i64 {
+        let mut sb_wiener_log = 0.0f64;
+        let mut sb_count = 0.0f64;
+        let mut row = 0i32;
+        while row < self.mi_rows {
+            let mut col = 0i32;
+            while col < self.mi_cols {
+                let var = self.get_var_perceptual_ai(sb_mi, sb_mi, row, col);
+                let satd = self.get_satd(sb_mi, sb_mi, row, col);
+                let sse = self.get_sse(sb_mi, sb_mi, row, col);
+                let scaled_satd = satd as f64 / (sse as f64).sqrt();
+                sb_wiener_log += scaled_satd * f64::from(var).ln();
+                sb_count += scaled_satd;
+                col += sb_mi;
+            }
+            row += sb_mi;
+        }
+        let mut norm = 1i64;
+        if sb_count > 0.0 {
+            norm = (sb_wiener_log / sb_count).exp() as i64;
+        }
+        norm.max(1)
+    }
+
+    /// One refinement iteration of `norm_wiener_variance` (allintra_vis.c:649-679,
+    /// run twice): re-weights each SB by `norm/beta` with `beta` clamped to
+    /// `[0.25, 4]` and SBs whose `beta < 1/min_max_scale` skipped, then re-takes
+    /// the weighted geometric mean.
+    fn refine_norm(&self, sb_mi: i32, norm: i64) -> i64 {
+        let mut sb_wiener_log = 0.0f64;
+        let mut sb_count = 0.0f64;
+        let mut row = 0i32;
+        while row < self.mi_rows {
+            let mut col = 0i32;
+            while col < self.mi_cols {
+                let var = self.get_var_perceptual_ai(sb_mi, sb_mi, row, col);
+                let mut beta = norm as f64 / f64::from(var);
+                let min_max_scale = self.get_max_scale(sb_mi, sb_mi, row, col).max(1.0);
+                beta = beta.min(4.0);
+                beta = beta.max(0.25);
+                if beta < 1.0 / min_max_scale {
+                    col += sb_mi;
+                    continue;
+                }
+                let var = (norm as f64 / beta) as i32;
+                let satd = self.get_satd(sb_mi, sb_mi, row, col);
+                let sse = self.get_sse(sb_mi, sb_mi, row, col);
+                let scaled_satd = satd as f64 / (sse as f64).sqrt();
+                sb_wiener_log += scaled_satd * f64::from(var).ln();
+                sb_count += scaled_satd;
+                col += sb_mi;
+            }
+            row += sb_mi;
+        }
+        let mut out = norm;
+        if sb_count > 0.0 {
+            out = (sb_wiener_log / sb_count).exp() as i64;
+        }
+        out.max(1)
+    }
+
+    /// `norm_wiener_variance` (allintra_vis.c:644-680): the initial estimate then
+    /// the two refinement iterations. `sb_mi` is `mi_size_wide[sb_size]`.
+    fn compute_norm_wiener_variance(&self, sb_mi: i32) -> i64 {
+        let mut norm = self.estimate_norm(sb_mi);
+        for _ in 0..2 {
+            norm = self.refine_norm(sb_mi, norm);
+        }
+        norm
+    }
+}
+
+/// `av1_set_mb_wiener_variance` (allintra_vis.c:592) — build the per-8x8
+/// [`WeberVarMap`] + `norm_wiener_variance` for `--deltaq-mode=3`. For each 8x8
+/// source block: the intra-mode SATD search over all 13 intra modes at
+/// `angle_delta = 0` (`av1_calc_mb_wiener_var_row`, :343-360) with the SOURCE
+/// pixels as the predictor neighbours (:345-347 uses src, not recon, so
+/// single/multi-thread match), then FP-quantize the DCT of the best mode's
+/// residual (`AV1_XFORM_QUANT_FP`), reconstruct, and record the Weber stats.
+/// Finally derive `norm_wiener_variance`.
+///
+/// **Scope (this landing): bd8, single tile, frame dims a multiple of 8px.**
+/// The highbd FP-quantize arm and the partial-edge source-border extension
+/// (the KB-6 partial-SB analogue) are follow-ups. `base_qindex` is the frame
+/// qindex (`rc_cfg.cq_level`, :612); `sb_size` is the seq SB BLOCK enum and
+/// `sb_mi` its mi extent (the norm grid step). `disable_edge_filter` is
+/// `!seq_params->enable_intra_edge_filter`; the per-block edge `filter_type`
+/// is `0` (the preprocessing nulls the above/left mbmi, :335-339).
+/// One 8x8 wiener block's predict→subtract→forward-DCT (the body shared by the
+/// mode-search loop and the best-mode requant in [`av1_set_mb_wiener_variance`]).
+/// Predicts `mode` at `angle_delta = 0` from the SOURCE neighbours into `pred`,
+/// writes `residual = src - pred`, and the DCT_DCT forward transform into
+/// `coeff` (`av1_quick_txfm(use_hadamard=0)`).
+#[allow(clippy::too_many_arguments)]
+fn wiener_block_residual_dct(
+    src_y: &[u16],
+    src_off: usize,
+    stride: usize,
+    sb_size: usize,
+    row: i32,
+    col: i32,
+    mi_rows: i32,
+    mi_cols: i32,
+    mode: usize,
+    disable_edge_filter: bool,
+    bd: u8,
+    pred: &mut [u16],
+    residual: &mut [i16],
+    coeff: &mut [i32],
+) {
+    const BLOCK_8X8: usize = 3;
+    const TX_8X8: usize = 1;
+    const DCT_DCT: usize = 0;
+    const PARTITION_NONE: usize = 0;
+    const BS: usize = 8;
+    let (n_top, n_topright, n_left, n_bottomleft) = aom_entropy::partition::intra_avail(
+        sb_size, BLOCK_8X8, row, col, row > 0, col > 0, mi_cols, mi_rows, PARTITION_NONE, TX_8X8, 0,
+        0, 0, 0, BS as i32, BS as i32, mi_cols, mi_rows, mode, 0, false,
+    );
+    aom_intra::predict_intra_high(
+        src_y,
+        src_off,
+        stride,
+        pred,
+        BS,
+        mode,
+        0,
+        false,
+        0,
+        disable_edge_filter,
+        0,
+        TX_8X8,
+        n_top as usize,
+        n_topright,
+        n_left as usize,
+        n_bottomleft,
+        i32::from(bd),
+    );
+    aom_dist::highbd_subtract_block(BS, BS, residual, BS, &src_y[src_off..], stride, pred, BS);
+    aom_transform::txfm2d::av1_fwd_txfm2d(residual, coeff, BS, DCT_DCT, TX_8X8);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn av1_set_mb_wiener_variance(
+    src_y: &[u16],
+    base_y: usize,
+    stride: usize,
+    mi_rows: i32,
+    mi_cols: i32,
+    base_qindex: i32,
+    bd: u8,
+    quants: &aom_quant::Quants,
+    deq: &aom_quant::Dequants,
+    sb_size: usize,
+    sb_mi: i32,
+    disable_edge_filter: bool,
+) -> WeberVarMap {
+    const TX_8X8: usize = 1;
+    const DCT_DCT: usize = 0;
+    const INTRA_MODE_END: usize = 13; // NEARESTMV (INTRA_MODE_START = DC_PRED = 0)
+    const BS: usize = 8; // tx_size_wide[TX_8X8]
+    const N: usize = BS * BS;
+
+    let qi = base_qindex as usize;
+    let round = [quants.y_round_fp[qi][0], quants.y_round_fp[qi][1]];
+    let quant = [quants.y_quant_fp[qi][0], quants.y_quant_fp[qi][1]];
+    let dequant = [deq.y_dequant_qtx[qi][0], deq.y_dequant_qtx[qi][1]];
+    let scan = aom_txb::scan(TX_8X8, DCT_DCT);
+
+    let mut stats = vec![WeberStats::default(); (mi_rows * mi_cols) as usize];
+
+    let mut pred = [0u16; N];
+    let mut residual = [0i16; N];
+    let mut coeff = [0i32; N];
+    let mut qcoeff = [0i32; N];
+    let mut dqcoeff = [0i32; N];
+
+    let mut row = 0i32;
+    while row < mi_rows {
+        let mut col = 0i32;
+        while col < mi_cols {
+            let src_off = base_y + (row as usize * 4) * stride + col as usize * 4;
+
+            // --- intra-mode SATD search (av1_calc_mb_wiener_var_row :343-360) ---
+            let mut best_mode = 0usize; // DC_PRED
+            let mut best_intra_cost = i32::MAX;
+            for mode in 0..INTRA_MODE_END {
+                wiener_block_residual_dct(
+                    src_y, src_off, stride, sb_size, row, col, mi_rows, mi_cols, mode,
+                    disable_edge_filter, bd, &mut pred, &mut residual, &mut coeff,
+                );
+                let intra_cost = aom_dist::hadamard::satd(&coeff);
+                if intra_cost < best_intra_cost {
+                    best_intra_cost = intra_cost;
+                    best_mode = mode;
+                }
+            }
+
+            // --- best mode: predict, DCT, FP-quantize, reconstruct (:362-396) ---
+            wiener_block_residual_dct(
+                src_y, src_off, stride, sb_size, row, col, mi_rows, mi_cols, best_mode,
+                disable_edge_filter, bd, &mut pred, &mut residual, &mut coeff,
+            );
+            qcoeff.fill(0);
+            dqcoeff.fill(0);
+            let eob = aom_quant::av1_quantize_fp(
+                &coeff, &round, &quant, &dequant, &mut qcoeff, &mut dqcoeff, scan,
+            );
+            // pred += inv(dqcoeff): pred now holds the reconstruction.
+            aom_transform::inv_txfm2d::av1_inverse_transform_add(
+                &dqcoeff, &mut pred, BS, DCT_DCT, TX_8X8, i32::from(bd), eob as usize, false,
+            );
+
+            // --- Weber statistics (:397-460) ---
+            let mut w = WeberStats {
+                src_pix_max: 1,
+                rec_pix_max: 1,
+                ..WeberStats::default()
+            };
+            let (mut src_mean, mut rec_mean, mut dist_mean) = (0i64, 0i64, 0i64);
+            for pr in 0..BS {
+                for pc in 0..BS {
+                    let src_pix = i32::from(src_y[src_off + pr * stride + pc]);
+                    let rec_pix = i32::from(pred[pr * BS + pc]);
+                    src_mean += i64::from(src_pix);
+                    rec_mean += i64::from(rec_pix);
+                    dist_mean += i64::from(src_pix - rec_pix);
+                    w.src_variance += i64::from(src_pix) * i64::from(src_pix);
+                    w.rec_variance += i64::from(rec_pix) * i64::from(rec_pix);
+                    w.src_pix_max = w.src_pix_max.max(src_pix as i16);
+                    w.rec_pix_max = w.rec_pix_max.max(rec_pix as i16);
+                    let d = src_pix - rec_pix;
+                    w.distortion += i64::from(d * d);
+                }
+            }
+            let pix_num = N as i64;
+            w.src_variance -= (src_mean * src_mean) / pix_num;
+            w.rec_variance -= (rec_mean * rec_mean) / pix_num;
+            w.distortion -= (dist_mean * dist_mean) / pix_num;
+            w.satd = i64::from(best_intra_cost);
+            let mut max_scale = 0i32;
+            for &qc in &qcoeff[1..N] {
+                max_scale = max_scale.max(qc.abs());
+            }
+            w.max_scale = f64::from(max_scale);
+
+            stats[((row / WEBER_MI_STEP) * mi_cols + col / WEBER_MI_STEP) as usize] = w;
+            col += WEBER_MI_STEP;
+        }
+        row += WEBER_MI_STEP;
+    }
+
+    let mut map = WeberVarMap {
+        stats,
+        mi_rows,
+        mi_cols,
+        norm_wiener_variance: 0,
+    };
+    map.norm_wiener_variance = map.compute_norm_wiener_variance(sb_mi);
+    map
 }
