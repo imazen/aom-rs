@@ -1136,13 +1136,27 @@ pub fn pack_tile_lr(
             // move the CDFs and flip near-tie mode decisions (e.g. DC vs a directional
             // mode on a steep diagonal ramp); SB 0 / single-SB frames read the frame-init
             // defaults unchanged, since nothing adapted yet.
-            let sb_real = crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra);
-            let sb_env = SbEncodeEnv {
-                rdmult: sb_rdmult,
-                coeff_costs_y: &sb_real.coeff_costs_y,
-                coeff_costs_uv: &sb_real.coeff_costs_uv,
-                tx_type_costs: &sb_real.tx_type_costs_y,
-                ..*env
+            // KB-12: allintra speed >= 9 flips coeff/mode_cost_upd_level to
+            // INTERNAL_COST_UPD_OFF for <4k (set_allintra_speed_feature_
+            // framesize_dependent, speed_features.c:166-177 -- runs AFTER the
+            // framesize-independent SBROW setting :593-594 and wins) -> the
+            // per-SB cost refresh STOPS: every SB reads the FRAME-INIT tables
+            // (pick_cfg/env), byte-visible on multi-SB (128 sq) frames.
+            // HANDOFF(speed 9): 4k+ frames keep INTERNAL_COST_UPD_SBROW --
+            // out of the canon envelope, unmodelled.
+            let cost_upd_off = pick_cfg.allintra && pick_cfg.speed >= 9;
+            let sb_real = (!cost_upd_off)
+                .then(|| crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra));
+            let sb_env = if let Some(sb_real) = &sb_real {
+                SbEncodeEnv {
+                    rdmult: sb_rdmult,
+                    coeff_costs_y: &sb_real.coeff_costs_y,
+                    coeff_costs_uv: &sb_real.coeff_costs_uv,
+                    tx_type_costs: &sb_real.tx_type_costs_y,
+                    ..*env
+                }
+            } else {
+                SbEncodeEnv { rdmult: sb_rdmult, ..*env }
             };
             let sb_pick_cfg = PickFrameCfg {
                 mode_costs: &sb_real.mode_costs,
@@ -1393,13 +1407,27 @@ pub fn pack_tile_from_trees(
             } else {
                 env.rdmult
             };
-            let sb_real = crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra);
-            let sb_env = SbEncodeEnv {
-                rdmult: sb_rdmult,
-                coeff_costs_y: &sb_real.coeff_costs_y,
-                coeff_costs_uv: &sb_real.coeff_costs_uv,
-                tx_type_costs: &sb_real.tx_type_costs_y,
-                ..*env
+            // KB-12: allintra speed >= 9 flips coeff/mode_cost_upd_level to
+            // INTERNAL_COST_UPD_OFF for <4k (set_allintra_speed_feature_
+            // framesize_dependent, speed_features.c:166-177 -- runs AFTER the
+            // framesize-independent SBROW setting :593-594 and wins) -> the
+            // per-SB cost refresh STOPS: every SB reads the FRAME-INIT tables
+            // (pick_cfg/env), byte-visible on multi-SB (128 sq) frames.
+            // HANDOFF(speed 9): 4k+ frames keep INTERNAL_COST_UPD_SBROW --
+            // out of the canon envelope, unmodelled.
+            let cost_upd_off = pick_cfg.allintra && pick_cfg.speed >= 9;
+            let sb_real = (!cost_upd_off)
+                .then(|| crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra));
+            let sb_env = if let Some(sb_real) = &sb_real {
+                SbEncodeEnv {
+                    rdmult: sb_rdmult,
+                    coeff_costs_y: &sb_real.coeff_costs_y,
+                    coeff_costs_uv: &sb_real.coeff_costs_uv,
+                    tx_type_costs: &sb_real.tx_type_costs_y,
+                    ..*env
+                }
+            } else {
+                SbEncodeEnv { rdmult: sb_rdmult, ..*env }
             };
 
             let mut cfl_pack = CflCtx::new(env.ss_x as i32, env.ss_y as i32);

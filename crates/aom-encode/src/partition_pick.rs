@@ -4003,3 +4003,301 @@ mod edge_partition_cost_tests {
         }
     }
 }
+
+// ===========================================================================
+// KB-12 — speed >= 8: av1_nonrd_use_partition (partition_search.c:2960).
+// HANDOFF: written under kill-order, NEVER COMPILED — see HANDOFF-SPEED89.md.
+// ===========================================================================
+
+/// `av1_nonrd_use_partition` (partition_search.c:2960) for the allintra KEY
+/// path: the SINGLE-PASS walk over the VBP-stamped tree — per leaf
+/// `pick_sb_modes_nonrd` (here: the hybrid dispatch below) then
+/// `encode_b_nonrd` IMMEDIATELY (here: [`crate::encode_sb::encode_b_intra_dry`]
+/// — recon + context stamps; bits come from the unchanged `pack_sb` re-walk).
+/// NO save/restore, NO mid-strip dry re-encode, NO root winner walk
+/// (contrast [`rd_use_partition_real`]).
+///
+/// Dead-on-KEY arms NOT modelled (verified against source):
+/// - `try_split_partition` — `nonrd_check_partition_split` stays 0 (:3001).
+/// - `try_merge` — `!frame_is_intra_only` gate (:3089).
+/// - `direct_partition_merging` — `!frame_is_intra_only` (:3106).
+/// - `x->reuse_inter_pred` (:2998) — inter only.
+/// - `set_mode_eval_params(DEFAULT_EVAL)` (:2996) — the full-RD arm's leaf
+///   machinery already runs DEFAULT_EVAL-shaped (leaf_pick_sb_modes).
+///
+/// `speed`: drives the hybrid gate (2 at speed 8, 0 at speed 9 —
+/// `hybrid_intra_pickmode`) and the speed-9 estimate-loop prunes.
+#[allow(clippy::too_many_arguments)]
+pub fn nonrd_use_partition_real(
+    env: &SbEncodeEnv,
+    cfg: &PickFrameCfg,
+    tile: &mut TileCtxState,
+    grid: &mut ModeGrid,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    cfl: &mut CflCtx,
+    vbp_stamps: &[u8],
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    visits: &mut Vec<LeafVisit>,
+    last_source_variance: &mut u32,
+) -> SbTree {
+    debug_assert!(mi_row < env.mi_rows && mi_col < env.mi_cols);
+    debug_assert!(bsize >= 3, "only square blocks 8x8..128x128 (:2971)");
+    let bs = MI_SIZE_WIDE_B[bsize] as i32;
+    let hbs = bs / 2;
+
+    let partition = crate::var_part::get_partition_from_stamps(
+        vbp_stamps,
+        env.mi_rows,
+        env.mi_cols,
+        mi_row,
+        mi_col,
+        bsize,
+    );
+    let subsize = get_partition_subsize(bsize, partition) as usize;
+
+    match partition {
+        // PARTITION_NONE (:3017-3030).
+        0 => {
+            let w = nonrd_leaf_pick_and_encode(
+                env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, bsize,
+                0, visits, last_source_variance,
+            );
+            SbTree::Leaf(w)
+        }
+        // PARTITION_HORZ (:3055) / PARTITION_VERT (:3031) — pick+encode strip
+        // 0, then strip 1 gated `mi_+hbs in frame && bsize > BLOCK_8X8`.
+        1 | 2 => {
+            let is_horz = partition == 1;
+            let w0 = nonrd_leaf_pick_and_encode(
+                env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, subsize,
+                partition as usize, visits, last_source_variance,
+            );
+            let sub1_in_frame = if is_horz {
+                mi_row + hbs < env.mi_rows
+            } else {
+                mi_col + hbs < env.mi_cols
+            };
+            // C gate: `&& bsize > BLOCK_8X8` (:3046/:3070) — port bsize 3.
+            if sub1_in_frame && bsize > 3 {
+                let (r1, c1) = if is_horz {
+                    (mi_row + hbs, mi_col)
+                } else {
+                    (mi_row, mi_col + hbs)
+                };
+                let w1 = nonrd_leaf_pick_and_encode(
+                    env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, r1, c1, subsize,
+                    partition as usize, visits, last_source_variance,
+                );
+                if is_horz {
+                    SbTree::Horz(Box::new([w0, w1]))
+                } else {
+                    SbTree::Vert(Box::new([w0, w1]))
+                }
+            } else {
+                // Same interior-envelope limitation as rd_use_partition_real:
+                // the SbTree rect variants carry both winners.
+                unimplemented!(
+                    "frame-edge single-strip nonrd rect at ({mi_row},{mi_col}) bsize {bsize}"
+                )
+            }
+        }
+        // PARTITION_SPLIT (:3078-3117): plain recursion (try_merge/direct
+        // merging are KEY-dead, module docs).
+        3 => {
+            let mut kids: [SbTree; 4] =
+                [SbTree::Absent, SbTree::Absent, SbTree::Absent, SbTree::Absent];
+            for (i, kid) in kids.iter_mut().enumerate() {
+                let y = mi_row + ((i as i32) >> 1) * hbs;
+                let x = mi_col + ((i as i32) & 1) * hbs;
+                if y >= env.mi_rows || x >= env.mi_cols {
+                    continue;
+                }
+                *kid = nonrd_use_partition_real(
+                    env,
+                    cfg,
+                    tile,
+                    grid,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    vbp_stamps,
+                    y,
+                    x,
+                    subsize,
+                    visits,
+                    last_source_variance,
+                );
+            }
+            SbTree::Split(Box::new(kids))
+        }
+        other => unreachable!("av1_nonrd_use_partition: extended partition {other} (:3119-3125)"),
+    }
+}
+
+/// One nonrd leaf: `pick_sb_modes_nonrd` (partition_search.c:2254 —
+/// `hybrid_intra_mode_search` on KEY, :2325) + `encode_b_nonrd` (:2089 —
+/// port: `encode_b_intra_dry` + grid stamp; bits via `pack_sb`).
+#[allow(clippy::too_many_arguments)]
+fn nonrd_leaf_pick_and_encode(
+    env: &SbEncodeEnv,
+    cfg: &PickFrameCfg,
+    tile: &mut TileCtxState,
+    grid: &mut ModeGrid,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    cfl: &mut CflCtx,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    partition: usize,
+    visits: &mut Vec<LeafVisit>,
+    last_source_variance: &mut u32,
+) -> LeafWinner {
+    // x->source_variance: pick_sb_modes_nonrd:2306-2311 recomputes per leaf
+    // (bsize < sb_size, or the SB-level value is the identical
+    // perpixel-variance — module docs in nonrd_pickmode.rs).
+    let ref_off_y = env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+    let source_variance = perpixel_variance_y(env.src_y, ref_off_y, env.stride, bsize, env.bd);
+    *last_source_variance = source_variance;
+
+    // hybrid_intra_pickmode: 2 at speed 8, 0 at speed >= 9
+    // (speed_features.c:578 / :598).
+    let hybrid = if cfg.speed >= 9 { 0 } else { 2 };
+
+    if crate::nonrd_pickmode::hybrid_use_rdopt(hybrid, bsize, source_variance) {
+        // Full-RD arm: av1_rd_pick_intra_mode_sb with INT64_MAX budget
+        // (partition_search.c:769) — the EXISTING leaf machinery.
+        let invalid = PartRdStats::invalid();
+        let (this_rdc, winner, _sv) = leaf_pick_sb_modes(
+            env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, bsize,
+            partition, &invalid,
+        );
+        visits.push(LeafVisit {
+            mi_row,
+            mi_col,
+            bsize,
+            budget: invalid.rdcost,
+            rate: this_rdc.rate,
+            dist: this_rdc.dist,
+            rdcost: this_rdc.rdcost,
+        });
+        let mut w = winner.expect("unbounded-budget leaf pick always finds a winner");
+        let _ = crate::encode_sb::encode_b_intra_dry(
+            env, tile, recon_y, recon_u, recon_v, cfl, &mut w, mi_row, mi_col, partition,
+            // HANDOFF: output_enabled flag — in the C nonrd walk EVERY leaf
+            // encode is dry_run=0 (OUTPUT_ENABLED). Check what this bool
+            // gates in encode_b_intra_dry (cb_offsets only?) and pass the
+            // value that matches the speeds-0-7-proven root walk's leaves.
+            false,
+        );
+        grid.stamp(mi_row, mi_col, bsize, w.mode as u8, w.uv_mode as u8, env.mi_rows, env.mi_cols);
+        return w;
+    }
+
+    // Estimate arm: av1_nonrd_pick_intra_mode (nonrd_pickmode.c:1582).
+    let up_available = mi_row > env.tile_row_start;
+    let left_available = mi_col > env.tile_col_start;
+    let above_mode = if up_available { grid.at(mi_row - 1, mi_col) as usize } else { 0 };
+    let left_mode = if left_available { grid.at(mi_row, mi_col - 1) as usize } else { 0 };
+    // KF y-mode ctx pair (intra_mode_context[A]/[L]) — same table the
+    // full-RD leaf uses.
+    const IMC: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0];
+    let bmode_costs = &cfg.mode_costs.y_mode_costs[IMC[above_mode.min(12)]][IMC[left_mode.min(12)]];
+    // skip ctx 0 (KEY intra invariant — leaf_pick_sb_modes' own).
+    let skip_cost = &cfg.skip_costs[0];
+    // Luma edge filter type (smooth above/left) — leaf_pick_sb_modes pattern.
+    let is_smooth = |m: usize| (9..=11).contains(&m);
+    let luma_edge_filter_type = i32::from(
+        (up_available && is_smooth(above_mode)) || (left_available && is_smooth(left_mode)),
+    );
+
+    let lctx = crate::nonrd_pickmode::NonrdIntraLeafCtx {
+        bmode_costs,
+        skip_cost,
+        above_mode,
+        left_mode,
+        up_available,
+        left_available,
+        source_variance,
+        partition,
+        prune_h_pred_using_best_mode_so_far: cfg.speed >= 9,
+        enable_intra_mode_pruning_using_neighbors: cfg.speed >= 9,
+        prune_intra_mode_using_best_sad_so_far: cfg.speed >= 9,
+        allow_screen_content_tools: cfg.allow_screen_content_tools,
+        luma_edge_filter_type,
+    };
+    let pick = crate::nonrd_pickmode::nonrd_pick_intra_mode(
+        env, &lctx, recon_y, mi_row, mi_col, bsize, env.rdmult,
+    );
+    visits.push(LeafVisit {
+        mi_row,
+        mi_col,
+        bsize,
+        budget: i64::MAX,
+        rate: pick.rd.rate,
+        dist: pick.rd.dist,
+        rdcost: pick.rd.rdcost,
+    });
+
+    // ctx->mic snapshot → LeafWinner (store_coding_context_nonrd +
+    // init_mbmi_nonrd fields): uv = DC (the chroma answer), angle 0,
+    // filter_intra off, palette zero, tx_type_map all DCT_DCT, skip_txfm
+    // false (encode_b_nonrd forces mi->skip_txfm = 0 for intra, :2120).
+    let mi_w = MI_SIZE_WIDE_B[bsize];
+    let mi_h = MI_SIZE_HIGH_B[bsize];
+    // Chroma edge filter type for the encode (leaf_pick_sb_modes' chroma
+    // pattern) — DC-only uv makes it decision-inert, recomputed for fidelity.
+    let base_row = mi_row - (mi_row & env.ss_y as i32);
+    let base_col = mi_col - (mi_col & env.ss_x as i32);
+    let mut chroma_up_available = up_available;
+    let mut chroma_left_available = left_available;
+    if env.ss_x != 0 && mi_w < 2 {
+        chroma_left_available = (mi_col - 1) > env.tile_col_start;
+    }
+    if env.ss_y != 0 && mi_h < 2 {
+        chroma_up_available = (mi_row - 1) > env.tile_row_start;
+    }
+    let uv_at = |r: i32, c: i32| -> u8 {
+        if r >= 0 && c >= 0 && r < env.mi_rows && c < env.mi_cols {
+            grid.at_uv(r, c)
+        } else {
+            0
+        }
+    };
+    let is_smooth_uv = |m: u8| (9..=11).contains(&m);
+    let uv_edge_filter_type = i32::from(
+        (chroma_up_available && is_smooth_uv(uv_at(base_row - 1, base_col + env.ss_x as i32)))
+            || (chroma_left_available
+                && is_smooth_uv(uv_at(base_row + env.ss_y as i32, base_col - 1))),
+    );
+
+    let mut w = LeafWinner {
+        bsize,
+        mode: pick.mode,
+        angle_delta_y: 0,
+        use_filter_intra: false,
+        filter_intra_mode: 0,
+        tx_size: pick.tx_size,
+        luma_edge_filter_type,
+        uv_mode: 0, // UV_DC_PRED — nonrd_pickmode.c:1735
+        angle_delta_uv: 0,
+        cfl_alpha_idx: 0,
+        cfl_alpha_signs: 0,
+        uv_edge_filter_type,
+        tx_type_map: vec![0; mi_w * mi_h], // DCT_DCT
+        skip_txfm: false,
+        raw_rdstats: pick.rd,
+    };
+    let _ = crate::encode_sb::encode_b_intra_dry(
+        env, tile, recon_y, recon_u, recon_v, cfl, &mut w, mi_row, mi_col, partition,
+        false, // HANDOFF: see the output_enabled note above.
+    );
+    grid.stamp(mi_row, mi_col, bsize, w.mode as u8, w.uv_mode as u8, env.mi_rows, env.mi_cols);
+    w
+}
