@@ -37,7 +37,7 @@ use aom_encode::encode_sb::SbEncodeEnv;
 use aom_encode::intra_uv_rd::UvLoopPolicy;
 use aom_encode::lf_search::{LfSearchFrame, build_lf_mi_grid, pick_filter_level};
 use aom_encode::obu_assemble::assemble_frame_obu_payload_single_tile;
-use aom_encode::pack::pack_tile;
+use aom_encode::pack::{LrPackParams, pack_tile, pack_tile_lr};
 use aom_encode::partition_pick::PickFrameCfg;
 use aom_encode::rd::{EncMode, FrameUpdateType, TuneMetric, av1_compute_rd_mult_based_on_qindex};
 use aom_encode::real_costs::derive_real_costs;
@@ -50,8 +50,12 @@ use aom_entropy::header::{
 use aom_entropy::obu::read_obu_header;
 use aom_entropy::partition::KfFrameContext;
 use aom_entropy::rb::ReadBitBuffer;
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_entropy::lr::{LrFrameConfig, RESTORE_NONE as LR_RESTORE_NONE};
+use aom_loopfilter::frame::{LfFrameBuf, LfMiGrid, LfParams, loop_filter_frame};
+use aom_quant::{Dequants, Quants, av1_build_quantizer, av1_dc_quant_qtx, set_q_index};
+use aom_restore::pick::{LrPlanePixels, LrSearchInput, LrSearchSf, pick_filter_restoration};
 use aom_sys_ref as c;
+use aom_txb::cost_tokens_from_cdf;
 
 const OBU_SEQUENCE_HEADER: u32 = 1;
 const OBU_FRAME: u32 = 6;
@@ -600,20 +604,10 @@ impl EncodeCell {
             None => (fw, fh, 0, 0),
             Some((cw, ch, ox, oy)) => (cw, ch, ox, oy),
         };
-        assert!(
-            off_x + w <= fw && off_y + h <= fh,
-            "{label}: crop exceeds frame"
-        );
-        assert!(
-            off_x % 2 == 0 && off_y % 2 == 0,
-            "{label}: crop offset must be even"
-        );
+        assert!(off_x + w <= fw && off_y + h <= fh, "{label}: crop exceeds frame");
+        assert!(off_x % 2 == 0 && off_y % 2 == 0, "{label}: crop offset must be even");
         let (cox, coy) = (off_x >> ss_x, off_y >> ss_y);
-        let (cw, ch) = if mono {
-            (0, 0)
-        } else {
-            ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
-        };
+        let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y) };
         let mut y = vec![0u16; w * h];
         for r in 0..h {
             for col in 0..w {
@@ -757,6 +751,30 @@ impl EncodeCell {
         )
     }
 
+    /// [`Self::c_encode`] with `--enable-restoration=1`
+    /// (`AV1E_SET_ENABLE_RESTORATION`) — the reference stream for the
+    /// loop-restoration-search parity gate.
+    pub fn c_encode_lr(&self) -> Vec<u8> {
+        c::ref_encode_av1_kf(
+            &self.y,
+            &self.u,
+            &self.v,
+            self.w,
+            self.h,
+            i32::from(self.bd),
+            self.mono,
+            self.ss_x as i32,
+            self.ss_y as i32,
+            self.cq_level,
+            self.speed,
+            false,
+            true, // enable_restoration
+            self.usage,
+            0,
+            false,
+        )
+    }
+
     /// Extract the frame OBU payload from a reference stream (the byte-match
     /// target for [`Self::port_encode`]).
     pub fn frame_obu_payload(stream: &[u8]) -> Vec<u8> {
@@ -789,6 +807,24 @@ impl EncodeCell {
     /// side's `--enable-palette=1`; the search still requires the frame's
     /// `allow_screen_content_tools`, exactly as C).
     pub fn port_encode_with(&self, bootstrap: &[u8], knobs: &ToggleKnobs) -> Vec<u8> {
+        self.port_encode_impl(bootstrap, knobs, false)
+    }
+
+    /// [`Self::port_encode`] plus the loop-restoration ENCODER stage
+    /// (`--enable-restoration=1` parity): after the pack + LF-level
+    /// derivation, APPLY the derived deblock to the reconstruction, run the
+    /// ported `av1_pick_filter_restoration` search on (source, deblocked
+    /// recon), and — when any plane restores — REPACK the tile with the
+    /// per-RU parameters interleaved at each superblock root
+    /// (`loop_restoration_write_sb_coeffs`) and write the derived
+    /// frame-restoration header fields. The bootstrap must be an
+    /// `enable_restoration=1` stream ([`Self::c_encode_lr`]); the
+    /// restoration DECISIONS are never copied from it.
+    pub fn port_encode_lr(&self, bootstrap: &[u8]) -> Vec<u8> {
+        self.port_encode_impl(bootstrap, &ToggleKnobs::default(), true)
+    }
+
+    fn port_encode_impl(&self, bootstrap: &[u8], knobs: &ToggleKnobs, lr_stage: bool) -> Vec<u8> {
         let (w, h, mono, ss_x, ss_y, bd) = (self.w, self.h, self.mono, self.ss_x, self.ss_y, self.bd);
         let obus = walk_obus(bootstrap);
         let seq_payload = obus
@@ -819,8 +855,7 @@ impl EncodeCell {
                 equal_picture_interval: seq.timing_info.equal_picture_interval,
                 frame_presentation_time_length: seq
                     .decoder_model_info
-                    .frame_presentation_time_length
-                    as u32,
+                    .frame_presentation_time_length as u32,
                 frame_id_numbers_present_flag: s.frame_id_numbers_present_flag,
                 frame_id_length: s.frame_id_length as u32,
                 force_screen_content_tools: s.force_screen_content_tools,
@@ -949,20 +984,12 @@ impl EncodeCell {
             FrameUpdateType::Kf,
             qindex,
             TuneMetric::Psnr,
-            if allintra {
-                EncMode::Allintra
-            } else {
-                EncMode::Good
-            },
+            if allintra { EncMode::Allintra } else { EncMode::Good },
         );
 
         // Partial-SB support: CEIL the SB walk and replicate-extend the
         // source into the SB-aligned overhang (the chroma_ss_e2e recipe).
-        let (cw, ch) = if mono {
-            (0, 0)
-        } else {
-            ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
-        };
+        let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y) };
         let n_sb_x = ((mi_cols + SB_MI - 1) / SB_MI).max(1);
         let n_sb_y = ((mi_rows + SB_MI - 1) / SB_MI).max(1);
         let sb_px_w = n_sb_x as usize * 64;
@@ -1185,6 +1212,181 @@ impl EncodeCell {
         p.loopfilter.filter_level_u = derived_lf.filter_level_u;
         p.loopfilter.filter_level_v = derived_lf.filter_level_v;
 
+        // ---- loop-restoration ENCODER stage (`--enable-restoration` parity).
+        // C pipeline (encoder.c `loopfilter_frame` -> `cdef_restoration_frame`):
+        // apply the picked deblock levels -> [CDEF off in this envelope] ->
+        // `av1_pick_filter_restoration` on (source, deblocked recon) -> pack
+        // the tile with the per-RU params interleaved at each SB root. The
+        // restoration DECISIONS (frame types, unit size, per-RU params) are
+        // derived by the port's own search — never copied from the bootstrap.
+        let mut our_tile_bytes = our_tile_bytes;
+        if lr_stage {
+            assert!(
+                allintra,
+                "port_encode_lr: allintra cells only (the GOOD-mode lpf_sf setters are not wired)"
+            );
+            assert!(
+                s.enable_restoration,
+                "port_encode_lr needs an enable_restoration=1 bootstrap stream"
+            );
+            assert!(!p.coded_lossless, "is_restoration_used excludes all-lossless");
+
+            // (1) The deblocked reconstruction: the derived levels applied to
+            //     a copy (`loop_filter_frame` gates itself on the Y levels,
+            //     exactly like the C apply site).
+            let mut db_y = recon_y.clone();
+            let mut db_u = recon_u.clone();
+            let mut db_v = recon_v.clone();
+            {
+                let lf_apply = LfParams {
+                    filter_level: derived_lf.filter_level,
+                    filter_level_u: derived_lf.filter_level_u,
+                    filter_level_v: derived_lf.filter_level_v,
+                    sharpness: 0,
+                    mode_ref_delta_enabled: true,
+                    ref_deltas: KF_REF_DELTAS,
+                    mode_deltas: KF_MODE_DELTAS,
+                    delta_lf_present: false,
+                    delta_lf_multi: false,
+                    lossless: [false; 8],
+                    seg: Default::default(),
+                };
+                let grid = LfMiGrid {
+                    mi: &mi_grid,
+                    stride: mi_cols as usize,
+                    mi_rows,
+                    mi_cols,
+                };
+                let mut buf = LfFrameBuf {
+                    y: &mut db_y,
+                    y_stride: stride,
+                    u: &mut db_u,
+                    v: &mut db_v,
+                    uv_stride: stride,
+                    crop_width: w as u32,
+                    crop_height: h as u32,
+                    ss_x,
+                    ss_y,
+                    bd: i32::from(bd),
+                };
+                loop_filter_frame(&mut buf, &grid, &lf_apply, 0, num_planes as usize);
+            }
+
+            // (2) `av1_pick_filter_restoration`: costs = av1_fill_lr_rates
+            //     over the FRAME-INIT LR CDFs (nothing adapts them before the
+            //     search in C); rdmult = the frame RDMULT.
+            let fc0 = KfFrameContext::default_for_qindex(qindex);
+            let mut wiener_cost = [0i32; 2];
+            let mut sgrproj_cost = [0i32; 2];
+            let mut switchable_cost = [0i32; 3];
+            cost_tokens_from_cdf(&mut wiener_cost, &fc0.wiener_restore, None);
+            cost_tokens_from_cdf(&mut sgrproj_cost, &fc0.sgrproj_restore, None);
+            cost_tokens_from_cdf(&mut switchable_cost, &fc0.switchable_restore, None);
+            let lr_input = LrSearchInput {
+                planes: if mono {
+                    vec![LrPlanePixels {
+                        src: &src_y_strided,
+                        deblocked: &db_y,
+                        cur: &db_y,
+                        stride,
+                    }]
+                } else {
+                    vec![
+                        LrPlanePixels {
+                            src: &src_y_strided,
+                            deblocked: &db_y,
+                            cur: &db_y,
+                            stride,
+                        },
+                        LrPlanePixels {
+                            src: &src_u_strided,
+                            deblocked: &db_u,
+                            cur: &db_u,
+                            stride,
+                        },
+                        LrPlanePixels {
+                            src: &src_v_strided,
+                            deblocked: &db_v,
+                            cur: &db_v,
+                            stride,
+                        },
+                    ]
+                },
+                crop_width: w as i32,
+                crop_height: h as i32,
+                ss_x,
+                ss_y,
+                bit_depth: i32::from(bd),
+                highbd: bd > 8,
+                rdmult: i64::from(rdmult),
+                dc_quant_qtx: i32::from(av1_dc_quant_qtx(qindex, 0, bd)),
+                mib_size_log2: mib_size_log2 as i32,
+                mi_rows,
+                mi_cols,
+                tile_sb_rows: vec![(0, n_sb_y)],
+                tile_sb_cols: vec![(0, n_sb_x)],
+                wiener_restore_cost: wiener_cost,
+                sgrproj_restore_cost: sgrproj_cost,
+                switchable_restore_cost: switchable_cost,
+                sf: lr_search_sf_allintra(speed, qindex, w, h, p.allow_screen_content_tools),
+            };
+            let outcome = pick_filter_restoration(&lr_input);
+
+            // (3) The derived frame-restoration header fields.
+            p.restoration.frame_restoration_type = outcome.frame_restoration_type;
+            p.restoration.restoration_unit_size = [outcome.unit_size; 3];
+
+            // (4) Repack with the interleaved RU params when any plane
+            //     restores (an all-NONE frame codes no LR symbols — the
+            //     pass-1 tile bytes are already exactly right).
+            if outcome
+                .frame_restoration_type
+                .iter()
+                .any(|&t| t != LR_RESTORE_NONE)
+            {
+                let lr_pack = LrPackParams {
+                    cfg: LrFrameConfig {
+                        frame_restoration_type: outcome.frame_restoration_type,
+                        unit_size: [outcome.unit_size; 3],
+                        crop_width: w as i32,
+                        crop_height: h as i32,
+                        superres_denom: 0,
+                    },
+                    units: [&outcome.units[0], &outcome.units[1], &outcome.units[2]],
+                    num_planes: num_planes as usize,
+                };
+                let mut kf2 = KfFrameContext::default_for_qindex(qindex);
+                let mut ry2 = src_y_strided.clone();
+                let mut ru2 = src_u_strided.clone();
+                let mut rv2 = src_v_strided.clone();
+                let mut enc2 = OdEcEnc::new();
+                let trees2 = pack_tile_lr(
+                    &mut enc2,
+                    &env,
+                    &pick_cfg,
+                    &pack_cfg,
+                    &mut kf2,
+                    &mut ry2,
+                    &mut ru2,
+                    &mut rv2,
+                    0,
+                    0,
+                    n_sb_y,
+                    n_sb_x,
+                    SB_MI,
+                    SB,
+                    Some(&lr_pack),
+                );
+                assert_eq!(
+                    trees2.len(),
+                    (n_sb_x * n_sb_y) as usize,
+                    "{}: LR repack must walk every SB",
+                    self.label
+                );
+                our_tile_bytes = enc2.done().to_vec();
+            }
+        }
+
         assemble_frame_obu_payload_single_tile(&p, tiles_log2, &our_tile_bytes)
     }
 
@@ -1211,6 +1413,153 @@ impl EncodeCell {
 /// speed-0 on real content at 3 sizes x 3 cq levels (all cells are landed
 /// KB-6 byte-match gates), plus one speed-4 point on the byte-exact
 /// synthetic-diag grid cell (speed features change the profile shape).
+/// Parse an encoded stream's frame-header LOOP-RESTORATION fields — the C
+/// encoder's `av1_pick_filter_restoration` DECISION as coded by
+/// `encode_restoration_mode`: per-plane `frame_restoration_type` + the coded
+/// per-plane unit sizes. The decision-level differential witness for the
+/// ported search (bitstream facts, not C-internals).
+pub fn parse_restoration_decision(stream: &[u8]) -> ([u8; 3], [i32; 3]) {
+    let obus = walk_obus(stream);
+    let seq_payload = obus
+        .iter()
+        .find(|(t, _)| *t == OBU_SEQUENCE_HEADER)
+        .map(|(_, p)| *p)
+        .expect("no sequence-header OBU");
+    let mut seq_rb = ReadBitBuffer::new(seq_payload);
+    let seq = read_sequence_header_obu(&mut seq_rb);
+    let frame_payload = obus
+        .iter()
+        .find(|(t, _)| *t == OBU_FRAME)
+        .map(|(_, p)| *p)
+        .expect("no frame OBU");
+    let s = &seq.seq_header;
+    let cc = &seq.color_config;
+    let num_planes = if cc.monochrome { 1 } else { 3 };
+    let mib_size_log2 = if s.sb_size_128 { 5u32 } else { 4u32 };
+    let mi_cols = mi_dim(s.max_frame_width);
+    let mi_rows = mi_dim(s.max_frame_height);
+    let cfg = FrameHeaderObu {
+        prefix: FrameHeaderPrefix {
+            reduced_still_picture_hdr: seq.reduced_still_picture_hdr,
+            decoder_model_info_present_flag: seq.decoder_model_info_present_flag,
+            equal_picture_interval: seq.timing_info.equal_picture_interval,
+            frame_presentation_time_length: seq.decoder_model_info.frame_presentation_time_length
+                as u32,
+            frame_id_numbers_present_flag: s.frame_id_numbers_present_flag,
+            frame_id_length: s.frame_id_length as u32,
+            force_screen_content_tools: s.force_screen_content_tools,
+            force_integer_mv: s.force_integer_mv,
+            max_frame_width: s.max_frame_width,
+            max_frame_height: s.max_frame_height,
+            enable_order_hint: s.enable_order_hint,
+            order_hint_bits_minus_1: s.order_hint_bits_minus_1,
+            operating_points_cnt_minus_1: seq.operating_points_cnt_minus_1,
+            operating_point_idc: seq.operating_point_idc,
+            op_decoder_model_param_present: seq.op_decoder_model_param_present,
+            buffer_removal_time_length: seq.decoder_model_info.buffer_removal_time_length as u32,
+            temporal_layer_id: 0,
+            spatial_layer_id: 0,
+            ..Default::default()
+        },
+        frame_size: FrameSizeHeader {
+            num_bits_width: s.num_bits_width,
+            num_bits_height: s.num_bits_height,
+            superres_upscaled_width: s.max_frame_width,
+            superres_upscaled_height: s.max_frame_height,
+            enable_superres: s.enable_superres,
+            ..Default::default()
+        },
+        tile_info: tile_limits(mi_cols, mi_rows, mib_size_log2),
+        num_planes,
+        separate_uv_delta_q: cc.separate_uv_delta_q,
+        loopfilter: LoopfilterHeader {
+            last_ref_deltas: KF_REF_DELTAS,
+            last_mode_deltas: KF_MODE_DELTAS,
+            ..Default::default()
+        },
+        cdef: CdefHeader {
+            enable_cdef: s.enable_cdef,
+            ..Default::default()
+        },
+        restoration: RestorationHeader {
+            enable_restoration: s.enable_restoration,
+            sb_size_128: s.sb_size_128,
+            subsampling_x: cc.subsampling_x,
+            subsampling_y: cc.subsampling_y,
+            ..Default::default()
+        },
+        film_grain_params_present: seq.film_grain_params_present,
+        ..Default::default()
+    };
+    let mut rb = ReadBitBuffer::new(frame_payload);
+    let p = read_uncompressed_header(&mut rb, &cfg);
+    (
+        p.restoration.frame_restoration_type,
+        p.restoration.restoration_unit_size,
+    )
+}
+
+/// The `lpf_sf` loop-restoration slice for the ALLINTRA path:
+/// `set_allintra_speed_features_framesize_independent` (speed_features.c:
+/// dual_sgr/ep-pruning at speed>=1; wiener-src-var + sgr-from-wiener prunes
+/// at speed>=2; reduced window / prune upgrades at speed>=3; full disable at
+/// speed>=5 — moot here because the REAL encoder also clears the seq
+/// `enable_restoration` bit at those speeds) + the qindex-dependent
+/// unit-size-search bounds (`av1_set_speed_features_qindex_dependent`:
+/// full 64..256 descent at speed 0; the single-size rule for allintra
+/// speed>=1: 128 when qindex <= 96 on sub-1440p frames, else 256).
+pub fn lr_search_sf_allintra(
+    speed: i32,
+    qindex: i32,
+    w: usize,
+    h: usize,
+    allow_screen_content_tools: bool,
+) -> LrSearchSf {
+    let mut sf = LrSearchSf::default();
+    if speed >= 1 {
+        sf.dual_sgr_penalty_level = 1;
+        sf.enable_sgr_ep_pruning = 1;
+    }
+    if speed >= 2 {
+        sf.prune_wiener_based_on_src_var = 1;
+        sf.prune_sgr_based_on_wiener = 1;
+    }
+    if speed >= 3 {
+        sf.prune_sgr_based_on_wiener = if allow_screen_content_tools { 1 } else { 2 };
+        sf.disable_loop_restoration_chroma = false;
+        sf.reduce_wiener_window_size = true;
+        sf.prune_wiener_based_on_src_var = 2;
+    }
+    if speed >= 5 {
+        sf.disable_wiener_filter = true;
+        sf.disable_sgr_filter = true;
+    }
+    // Unit-size search bounds (qindex-dependent setter, all modes).
+    sf.min_lr_unit_size = 64; // RESTORATION_PROC_UNIT_SIZE
+    sf.max_lr_unit_size = 256; // RESTORATION_UNITSIZE_MAX
+    let is_1440p_or_larger = w.min(h) >= 1440;
+    let is_720p_or_larger = w.min(h) >= 720;
+    if speed >= 1 {
+        if is_1440p_or_larger {
+            sf.min_lr_unit_size = 256;
+        } else if is_720p_or_larger {
+            sf.min_lr_unit_size = 128;
+        }
+    }
+    // `speed >= 3 || (mode == ALLINTRA && speed >= 1)` — this helper IS the
+    // allintra arm.
+    if speed >= 1 {
+        if qindex <= 96 && !is_1440p_or_larger {
+            sf.min_lr_unit_size = 128;
+            sf.max_lr_unit_size = 128;
+        } else {
+            sf.min_lr_unit_size = 256;
+            sf.max_lr_unit_size = 256;
+        }
+    }
+    sf
+}
+
 pub fn encode_cells() -> Vec<EncodeCell> {
     let mut cells = Vec::new();
     for &(size_label, vector, crop) in &[
@@ -1232,12 +1581,6 @@ pub fn encode_cells() -> Vec<EncodeCell> {
             ));
         }
     }
-    cells.push(EncodeCell::synthetic_diag(
-        "enc_s4_128_cq32",
-        128,
-        128,
-        32,
-        4,
-    ));
+    cells.push(EncodeCell::synthetic_diag("enc_s4_128_cq32", 128, 128, 32, 4));
     cells
 }

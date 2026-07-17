@@ -61,6 +61,10 @@ use crate::partition::{PartRdStats, split_subsize};
 use crate::partition_pick::{ModeGrid, PickFrameCfg, rd_pick_partition_real};
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
 use aom_entropy::enc::OdEcEnc;
+use aom_entropy::lr::{
+    LrFrameConfig, LrRefState, LrUnitInfo, RESTORE_NONE as LR_RESTORE_NONE, lr_corners_in_sb,
+    write_lr_unit,
+};
 use aom_entropy::partition::{
     KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, PaletteNbrKf, allow_palette,
     bsize_to_max_depth, bsize_to_tx_size_cat, encode_color_map_tokens, get_partition_subsize,
@@ -965,6 +969,48 @@ pub fn pack_tile(
     sb_mi: i32,
     sb_size: usize,
 ) -> Vec<SbTree> {
+    pack_tile_lr(
+        enc, env, pick_cfg, pack_cfg, kf, recon_y, recon_u, recon_v, mi_row0, mi_col0, n_sb_rows,
+        n_sb_cols, sb_mi, sb_size, None,
+    )
+}
+
+/// The loop-restoration pack inputs: the frame-level decision
+/// (`av1_pick_filter_restoration`'s outcome) whose per-RU parameters are
+/// written INTERLEAVED in the tile data at each superblock root, BEFORE the
+/// SB's first partition symbol (`loop_restoration_write_sb_coeffs`,
+/// av1/encoder/bitstream.c — the exact mirror of the decoder's
+/// `loop_restoration_read_sb_coeffs` placement already proven byte-exact on
+/// the decode side).
+pub struct LrPackParams<'a> {
+    /// Frame geometry + per-plane `frame_restoration_type` / unit sizes.
+    pub cfg: LrFrameConfig,
+    /// Per-plane unit params in unit-grid raster order (empty for
+    /// `RESTORE_NONE` planes).
+    pub units: [&'a [LrUnitInfo]; 3],
+    pub num_planes: usize,
+}
+
+/// [`pack_tile`] plus the interleaved loop-restoration unit writes.
+/// `lr = None` is byte-identical to [`pack_tile`].
+#[allow(clippy::too_many_arguments)]
+pub fn pack_tile_lr(
+    enc: &mut OdEcEnc,
+    env: &SbEncodeEnv,
+    pick_cfg: &PickFrameCfg,
+    pack_cfg: &PackCfg,
+    kf: &mut KfFrameContext,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    mi_row0: i32,
+    mi_col0: i32,
+    n_sb_rows: i32,
+    n_sb_cols: i32,
+    sb_mi: i32,
+    sb_size: usize,
+    lr: Option<&LrPackParams<'_>>,
+) -> Vec<SbTree> {
     // C write_modes (bitstream.c): `w->allow_update_cdf = !large_scale_tile
     // && !disable_cdf_update` — the tile writer's symbol adaptation gate
     // (aom_write_symbol adapts iff set). large_scale_tile is out of this
@@ -982,6 +1028,9 @@ pub fn pack_tile(
     let mut nbr = MiNbrGrid::zeroed(mi_cols);
     let mut kfs = kf_block_state(pack_cfg, env, sb_mi);
     let mut trees = Vec::new();
+    // `av1_reset_loop_restoration` (write_modes, bitstream.c): per-tile LR
+    // delta-coding references.
+    let mut lr_refs = LrRefState::default();
 
     // `part_sf.partition_search_type == VAR_BASED_PARTITION` — allintra
     // speed >= 7 exactly (speed_features.c:571 is its only allintra setter;
@@ -1186,6 +1235,43 @@ pub fn pack_tile(
                 );
                 tree.expect("found implies a winning tree")
             };
+
+            // C `write_modes_sb` (bitstream.c:1625-1645): at the superblock
+            // root — BEFORE the partition symbol — write every restoration
+            // unit whose corner falls inside this SB, per plane, in
+            // (plane, rrow, rcol) order. `lr_corners_in_sb` reproduces
+            // `av1_loop_restoration_corners_in_sb` (the C gates bsize ==
+            // sb_size internally; this loop runs only at SB roots). The LR
+            // CDFs adapt inside the SAME tile context (`kf`) as every other
+            // symbol.
+            if let Some(lr) = lr {
+                for plane in 0..lr.num_planes {
+                    if lr.cfg.frame_restoration_type[plane] == LR_RESTORE_NONE {
+                        continue;
+                    }
+                    if let Some((rc0, rc1, rr0, rr1)) = lr_corners_in_sb(
+                        &lr.cfg, plane, env.ss_x, env.ss_y, mi_row, mi_col, sb_mi, sb_mi,
+                    ) {
+                        let (hu, _) = lr.cfg.plane_units(plane, env.ss_x, env.ss_y);
+                        for rr in rr0..rr1 {
+                            for rc in rc0..rc1 {
+                                let runit_idx = (rc + rr * hu) as usize;
+                                write_lr_unit(
+                                    enc,
+                                    &lr.units[plane][runit_idx],
+                                    lr.cfg.frame_restoration_type[plane],
+                                    plane,
+                                    &mut lr_refs,
+                                    &mut kf.switchable_restore,
+                                    &mut kf.wiener_restore,
+                                    &mut kf.sgrproj_restore,
+                                    pack_cfg.allow_update_cdf,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
 
             let mut cfl_pack = CflCtx::new(env.ss_x as i32, env.ss_y as i32);
             pack_sb(

@@ -12,6 +12,12 @@ aom-encode = { path = "../aom-encode" }
 aom-decode = { path = "../aom-decode" }
 aom-entropy = { path = "../aom-entropy" }
 aom-quant = { path = "../aom-quant" }
+# LR-on stills parity: the loop-restoration search (aom-restore::pick), the
+# deblock APPLY that feeds it (aom-loopfilter), and the LR mode-cost
+# derivation (aom-txb cost_tokens_from_cdf).
+aom-restore = { path = "../aom-restore" }
+aom-loopfilter = { path = "../aom-loopfilter" }
+aom-txb = { path = "../aom-txb" }
 # The REAL C oracle (reference libaom v3.14.1, Release + SIMD). This crate is
 # bench-only (publish = false), so depending on the FFI oracle here mirrors the
 # dev-dependency isolation the shipping crates use: all unsafe stays inside
