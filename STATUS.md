@@ -2995,11 +2995,94 @@ at every token permutation over the structural domain + boundary fills.
 (-23.2%); the ~985M cdef_filter cluster collapsed to ~40M SIMD + residual
 (cdef_find_dir 61M, next on the CDEF list).
 
-**Next kernels (profile order):** wiener convolve (decode #1 now, ~17%),
-inverse-txfm stack (shared decode+encode; i64-sum-exact formulation first,
-i32 only with a range proof), deblock filters (~5-9%), txb trio
-(txb_init_levels / get_nz_mag / get_lower_levels_ctx, encode ~12%),
-forward-txfm stack, cdef_find_dir, variance/SAD family.
+**SIMD kernels #3-#5 (landed 2026-07-17, each with per-tier permutation
+differentials + the pre-existing C-differentials now driving the dispatch,
+each gated 0-failed in BOTH dispatch modes):**
+- **#3 `wiener_convolve_add_src`** (16eb3b3): i32x8 8-column lanes, ZERO
+  reformulation (the scalar port's exact i32 expressions lane-wise);
+  overlap-back width tails; w<8 scalar. Decode Ir 2.807B -> 2.553B
+  (**-30.2% cumulative** vs the 3.657B all-scalar baseline).
+- **#4 `txb_init_levels`** (0730a68): all geometries (h>=8 column chunks;
+  h=4 two-columns-per-vector); |x|.min(127) exact on the FULL i32 domain
+  incl. the i32::MIN lane. Encode Ir -> 145.30B.
+- **#5 `highbd_variance64`** (b164600): pixel-domain-exact row kernel (lane
+  mullo wrap == scalar i32 wrap; i32 lane adds == u32 adds bitwise). Encode
+  Ir -> **142.61B (cumulative -8.1%** vs 155.21B; w=4 blocks still scalar —
+  a two-rows-per-vector arm is a cheap follow-up).
+
+**NEXT (the elephant): the transform stack — full design worked out, not yet
+built (record of the 2026-07-17 analysis; the next perf session should start
+here):**
+- **Shape:** vectorize ACROSS independent 1-D transforms. The 2-D drivers'
+  COLUMN pass reads `buf[r*col_n + c..c+8]` contiguously per row when lanes =
+  8 adjacent columns — NO transposes needed (fwd: the col pass is first; inv:
+  the col pass is second). The ROW pass needs 8x8 in-register transposes (or
+  gather-arrays first cut) — do the col pass per kernel FIRST (half the
+  transform cost, zero shuffle risk), rows later.
+- **Per-kernel incremental landing:** dispatch per `func_col` — blocks whose
+  1-D col kernel is in the ported set take the 8-column vector path, others
+  keep the scalar per-column loop. Port order by profile: idct16/iadst16
+  (the workhorses), idct8/iadst8, idct32, idct4/iadst4, fdct/fadst same
+  order (fwd shares the pattern), identity kernels (trivial, no butterflies)
+  anytime.
+- **EXACTNESS TRAP (the crux, verified against the scalar port 2026-07-17):**
+  `half_btf` wraps each PRODUCT in i32 (`w.wrapping_mul(in)` — matches C's
+  int multiply) but sums the two wrapped products + rounding in **i64**.
+  With driver clamp bounds (row pass clamps input to (bd+8) bits = +/-2^19
+  at bd12; cospi <= 2^13) a product reaches 2^32 and the SUM needs 33 bits:
+  an i32-sum SIMD (libaom's own SSE4/AVX2 shape) diverges from our scalar
+  port on CRAFTED-BUT-DECODABLE streams that push dequantized coefficients
+  to the clamp bounds. Zero-tolerance => the SIMD must reproduce the i64
+  sum exactly. (libaom's own SIMD has this divergence vs their _c — their
+  corpus never hits it; OUR standard is scalar==SIMD on every decodable
+  stream.)
+- **Exact-i64 recipe on AVX2 (per 8 lanes):** p0 = mullo(w0, in0), p1 =
+  mullo(w1, in1) (wrapped products == scalar); widen each 128-half via
+  vpmovsxdq to 2x i64x4; s = p0_64 + p1_64 + rnd (vpaddq); the >> bit +
+  truncate-to-i32 pair is EXACT via LOGICAL vpsrlq (bit in {12,13}) + take
+  the LOW dword of each 64-lane (vpermd gather) — because
+  `((v >>arith b) as i32) == low32(v >>logical b)` for any v (sign bits
+  land above the truncation). ~15 vector ops per 8-lane half_btf vs ~40
+  scalar ops. AVX2 lacks vpsraq (64-bit arithmetic shift) — the
+  logical+truncate trick dodges it. magetypes has NO integer widening ops
+  (verified) => this needs the raw-intrinsic escape (`i32x8::raw()` /
+  `from_m256i`) inside a hand-written `_v3` variant (pattern C; value
+  intrinsics are safe under #[arcane], #![forbid(unsafe_code)] holds).
+  NEON deferred (falls to scalar; the perf gate box is x86).
+- **Kernel bodies:** mechanical lane-generic rewrites of the generated
+  butterfly kernels (inv_txfm1d_gen.rs / txfm1d_gen.rs) — extend
+  `xtask/transpile_txfm1d.py` to ALSO emit lane-generic variants over a
+  small local trait {add/sub (wrapping), half_btf, clamp_bits, neg}, whose
+  scalar impl delegates to the existing helpers (so the scalar path is the
+  EXISTING code) and whose v3 impl is the recipe above. clamp_value on
+  lanes = clamp(splat(min), splat(max)) — trivial. round_shift_array /
+  clamp_buf / the final highbd_clip_pixel_add row are separate lane-wise
+  steps in the driver (easy, exact).
+- **Differential plan:** per 1-D kernel, SIMD == scalar at every token
+  permutation over inputs SWEEPING THE DRIVER CLAMP BOUNDS (+/-2^(bd+7),
+  dense random + the exact boundary values + sign patterns engineered to
+  maximize |p0+p1|) x cos_bit {12,13} x all stage_range values the drivers
+  pass; plus the existing inv_txfm2d/txfm2d C-differentials (193 combos,
+  ~400k comparisons) drive the dispatching 2-D entries end-to-end.
+
+**Other remaining kernels (profile order, after transforms):** deblock
+filters (~6% of decode; horizontal edges = natural 4-column lanes like the
+CDEF w4 pattern; vertical edges need 4x14 transposes — do horizontal
+first), get_nz_mag/get_lower_levels_ctx (encode ~9% — requires switching
+the cost/optimize scan loops to the ALREADY-PORTED batch
+av1_get_nz_map_contexts shape first, a call-site restructure with its own
+parity gate), cdef_find_dir (decode 2.4%, shuffle-heavy partial sums),
+sub_pixel_variance's bilinear filter, the w=4 arms of variance/init_levels,
+and the alloc-reuse pass (malloc/memset ~4% of encode — scratch-buffer
+reuse in xform_quant/tx_search, algorithmic not SIMD).
+
+**Wall-clock status:** the committed zenbench baseline (quiet box) is STILL
+PENDING — every run so far was on a loaded box (resource-gate flagged).
+Instruction counts are the only committed numbers; per the no-fabrication
+rule no wall ratios are claimed beyond the provisional noisy smoke in
+`benchmarks/gate3_profile_ranking_2026-07-16.meta`. When the box drains:
+`just bench-gate3`, commit results to `benchmarks/gate3_baseline_<date>.csv`
++ `.meta`, and compute the Gate-3 ratios from the paired CIs.
 
 ## #7 CDEF-strength RD search — BIT-IDENTICAL, first bulk-port family lands directly in PARITY section A (2026-07-17, CDEF bulk track)
 
