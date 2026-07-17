@@ -1,0 +1,19 @@
+kind,cell,run,c_mean,port_mean,c_mpx_s,port_mpx_s,port_vs_c_pct,ci_low_pct,ci_high_pct,port_over_c_x,rounds,calls,cv_port,pre_simd_x,delta_x,note
+dec,dec_64x64,1,90.32µs,161.07µs,45.35,25.43,+78.33,+64.60,+102.49,1.78,4,35,15.6%,1.77,0.01,
+dec,dec_196x196,1,418.22µs,1.01ms,91.86,38.2,+143.43,+141.04,+145.18,2.43,4,5,1.6%,2.57,-0.14,
+dec,dec_352x288_q00,1,9.38ms,13.05ms,10.8,7.77,+39.07,+35.12,+43.89,1.39,4,1,7.5%,1.37,0.02,
+dec,dec_352x288_q32,1,2.49ms,5.11ms,40.76,19.83,+105.54,+102.54,+108.52,2.06,4,1,3.1%,2.24,-0.18,
+dec,dec_352x288_q63,1,575.71µs,1.60ms,176.09,63.45,+177.53,+163.32,+201.37,2.78,4,3,9.4%,2.9,-0.12,
+dec,dec_mosaic_2k_cq20,1,31.51ms,61.23ms,65.82,33.87,+94.35,+87.70,+105.75,1.94,4,1,8.0%,,,new headline cell (no pre-SIMD baseline)
+dec,dec_mosaic_2k_cq40,1,18.99ms,39.79ms,109.17,52.12,+109.46,+104.55,+117.45,2.09,4,1,4.8%,,,new headline cell (no pre-SIMD baseline)
+dec,dec_mosaic_4k_cq20,1,230.25ms,345.30ms,36.02,24.02,+49.97,+47.38,+54.50,1.5,4,1,3.3%,,,new headline cell (no pre-SIMD baseline)
+dec,dec_mosaic_4k_cq40,1,136.06ms,192.06ms,60.96,43.19,+41.16,+38.90,+44.56,1.41,4,1,2.6%,,,new headline cell (no pre-SIMD baseline)
+dec,dec_64x64,2,101.60µs,170.91µs,40.32,23.97,+68.23,+61.43,+75.03,1.68,4,35,10.3%,1.77,-0.09,
+dec,dec_196x196,2,414.72µs,1.18ms,92.63,32.61,+184.03,+140.11,+227.95,2.84,4,5,19.1%,2.57,0.27,
+dec,dec_352x288_q00,2,8.88ms,12.41ms,11.41,8.17,+39.73,+38.51,+40.92,1.4,4,1,1.1%,1.37,0.03,
+dec,dec_352x288_q32,2,2.46ms,5.47ms,41.29,18.53,+122.85,+99.45,+158.06,2.23,4,1,16.3%,2.24,-0.01,
+dec,dec_352x288_q63,2,576.28µs,1.53ms,175.91,66.47,+172.14,+170.82,+173.39,2.72,4,3,0.6%,2.9,-0.18,RATIO XCHECK MISMATCH mean-derived=2.65
+dec,dec_mosaic_2k_cq20,2,31.94ms,60.20ms,64.91,34.45,+88.45,+86.82,+90.08,1.88,4,1,2.6%,,,new headline cell (no pre-SIMD baseline)
+dec,dec_mosaic_2k_cq40,2,18.80ms,39.42ms,110.28,52.6,+109.65,+105.10,+114.20,2.1,4,1,2.5%,,,new headline cell (no pre-SIMD baseline)
+dec,dec_mosaic_4k_cq20,2,237.55ms,356.15ms,34.92,23.29,+49.93,+46.53,+54.11,1.5,4,1,3.3%,,,new headline cell (no pre-SIMD baseline)
+dec,dec_mosaic_4k_cq40,2,138.77ms,193.65ms,59.77,42.83,+39.55,+37.95,+41.40,1.4,4,1,3.4%,,,new headline cell (no pre-SIMD baseline)

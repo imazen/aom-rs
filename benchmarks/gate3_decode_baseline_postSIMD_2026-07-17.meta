@@ -1,0 +1,64 @@
+measurement: Gate-3 DECODE post-SIMD wall-clock re-measure (port vs REAL C oracle, zenbench paired)
+git commit: b6c8d5bdd98ee177926175d80dc480125f1c04c2 (origin/main HEAD at capture)
+date: 2026-07-17 (run1 finalized 18:41:04Z, run2 finalized ~19:05Z)
+host: dedicated aom-rs box (AMD EPYC-Genoa / Zen 4, avx512), shared with concurrent agent sessions
+tool: zenbench (interleaved paired rounds; c_oracle is each group's baseline, so the port row's
+  "95% CI vs base" IS the Gate-3 ratio). release/bench profile, NO -Ctarget-cpu. Default resource gate ON.
+command: cargo bench -p aom-bench --bench gate3 -- --group=dec   (== `just bench-gate3` decode group)
+  run twice (reproducibility): raw structured data in .run1.zenbench.txt / .run2.zenbench.txt (re-readable;
+  cargo bench -- --format=csv|md|json reformats without re-running).
+cells: 5 conformance (dec_64x64, dec_196x196, dec_352x288_q00/q32/q63 — always present) + 4 headline
+  stills (dec_mosaic_{2k,4k}_{cq20,cq40} — .ivf all present, so from_vector_opt included them).
+  Every cell byte-verifies port==C in setup before timing (assert_byte_exact).
+ratio column: port_over_c_x = 1 + vs_base_pct/100 (zenbench's PAIRED estimate — authoritative). The naive
+  ratio-of-means is a cross-check; under 4-round low-n it can diverge ~0.05-0.07x (flagged on q63 run2:
+  paired 2.72 vs mean-ratio 2.65) — trust the paired value, that is what the Gate-3 target is defined against.
+delta_x = port_over_c_x - pre_simd_x  (NEGATIVE = improvement: port moved closer to C).
+
+BOX STATE / DRIFT (the owed "idle-box" caveat — READ THIS):
+- No competing BUILDS during either run: pgrep rustc/cargo/cc = 0 throughout (verified before + during).
+  Own build (--no-run) finished before timing. Load 0.33-1.6 across the two runs.
+- BUT the box is never drift-free: ~30 concurrent agent worktrees + herder processes cause per-round
+  micro-contention that zenbench's resource gate rejects. Result: EVERY decode cell gate-truncated to
+  exactly 4 clean rounds (min_rounds=10 requested; gate kept the 4 non-noisy ones). run1: 1045 noisy
+  rounds / 1098.3s; run2: 1078 noisy / 1098.6s. Per-cell drift flags both runs: dec_196x196 r=+1.00
+  (later rounds slower), dec_352x288_q32 r=-0.80 (later faster); run2 also flagged mosaic_4k drift.
+- This 4-round floor is STRUCTURALLY REPRODUCIBLE (identical in both independent runs AND in the pre-SIMD
+  baseline gate3_baseline_2026-07-17). It is a property of this background-agent box, not a fixable
+  transient — a "fully idle box" per the baseline's recommendation is not achievable here. Because BOTH
+  the pre-SIMD baseline and this re-measure gate-truncate to 4 rounds, the comparison is apples-to-apples,
+  and the PAIRED ratio (common-mode noise cancels) is the robust deliverable despite low n.
+
+PROVENANCE CORRECTION (verified against git ancestry + benchmarks/*.meta — the task brief's framing was off):
+- The pre-SIMD baseline commit 53779d9 (gate3_baseline_2026-07-17) ALREADY CARRIED the transform-SIMD
+  stack (its own meta: "transform-SIMD stack on main"; kernels #1-#5 + transforms landed, deblock still
+  scalar). So this is NOT a pre-transform-SIMD -> post-transform-SIMD delta.
+- What actually landed on origin/main between 53779d9 and b6c8d5b that touches DECODE: the deblock SIMD
+  chain ab88ad8 (filter4/lpf_4) -> fbdc153 (lpf_6/lpf_8) -> 1ce19a5 (lpf_14, all widths). (7241438, cited
+  in the brief as "transform-stack SIMD -41.5%", is actually a build-profile commit: "fast optimized test
+  profile + recipes"; it does not change the bench, which was already release/opt-3.)
+- Therefore this re-measure captures the DEBLOCK-SIMD increment on decode wall-clock, nothing more.
+
+RESULT — port/C ratio (x), pre-SIMD baseline -> post-SIMD (run1 / run2):
+  CONFORMANCE (have pre-SIMD baseline):
+    dec_64x64        1.77 -> 1.78 / 1.68   (flat; within run-to-run noise)
+    dec_196x196      2.57 -> 2.43 / 2.84   (noisy: 4-round low-n swings this small cell +-0.4x)
+    dec_352x288_q00  1.37 -> 1.39 / 1.40   (flat — high-quality KEY, minimal deblocking)
+    dec_352x288_q32  2.24 -> 2.06 / 2.23   (flat-to-slightly-better)
+    dec_352x288_q63  2.90 -> 2.78 / 2.72   (improved ~0.12-0.18x — aggressive q, deblock-heaviest cell)
+  HEADLINE STILLS (new cells; no pre-SIMD baseline; rock-solid across runs, Delta<=0.06x):
+    dec_mosaic_2k_cq20  1.94 / 1.88   dec_mosaic_2k_cq40  2.09 / 2.10
+    dec_mosaic_4k_cq20  1.50 / 1.50   dec_mosaic_4k_cq40  1.41 / 1.40
+
+INTERPRETATION (honest):
+- Post-SIMD decode sits at ~1.4-2.8x C (conformance) and ~1.4-2.1x C (2K/4K photographic stills). The
+  band is essentially the SAME as the pre-SIMD 1.37-2.90x. The deblock-SIMD landing yields at most a small
+  (~0.1x) improvement, concentrated where deblocking is a larger share (q63); elsewhere the change is
+  within the 4-round measurement noise. This is expected: the big decode SIMD win (transforms) was already
+  in the baseline; deblock is a smaller fraction of decode time, and 1ce19a5's own note was -10..13% on the
+  deblock kernels in isolation (not whole-frame decode).
+- Reproducibility: the LARGE cells (mosaic 2K/4K, 100-350ms/decode) are the trustworthy numbers — paired
+  ratios agree to <=0.06x across runs. The TINY conformance cells (us-ms) swing run-to-run under 4-round
+  truncation; report them as a band, not a point.
+- Gate-3 target is port <= 1.20x C. Decode is still 1.4-2.8x C: remaining scalar hot paths (small-tx
+  W4/H4, entropy/get_nz_ctx, alloc) are the gap, unchanged by this deblock landing.
