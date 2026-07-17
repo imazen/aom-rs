@@ -17,9 +17,22 @@
 //! math runs once across the 4 lanes instead of the scalar core's 4 sequential
 //! iterations.
 //!
+//! # Branchless width selection
+//!
+//! The scalar core branches per position: `filter6`/`filter8` apply the wide
+//! (flat-region) filter iff `flat && mask`, else fall back to `filter4`; those
+//! branches differ per lane. This kernel computes BOTH the `filter4` result and
+//! the wide result for all 4 lanes and blends per lane on the `flat & mask`
+//! lane mask (`i32x4::blend`) — the standard libaom SIMD structure. `filter4`
+//! itself is already branchless (its `& mask` / `& hev` gates zero out the
+//! contribution for unfiltered lanes, reproducing the scalar identity when
+//! `mask == 0`). Taps that only the wide filter writes (`p2`/`q2` in the 8-tap
+//! filter) blend against the ORIGINAL sample, matching the scalar core leaving
+//! them untouched on the `filter4` fallback.
+//!
 //! # Bit-exactness (full highbd domain, bd 8/10/12)
 //!
-//! The highbd scalar core does the FILTER math in `i16` (`filter`, `hev`,
+//! The highbd scalar core does the `filter4` math in `i16` (`filter`, `hev`,
 //! `filter1/2`, `f`) and the WIDE (6/8/14-tap) sums in `i32`. This kernel runs
 //! EVERYTHING in `i32` lanes, which reproduces the scalar result lane-for-lane:
 //!
@@ -29,8 +42,9 @@
 //! * The `& hev` / `& mask` / `& !hev` gates are `0`/`-1` lane masks; ANDing a
 //!   value already in the `i16` range with an all-ones/all-zero `i32` mask
 //!   yields the same value the scalar `i16` AND does.
-//! * `>> 3` / `>> 1` are arithmetic shifts on values in the `i16` range — the
-//!   `i32` and `i16` arithmetic shifts agree there.
+//! * `>> 3` / `>> 1` are arithmetic shifts on values in the `i16` range; the
+//!   wide-sum rounding (`rpo2`) shifts a NON-NEGATIVE sum, so `>> n` is a plain
+//!   unsigned divide. `i32` and `i16`/scalar agree in both cases.
 //! * `iabs(a,b) = |a-b|` with `a,b` ∈ `[0, 4095]`, so `.abs()` never hits the
 //!   `i32::MIN` corner; `iabs/2` is `>> 1` on a non-negative value.
 //! * The wide 14-tap weighted sums reach ~`4095*16 = 65520` at bd 12 — beyond
@@ -99,7 +113,7 @@ fn lpf_impl(
     bd: i32,
 ) {
     // Widths not yet vectorized fall through to the scalar transcription.
-    if width != 4 {
+    if width == 14 {
         crate::highbd::lpf_scalar(width, buf, center, ts, step, bl, li, th, bd);
         return;
     }
@@ -109,10 +123,16 @@ fn lpf_impl(
     let lim: i32 = 128 << shift;
     let neg_lim = i32x4::splat(token, -lim);
     let lim_hi = i32x4::splat(token, lim - 1);
+    let l = i32x4::splat(token, (li as i32) << shift); // limit
+    let blv = i32x4::splat(token, (bl as i32) << shift); // blimit
+    let ft = i32x4::splat(token, 1 << shift); // flat_mask thresh (== 1)
+
     // signed_char_clamp_high
     let scc = |v: i32x4| v.clamp(neg_lim, lim_hi);
     // |a - b| (a,b are u16 pixels widened to i32, so abs() is exact)
     let iabs = |a: i32x4, b: i32x4| (a - b).abs();
+    // rpo2(v, 3): round-power-of-two on a non-negative sum
+    let rpo3 = |v: i32x4| (v + 4).shr_logical_const::<3>();
 
     let c = center as isize;
     // Gather tap `k` (offset k*ts from center) across the 4 edge positions
@@ -129,7 +149,7 @@ fn lpf_impl(
         )
     };
 
-    // filter4: taps p1(-2) p0(-1) q0(0) q1(1); mask is the filter_mask lane
+    // filter4: taps p1(-2) p0(-1) q0(0) q1(1); `mask` is the filter_mask lane
     // mask (all-ones = filter). Returns (op1', op0', oq0', oq1').
     let filter4 = |op1: i32x4,
                    op0: i32x4,
@@ -156,28 +176,146 @@ fn lpf_impl(
         (n_op1, n_op0, n_oq0, n_oq1)
     };
 
-    // ---- lpf_4: filter_mask2 + filter4 -----------------------------------
-    let op1 = load(-2);
-    let op0 = load(-1);
-    let oq0 = load(0);
-    let oq1 = load(1);
+    // filter_mask2(limit, blimit, p1, p0, q0, q1) -> filter mask (post-NOT)
+    let fmask2 = |p1: i32x4, p0: i32x4, q0: i32x4, q1: i32x4| -> i32x4 {
+        (iabs(p1, p0).simd_gt(l)
+            | iabs(q1, q0).simd_gt(l)
+            | (iabs(p0, q0) * 2 + iabs(p1, q1).shr_logical_const::<1>()).simd_gt(blv))
+        .not()
+    };
+    // filter_mask3_chroma(limit, blimit, p2,p1,p0,q0,q1,q2)
+    let fmask6 = |p2: i32x4, p1: i32x4, p0: i32x4, q0: i32x4, q1: i32x4, q2: i32x4| -> i32x4 {
+        (iabs(p2, p1).simd_gt(l)
+            | iabs(p1, p0).simd_gt(l)
+            | iabs(q1, q0).simd_gt(l)
+            | iabs(q2, q1).simd_gt(l)
+            | (iabs(p0, q0) * 2 + iabs(p1, q1).shr_logical_const::<1>()).simd_gt(blv))
+        .not()
+    };
+    // filter_mask(limit, blimit, p3,p2,p1,p0,q0,q1,q2,q3)
+    let fmask8 = |p3: i32x4,
+                  p2: i32x4,
+                  p1: i32x4,
+                  p0: i32x4,
+                  q0: i32x4,
+                  q1: i32x4,
+                  q2: i32x4,
+                  q3: i32x4|
+     -> i32x4 {
+        (iabs(p3, p2).simd_gt(l)
+            | iabs(p2, p1).simd_gt(l)
+            | iabs(p1, p0).simd_gt(l)
+            | iabs(q1, q0).simd_gt(l)
+            | iabs(q2, q1).simd_gt(l)
+            | iabs(q3, q2).simd_gt(l)
+            | (iabs(p0, q0) * 2 + iabs(p1, q1).shr_logical_const::<1>()).simd_gt(blv))
+        .not()
+    };
+    // flat_mask3_chroma(1, p2,p1,p0,q0,q1,q2)
+    let flat3 = |p2: i32x4, p1: i32x4, p0: i32x4, q0: i32x4, q1: i32x4, q2: i32x4| -> i32x4 {
+        (iabs(p1, p0).simd_gt(ft)
+            | iabs(q1, q0).simd_gt(ft)
+            | iabs(p2, p0).simd_gt(ft)
+            | iabs(q2, q0).simd_gt(ft))
+        .not()
+    };
+    // flat_mask4(1, p3,p2,p1,p0,q0,q1,q2,q3)
+    let flat4 = |p3: i32x4,
+                 p2: i32x4,
+                 p1: i32x4,
+                 p0: i32x4,
+                 q0: i32x4,
+                 q1: i32x4,
+                 q2: i32x4,
+                 q3: i32x4|
+     -> i32x4 {
+        (iabs(p1, p0).simd_gt(ft)
+            | iabs(q1, q0).simd_gt(ft)
+            | iabs(p2, p0).simd_gt(ft)
+            | iabs(q2, q0).simd_gt(ft)
+            | iabs(p3, p0).simd_gt(ft)
+            | iabs(q3, q0).simd_gt(ft))
+        .not()
+    };
 
-    let l = i32x4::splat(token, (li as i32) << shift);
-    let blv = i32x4::splat(token, (bl as i32) << shift);
-    // filter_mask2(limit, blimit, p1, p0, q0, q1)
-    let cond1 = iabs(op1, op0).simd_gt(l);
-    let cond2 = iabs(oq1, oq0).simd_gt(l);
-    let cond3 = (iabs(op0, oq0) * 2 + iabs(op1, oq1).shr_logical_const::<1>()).simd_gt(blv);
-    let mask = (cond1 | cond2 | cond3).not();
+    // Scatter helper values into `buf` for taps `ks` — direct indexing so the
+    // (immutable) `load` closure's borrow has ended by this point.
+    macro_rules! store {
+        ($($k:expr => $v:expr),+ $(,)?) => {{
+            $(
+                let a = ($v).to_array();
+                buf[(c + ($k) * ts) as usize] = a[0] as u16;
+                buf[(c + step + ($k) * ts) as usize] = a[1] as u16;
+                buf[(c + 2 * step + ($k) * ts) as usize] = a[2] as u16;
+                buf[(c + 3 * step + ($k) * ts) as usize] = a[3] as u16;
+            )+
+        }};
+    }
 
-    let (n_op1, n_op0, n_oq0, n_oq1) = filter4(op1, op0, oq0, oq1, mask);
-
-    // scatter (mutable-borrow region — `load` is no longer used past here)
-    for (k, v) in [(-2isize, n_op1), (-1, n_op0), (0, n_oq0), (1, n_oq1)] {
-        let a = v.to_array();
-        buf[(c + k * ts) as usize] = a[0] as u16;
-        buf[(c + step + k * ts) as usize] = a[1] as u16;
-        buf[(c + 2 * step + k * ts) as usize] = a[2] as u16;
-        buf[(c + 3 * step + k * ts) as usize] = a[3] as u16;
+    match width {
+        4 => {
+            // taps p1(-2) p0(-1) q0(0) q1(1)
+            let op1 = load(-2);
+            let op0 = load(-1);
+            let oq0 = load(0);
+            let oq1 = load(1);
+            let mask = fmask2(op1, op0, oq0, oq1);
+            let (n1, n0, m0, m1) = filter4(op1, op0, oq0, oq1, mask);
+            store!(-2 => n1, -1 => n0, 0 => m0, 1 => m1);
+        }
+        6 => {
+            // taps p2(-3) p1(-2) p0(-1) q0(0) q1(1) q2(2)
+            let p2 = load(-3);
+            let p1 = load(-2);
+            let p0 = load(-1);
+            let q0 = load(0);
+            let q1 = load(1);
+            let q2 = load(2);
+            let mask = fmask6(p2, p1, p0, q0, q1, q2);
+            let flat = flat3(p2, p1, p0, q0, q1, q2);
+            let use_wide = flat & mask;
+            // wide 6-tap (writes p1,p0,q0,q1)
+            let w_p1 = rpo3(p2 * 3 + p1 * 2 + p0 * 2 + q0);
+            let w_p0 = rpo3(p2 + p1 * 2 + p0 * 2 + q0 * 2 + q1);
+            let w_q0 = rpo3(p1 + p0 * 2 + q0 * 2 + q1 * 2 + q2);
+            let w_q1 = rpo3(p0 + q0 * 2 + q1 * 2 + q2 * 3);
+            let (f_p1, f_p0, f_q0, f_q1) = filter4(p1, p0, q0, q1, mask);
+            let o_p1 = i32x4::blend(use_wide, w_p1, f_p1);
+            let o_p0 = i32x4::blend(use_wide, w_p0, f_p0);
+            let o_q0 = i32x4::blend(use_wide, w_q0, f_q0);
+            let o_q1 = i32x4::blend(use_wide, w_q1, f_q1);
+            store!(-2 => o_p1, -1 => o_p0, 0 => o_q0, 1 => o_q1);
+        }
+        8 => {
+            // taps p3(-4) p2(-3) p1(-2) p0(-1) q0(0) q1(1) q2(2) q3(3)
+            let p3 = load(-4);
+            let p2 = load(-3);
+            let p1 = load(-2);
+            let p0 = load(-1);
+            let q0 = load(0);
+            let q1 = load(1);
+            let q2 = load(2);
+            let q3 = load(3);
+            let mask = fmask8(p3, p2, p1, p0, q0, q1, q2, q3);
+            let flat = flat4(p3, p2, p1, p0, q0, q1, q2, q3);
+            let use_wide = flat & mask;
+            // wide 8-tap (writes p2,p1,p0,q0,q1,q2)
+            let w_p2 = rpo3(p3 * 3 + p2 * 2 + p1 + p0 + q0);
+            let w_p1 = rpo3(p3 * 2 + p2 + p1 * 2 + p0 + q0 + q1);
+            let w_p0 = rpo3(p3 + p2 + p1 + p0 * 2 + q0 + q1 + q2);
+            let w_q0 = rpo3(p2 + p1 + p0 + q0 * 2 + q1 + q2 + q3);
+            let w_q1 = rpo3(p1 + p0 + q0 + q1 * 2 + q2 + q3 * 2);
+            let w_q2 = rpo3(p0 + q0 + q1 + q2 * 2 + q3 * 3);
+            let (f_p1, f_p0, f_q0, f_q1) = filter4(p1, p0, q0, q1, mask);
+            // p2/q2 fall back to the ORIGINAL sample (filter4 leaves them).
+            let o_p2 = i32x4::blend(use_wide, w_p2, p2);
+            let o_p1 = i32x4::blend(use_wide, w_p1, f_p1);
+            let o_p0 = i32x4::blend(use_wide, w_p0, f_p0);
+            let o_q0 = i32x4::blend(use_wide, w_q0, f_q0);
+            let o_q1 = i32x4::blend(use_wide, w_q1, f_q1);
+            let o_q2 = i32x4::blend(use_wide, w_q2, q2);
+            store!(-3 => o_p2, -2 => o_p1, -1 => o_p0, 0 => o_q0, 1 => o_q1, 2 => o_q2);
+        }
+        _ => crate::highbd::lpf_scalar(width, buf, center, ts, step, bl, li, th, bd),
     }
 }
