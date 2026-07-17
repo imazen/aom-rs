@@ -74,6 +74,7 @@ Byte-identity gates landed and green on origin/main. Any regression here is a sh
 | **CDEF-strength RD search** (`--enable-cdef=1`, #7 / family C1): 14/14 cells — real content 196²/64² cq5..63 (cdef_bits=2 four-strength joint sets, per-unit literals) + mono/4:4:4/4:2:0/bd10 axes; speed-0 FULL search; two-pass encode→LF→search→pack | `encoder_gate_cdef_{real_content,synthetic_axes}_rd_close` (aom-bench; rd_close report + full byte-identity asserts) | 016d4dd + 9850da6 + c9ebf83 |
 | **Loop-restoration RD search** (`--enable-restoration=1`, family C2): 8/8 cells BYTE-IDENTICAL + 8/8 decisions equal C's — real content 64² cq{12,32,48}, 196² cq{20,48} (partial-SB edges), 352×288 cq{32,55} (multi-unit size-descent grids), b10 352×288 cq32; decision shapes covered: all-NONE, WIENER-luma, SGRPROJ-luma, WIENER-all-3-planes, mixed SGR-luma+WIENER-chroma (b10), unit-size descent picking 128; allintra speed-0 full search (all 16 SGR eps, ±{4,2,1} Wiener tap refine, 256→128→64 size loop) | `lr_restoration_gate.rs::lr_restoration_search_rd_close_vs_real_aomenc` (aom-bench; rd_close report + full byte-identity + decision-equality asserts) | e24cf09 + 96d3464 + dfd757e + 96534c4 |
 | **tune=IQ / tune=SSIMULACRA2 family** (`--tune=iq` / `--tune=ssimulacra2`, family C4): each bundle piece e2e byte-identical — QM-level formulas (`aom_get_qmlevel_luma_ssimulacra2` + `_444_chroma`), QM-PSNR dist metric (trellis + tx-search transform-domain distortion QM-weighted), `--sharpness` 0..7, `--enable-chroma-deltaq`, `--enable-adaptive-sharpness`, Variance-Boost `--deltaq-mode=6` — PLUS the **full composite bundle** (54/54 cells: mono/420/444 × 64/128/192 × cq12/32/50, CDEF overridden off = the separate C1 track, symbol-inert). All OFF by default (`TuneKnobs::default()` = PSNR). Anti-vacuous witnesses for sharpness/adaptive/variance-boost + `tune_shim_smoke` | `encoder_gate_tune_iq_e2e` (9 tests) + `qm_level_diff` + `tune_shim_smoke` | 2026-07-17 |
+| **Superres encoder-side, FIXED denom, bd8** (`--superres-mode=fixed --superres-denominator=D`, family C6): **13/13 cells BYTE-IDENTICAL** — real-content 196² 4:2:0 (denoms 9/12/14 × cq{20,32,48}) + mono (denoms 9/12 × cq{20,48}). The source is downscaled horizontally to the coded `FrameWidth` via the ported non-normative `av1_resize_plane` (`aom_encode::resize`, differentially bit-exact vs the exported C symbol — interpolate 5-band + down2_symeven/symodd + resize_multistep + `coded_superres_width`), encoded at the reduced width (existing speed-0 KEY machinery, mi grid sized to coded_w), superres denom + upscaled width signalled in the header (`write_superres_scale`); port+C decoders agree on the upscaled recon. Superres OFF by default. **Anti-vacuity**: `scale_denominator == D`, `coded_w < w`. **Follow-ups (Section C6)**: highbd (10/12-bit) downscale (`highbd_resize_plane`), the 8-bit denom-16-even-width optimized-scaler corner (`av1_resize_and_extend_frame`), and AUTO/QTHRESH/RANDOM denom selection + the recode loop. | `encoder_gate_superres_{fixed_real_content,fixed_mono}_rd_close` (aom-bench; rd_close report + full byte-identity asserts) | 2505b49f (kernel) + (this landing) |
 
 ### Decoder (vs real `aom_codec_av1_dx`)
 
@@ -224,13 +225,30 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   priority) `--delta-lf-mode` (S–M).
 - Encoder-side per-SB delta-q/delta-lf tile signaling (writer side). (S–M, shared)
 
-### C6 — Superres (encode side) — ABSENT (M–L)
+### C6 — Superres (encode side) — FIXED bd8 DONE (→ Section A); remaining PARTIAL (S–M)
 - `--superres-mode/-denominator/-kf-denominator/-qthresh/-kf-qthresh`. Default NONE.
-- C: `av1/encoder/superres_scale.c` `av1_superres_post_encode` + mode/denom selection,
-  `hl_sf.superres_auto_search_type=SUPERRES_AUTO_DUAL` at allintra speed-0 (dual = encode
-  twice + compare); downscale `av1/common/resize.c`. Port has: normative decode-side
-  upscale + `ref_encode_av1_kf_superres` oracle. Missing: source downscale, the recode
-  loop, RD compare, header denominator signaling from the encoder.
+- **DONE (Section A): FIXED mode, 8-bit, 13/13 byte-identical** — source downscale
+  (`av1_resize_plane`, `aom_encode::resize`, differentially bit-exact vs exported C:
+  `resize_plane_diff` 5 tests) + coded-width encode + `write_superres_scale` header
+  signalling. Gate `encoder_gate_superres_{fixed_real_content,fixed_mono}_rd_close`. The
+  source downscale for an ALLINTRA KEY still takes the `DISALLOW_RECODE` `encode_without_recode`
+  path → `av1_resize_and_extend_frame_nonnormative` → `av1_resize_plane` (verified in
+  `reference/libaom`), so there is NO recode loop for FIXED stills.
+- **Remaining:**
+  1. **Highbd (10/12-bit) downscale** — port `highbd_resize_plane` (resize.c:771+, the u16
+     `highbd_interpolate`/`highbd_down2_*`) as the bd>8 arm; the differential + e2e already
+     have the shape (add bd10/bd12 cells). (S)
+  2. **8-bit denom-16-even-width corner** — that ratio (exact 1/2, 1/16-multiple) trips
+     libaom's OPTIMIZED `av1_resize_and_extend_frame` (a DIFFERENT kernel, `aom_scaled_2d`),
+     not `av1_resize_plane`; the gate asserts-out of it (`superres_uses_optimized_scaler_8bit`).
+     Port the optimized scaler to cover it. (S–M)
+  3. **AUTO / QTHRESH / RANDOM denom selection** — `calculate_next_superres_scale`
+     (superres_scale.c): QTHRESH/AUTO choose the denom from qindex via `analyze_hor_freq`
+     (16×4 H_DCT energy, needs `av1_fwd_txfm2d_16x4`) + `get_superres_denom_from_qindex_energy`
+     + `av1_rc_pick_q_and_bounds`; RANDOM = `lcg_rand16 % 9 + 8`. FIXED (denom given) is the
+     common stills mode and is done; these are the denom-*derivation* modes. (M)
+  4. `av1_superres_in_recode_allowed` is AUTO+non-SOLO+frames_to_key>1 only → never for FIXED
+     stills; the recode loop (`SUPERRES_AUTO_DUAL`) is an AUTO-mode multi-pass follow-up. (M)
 
 ### C7 — Film grain / denoise estimation — ABSENT (S table-inject, L estimation)
 - `--film-grain-test` / `--film-grain-table`: inject grain params → header. C:
