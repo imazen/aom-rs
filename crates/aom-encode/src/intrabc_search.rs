@@ -655,6 +655,78 @@ mod tests {
         assert_ne!(crc.value(&[0u8; 16]), crc.value(&[1u8; 16]));
     }
 
+    /// `intrabc_predict_chroma` must match the (bit-exact vs C) DECODER's
+    /// `intrabc_chroma_predict` for every full-pel DV and subsampling. The
+    /// decoder (aom-decode/src/lib.rs, conformance-bit-exact) derives the
+    /// chroma ref position + subpel as `mvq4 = dv << (1 - ss); off = mvq4 >> 4;
+    /// subpel = mvq4 & 15`, then the same 2-tap copy/h-half/v-half/bilinear
+    /// interpolation. Our encoder-side predictor derives subpel INTERNALLY
+    /// (`(dv>>3>>ss)`, `((dv>>3)&1)*8`); this transcribes the decoder's exact
+    /// reference and asserts byte-identity across DVs / ss / bit depth — the
+    /// HANDOFF-flagged "diff-test chroma predict vs the decoder" hazard.
+    #[test]
+    fn intrabc_chroma_predict_matches_decoder() {
+        let stride = 48usize;
+        let mut recon = vec![0u16; stride * 48];
+        let mut s = 0x1234_5678u32;
+        for p in recon.iter_mut() {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            *p = ((s >> 13) & 0x3ff) as u16;
+        }
+        let (cw, ch) = (8usize, 8usize);
+        let block_off = 20 * stride + 20;
+        for &(ss_x, ss_y) in &[(1usize, 1usize), (1, 0), (0, 0)] {
+            for &bd in &[8i32, 10, 12] {
+                for kr in -6..=0i32 {
+                    for kc in -6..=0i32 {
+                        let (dv_row, dv_col) = (kr * 8, kc * 8); // full-pel luma DV
+                        // ---- decoder reference derivation (transcribed) ----
+                        let mvq4_row = dv_row << (1 - ss_y as i32);
+                        let mvq4_col = dv_col << (1 - ss_x as i32);
+                        let ref_off = (block_off as i64
+                            + (mvq4_row >> 4) as i64 * stride as i64
+                            + (mvq4_col >> 4) as i64) as usize;
+                        let (subpel_x, subpel_y) = (mvq4_col & 15, mvq4_row & 15);
+                        let max = (1i32 << bd) - 1;
+                        let clip = |v: i32| v.clamp(0, max) as u16;
+                        let mut want = vec![0u16; cw * ch];
+                        for r in 0..ch {
+                            let so = ref_off + r * stride;
+                            for c in 0..cw {
+                                let a00 = recon[so + c] as i32;
+                                want[r * cw + c] = match (subpel_x != 0, subpel_y != 0) {
+                                    (false, false) => a00 as u16,
+                                    (true, false) => clip((a00 + recon[so + c + 1] as i32 + 1) >> 1),
+                                    (false, true) => {
+                                        clip((a00 + recon[so + c + stride] as i32 + 1) >> 1)
+                                    }
+                                    (true, true) => clip(
+                                        (a00
+                                            + recon[so + c + 1] as i32
+                                            + recon[so + c + stride] as i32
+                                            + recon[so + c + stride + 1] as i32
+                                            + 2)
+                                            >> 2,
+                                    ),
+                                };
+                            }
+                        }
+                        // ---- encoder predictor ----
+                        let mut got = vec![0u16; cw * ch];
+                        intrabc_predict_chroma(
+                            &recon, block_off, stride, dv_row, dv_col, ss_x, ss_y, &mut got, cw,
+                            cw, ch, bd,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "chroma predict mismatch ss=({ss_x},{ss_y}) bd={bd} dv=({dv_row},{dv_col})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// The hierarchical exploration must visit every candidate exactly once
     /// (the C doc-comment's 8x8/block-4 example: 25 candidates).
     #[test]
@@ -892,17 +964,16 @@ pub struct FullMvLimits {
 /// `av1_set_mv_search_range` (mcomp.c:233): intersect the caller's limits
 /// with the ±MAX_FULL_PEL_VAL window around the (subpel) ref MV.
 pub fn set_mv_search_range(lim: &mut FullMvLimits, ref_row: i32, ref_col: i32) {
-    const MAX_FULL_PEL_VAL: i32 = (1 << 11) - 1; // (1 << MAX_MVSEARCH_STEPS-1) - 1... mcomp.h: (1 << (MAX_MVSEARCH_STEPS - 1)) - 1 = 1023? see below
-    // mcomp.h: MAX_FULL_PEL_VAL = (1 << (MAX_MVSEARCH_STEPS - 1)) - 1, with
-    // MAX_MVSEARCH_STEPS = 11 -> 1023.
-    const MAX_FP: i32 = (1 << 10) - 1;
-    let _ = MAX_FULL_PEL_VAL;
+    // VERIFIED vs reference/libaom (mcomp_structs.h:19,22): MAX_MVSEARCH_STEPS
+    // = 11, so MAX_FULL_PEL_VAL = (1 << (MAX_MVSEARCH_STEPS - 1)) - 1 = 1023.
+    const MAX_FULL_PEL_VAL: i32 = (1 << 10) - 1;
+    // mv.h: MV_LOW = -(1 << 14), MV_UPP = (1 << 14).
     const MV_LOW: i32 = -(1 << 14);
     const MV_UPP: i32 = 1 << 14;
-    let mut col_min = ((ref_col + 7) >> 3) - MAX_FP;
-    let mut row_min = ((ref_row + 7) >> 3) - MAX_FP;
-    let mut col_max = (ref_col >> 3) + MAX_FP;
-    let mut row_max = (ref_row >> 3) + MAX_FP;
+    let mut col_min = ((ref_col + 7) >> 3) - MAX_FULL_PEL_VAL;
+    let mut row_min = ((ref_row + 7) >> 3) - MAX_FULL_PEL_VAL;
+    let mut col_max = (ref_col >> 3) + MAX_FULL_PEL_VAL;
+    let mut row_max = (ref_row >> 3) + MAX_FULL_PEL_VAL;
     col_min = col_min.max((MV_LOW >> 3) + 1);
     row_min = row_min.max((MV_LOW >> 3) + 1);
     col_max = col_max.min((MV_UPP >> 3) - 1);
