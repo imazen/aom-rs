@@ -976,9 +976,13 @@ port-derived.
   (KB-8/KB-9/KB-10/KB-11; 6/7 = 64/64 canon each), speed 9 = 64/64 canon + noise, speed 8 =
   60/64 canon (4 diag estimate-arm V/H near-ties pinned open, KB-12) + noise — the nonrd
   PICKMODE (`use_nonrd_pick_mode`, `av1_nonrd_use_partition` single-pass walk,
-  `av1_nonrd_pick_intra_mode` + `hybrid_intra_mode_search`). See KB-12. Remaining Gate-2
-  byte-exactness is the 4 speed-8 diag near-ties + the KB-10/KB-11 speed-6/7 noise-cq63 near-tie
-  (both a sibling-C RD dump away). (#8 qindex-from-cq and #21 decoder q62/q63 also DONE + CI-green.)
+  `av1_nonrd_pick_intra_mode` + `hybrid_intra_mode_search`). See KB-12. The speed sweep above is
+  SYNTHETIC content; **REAL content at speed>=1 is a SEPARATE residual (KB-13, task #39)** — the
+  synthetic gates are 64/64 but decoded-conformance content diverges at 36/60 speed-1..4 cells (all
+  interior BLOCK_16X16/8X8 partition RD near-ties, port over-picks AB/SPLIT), pinned self-promoting
+  in `encoder_gate_real_content_speed1to4_e2e`. Remaining Gate-2 byte-exactness is the 4 speed-8
+  diag near-ties + the KB-10/KB-11 speed-6/7 noise-cq63 near-tie + the KB-13 real-content set (all a
+  sibling-C RD dump away). (#8 qindex-from-cq and #21 decoder q62/q63 also DONE + CI-green.)
 
 **Confirmed NON-divergences (ruled out — do not re-chase):**
 - **#27 `model_based_prune_tx_search_level`.** `av1_set_speed_features_qindex_dependent` sets it
