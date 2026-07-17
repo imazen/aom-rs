@@ -873,6 +873,53 @@ pub fn pack_tile(
     let mut kfs = kf_block_state(pack_cfg, env, sb_mi);
     let mut trees = Vec::new();
 
+    // `part_sf.partition_search_type == VAR_BASED_PARTITION` — allintra
+    // speed >= 7 exactly (speed_features.c:571 is its only allintra setter;
+    // `SpeedFeatures::partition_search_type` documents the field, derived
+    // inline here per the established `cfg.allintra && cfg.speed >= N`
+    // pattern). Flips the per-SB encoder from the RD partition search to
+    // `av1_choose_var_based_partitioning` + `av1_rd_use_partition`
+    // (encode_rd_sb, encodeframe.c:876-895).
+    let use_var_based_partition = pick_cfg.allintra && pick_cfg.speed >= 7;
+    let mut vbp_stamps = if use_var_based_partition {
+        vec![0u8; env.mi_rows as usize * mi_cols]
+    } else {
+        Vec::new()
+    };
+    let vbp_frame = if use_var_based_partition {
+        // `cm->width * cm->height` feeds set_vbp_thresholds' <720p arm; the
+        // true crop dims aren't threaded to pack_tile, so use the mi-aligned
+        // dims and LOUDLY reject the (up-to-3px-per-axis) window where the
+        // crop could straddle the 1280x720 boundary and flip the thresholds.
+        const RESOLUTION_720P: i64 = 1280 * 720;
+        let mi_px = i64::from(env.mi_cols * 4) * i64::from(env.mi_rows * 4);
+        let min_crop_px = i64::from(env.mi_cols * 4 - 3) * i64::from(env.mi_rows * 4 - 3);
+        assert_eq!(
+            mi_px < RESOLUTION_720P,
+            min_crop_px < RESOLUTION_720P,
+            "VBP threshold resolution arm is crop-ambiguous at {}x{} mi-aligned: \
+             thread the true crop dims",
+            env.mi_cols * 4,
+            env.mi_rows * 4
+        );
+        Some(crate::var_part::VbpFrame {
+            mi_rows: env.mi_rows,
+            mi_cols: env.mi_cols,
+            // Single-tile envelope: tile ends == frame ends (the env's
+            // tile_row_end/tile_col_end are unclamped sentinels).
+            tile_mi_row_end: env.mi_rows.min(env.tile_row_end),
+            tile_mi_col_end: env.mi_cols.min(env.tile_col_end),
+            num_pixels: mi_px,
+            sb_size,
+            qindex: pick_cfg.qindex,
+            bit_depth: env.bd,
+            ss_x: if env.monochrome { 1 } else { env.ss_x },
+            ss_y: if env.monochrome { 1 } else { env.ss_y },
+        })
+    } else {
+        None
+    };
+
     for r in 0..n_sb_rows {
         search_tile.left_ectx = [[0; 32]; 3];
         search_tile.left_pctx = [0; 32];
@@ -889,8 +936,12 @@ pub fn pack_tile(
             // partition_search.c:652/5710-5722): computed ONCE per SB from
             // the whole-SB source variance, then held constant for every
             // node/leaf below it (both the search and the pack walk use the
-            // SAME folded env for this SB).
-            let sb_rdmult = if pick_cfg.allintra {
+            // SAME folded env for this SB). NOT on the VAR_BASED_PARTITION
+            // path: only av1_rd_pick_partition's SB root recomputes
+            // `x->intra_sb_rdmult_modifier` (:5715) — `encode_rd_sb`'s VBP
+            // arm leaves it at the per-SB reset 128 (encodeframe.c:1303), so
+            // setup_block_rdmult's ALLINTRA fold is IDENTITY at speed >= 7.
+            let sb_rdmult = if pick_cfg.allintra && !use_var_based_partition {
                 let mi_w = MI_SIZE_WIDE_B[sb_size] as i32;
                 let mi_h = MI_SIZE_HIGH_B[sb_size] as i32;
                 let ref_off_y =
@@ -964,31 +1015,67 @@ pub fn pack_tile(
             // node's own NONE/SPLIT/RECT stages has always already
             // overwritten it in every case this port's envelope reaches.
             let mut last_source_variance = 0u32;
-            let (tree, _stats, found) = rd_pick_partition_real(
-                &sb_env,
-                &sb_pick_cfg,
-                &mut search_tile,
-                &mut grid,
-                recon_y,
-                recon_u,
-                recon_v,
-                &mut cfl_search,
-                mi_row,
-                mi_col,
-                sb_size,
-                PartRdStats::invalid(),
-                0,
-                0, // quad_tree_idx: 0 at the SB (64×64) root
-                None,
-                None, // rect_part_win_info: NULL at the SB root (encodeframe.c:826)
-                &mut visits,
-                &mut last_source_variance,
-            );
-            assert!(
-                found,
-                "partition search must find a valid tree at ({mi_row}, {mi_col})"
-            );
-            let mut tree = tree.expect("found implies a winning tree");
+            let mut tree = if let Some(vf) = &vbp_frame {
+                // encode_rd_sb's VAR_BASED_PARTITION arm (encodeframe.c:
+                // 876-895): av1_choose_var_based_partitioning fixes the
+                // tree, av1_rd_use_partition runs the RD mode search over
+                // it (do_recon=1 at the SB root -> the OUTPUT_ENABLED
+                // winner walk, exactly the pick path's own root behavior).
+                crate::var_part::choose_var_based_partitioning_key(
+                    &mut vbp_stamps,
+                    vf,
+                    env.src_y,
+                    env.base_y,
+                    env.stride,
+                    mi_row,
+                    mi_col,
+                    /*vbp_prune_16x16_split_using_min_max_sub_blk_var=*/ false,
+                );
+                let (tree, _stats) = crate::partition_pick::rd_use_partition_real(
+                    &sb_env,
+                    &sb_pick_cfg,
+                    &mut search_tile,
+                    &mut grid,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    &mut cfl_search,
+                    &vbp_stamps,
+                    mi_row,
+                    mi_col,
+                    sb_size,
+                    /*do_recon=*/ true,
+                    &mut visits,
+                    &mut last_source_variance,
+                );
+                tree
+            } else {
+                let (tree, _stats, found) = rd_pick_partition_real(
+                    &sb_env,
+                    &sb_pick_cfg,
+                    &mut search_tile,
+                    &mut grid,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    &mut cfl_search,
+                    mi_row,
+                    mi_col,
+                    sb_size,
+                    PartRdStats::invalid(),
+                    0,
+                    0, // quad_tree_idx: 0 at the SB (64×64) root
+                    None,
+                    None, // rect_part_win_info: NULL at the SB root (encodeframe.c:826)
+                    &mut visits,
+                    &mut last_source_variance,
+                );
+                assert!(
+                    found,
+                    "partition search must find a valid tree at ({mi_row}, {mi_col})"
+                );
+                tree.expect("found implies a winning tree")
+            };
 
             let mut cfl_pack = CflCtx::new(env.ss_x as i32, env.ss_y as i32);
             pack_sb(

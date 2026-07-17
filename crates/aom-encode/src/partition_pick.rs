@@ -3156,6 +3156,347 @@ fn stamp_grid_from_tree(
     }
 }
 
+/// `av1_rd_use_partition` (partition_search.c:1764) — the VAR_BASED_PARTITION
+/// walk (allintra speed >= 7, KEY): apply the pre-calculated partition tree
+/// (the [`crate::var_part::choose_var_based_partitioning_key`] `bsize` stamps
+/// in `vbp_stamps`, read back per node via
+/// [`crate::var_part::get_partition_from_stamps`] = C's `get_partition`)
+/// running [`leaf_pick_sb_modes`] — the SAME full-RD leaf mode search the
+/// partition search uses (`use_nonrd_pick_mode` stays 0 until speed 8) — at
+/// each tree leaf, with C's exact context-propagation shape:
+///
+/// - **HORZ/VERT** (:1869-1938): pick sub 0, then `av1_update_state` +
+///   `encode_superblock(DRY_RUN_NORMAL)` (= [`encode_b_intra_dry`], the rect
+///   stage's own mid-stage propagation) before picking sub 1. Sub 1 runs only
+///   when in-frame (`mi_row/col + hbs < mi_rows/cols`) — a frame-edge rect
+///   codes sub 0 alone. Both leaves take `invalid_rdc` budgets (INT64_MAX —
+///   the fixed tree never early-outs a leaf).
+/// - **SPLIT** (:1940-1974): recurse per quadrant with `do_recon = i != 3`
+///   (the C call's `i != SUB_PARTITIONS_SPLIT - 1`) — children 0..2 re-encode
+///   their winner subtree (context propagation for the next sibling), child 3
+///   skips it (the parent's own walk covers it). Off-frame quadrants are
+///   skipped ([`SbTree::Absent`]).
+/// - **Per node** (:1815/:2051 + :2064-2086): `av1_save_context` on entry,
+///   `av1_restore_context` after the switch, then `if (do_recon) encode_sb`
+///   — OUTPUT_ENABLED at the SB root, DRY_RUN_NORMAL below
+///   ([`encode_sb_dry`] with the same `output_enabled` tx_type_map
+///   semantics as the pick path's winner walk) + the mi-grid stamp
+///   (`stamp_grid_from_tree`).
+///
+/// Structurally DEAD at allintra speed 7 (verified against source, KB-11):
+/// - The PARTITION_NONE re-evaluation (:1827-1852) and the split-of-NONEs
+///   re-evaluation (:1986-2040) — both gated on
+///   `adjust_var_based_rd_partitioning` (`is_adjust_var_based_part_enabled`
+///   :1714 needs 1/2; the `> 2` chosen-split gate) which is **0 outside
+///   REALTIME** (init :2288; the =2 setter :2002 + the qindex-dep :2896 are
+///   both REALTIME-only). So `none_rdc`/`chosen_rdc` stay invalid, the
+///   `last_part < chosen` compare always keeps the tree's partition, and
+///   `use_partition_none` never fires. NOT ported (documented).
+/// - `setup_block_rdmult` (:1824): resets `x->rdmult = cpi->rd.RDMULT` then
+///   applies the ALLINTRA `intra_sb_rdmult_modifier` fold — which the VAR
+///   path leaves at its per-SB reset value 128 (encodeframe.c:1303; only
+///   av1_rd_pick_partition's root recomputes it, partition_search.c:5715) —
+///   identity. `env.rdmult` must be the UNMODIFIED frame RDMULT (the caller
+///   `pack_tile` skips the SB fold on this path).
+/// - `bsize == BLOCK_16X16 && cpi->vaq_refresh` mb_energy (:1817), AQ /
+///   delta-q / SSIM rdmult arms — all off in this envelope.
+///
+/// The partition rate (`partition_cost[pl][partition]`, :2043-2047 — the
+/// plain 10-way table; rd_use_partition does NOT use rd_pick's
+/// `set_partition_cost_for_edge_blk` edge gather) is folded faithfully into
+/// the returned stats, but on this path the RD totals are DECISION-INERT:
+/// nothing compares them (the tree is fixed; the none/chosen arms are dead).
+///
+/// Returns `(tree, last_part_rdc)`.
+#[allow(clippy::too_many_arguments)]
+pub fn rd_use_partition_real(
+    env: &SbEncodeEnv,
+    cfg: &PickFrameCfg,
+    tile: &mut TileCtxState,
+    grid: &mut ModeGrid,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    cfl: &mut CflCtx,
+    vbp_stamps: &[u8],
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    do_recon: bool,
+    visits: &mut Vec<LeafVisit>,
+    last_source_variance: &mut u32,
+) -> (SbTree, PartRdStats) {
+    debug_assert!(
+        mi_row < env.mi_rows && mi_col < env.mi_cols,
+        "callers skip off-frame quadrants (partition_search.c:1799/:1952)"
+    );
+    // In rt mode, currently the min partition size is BLOCK_8X8 (:1803) —
+    // the KEY variance tree never stamps below it.
+    debug_assert!(bsize >= 3, "bsize >= default_min_partition_size (:1803)");
+    let bs = MI_SIZE_WIDE_B[bsize] as i32;
+    let hbs = bs / 2;
+    let invalid = PartRdStats::invalid();
+
+    // get_partition (av1_common_int.h:1775) over the stamp grid.
+    let partition = crate::var_part::get_partition_from_stamps(
+        vbp_stamps,
+        env.mi_rows,
+        env.mi_cols,
+        mi_row,
+        mi_col,
+        bsize,
+    );
+    let subsize = get_partition_subsize(bsize, partition) as usize;
+
+    // partition_plane_context (:1778-1780) + the plain 10-way cost row.
+    let pl_ctx = partition_plane_context(
+        &tile.above_pctx,
+        &tile.left_pctx,
+        mi_row as usize,
+        mi_col as usize,
+        bsize,
+    ) as usize;
+    let partition_cost = &cfg.partition_costs[pl_ctx];
+
+    // av1_save_context (:1815).
+    let saved = save_context(tile, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+
+    // C: av1_invalid_rd_stats(&last_part_rdc) at entry (:1805) — every
+    // reachable arm below assigns before reading (the compiler enforces it,
+    // so the invalid-init is elided rather than dead-stored).
+    let mut last_part_rdc;
+    let tree: SbTree = match partition {
+        // PARTITION_NONE (:1861-1864).
+        0 => {
+            let (this_rdc, winner, sv) = leaf_pick_sb_modes(
+                env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, bsize,
+                0, &invalid,
+            );
+            *last_source_variance = sv;
+            visits.push(LeafVisit {
+                mi_row,
+                mi_col,
+                bsize,
+                budget: invalid.rdcost,
+                rate: this_rdc.rate,
+                dist: this_rdc.dist,
+                rdcost: this_rdc.rdcost,
+            });
+            last_part_rdc = this_rdc;
+            SbTree::Leaf(winner.expect("unbounded-budget leaf pick always finds a winner"))
+        }
+        // PARTITION_HORZ (:1869) / PARTITION_VERT (:1903) — same shape on
+        // the other axis.
+        1 | 2 => {
+            let is_horz = partition == 1;
+            let (this_rdc, w0, sv) = leaf_pick_sb_modes(
+                env,
+                cfg,
+                tile,
+                grid,
+                recon_y,
+                recon_u,
+                recon_v,
+                cfl,
+                mi_row,
+                mi_col,
+                subsize,
+                partition as usize,
+                &invalid,
+            );
+            *last_source_variance = sv;
+            visits.push(LeafVisit {
+                mi_row,
+                mi_col,
+                bsize: subsize,
+                budget: invalid.rdcost,
+                rate: this_rdc.rate,
+                dist: this_rdc.dist,
+                rdcost: this_rdc.rdcost,
+            });
+            last_part_rdc = this_rdc;
+            let mut w0 = w0.expect("unbounded-budget leaf pick always finds a winner");
+            let sub1_in_frame = if is_horz {
+                mi_row + hbs < env.mi_rows
+            } else {
+                mi_col + hbs < env.mi_cols
+            };
+            // (:1885-1908 / :1919-1938) — bsize >= BLOCK_8X8 always holds
+            // here (tree min); rate != INT_MAX always holds (unbounded leaf).
+            if last_part_rdc.rate != i32::MAX && sub1_in_frame {
+                // av1_update_state + encode_superblock(DRY_RUN_NORMAL)
+                // (:1890-1892) — the mid-stage propagation, exactly the rect
+                // stage's own shape.
+                let _ = crate::encode_sb::encode_b_intra_dry(
+                    env,
+                    tile,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    &mut w0,
+                    mi_row,
+                    mi_col,
+                    partition as usize,
+                    false,
+                );
+                grid.stamp(
+                    mi_row,
+                    mi_col,
+                    subsize,
+                    w0.mode as u8,
+                    w0.uv_mode as u8,
+                    env.mi_rows,
+                    env.mi_cols,
+                );
+                let (r1, c1) = if is_horz {
+                    (mi_row + hbs, mi_col)
+                } else {
+                    (mi_row, mi_col + hbs)
+                };
+                let (tmp_rdc, w1, sv1) = leaf_pick_sb_modes(
+                    env,
+                    cfg,
+                    tile,
+                    grid,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    r1,
+                    c1,
+                    subsize,
+                    partition as usize,
+                    &invalid,
+                );
+                *last_source_variance = sv1;
+                visits.push(LeafVisit {
+                    mi_row: r1,
+                    mi_col: c1,
+                    bsize: subsize,
+                    budget: invalid.rdcost,
+                    rate: tmp_rdc.rate,
+                    dist: tmp_rdc.dist,
+                    rdcost: tmp_rdc.rdcost,
+                });
+                // (:1899-1902): INT_MAX invalidates; else accumulate.
+                if tmp_rdc.rate == i32::MAX || tmp_rdc.dist == i64::MAX {
+                    last_part_rdc = PartRdStats::invalid();
+                } else {
+                    last_part_rdc.rate += tmp_rdc.rate;
+                    last_part_rdc.dist += tmp_rdc.dist;
+                    last_part_rdc.rdcost += tmp_rdc.rdcost;
+                }
+                let w1 = w1.expect("unbounded-budget leaf pick always finds a winner");
+                if is_horz {
+                    SbTree::Horz(Box::new([w0, w1]))
+                } else {
+                    SbTree::Vert(Box::new([w0, w1]))
+                }
+            } else {
+                // Frame-edge rect: sub 0 alone. The SbTree Horz/Vert
+                // variants carry both winners (interior envelope, module
+                // docs on encode_sb.rs) — an edge single-strip rect is
+                // representable only once that envelope lifts. The KEY
+                // variance tree produces edge rects solely on
+                // non-multiple-of-64 frames (var_part.rs's
+                // `edge_vert_single_strip_stamp`), outside the current
+                // speed-7 gate grid.
+                unimplemented!(
+                    "frame-edge single-strip {} at ({mi_row},{mi_col}) bsize {bsize}: \
+                     out of the interior-envelope SbTree rect representation",
+                    if is_horz { "HORZ" } else { "VERT" }
+                )
+            }
+        }
+        // PARTITION_SPLIT (:1940-1974).
+        3 => {
+            last_part_rdc = PartRdStats::init();
+            let mut kids: [SbTree; 4] =
+                [SbTree::Absent, SbTree::Absent, SbTree::Absent, SbTree::Absent];
+            #[allow(clippy::needless_range_loop)] // i drives y/x AND the kids slot
+            for i in 0..4usize {
+                let y = mi_row + ((i as i32) >> 1) * hbs;
+                let x = mi_col + ((i as i32) & 1) * hbs;
+                if y >= env.mi_rows || x >= env.mi_cols {
+                    continue;
+                }
+                let (child_tree, tmp_rdc) = rd_use_partition_real(
+                    env,
+                    cfg,
+                    tile,
+                    grid,
+                    recon_y,
+                    recon_u,
+                    recon_v,
+                    cfl,
+                    vbp_stamps,
+                    y,
+                    x,
+                    subsize,
+                    /*do_recon=*/ i != 3,
+                    visits,
+                    last_source_variance,
+                );
+                kids[i] = child_tree;
+                if tmp_rdc.rate == i32::MAX || tmp_rdc.dist == i64::MAX {
+                    last_part_rdc = PartRdStats::invalid();
+                    break;
+                }
+                last_part_rdc.rate += tmp_rdc.rate;
+                last_part_rdc.dist += tmp_rdc.dist;
+            }
+            SbTree::Split(Box::new(kids))
+        }
+        other => {
+            // VERT_A/VERT_B/HORZ_A/HORZ_B/HORZ_4/VERT_4: "Cannot handle
+            // extended partition types" (:1976-1982) — the variance tree
+            // never produces them.
+            unreachable!("av1_rd_use_partition: extended partition {other} from the vbp tree")
+        }
+    };
+
+    // (:2043-2047): fold the partition cost, recompute the rdcost.
+    if last_part_rdc.rate < i32::MAX {
+        last_part_rdc.rate += partition_cost[partition as usize];
+        last_part_rdc.rdcost = crate::rd::rdcost(env.rdmult, last_part_rdc.rate, last_part_rdc.dist);
+    }
+
+    // (:2049-2062, the last_part/none winner selection): none_rdc and
+    // chosen_rdc are both invalid on this path (module docs), so the tree's
+    // partition always stands — nothing to do.
+
+    // av1_restore_context (:2064).
+    restore_context(tile, &saved, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+
+    // (:2072-2086): the winner re-encode. OUTPUT_ENABLED at the SB root
+    // (with set_cb_offsets, folded into encode_sb_dry's own walk),
+    // DRY_RUN_NORMAL below.
+    if do_recon {
+        let mut tree = tree;
+        let output_enabled = bsize == env.sb_size;
+        let mut leaves: Vec<LeafEncodeOut> = Vec::new();
+        encode_sb_dry(
+            env,
+            tile,
+            recon_y,
+            recon_u,
+            recon_v,
+            cfl,
+            &mut tree,
+            mi_row,
+            mi_col,
+            bsize,
+            &mut leaves,
+            output_enabled,
+        );
+        stamp_grid_from_tree(grid, &tree, mi_row, mi_col, bsize, env.mi_rows, env.mi_cols);
+        return (tree, last_part_rdc);
+    }
+
+    (tree, last_part_rdc)
+}
+
 #[cfg(test)]
 mod ext_partition_eval_thresh_tests {
     use super::ext_partition_eval_thresh_allintra_key;
