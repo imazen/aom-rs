@@ -25,7 +25,7 @@
 //! screen detection does NOT fire there, palette is never searched by either
 //! side, and the cell must stay in band (it is byte-exact today).
 
-use aom_bench::EncodeCell;
+use aom_bench::{EncodeCell, ToggleKnobs};
 use aom_bench::rd_close::{self, RdBands};
 use aom_entropy::header::{
     CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
@@ -265,10 +265,16 @@ fn palette_y_rd_close_gate() {
         if c_tu != c_tu_off {
             c_palette_active_somewhere = true;
         }
-        let port_on = cell.port_encode_with(&c_tu, true);
+        let port_on = cell.port_encode_with(
+            &c_tu,
+            &ToggleKnobs {
+                enable_palette: true,
+                ..Default::default()
+            },
+        );
         // The OFF-side port run bootstraps from the palette-OFF C stream (its
         // own same-knob reference).
-        let port_off = cell.port_encode_with(&c_tu_off, false);
+        let port_off = cell.port_encode_with(&c_tu_off, &ToggleKnobs::default());
         if port_on != port_off {
             port_palette_active_somewhere = true;
         }
@@ -286,7 +292,13 @@ fn palette_y_rd_close_gate() {
         !stream_allow_screen_content(&control_tu),
         "control cell unexpectedly detected as screen content"
     );
-    let control_port = control.port_encode_with(&control_tu, true);
+    let control_port = control.port_encode_with(
+        &control_tu,
+        &ToggleKnobs {
+            enable_palette: true,
+            ..Default::default()
+        },
+    );
     let control_spliced = rd_close::splice_frame_obu(&control_tu, &control_port);
     results.push(rd_close::compare_cell(
         &control.label,

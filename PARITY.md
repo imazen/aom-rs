@@ -62,6 +62,10 @@ Byte-identity gates landed and green on origin/main. Any regression here is a sh
 | Coded-lossless cq0 **mono** (4:2:0 still open — KB-5) | `encoder_gate_lossless_cq0_e2e_kb5_repro` | ba560eb |
 | QM-on forward-quant (`--enable-qm`, 40 cells bd8+bd10) | `qm_encode_witness` | 5b512bf (parts 624e91d/a066cf8/abb68d9) |
 | Multi-tile encode (2×1/1×2/2×2, 4:4:4 128²) | `encoder_gate_multitile_e2e` | f6e6319 |
+| **C8 partition-control disable arms** (`--enable-rect-partitions=0`, `--enable-ab-partitions=0`, `--enable-1to4-partitions=0`, `--min-partition-size=16`, `--max-partition-size=32`, square-only 8..32 band) × real-content 64²(cq32/63)+128²(cq12), each knob anti-vacuity-witnessed (must change the C stream) | `toggles_rd_close::toggles_c8_*` (hard `bit_identical` pins) | (this landing) |
+| **C10 intra-tool disable arms** (`--enable-smooth-intra=0`, `--enable-paeth-intra=0`, `--enable-cfl-intra=0`, `--enable-directional-intra=0`, `--enable-diagonal-intra=0`, `--enable-angle-delta=0`, `--enable-filter-intra=0`, `--enable-intra-edge-filter=0`) × the same witnessed grid; seq-header knobs assert the C stream's seq bits == the knob (no bootstrap flow) | `toggles_rd_close::toggles_c10_*` (hard `bit_identical` pins) | (this landing) |
+| **C9 tx-control arms** (`--enable-tx64=0`, `--enable-rect-tx=0`, `--enable-flip-idtx=0`, `--use-intra-default-tx-only=1`, `--reduced-tx-type-set=1`, `--enable-tx-size-search=0` — frame-header bits/tx_mode asserted == knob) × the same witnessed grid | `toggles_rd_close::toggles_c9_*` (hard `bit_identical` pins) | (this landing) |
+| **C11 `--cdf-update-mode=0` encoder e2e** × the same witnessed grid (header `disable_cdf_update` asserted == knob). Landing FIXED a real pack bug: only the coeff writer was gated — partition/mode/tx symbol writers adapted CDFs unconditionally, desyncing the stream vs the non-adapting decoder (zensim −264 vs C's +79 pre-fix). Fix = C's architecture: `allow_update_cdf` on `OdEcEnc`, gated in `write_symbol` (aom_write_symbol), set per tile in `pack_tile` (write_modes) | `toggles_rd_close::toggles_c11_cdf_update_mode_0` (hard `bit_identical` pins) | (this landing) |
 | qindex-from-cq derivation (#8) | `qindex_from_cq_diff` | (landed pre-pivot) |
 | Gate-3 perf cells byte-verified before timing | `aom-bench` `EncodeCell::assert_byte_exact` | 057bde2 |
 | **CDEF-strength RD search** (`--enable-cdef=1`, #7 / family C1): 14/14 cells — real content 196²/64² cq5..63 (cdef_bits=2 four-strength joint sets, per-unit literals) + mono/4:4:4/4:2:0/bd10 axes; speed-0 FULL search; two-pass encode→LF→search→pack | `encoder_gate_cdef_{real_content,synthetic_axes}_rd_close` (aom-bench; rd_close report + full byte-identity asserts) | 016d4dd + 9850da6 + c9ebf83 |
@@ -80,6 +84,7 @@ Bulk agents append rows here as features land (rule 2). Empty at pivot start.
 | Component | Knobs | Cells | size_delta | zensim_drop | Harness ref (test) | Date | Notes |
 |---|---|---|---|---|---|---|---|
 | Palette RD search (Y `av1_rd_pick_palette_intra_sby` + UV `_sbuv`: dim-1/2 k-means, top-colours, colour/map costs, header-rd gating + chroma early-term, palette recon + pack syntax/map tokens, neighbour cache/ctx grids) | `PickFrameCfg::palette_costs = Some` (= `--enable-palette=1`; OFF everywhere else) | 6 screen (text/UI, mono+420, 64²/128², cq12..63) + 1 real-content control | **5/7 EXACT (byte-identical)**; worst +2.55% | worst +0.190 (one cell −1.041 = port better) | `rd_close_palette::palette_y_rd_close_gate` (aom-bench) | 2026-07-17 | speed-0 sf levels (search 0 / size-search 1 / chroma early-term 1); speeds 1–5 levels wired untested-by-gate. Fixed latent UV no-palette-flag under-cost on screen frames (per-leaf `try_palette`). (CDEF search, the first bulk family, went straight to section A — 14/14 EXACT.) |
+| C9 `--use-intra-dct-only=1` (PINNED-OPEN: luma byte-faithful, chroma UV-mode-loop divergence) | `AV1E_SET_INTRA_DCT_ONLY=1` | 64²cq32 / 64²cq63 / 128²cq12 (real content) | +2.23% / 0 (EXACT) / −1.40% | +3.588 (OUT of band) / 0 / +0.333 | `toggles_rd_close::toggles_c9_intra_dct_only_pinned_open` | 2026-07-17 | Y recon identical; first divergent leaf mi(0,0) 32×32: real uv=D45/aduv2 (eob 1) vs port uv=V (eob 78); real winners are derived-type==DCT modes (DCT-forced-search signature). Port UV txb eval + UV mode loop both match the C-pieces oracles under the knob (txfm_uvrd_diff / intra_sbuv_mode_loop_diff sweep green; mask verified vs the REAL facade incl. the PAETH reduced-set reset) ⇒ shared port+oracle mis-model of the REAL UV loop; next: sibling-C UV-candidate rd dump (KB-2/KB-7 method). |
 
 ## Section C — ABSENT (to port), by family
 
@@ -190,42 +195,66 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
 - `--denoise-noise-level/-block-size`, `--enable-dnl-denoising`: noise-model estimation +
   source denoise + grain fit. C: `aom_dsp/noise_model.c` (`aom_denoise_and_model_*`). (L)
 
-### C8 — Partition controls — PARTIAL (S each)
-- PRESENT + threaded: `enable_rect_partitions`, `enable_ab_partitions`,
-  `enable_1to4_partitions`, `min/max_partition_size` (PickFrameCfg; disable arms exercised
-  in `partition_pick_diff` vs the C-recursion reference). Missing: e2e byte gates vs real
-  aomenc with each disable arm ON (needs shim ctrl args). (S each)
+### C8 — Partition controls — disable arms DONE (byte-exact); SB128 remains
+- **DONE (this landing, → section A):** `--enable-rect-partitions=0`, `--enable-ab-partitions=0`,
+  `--enable-1to4-partitions=0`, `--min-partition-size`, `--max-partition-size` + the
+  square-only 8..32 interaction arm — all BYTE-IDENTICAL vs real aomenc (same ctrl) on the
+  real-content grid, hard-pinned in `toggles_rd_close` (aom-bench). Infra: generic ctrl-pair
+  shim `shim_encode_av1_kf_ctrls` + `ToggleKnobs`/`port_encode_with`; ctrl-id constants
+  header-cross-checked (`cx_ctrl_ids_match_reference_headers`). C mapping verified:
+  `set_max_min_partition_size` (partition_strategy.h:214) `min(sf_default, dim_to_size(px),
+  sb)` / `min(max(BLOCK_4X4, dim), sb)`; the auto-max ML arm is inter-only.
 - `--sb-size=128` ENCODE side — ABSENT: decoder + entropy layers are SB-size-generic
   (798ec25), but the encoder walk/harnesses are SB-64-only. (M)
 - External partition / `--partition-info-path` / `--sb-qp-sweep`: diagnostic, lowest
   priority. (M, defer)
 
-### C9 — Transform controls — PARTIAL (S each)
-- PRESENT + threaded: `enable_tx64`, `enable_rect_tx` (PickFrameCfg);
-  `use_intra_default_tx_only` exists as the speed-feature form (96eeb71) — CLI knob
-  threading is trivial (S). `reduced-tx-type-set` present as header/`reduced_tx_set_used`.
-- ABSENT knob threading: `--enable-flip-idtx` (masks FLIPADST/IDTX family out of ext-tx
-  sets — `av1_get_ext_tx_set_type` arm) (S); `--use-intra-dct-only` (S);
-  `--enable-tx-size-search=0` (forces largest — the USE_LARGESTALL arm exists from KB-8,
-  needs the knob route) (S); `--disable-trellis-quant` values 2/3 as explicit knob states
-  (stage-aware policies exist from KB-8) (S); `--quant-b-adapt` (the `_adaptive`
-  quantizer family — STATUS lists as TODO) (S–M).
+### C9 — Transform controls — mostly DONE (byte-exact); dct-only pinned-open
+- **DONE (this landing, → section A):** `--enable-tx64=0`, `--enable-rect-tx=0`,
+  `--enable-flip-idtx=0`, `--use-intra-default-tx-only=1`, `--reduced-tx-type-set=1` — all
+  BYTE-IDENTICAL vs real aomenc on the witnessed grid (`toggles_rd_close::toggles_c9_*`).
+  Threading landed: `TxTypeSearchPolicy.{enable_flip_idtx, use_intra_dct_only}` →
+  `TxMaskParams` (tx_search.rs; C reads oxcf directly in `get_tx_mask`, stage-independent);
+  partition_pick's derived winner-mode stage policies copy the CLI toggles from `cfg.pol`
+  (+ the MODE_EVAL `use_default_intra_tx_type` OR, rdopt_utils.h:579). The five layer
+  differentials (`uniform_txfm_yrd_diff`, `intra_sby_mode_loop_diff`, `rd_pick_intra_sb_diff`,
+  `txfm_uvrd_diff`, `intra_sbuv_mode_loop_diff`) now SWEEP `use_intra_dct_only` (oracle chain
+  threads it into the REAL `get_tx_mask` facades) — all green.
+- **`--use-intra-dct-only=1` — PINNED-OPEN** (section B row): luma byte-faithful; chroma
+  UV-mode-loop winner divergence vs real aomenc, out of band at 64²cq32. Full localization
+  trail in the section-B row + the pinned test's doc comment.
+- **`--enable-tx-size-search=0` DONE (this landing, → section A):** knob route landed —
+  `TxTypeSearchPolicy.enable_tx_size_search` (the port's oxcf.txfm_cfg carrier): the speed-0
+  single-pass method pick goes USE_FULL_RD → USE_LARGESTALL (intra_rd.rs), the winner-mode sf
+  derivation forces `tx_size_search_level = 3` post-speed (speed_features.c:2726 shape,
+  partition_pick.rs), and the leaf `tx_mode_is_select` init ANDs the knob (select_tx_mode →
+  TX_MODE_LARGEST; the existing KB-10 LARGESTALL⇒not-select coupling handles the pass level).
+  C forbids combining with `--enable-tx64=0` (encodeframe.c:2461 assert) — not celled.
+- Remaining: `--disable-trellis-quant` values 1/2 as explicit knob states (stage-aware
+  policies exist from KB-8; default is 3) (S); `--quant-b-adapt` (the `_adaptive` quantizer
+  family) (S–M).
 
-### C10 — Intra mode toggles — PARTIAL (S each)
-- The candidate-loop visit gate incl. ALL toggle flags is already diffed vs REAL C
-  (`shim_intra_sby_visits`: enable_diagonal/directional/smooth/paeth/angle_delta,
-  `intra_sby_candidates_diff`). `enable_filter_intra` + `enable_intra_edge_filter`
-  (seq-level) are threaded and live.
-- Missing: threading `--enable-smooth-intra`, `--enable-paeth-intra`, `--enable-cfl-intra`,
-  `--enable-directional-intra`, `--enable-diagonal-intra`, `--enable-angle-delta` into
-  `PickFrameCfg` + disable-arm validation cells (these are pure encoder search masks, not
-  bitstream bits). (S each; CFL-off also needs the UV loop policy arm.)
+### C10 — Intra mode toggles — DONE (byte-exact)
+- **DONE (this landing, → section A):** all 8 toggles — `--enable-smooth-intra=0`,
+  `--enable-paeth-intra=0`, `--enable-cfl-intra=0`, `--enable-directional-intra=0`,
+  `--enable-diagonal-intra=0`, `--enable-angle-delta=0`, `--enable-filter-intra=0`,
+  `--enable-intra-edge-filter=0` — BYTE-IDENTICAL vs real aomenc on the witnessed grid
+  (`toggles_rd_close::toggles_c10_*`). Threading landed: `IntraToolCfg` on `PickFrameCfg`
+  (partition_pick.rs; the 5 luma flags applied onto `IntraSbyGates` after the sf
+  derivation — C keeps CLI + sf gates separate and the diffed visit chain reads both);
+  chroma copies ride the existing `UvLoopPolicy` fields (the speed>=3 chroma rebuild
+  spreads `..cfg.uv_lp.clone()`, so they survive at all speeds). The seq-level pair
+  (filter-intra / intra-edge-filter) is knob-driven on the port side with the bootstrap
+  seq bits ASSERTED equal (no bootstrap flow).
 
 ### C11 — Bitstream / global — mostly PRESENT
 - PRESENT: bd 8/10/12, mono, 4:2:0/4:2:2/4:4:4, tiles (multi-tile e2e), lossless-mono,
   QM signaling, header/OBU writers (seq + frame, all components bit-exact).
-- PARTIAL: `--cdf-update-mode=0` encoder e2e (decoder gate landed 1dfbcc3; encoder-side
-  byte gate absent — PackCfg.allow_update_cdf exists) (S); cost-upd-freq knobs
+  `--reduced-tx-type-set=1` e2e byte gate landed with C9 (this landing).
+- **`--cdf-update-mode=0` encoder e2e DONE (this landing, → section A)** — and it caught a
+  REAL pack bug (see the section-A row: symbol writers adapted CDFs unconditionally; the
+  writer-side `allow_update_cdf` gate now mirrors C's aom_write_symbol).
+- PARTIAL: cost-upd-freq knobs
   (`--coeff/mode/dv-cost-upd-freq` non-default arms; default arm proven byte-exact via
   the multi-SB e2e gates) (S–M); self-derived seq/frame header fields (drop the Gate-3
   bootstrap caveat: qindex mapping done #8; tile limits, CICP echo, level/tier remain)

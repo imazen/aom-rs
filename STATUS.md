@@ -3293,3 +3293,81 @@ is scheduled); speeds 1-5 palette sf levels are wired but only speed 0 is gate-c
 `av1_search_palette_mode[_luma]` (inter-frame callers) out of stills scope; UV palette
 + 4:2:2 not gate-covered (machinery is subsampling-generic); palette winner-mode
 interaction at speed>=4 wired per C but not gate-covered.
+
+## TOGGLE SWEEP — C8/C9/C10 CLI-toggle byte gates (2026-07-17, encoder track)
+
+**19 of the C8-C11 toggle-family knobs are BYTE-IDENTICAL vs real aomenc (same
+ctrl) and hard-pinned; 1 pinned-open** (`aom-bench/tests/toggles_rd_close.rs`,
+21 tests). Every knob set runs the witnessed 3-cell real-content grid (64² cq32
++ cq63, 128²-crop cq12) with an ANTI-VACUITY witness: the toggle must change
+the C encoder's output on at least one cell, or the test panics (an EXACT
+verdict on a cell the knob never reaches proves nothing).
+
+- **Infra:** generic ctrl-pair oracle `shim_encode_av1_kf_ctrls` (dec_shim.c —
+  base config identical to `shim_encode_av1_kf`, plus raw
+  `(aome_enc_control_id, value)` pairs applied in caller order; every
+  pre-existing shim wrapper is byte-inert NULL/0) + `ref_encode_av1_kf_ctrls` +
+  the `cx_ctrl` constant module, cross-checked against the pinned v3.14.1
+  headers at shim compile time (`shim_cx_ctrl_id_by_probe` +
+  `cx_ctrl_ids_match_reference_headers`). Harness: `ToggleKnobs` +
+  `EncodeCell::port_encode_with` / `c_encode_ctrls` (aom-bench) — one struct
+  drives both sides of every cell; `Default` == the stock proven envelope
+  (control test pins that byte-exactly).
+- **C8 partition controls (6/6 arms EXACT):** rect=0 / ab=0 / 1to4=0 / min=16px
+  / max=32px / square-only-8..32. `PickFrameCfg` already carried the fields;
+  the harness now maps px→BLOCK via C's `set_max_min_partition_size`
+  (`min(sf_default_max, dim_to_size, sb)` — partition_strategy.h:214; auto-max
+  ML arm verified inter-only) instead of the flat 15.
+- **C10 intra toggles (8/8 arms EXACT):** smooth/paeth/cfl/directional/
+  diagonal/angle-delta + the seq-level filter-intra/intra-edge-filter pair.
+  New `IntraToolCfg` on `PickFrameCfg` → applied onto `IntraSbyGates` (the
+  C-diffed visit chain reads CLI + sf gates independently); chroma rides the
+  existing `UvLoopPolicy` enable fields. Seq-level knobs drive the port
+  directly and ASSERT the bootstrap seq bits agree (no bootstrap flow).
+- **C9 tx controls (5 arms EXACT + 1 pinned-open):** tx64=0 / rect-tx=0 /
+  flip-idtx=0 / default-tx-only=1 / reduced-tx-set=1 EXACT.
+  `TxTypeSearchPolicy` gained `enable_flip_idtx` + `use_intra_dct_only`
+  (threaded into `TxMaskParams` — C reads oxcf directly in `get_tx_mask`,
+  stage-independent; partition_pick's winner-mode stage policies copy the CLI
+  toggles from `cfg.pol` and OR the default-tx-only knob into MODE_EVAL per
+  rdopt_utils.h:579). The reduced-tx-set frame-header bit is asserted == knob.
+- **`--use-intra-dct-only=1` PINNED-OPEN** (KB-5/KB-10 pattern;
+  `toggles_c9_intra_dct_only_pinned_open` fails on movement either way):
+  64²cq32 out of band (+2.23% size, zensim −3.588), 64²cq63 EXACT, 128²cq12
+  CLOSE (−1.40%, +0.333). Localized: Y recon IDENTICAL; first divergent leaf
+  mi(0,0) 32×32 — real picks uv D45/aduv2 (eob 1), port picks uv V (eob 78);
+  real's winners frame-wide are derived-type==DCT modes (the DCT-forced-search
+  signature). The port's UV txb eval AND UV mode loop both match the C-pieces
+  oracle chain under the knob — the five layer differentials
+  (`uniform_txfm_yrd_diff` / `intra_sby_mode_loop_diff` /
+  `rd_pick_intra_sb_diff` / `txfm_uvrd_diff` / `intra_sbuv_mode_loop_diff`)
+  now SWEEP `use_intra_dct_only` with the oracle chain threading it into the
+  REAL `get_tx_mask` facades (all green; the mask itself verified vs the REAL
+  facade incl. the PAETH reduced-set empty-mask reset) ⇒ a shared port+oracle
+  mis-model of the REAL UV loop under the knob. Next step: sibling-C
+  instrumented dump of the mi(0,0) UV candidate rds (KB-2/KB-7 method).
+- **Remaining in the toggle families:** `--enable-tx-size-search=0` (S),
+  `--disable-trellis-quant` 1/2 (S), `--quant-b-adapt` (S–M),
+  `--cdf-update-mode=0` encoder e2e (S), cost-upd-freq non-default arms (S–M),
+  min/max-q clamps (S), SB128 encode (M, own chunk) — PARITY.md C8/C9/C11.
+
+### Toggle-sweep addendum (same landing): tx-size-search + cdf-update-mode
+
+- **C9 `--enable-tx-size-search=0` — EXACT (3/3 cells):**
+  `TxTypeSearchPolicy.enable_tx_size_search` threaded three ways (all
+  C-anchored): speed-0 single-pass method USE_FULL_RD → USE_LARGESTALL
+  (intra_rd.rs pass-method pick), winner-mode sf derivation forces
+  `tx_size_search_level = 3` after the speed derivation (speed_features.c:2726),
+  leaf `tx_mode_is_select` init ANDs the knob (select_tx_mode ⇒
+  TX_MODE_LARGEST; harness asserts the bootstrap header's tx_mode == knob).
+  C forbids the `--enable-tx64=0` combo (encodeframe.c:2461 assert).
+- **C11 `--cdf-update-mode=0` encoder e2e — EXACT (3/3 cells) + REAL BUG
+  FIX:** the pack adapted partition/mode/tx-size symbol CDFs unconditionally
+  (only `write_coeffs_txb_full` was gated), so a disable-cdf-update stream
+  desynced against the non-adapting decoder (measured zensim −264 vs C +79
+  pre-fix). Fix mirrors C's architecture: `OdEcEnc.allow_update_cdf`
+  (default true — byte-inert for every existing caller), gated inside
+  `aom_entropy::cdf::write_symbol` exactly like `aom_write_symbol`, set per
+  tile in `pack_tile` from `PackCfg::allow_update_cdf` (C's write_modes).
+  The decoder twin (`OdEcDec.allow_update_cdf`, landed 1dfbcc3) now has its
+  encoder mirror.

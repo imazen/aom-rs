@@ -252,6 +252,266 @@ pub struct EncodeCell {
     pub v: Vec<u16>,
 }
 
+/// CLI-toggle knob set for [`EncodeCell::port_encode_with`] — the C8-C11
+/// toggle-sweep families (PARITY.md). `Default` reproduces the stock
+/// envelope (every knob at its aomenc default), under which
+/// `port_encode_with` == `port_encode` byte-for-byte on the proven gates.
+///
+/// Each knob mirrors one `aome_enc_control_id` control
+/// ([`c::cx_ctrl`]); [`ToggleKnobs::c_ctrls`] emits the non-default ones
+/// for [`EncodeCell::c_encode_ctrls`], and `port_encode_with` threads the
+/// same values into the port's search config, so one struct drives both
+/// sides of an RD-closeness cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToggleKnobs {
+    /// `--enable-rect-partitions` (default 1): HORZ/VERT (and, downstream,
+    /// AB) partition arms in the search.
+    pub enable_rect_partitions: bool,
+    /// `--enable-ab-partitions` (default 1): HORZ_A/HORZ_B/VERT_A/VERT_B.
+    pub enable_ab_partitions: bool,
+    /// `--enable-1to4-partitions` (default 1): HORZ_4/VERT_4.
+    pub enable_1to4_partitions: bool,
+    /// `--min-partition-size` in PIXELS {4,8,16,32,64,128} (default 4).
+    pub min_partition_size_px: usize,
+    /// `--max-partition-size` in PIXELS {4,8,16,32,64,128} (default 128).
+    pub max_partition_size_px: usize,
+    /// `--enable-intra-edge-filter` (default 1) — a SEQUENCE-header bit
+    /// (encoder.c:646); the port side drives `SbEncodeEnv::
+    /// disable_edge_filter` from this knob and ASSERTS the C stream's seq
+    /// header agrees (no bootstrap flow).
+    pub enable_intra_edge_filter: bool,
+    /// `--enable-filter-intra` (default 1) — a SEQUENCE-header bit
+    /// (encoder.c:647); drives `PickFrameCfg::enable_filter_intra` + the
+    /// cost derivation + `PackCfg::enable_filter_intra`, seq bit asserted.
+    pub enable_filter_intra: bool,
+    /// `--enable-smooth-intra` (default 1): SMOOTH/SMOOTH_V/SMOOTH_H in
+    /// BOTH the luma and chroma mode loops.
+    pub enable_smooth_intra: bool,
+    /// `--enable-paeth-intra` (default 1): PAETH, both loops.
+    pub enable_paeth_intra: bool,
+    /// `--enable-cfl-intra` (default 1): UV_CFL_PRED in the chroma loop.
+    pub enable_cfl_intra: bool,
+    /// `--enable-directional-intra` (default 1): every directional mode
+    /// (V/H/D45..D203 + deltas), both loops.
+    pub enable_directional_intra: bool,
+    /// `--enable-diagonal-intra` (default 1): D45..D203, both loops.
+    pub enable_diagonal_intra: bool,
+    /// `--enable-angle-delta` (default 1): nonzero deltas on directional
+    /// modes, both loops.
+    pub enable_angle_delta: bool,
+    /// `--enable-tx64` (default 1): 64-pt transform sizes in the tx-size
+    /// search (off caps the largest tx at 32).
+    pub enable_tx64: bool,
+    /// `--enable-rect-tx` (default 1): rectangular tx sizes.
+    pub enable_rect_tx: bool,
+    /// `--enable-flip-idtx` (default 1): the FLIPADST/IDTX tx-type family
+    /// in the ext-tx sets (`get_tx_mask`'s DCT_ADST_TX_MASK arm).
+    pub enable_flip_idtx: bool,
+    /// `--use-intra-dct-only` (default 0): force DCT_DCT for every luma
+    /// intra txb.
+    pub use_intra_dct_only: bool,
+    /// `--use-intra-default-tx-only` (default 0): each luma intra txb
+    /// searches only its mode's default tx type (MODE_EVAL arm,
+    /// rdopt_utils.h:579).
+    pub use_intra_default_tx_only: bool,
+    /// `--reduced-tx-type-set` (default 0) — a FRAME-header bit
+    /// (`reduced_tx_set_used`, encodeframe.c:2712): both the search's
+    /// ext-tx sets and the coded tx-type signalling shrink. The port side
+    /// asserts the bootstrapped frame header bit equals this knob.
+    pub reduced_tx_type_set: bool,
+    /// `--enable-tx-size-search` (default 1). OFF forces every eval stage
+    /// to USE_LARGESTALL (`winner_mode_sf.tx_size_search_level = 3`,
+    /// speed_features.c:2726) and the frame codes `tx_mode = TX_MODE_LARGEST`
+    /// (asserted against the bootstrap header). C FORBIDS combining this
+    /// with `--enable-tx64=0` (encodeframe.c:2461 assert).
+    pub enable_tx_size_search: bool,
+    /// `--cdf-update-mode` (default 1 = update on every frame; 0 = no CDF
+    /// update for any frame → the KEY header codes `disable_cdf_update=1`,
+    /// asserted against the bootstrap, and the pack skips symbol
+    /// adaptation via `PackCfg::allow_update_cdf`). Mode 2 (selective) is
+    /// identical to 1 on a lone KEY frame — not swept.
+    pub cdf_update_mode: u32,
+    /// `--enable-palette=1` (NOT a C8-C11 toggle — the port's palette RD
+    /// search enable, carried here so `port_encode_with` can thread it into
+    /// `PickFrameCfg::palette_costs`; the search still requires the frame's
+    /// `allow_screen_content_tools`, exactly as C). Default OFF.
+    pub enable_palette: bool,
+}
+
+impl Default for ToggleKnobs {
+    fn default() -> Self {
+        ToggleKnobs {
+            enable_rect_partitions: true,
+            enable_ab_partitions: true,
+            enable_1to4_partitions: true,
+            min_partition_size_px: 4,
+            max_partition_size_px: 128,
+            enable_intra_edge_filter: true,
+            enable_filter_intra: true,
+            enable_smooth_intra: true,
+            enable_paeth_intra: true,
+            enable_cfl_intra: true,
+            enable_directional_intra: true,
+            enable_diagonal_intra: true,
+            enable_angle_delta: true,
+            enable_tx64: true,
+            enable_rect_tx: true,
+            enable_flip_idtx: true,
+            use_intra_dct_only: false,
+            use_intra_default_tx_only: false,
+            reduced_tx_type_set: false,
+            enable_tx_size_search: true,
+            cdf_update_mode: 1,
+            enable_palette: false,
+        }
+    }
+}
+
+/// `dim_to_size` (partition_strategy.h:201): pixel dimension -> square
+/// BLOCK_SIZE enum value.
+fn dim_to_bsize(px: usize) -> usize {
+    match px {
+        4 => 0,    // BLOCK_4X4
+        8 => 3,    // BLOCK_8X8
+        16 => 6,   // BLOCK_16X16
+        32 => 9,   // BLOCK_32X32
+        64 => 12,  // BLOCK_64X64
+        128 => 15, // BLOCK_128X128
+        _ => panic!("partition size {px}px is not a square BLOCK dimension"),
+    }
+}
+
+impl ToggleKnobs {
+    /// The `(ctrl_id, value)` pairs for the C side — only knobs that differ
+    /// from the aomenc default are emitted (a default-knobs cell reproduces
+    /// `EncodeCell::c_encode` exactly).
+    pub fn c_ctrls(&self) -> Vec<(i32, i32)> {
+        use c::cx_ctrl::*;
+        let d = ToggleKnobs::default();
+        let mut out = Vec::new();
+        if self.enable_rect_partitions != d.enable_rect_partitions {
+            out.push((
+                AV1E_SET_ENABLE_RECT_PARTITIONS,
+                self.enable_rect_partitions as i32,
+            ));
+        }
+        if self.enable_ab_partitions != d.enable_ab_partitions {
+            out.push((
+                AV1E_SET_ENABLE_AB_PARTITIONS,
+                self.enable_ab_partitions as i32,
+            ));
+        }
+        if self.enable_1to4_partitions != d.enable_1to4_partitions {
+            out.push((
+                AV1E_SET_ENABLE_1TO4_PARTITIONS,
+                self.enable_1to4_partitions as i32,
+            ));
+        }
+        if self.min_partition_size_px != d.min_partition_size_px {
+            out.push((
+                AV1E_SET_MIN_PARTITION_SIZE,
+                self.min_partition_size_px as i32,
+            ));
+        }
+        if self.max_partition_size_px != d.max_partition_size_px {
+            out.push((
+                AV1E_SET_MAX_PARTITION_SIZE,
+                self.max_partition_size_px as i32,
+            ));
+        }
+        if self.enable_intra_edge_filter != d.enable_intra_edge_filter {
+            out.push((
+                AV1E_SET_ENABLE_INTRA_EDGE_FILTER,
+                self.enable_intra_edge_filter as i32,
+            ));
+        }
+        if self.enable_filter_intra != d.enable_filter_intra {
+            out.push((
+                AV1E_SET_ENABLE_FILTER_INTRA,
+                self.enable_filter_intra as i32,
+            ));
+        }
+        if self.enable_smooth_intra != d.enable_smooth_intra {
+            out.push((
+                AV1E_SET_ENABLE_SMOOTH_INTRA,
+                self.enable_smooth_intra as i32,
+            ));
+        }
+        if self.enable_paeth_intra != d.enable_paeth_intra {
+            out.push((AV1E_SET_ENABLE_PAETH_INTRA, self.enable_paeth_intra as i32));
+        }
+        if self.enable_cfl_intra != d.enable_cfl_intra {
+            out.push((AV1E_SET_ENABLE_CFL_INTRA, self.enable_cfl_intra as i32));
+        }
+        if self.enable_directional_intra != d.enable_directional_intra {
+            out.push((
+                AV1E_SET_ENABLE_DIRECTIONAL_INTRA,
+                self.enable_directional_intra as i32,
+            ));
+        }
+        if self.enable_diagonal_intra != d.enable_diagonal_intra {
+            out.push((
+                AV1E_SET_ENABLE_DIAGONAL_INTRA,
+                self.enable_diagonal_intra as i32,
+            ));
+        }
+        if self.enable_angle_delta != d.enable_angle_delta {
+            out.push((AV1E_SET_ENABLE_ANGLE_DELTA, self.enable_angle_delta as i32));
+        }
+        if self.enable_tx64 != d.enable_tx64 {
+            out.push((AV1E_SET_ENABLE_TX64, self.enable_tx64 as i32));
+        }
+        if self.enable_rect_tx != d.enable_rect_tx {
+            out.push((AV1E_SET_ENABLE_RECT_TX, self.enable_rect_tx as i32));
+        }
+        if self.enable_flip_idtx != d.enable_flip_idtx {
+            out.push((AV1E_SET_ENABLE_FLIP_IDTX, self.enable_flip_idtx as i32));
+        }
+        if self.use_intra_dct_only != d.use_intra_dct_only {
+            out.push((AV1E_SET_INTRA_DCT_ONLY, self.use_intra_dct_only as i32));
+        }
+        if self.use_intra_default_tx_only != d.use_intra_default_tx_only {
+            out.push((
+                AV1E_SET_INTRA_DEFAULT_TX_ONLY,
+                self.use_intra_default_tx_only as i32,
+            ));
+        }
+        if self.reduced_tx_type_set != d.reduced_tx_type_set {
+            out.push((
+                AV1E_SET_REDUCED_TX_TYPE_SET,
+                self.reduced_tx_type_set as i32,
+            ));
+        }
+        if self.enable_tx_size_search != d.enable_tx_size_search {
+            out.push((
+                AV1E_SET_ENABLE_TX_SIZE_SEARCH,
+                self.enable_tx_size_search as i32,
+            ));
+        }
+        if self.cdf_update_mode != d.cdf_update_mode {
+            out.push((AV1E_SET_CDF_UPDATE_MODE, self.cdf_update_mode as i32));
+        }
+        out
+    }
+
+    /// `x->sb_enc.max_partition_size` (set_max_min_partition_size,
+    /// partition_strategy.h:214): `min(sf.default_max_partition_size,
+    /// dim_to_size(oxcf px), sb_size)`. The auto-max ML arm is
+    /// inter-only (`use_auto_max_partition` requires `!frame_is_intra_only`).
+    fn max_partition_bsize(&self, sf_default_max: usize, sb_bsize: usize) -> usize {
+        sf_default_max
+            .min(dim_to_bsize(self.max_partition_size_px))
+            .min(sb_bsize)
+    }
+
+    /// `x->sb_enc.min_partition_size`: `min(max(BLOCK_4X4,
+    /// dim_to_size(oxcf px)), sb_size)` (default_min_partition_size is
+    /// BLOCK_4X4 at every allintra speed — init_part_sf only).
+    fn min_partition_bsize(&self, sb_bsize: usize) -> usize {
+        dim_to_bsize(self.min_partition_size_px).min(sb_bsize)
+    }
+}
+
 impl EncodeCell {
     /// Real-content cell: decode the first KEY frame of a conformance vector
     /// via the C oracle and (optionally) crop an SB-aligned window —
@@ -420,6 +680,27 @@ impl EncodeCell {
         )
     }
 
+    /// [`Self::c_encode`] plus extra `(ctrl_id, value)` control pairs
+    /// ([`c::cx_ctrl`]) — the toggle-sweep C side. `&[]` reproduces
+    /// `c_encode` exactly (same base config, no extra controls).
+    pub fn c_encode_ctrls(&self, ctrls: &[(i32, i32)]) -> Vec<u8> {
+        c::ref_encode_av1_kf_ctrls(
+            &self.y,
+            &self.u,
+            &self.v,
+            self.w,
+            self.h,
+            i32::from(self.bd),
+            self.mono,
+            self.ss_x as i32,
+            self.ss_y as i32,
+            self.cq_level,
+            self.speed,
+            self.usage,
+            ctrls,
+        )
+    }
+
     /// Extract the frame OBU payload from a reference stream (the byte-match
     /// target for [`Self::port_encode`]).
     pub fn frame_obu_payload(stream: &[u8]) -> Vec<u8> {
@@ -442,16 +723,17 @@ impl EncodeCell {
     /// threading); cells at cq >= 1 only (the lossless two-pass probe is out
     /// of scope here).
     pub fn port_encode(&self, bootstrap: &[u8]) -> Vec<u8> {
-        self.port_encode_with(bootstrap, false)
+        self.port_encode_with(bootstrap, &ToggleKnobs::default())
     }
 
-    /// [`Self::port_encode`] + feature knobs for the bulk-port RD-close gates:
-    /// `enable_palette` turns the palette RD search on (the port analogue of
-    /// the C side's `--enable-palette=1`; the search still requires the
-    /// frame's `allow_screen_content_tools`, exactly as C).
-    pub fn port_encode_with(&self, bootstrap: &[u8], enable_palette: bool) -> Vec<u8> {
-        let (w, h, mono, ss_x, ss_y, bd) =
-            (self.w, self.h, self.mono, self.ss_x, self.ss_y, self.bd);
+    /// [`Self::port_encode`] with explicit CLI-toggle knobs threaded into
+    /// the port's search config ([`ToggleKnobs`]; the toggle-sweep port
+    /// side). `ToggleKnobs::default()` == `port_encode`. `knobs.enable_palette`
+    /// additionally turns the palette RD search on (the port analogue of the C
+    /// side's `--enable-palette=1`; the search still requires the frame's
+    /// `allow_screen_content_tools`, exactly as C).
+    pub fn port_encode_with(&self, bootstrap: &[u8], knobs: &ToggleKnobs) -> Vec<u8> {
+        let (w, h, mono, ss_x, ss_y, bd) = (self.w, self.h, self.mono, self.ss_x, self.ss_y, self.bd);
         let obus = walk_obus(bootstrap);
         let seq_payload = obus
             .iter()
@@ -543,6 +825,49 @@ impl EncodeCell {
         assert_eq!(tiles_log2, 0, "single-tile envelope only");
         let allintra = self.usage == 2;
 
+        // Seq-level toggles (`--enable-filter-intra` / `--enable-intra-edge-
+        // filter` are SEQUENCE-header bits, encoder.c:646-647): the port side
+        // is driven by the KNOBS below (no bootstrap flow); the C stream's
+        // seq header must agree or the two sides encode different configs.
+        assert_eq!(
+            s.enable_filter_intra, knobs.enable_filter_intra,
+            "{}: bootstrap seq header enable_filter_intra != knob",
+            self.label
+        );
+        assert_eq!(
+            s.enable_intra_edge_filter, knobs.enable_intra_edge_filter,
+            "{}: bootstrap seq header enable_intra_edge_filter != knob",
+            self.label
+        );
+        // `--reduced-tx-type-set` is a FRAME-header bit (encodeframe.c:2712)
+        // the port parses from the bootstrap; the knob must agree (the
+        // search + pack read the parsed bit — config, not a per-block
+        // decision, so no bootstrap leak).
+        assert_eq!(
+            p.reduced_tx_set_used, knobs.reduced_tx_type_set,
+            "{}: bootstrap frame header reduced_tx_set_used != knob",
+            self.label
+        );
+        // `--enable-tx-size-search=0` → the frame codes TX_MODE_LARGEST
+        // (select_tx_mode via tx_size_search_level 3): knob OFF must never
+        // yield a SELECT header. The converse does NOT hold — with the knob
+        // ON, C post-hoc demotes SELECT to LARGEST when the coded frame had
+        // ZERO tx splits (av1_encode_frame's txb_split_count == 0 arm, the
+        // KB-10 cq63 shape) — so a LARGEST header is legal either way.
+        assert!(
+            knobs.enable_tx_size_search || !p.tx_mode_select,
+            "{}: --enable-tx-size-search=0 but the bootstrap header codes              TX_MODE_SELECT",
+            self.label
+        );
+        // `--cdf-update-mode=0` → the KEY header codes disable_cdf_update=1
+        // (av1/encoder/encoder.c cdf-update-mode case 0).
+        assert_eq!(
+            p.prefix.disable_cdf_update,
+            knobs.cdf_update_mode == 0,
+            "{}: bootstrap frame header disable_cdf_update != knob",
+            self.label
+        );
+
         let qindex = p.quant.base_qindex;
         let mut quants = Quants::zeroed();
         let mut deq = Dequants::zeroed();
@@ -562,7 +887,7 @@ impl EncodeCell {
         let rows_v = set_q_index(&quants, &deq, qindex as usize, 2);
 
         let mut kf_write = KfFrameContext::default_for_qindex(qindex);
-        let real = derive_real_costs(&kf_write, s.enable_filter_intra);
+        let real = derive_real_costs(&kf_write, knobs.enable_filter_intra);
         let rdmult = av1_compute_rd_mult_based_on_qindex(
             bd,
             FrameUpdateType::Kf,
@@ -633,7 +958,8 @@ impl EncodeCell {
             bd,
             lossless: p.coded_lossless,
             reduced_tx_set_used: p.reduced_tx_set_used,
-            disable_edge_filter: !s.enable_intra_edge_filter,
+            // Knob-driven (seq bit asserted equal above — no bootstrap flow).
+            disable_edge_filter: !knobs.enable_intra_edge_filter,
             filter_type: 0,
             stride,
             src_y: &src_y_strided,
@@ -659,13 +985,44 @@ impl EncodeCell {
             coeff_costs_uv: &real.coeff_costs_uv,
             tx_type_costs: &real.tx_type_costs_y,
         };
+        // CLI tx-type toggles override the sf-derived policy (C reads oxcf
+        // directly in get_tx_mask, stage-independent; the MODE_EVAL
+        // default-tx-only OR happens in partition_pick's stage derivation
+        // from this policy).
+        let pol = {
+            let mut pol = sf.tx_type_search_policy(false, 0);
+            pol.enable_flip_idtx = knobs.enable_flip_idtx;
+            pol.use_intra_dct_only = knobs.use_intra_dct_only;
+            pol.use_default_intra_tx_type |= knobs.use_intra_default_tx_only;
+            pol.enable_tx_size_search = knobs.enable_tx_size_search;
+            pol
+        };
+        // Chroma-loop tool toggles ride on the UvLoopPolicy (the sf-driven
+        // fields keep their speed-0 values; the speed>=3 chroma rebuild in
+        // partition_pick spreads `..cfg.uv_lp.clone()`, so these survive).
+        let uv_lp = UvLoopPolicy {
+            enable_diagonal_intra: knobs.enable_diagonal_intra,
+            enable_directional_intra: knobs.enable_directional_intra,
+            enable_smooth_intra: knobs.enable_smooth_intra,
+            enable_paeth_intra: knobs.enable_paeth_intra,
+            enable_cfl_intra: knobs.enable_cfl_intra,
+            enable_angle_delta: knobs.enable_angle_delta,
+            ..UvLoopPolicy::speed0_allintra()
+        };
         let pick_cfg = PickFrameCfg {
+            intra_tools: aom_encode::partition_pick::IntraToolCfg {
+                enable_diagonal_intra: knobs.enable_diagonal_intra,
+                enable_directional_intra: knobs.enable_directional_intra,
+                enable_smooth_intra: knobs.enable_smooth_intra,
+                enable_paeth_intra: knobs.enable_paeth_intra,
+                enable_angle_delta: knobs.enable_angle_delta,
+            },
             mode_costs: &real.mode_costs,
             tx_size_costs: &real.tx_size_costs,
             skip_costs: &real.skip_costs,
             tx_type_costs_y: &real.tx_type_costs_y,
-            pol: &sf.tx_type_search_policy(false, 0),
-            uv_lp: &UvLoopPolicy::speed0_allintra(),
+            pol: &pol,
+            uv_lp: &uv_lp,
             intra_uv_mode_cost: &real.mode_costs.intra_uv_mode_cost,
             cfl_costs: &real.cfl_costs,
             partition_costs: &real.partition_costs,
@@ -673,30 +1030,32 @@ impl EncodeCell {
             allintra,
             speed,
             qindex,
-            enable_filter_intra: s.enable_filter_intra,
-            enable_tx64: true,
-            enable_rect_tx: true,
+            enable_filter_intra: knobs.enable_filter_intra,
+            enable_tx64: knobs.enable_tx64,
+            enable_rect_tx: knobs.enable_rect_tx,
             intra_pruning_with_hog: if allintra {
                 sf.intra_pruning_with_hog != 0
             } else {
                 true
             },
-            enable_rect_partitions: true,
+            enable_rect_partitions: knobs.enable_rect_partitions,
             less_rectangular_check_level: if allintra {
                 sf.less_rectangular_check_level
             } else {
                 i32::from(allintra)
             },
-            max_partition_size: 15,
-            min_partition_size: 0,
-            enable_1to4_partitions: true,
-            enable_ab_partitions: true,
+            // C's set_max_min_partition_size (partition_strategy.h:214):
+            // min(sf default, CLI dim, sb). SB is 64 in this harness (12).
+            max_partition_size: knobs.max_partition_bsize(sf.default_max_partition_size, 12),
+            min_partition_size: knobs.min_partition_bsize(12),
+            enable_1to4_partitions: knobs.enable_1to4_partitions,
+            enable_ab_partitions: knobs.enable_ab_partitions,
             allow_screen_content_tools: p.allow_screen_content_tools,
             qm_levels: None,
-            palette_costs: enable_palette.then_some(&real.palette_costs),
+            palette_costs: knobs.enable_palette.then_some(&real.palette_costs),
         };
         let pack_cfg = aom_encode::pack::PackCfg {
-            enable_filter_intra: s.enable_filter_intra,
+            enable_filter_intra: knobs.enable_filter_intra,
             tx_mode_is_select: p.tx_mode_select,
             signal_gate: qindex > 0,
             allow_update_cdf: !p.prefix.disable_cdf_update,
