@@ -514,8 +514,14 @@ pub fn encode_b_intra_dry(
         sharpness: env.sharpness,
         coeff_costs: &y_tables,
         enable_optimize_b: env.enable_optimize_b,
-        // DRY_RUN_NORMAL.
-        dry_run_output_enabled: false,
+        // C's `dry_run == OUTPUT_ENABLED` (tokenize.h) — the pack/winner walk
+        // passes `output_enabled = true`, the search's DRY_RUN_NORMAL context
+        // propagation passes `false`. Byte-inert for NO/FULL/NO_ESTIMATE_YRD
+        // trellis (is_trellis_used is flag-independent there — every existing
+        // gate); load-bearing ONLY for FINAL_PASS_TRELLIS_OPT
+        // (--disable-trellis-quant=2), where the final pack must trellis and
+        // the search must not (init_rd_sf, is_trellis_used, encodemb.h:153).
+        dry_run_output_enabled: output_enabled,
         above_ctx: &above_y,
         left_ctx: &left_y,
         qm_level: env.qm_levels.map(|l| l[0]),
@@ -650,7 +656,10 @@ pub fn encode_b_intra_dry(
             skip_txfm: winner.skip_txfm,
             sharpness: env.sharpness,
             enable_optimize_b: env.enable_optimize_b,
-            dry_run_output_enabled: false,
+            // See the luma `dry_run_output_enabled` note above: `output_enabled`
+            // is C's OUTPUT_ENABLED flag; only FINAL_PASS_TRELLIS_OPT reads it
+            // (the chroma final pack must trellis, the search must not).
+            dry_run_output_enabled: output_enabled,
             use_chroma_trellis_rd_mult: env.use_chroma_trellis_rd_mult,
         };
         u_out = Some(encode_intra_block_plane_uv(

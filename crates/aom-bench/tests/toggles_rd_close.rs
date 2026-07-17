@@ -448,10 +448,9 @@ fn toggles_c11_cdf_update_mode_0() {
 /// NO_TRELLIS_OPT — trellis off in BOTH the search and the pack
 /// (init_rd_sf, speed_features.c:2494).
 ///
-/// HANDOFF: written under the shutdown directive — compile-checked, NOT yet
-/// run. Expected EXACT (pure deterministic policy shrink, same shape as the
-/// other C9 arms); if a cell comes out non-EXACT, drop `expect_exact` and
-/// record the closeness numbers per PARITY rule 2 before landing claims.
+/// VERIFIED EXACT 2026-07-17 (3/3 cells byte-identical vs real aomenc). The
+/// port's search `skip_trellis` and pack `enable_optimize_b` both resolve
+/// no-trellis, so this arm matched with no additional fix.
 #[test]
 fn toggles_c9_trellis_quant_off() {
     let knobs = ToggleKnobs {
@@ -465,8 +464,13 @@ fn toggles_c9_trellis_quant_off() {
 /// evaluates WITHOUT trellis (`is_trellis_used(., DRY_RUN_NORMAL) = false`)
 /// while the pack's final quantize runs WITH it (OUTPUT_ENABLED arm).
 ///
-/// HANDOFF: compile-checked, NOT yet run (shutdown directive) — same
-/// expectation + fallback as `toggles_c9_trellis_quant_off`. NOTE
+/// VERIFIED EXACT 2026-07-17 (3/3 cells byte-identical vs real aomenc), but
+/// ONLY after a real fix: `encode_b_intra_dry` had hardcoded
+/// `dry_run_output_enabled: false`, so the OUTPUT_ENABLED pack pass did NOT
+/// apply FINAL_PASS trellis (it does for the default/NO/lossless arms because
+/// `is_trellis_used` is flag-independent there — which is why every prior gate
+/// passed). The pack now threads `output_enabled` through, matching C's
+/// `is_trellis_used(FINAL_PASS, OUTPUT_ENABLED) = true`. NOTE
 /// `--disable-trellis-quant=0` (FULL) is NOT celled: vs the default (3,
 /// NO_ESTIMATE_YRD) it differs only in `estimate_yrd_for_sb`, which is
 /// inter-only — the C stream would not change and the anti-vacuity witness

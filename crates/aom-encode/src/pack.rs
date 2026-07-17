@@ -18,12 +18,14 @@
 //!
 //! [`crate::encode_intra::encode_intra_block_plane_y`]/`_uv`'s only
 //! `dry_run_output_enabled`-gated behavior is [`crate::encode_intra::is_trellis_used`]'s
-//! `FinalPassTrellisOpt` check (`encodemb.h`); at speed 0, non-lossless, the
-//! trellis mode is always `FullTrellisOpt` (`encode_intra.rs` module docs:
-//! "the speed-0 final encode is ALWAYS AV1_XFORM_QUANT_FP + av1_optimize_b"),
-//! for which `is_trellis_used` returns `true` **regardless** of the flag. So
-//! re-running [`crate::encode_sb::encode_b_intra_dry`] (which hardcodes
-//! `dry_run_output_enabled: false`) over the SAME winning leaf, from the
+//! `FinalPassTrellisOpt` check (`encodemb.h`). For the default speed-0
+//! envelope (`NoEstimateYrdTrellisOpt`) and the `NO_TRELLIS`/lossless arms
+//! `is_trellis_used` returns the same value **regardless** of the flag, so
+//! the pack matched even when the flag was hardcoded. `FINAL_PASS_TRELLIS_OPT`
+//! (`--disable-trellis-quant=2`) is the exception: the final encode MUST
+//! trellis where the search did not, so [`crate::encode_sb::encode_b_intra_dry`]
+//! now takes an `output_enabled` argument and this pack passes `true`
+//! (C's `OUTPUT_ENABLED`). Re-running it over the SAME winning leaf, from the
 //! SAME starting context state, reproduces byte-identical
 //! qcoeff/eob/tx_type/dqcoeff to what a true `OUTPUT_ENABLED` call would —
 //! this module reuses that validated code path instead of a parallel copy,
