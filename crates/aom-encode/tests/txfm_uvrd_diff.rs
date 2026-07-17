@@ -205,11 +205,17 @@ fn txfm_uvrd_matches_c_walk() {
         for iter in 0..8 {
             // Sweep BOTH usage arms (ALLINTRA chroma trellis mult 13 /
             // GOOD 20).
-            let pol = if iter % 2 == 0 {
+            let mut pol = if iter % 2 == 0 {
                 TxTypeSearchPolicy::speed0_allintra()
             } else {
                 TxTypeSearchPolicy::speed0_good()
             };
+            // C9 toggle sweep: `--use-intra-dct-only` forces the chroma
+            // search mask to DCT too (get_tx_mask has no plane gate on the
+            // force; the reduced-set empty-mask reset restores the derived
+            // uv type where DCT is outside the per-direction table).
+            let use_intra_dct_only = iter % 4 == 3;
+            pol.use_intra_dct_only = use_intra_dct_only;
             let sc = build_scenario(&mut rng, bsize, ss_x, ss_y, mi_row, mi_col, ci + iter);
             let t = gen_tables(&mut rng);
             let coeff_costs = CoeffCostTables {
@@ -303,6 +309,7 @@ fn txfm_uvrd_matches_c_walk() {
             );
 
             let cenv = CUvEnv {
+                use_intra_dct_only,
                 partition: 0,
                 bsize: sc.bsize,
                 mi_row: sc.mi_row,
@@ -695,11 +702,17 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
         for iter in 0..8 {
             // Sweep BOTH usage arms (ALLINTRA chroma trellis mult 13 /
             // GOOD 20).
-            let pol = if iter % 2 == 0 {
+            let mut pol = if iter % 2 == 0 {
                 TxTypeSearchPolicy::speed0_allintra()
             } else {
                 TxTypeSearchPolicy::speed0_good()
             };
+            // C9 toggle sweep: `--use-intra-dct-only` forces the chroma
+            // search mask to DCT too (get_tx_mask has no plane gate on the
+            // force; the reduced-set empty-mask reset restores the derived
+            // uv type where DCT is outside the per-direction table).
+            let use_intra_dct_only = iter % 4 == 3;
+            pol.use_intra_dct_only = use_intra_dct_only;
             let sc = build_scenario(&mut rng, bsize, ss_x, ss_y, mi_row, mi_col, ci + iter);
             let t = gen_tables(&mut rng);
             let coeff_costs = CoeffCostTables {
@@ -811,6 +824,7 @@ fn txfm_rd_in_plane_uv_cfl_matches_c_walk() {
                 qm_levels: None,
             };
             let cenv = CUvEnv {
+                use_intra_dct_only,
                 partition: 0,
                 bsize: sc.bsize,
                 mi_row: sc.mi_row,

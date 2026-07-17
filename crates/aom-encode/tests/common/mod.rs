@@ -133,6 +133,7 @@ pub fn c_search_tx_type(
     ref_best_rd: i64,
     coeff_tbls: (&[i32], &[i32], &[i32], &[i32], &[i32], &[i32], &[i32]),
     ttc_tables: (&[i32], &[i32]),
+    use_intra_dct_only: bool,
 ) -> (usize, u16, i32, i64, i64, u8, Vec<i32>, i64) {
     // plane 0: the chroma trellis-table select is irrelevant (luma is 17 in
     // both tables).
@@ -161,6 +162,7 @@ pub fn c_search_tx_type(
         coeff_tbls,
         ttc_tables,
         true,
+        use_intra_dct_only,
     )
 }
 
@@ -199,6 +201,7 @@ pub fn c_uniform_txfm_yrd(
     skip_ctx: usize,
     ts_flat: &[i32],
     tx_size_ctx: usize,
+    use_intra_dct_only: bool,
 ) -> (i64, Option<(i32, i64, i64, Vec<(usize, u16, u8)>)>) {
     let (mi_row, mi_col, ref_off, src_off, stride) = geometry;
     let (bw, bh) = (BLK_W[bsize], BLK_H[bsize]);
@@ -311,6 +314,7 @@ pub fn c_uniform_txfm_yrd(
                 ref_best_rd - current_rd,
                 coeff_tbls,
                 ttc_tables,
+                use_intra_dct_only,
             );
             // recon_intra (tx_search.c:930-932) reconstructs a txb into the
             // recon plane ONLY when it is NOT the last (bottom-right-most) txb
@@ -493,6 +497,7 @@ pub fn c_pick_uniform_tx_size_type_yrd(
     ts_flat: &[i32],
     tx_size_ctx: usize,
     source_variance: u32,
+    use_intra_dct_only: bool,
 ) -> Option<(usize, i64, i32, i64, i64, Vec<(usize, u16, u8)>)> {
     const MI_W: [usize; 22] = [
         1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
@@ -531,6 +536,7 @@ pub fn c_pick_uniform_tx_size_type_yrd(
             skip_ctx,
             ts_flat,
             tx_size_ctx,
+            use_intra_dct_only,
         );
         return res.map(|(rate, dist, sse, w)| (0, rd, rate, dist, sse, w));
     }
@@ -568,6 +574,7 @@ pub fn c_pick_uniform_tx_size_type_yrd(
             skip_ctx,
             ts_flat,
             tx_size_ctx,
+            use_intra_dct_only,
         );
         rd_arr[depth as usize] = rd;
         if rd < best_rd_c {
@@ -656,6 +663,7 @@ pub fn c_search_tx_type_p(
     coeff_tbls: (&[i32], &[i32], &[i32], &[i32], &[i32], &[i32], &[i32]),
     ttc_tables: (&[i32], &[i32]),
     use_chroma_trellis_rd_mult: bool,
+    use_intra_dct_only: bool,
 ) -> (usize, u16, i32, i64, i64, u8, Vec<i32>, i64) {
     let (w, _h) = (TX_W[tx_size], TX_H[tx_size]);
     let n_coeffs = txb_wide(tx_size) * txb_high(tx_size);
@@ -671,13 +679,22 @@ pub fn c_search_tx_type_p(
             1,
             false,
             true,
-            false,
+            use_intra_dct_only,
             false, // use_default_intra_tx_type
             false, // use_screen_content_tools
         )
     } else {
         let (m, t) = c::ref_get_tx_mask_uv_intra(
-            tx_size, uv_mode, mode, use_fi, fi_mode, lossless, reduced, 1, true, false,
+            tx_size,
+            uv_mode,
+            mode,
+            use_fi,
+            fi_mode,
+            lossless,
+            reduced,
+            1,
+            true,
+            use_intra_dct_only,
         );
         (m, t as i32)
     };
@@ -913,6 +930,11 @@ pub struct CUvEnv<'a> {
     /// `mbmi->partition` (has_top_right/has_bottom_left input; 0 NONE /
     /// 1 HORZ / 2 VERT for the ported tree shapes).
     pub partition: usize,
+    /// `oxcf.txfm_cfg.use_intra_dct_only` (`--use-intra-dct-only`, default
+    /// off) — threaded into the REAL `get_tx_mask` facade for BOTH planes
+    /// (the C force applies to chroma too; the empty-mask reset then
+    /// restores the derived uv type where the reduced set lacks DCT).
+    pub use_intra_dct_only: bool,
 }
 
 /// C-side `av1_txfm_rd_in_plane` for one CHROMA plane (intra): the walk over
@@ -1149,6 +1171,7 @@ pub fn c_txfm_rd_in_plane_uv(
                 env.coeff_tbls,
                 env.ttc_tables,
                 env.use_chroma_trellis_rd_mult,
+                env.use_intra_dct_only,
             );
             if weob > 0 {
                 let mut tight = pred.clone();
@@ -2036,6 +2059,7 @@ pub fn c_mode_loop(
     allintra: bool,
     cvar: &mut [i32],
     clog: &mut [f64],
+    use_intra_dct_only: bool,
 ) -> CLoopOut {
     let (mi_row, mi_col, ref_off, src_off, stride) = geometry;
     let (above_mode, left_mode) = neigh_modes;
@@ -2137,6 +2161,7 @@ pub fn c_mode_loop(
                 ts_flat,
                 tx_size_ctx,
                 source_variance,
+                use_intra_dct_only,
             )
         else {
             continue; // rate == INT_MAX
@@ -2273,6 +2298,7 @@ pub fn c_mode_loop(
                     ts_flat,
                     tx_size_ctx,
                     source_variance,
+                    use_intra_dct_only,
                 )
             else {
                 continue;
@@ -3074,6 +3100,7 @@ impl COracle<'_> {
             let above_v: Vec<i8> = self.above_e[2][au..au + pmw].to_vec();
             let left_v: Vec<i8> = self.left_e[2][lu..lu + pmh].to_vec();
             let cenv = CUvEnv {
+                use_intra_dct_only: false,
                 partition,
                 bsize,
                 mi_row,

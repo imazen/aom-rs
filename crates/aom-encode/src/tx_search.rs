@@ -829,6 +829,24 @@ pub struct TxTypeSearchPolicy {
     /// (stage-independent — copied from the raw sf like
     /// `prune_tx_type_est_rd`); gates the [`NnDepthPruneCtx`] threading.
     pub prune_intra_tx_depths_using_nn: bool,
+    /// `oxcf.txfm_cfg.enable_flip_idtx` (`--enable-flip-idtx`, CLI default
+    /// on) — stage-INDEPENDENT (C reads oxcf directly in `get_tx_mask`,
+    /// tx_search.c). When off, masks the FLIPADST/IDTX tx-type family out of
+    /// every ext-tx set ([`DCT_ADST_TX_MASK`]).
+    pub enable_flip_idtx: bool,
+    /// `oxcf.txfm_cfg.use_intra_dct_only` (`--use-intra-dct-only`, CLI
+    /// default off) — stage-independent like `enable_flip_idtx`. Forces
+    /// `txk_allowed = DCT_DCT` for every luma intra txb.
+    pub use_intra_dct_only: bool,
+    /// `oxcf.txfm_cfg.enable_tx_size_search` (`--enable-tx-size-search`, CLI
+    /// default on). OFF forces `winner_mode_sf.tx_size_search_level = 3`
+    /// (speed_features.c:2726) → USE_LARGESTALL at every eval stage → the
+    /// frame codes `tx_mode = TX_MODE_LARGEST` (`select_tx_mode`). Carried on
+    /// the policy because the policy is the port's oxcf.txfm_cfg carrier:
+    /// consumers are the single-pass method pick (intra_rd.rs, USE_FULL_RD →
+    /// USE_LARGESTALL), the winner-mode sf derivation (partition_pick.rs,
+    /// level 3), and the leaf `tx_mode_is_select` init (partition_pick.rs).
+    pub enable_tx_size_search: bool,
 }
 
 impl TxTypeSearchPolicy {
@@ -853,6 +871,9 @@ impl TxTypeSearchPolicy {
             prune_2d_txfm_mode: 1, // TX_TYPE_PRUNE_1 (init_tx_sf:2457); inert while est_rd off
             predict_dc_level: 0,   // predict_dc_levels[0][*] (dc_blk_pred_level 0 through speed 5)
             prune_intra_tx_depths_using_nn: false, // default off (speed>=6 only)
+            enable_flip_idtx: true,    // --enable-flip-idtx CLI default
+            use_intra_dct_only: false, // --use-intra-dct-only CLI default
+            enable_tx_size_search: true, // --enable-tx-size-search CLI default
         }
     }
 
@@ -1084,6 +1105,11 @@ pub fn search_tx_type_intra(
     let tx_mask_params = TxMaskParams {
         use_default_intra_tx_type: pol.use_default_intra_tx_type,
         use_screen_content_tools: pol.use_screen_content_tools,
+        // CLI tx-type toggles (oxcf.txfm_cfg → get_tx_mask reads them
+        // directly, stage-independent): defaults on/off in every policy
+        // constructor, so pre-toggle behavior is byte-identical.
+        enable_flip_idtx: pol.enable_flip_idtx,
+        use_intra_dct_only: pol.use_intra_dct_only,
         ..TxMaskParams::speed0_allintra()
     };
     let (allowed_tx_mask, txk_allowed) = if inp.plane == 0 {

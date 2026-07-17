@@ -963,6 +963,12 @@ pub fn pack_tile(
     sb_mi: i32,
     sb_size: usize,
 ) -> Vec<SbTree> {
+    // C write_modes (bitstream.c): `w->allow_update_cdf = !large_scale_tile
+    // && !disable_cdf_update` — the tile writer's symbol adaptation gate
+    // (aom_write_symbol adapts iff set). large_scale_tile is out of this
+    // envelope (0).
+    enc.allow_update_cdf = pack_cfg.allow_update_cdf;
+
     let mi_cols = env.mi_cols as usize;
     let mut search_tile = TileCtxState::zeroed(mi_cols);
     let mut pack_tile_ctx = TileCtxState::zeroed(mi_cols);

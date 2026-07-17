@@ -230,7 +230,10 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
             // Mode-info cost tables (random CDFs through the dual fill).
             let cdf_set = gen_all_cdfs(&mut rng);
             let (mode_costs, c_mode_costs) = fill_both(&cdf_set, true);
-            let pol = TxTypeSearchPolicy::speed0_allintra();
+            let mut pol = TxTypeSearchPolicy::speed0_allintra();
+            // C9 `--use-intra-dct-only` sweep (forces the luma mask to DCT).
+            let use_intra_dct_only = iter % 4 == 3;
+            pol.use_intra_dct_only = use_intra_dct_only;
             let gates = IntraSbyGates {
                 directional_mode_skip_mask: skip_mask,
                 ..IntraSbyGates::speed0([false; INTRA_MODES])
@@ -346,6 +349,7 @@ fn rd_pick_intra_sby_mode_matches_c_loop() {
                 allintra,
                 &mut cvar,
                 &mut clog,
+            use_intra_dct_only,
             );
 
             factor_fired_total += want.factor_fired;

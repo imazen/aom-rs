@@ -145,7 +145,10 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
                 .collect();
             let rdmult = rng.range(1, 1 << 22);
             let ref_best_rd = if iter == 9 { 1 << 8 } else { i64::MAX };
-            let pol = TxTypeSearchPolicy::speed0_allintra();
+            let mut pol = TxTypeSearchPolicy::speed0_allintra();
+            // C9 `--use-intra-dct-only` sweep (forces the luma mask to DCT).
+            let use_intra_dct_only = iter % 4 == 3;
+            pol.use_intra_dct_only = use_intra_dct_only;
 
             // ---- Rust side ----
             let env = TxfmYrdEnv {
@@ -314,6 +317,7 @@ fn uniform_txfm_yrd_intra_matches_c_walk() {
                             &txb_skip, &base_eob, &base, &eob_extra, &dc_sign, &lps, &eob_tbl,
                         ),
                         (&c_ttc_intra, &c_ttc_inter),
+                    use_intra_dct_only,
                     );
                     // recon_intra (tx_search.c:930-932) reconstructs a txb into
                     // the recon plane ONLY when it is NOT the last
@@ -526,7 +530,10 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                 .collect();
             let rdmult = rng.range(1, 1 << 22);
             let ref_best_rd = i64::MAX;
-            let pol = TxTypeSearchPolicy::speed0_allintra();
+            let mut pol = TxTypeSearchPolicy::speed0_allintra();
+            // C9 `--use-intra-dct-only` sweep (forces the luma mask to DCT).
+            let use_intra_dct_only = iter % 4 == 3;
+            pol.use_intra_dct_only = use_intra_dct_only;
 
             let env = TxfmYrdEnv {
                 sb_size: 12,
@@ -623,6 +630,7 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                     skip_ctx,
                     &ts_flat,
                     tx_size_ctx,
+                use_intra_dct_only,
                 );
                 if let Some((rate, dist, sse, w)) = res {
                     best_c = Some((0, rd, rate, dist, sse, w));
@@ -663,6 +671,7 @@ fn pick_uniform_tx_size_type_yrd_matches_c_depth_loop() {
                         skip_ctx,
                         &ts_flat,
                         tx_size_ctx,
+                    use_intra_dct_only,
                     );
                     rd_arr[depth as usize] = rd;
                     if rd < best_rd_c {

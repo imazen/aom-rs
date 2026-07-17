@@ -1010,6 +1010,15 @@ impl SpeedFeatures {
                 PREDICT_DC_LEVELS[self.dc_blk_pred_level as usize][stage]
             },
             prune_intra_tx_depths_using_nn: self.prune_intra_tx_depths_using_nn,
+            // CLI tx-type toggles (oxcf.txfm_cfg — stage-independent; C's
+            // get_tx_mask reads oxcf directly). The sf derivation always
+            // emits the CLI DEFAULTS; a caller threading a non-default
+            // toggle overrides these on the returned policy (and
+            // partition_pick copies them from `cfg.pol` onto its internally
+            // derived winner-mode stage policies so the flags stay global).
+            enable_flip_idtx: true,
+            use_intra_dct_only: false,
+            enable_tx_size_search: true,
         }
     }
 

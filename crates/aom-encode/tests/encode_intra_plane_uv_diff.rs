@@ -322,6 +322,7 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
             };
 
             let cenv = CUvEnv {
+                use_intra_dct_only: false,
                 partition: 0,
                 bsize,
                 mi_row,

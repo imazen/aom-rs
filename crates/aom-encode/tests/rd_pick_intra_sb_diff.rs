@@ -359,11 +359,14 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             // Sweep BOTH usage arms: ALLINTRA (primary; chroma trellis
             // mult 13) and GOOD (secondary; 20) — the only speed-0 tx-layer
             // sf delta between the two usages.
-            let pol = if iter % 2 == 0 {
+            let mut pol = if iter % 2 == 0 {
                 TxTypeSearchPolicy::speed0_allintra()
             } else {
                 TxTypeSearchPolicy::speed0_good()
             };
+            // C9 `--use-intra-dct-only` toggle arm (luma pin + chroma force).
+            let use_intra_dct_only = iter % 4 == 3;
+            pol.use_intra_dct_only = use_intra_dct_only;
             let gates = IntraSbyGates::speed0([false; 13]);
 
             // ---- Rust side ----
@@ -554,6 +557,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 allintra,
                 &mut cvar,
                 &mut clog,
+            use_intra_dct_only,
             );
 
             let m = format!(
@@ -704,6 +708,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                 not_chroma_ref += 1;
             } else {
                 let cuv = CUvEnv {
+                    use_intra_dct_only,
                     partition: 0,
                     bsize,
                     mi_row,

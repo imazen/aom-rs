@@ -1058,6 +1058,12 @@ pub fn rd_pick_intra_sby_mode_y(
     let select_default = env.tx_mode_is_select;
     let (pass_pol, pass_method) = match cfg.winner_mode {
         Some(wm) => (wm.mode_eval_pol, wm.mode_eval_tx_size_method),
+        // `--enable-tx-size-search=0` forces tx_size_search_level 3 →
+        // USE_LARGESTALL even on the single-pass (speed 0..=3) arm
+        // (speed_features.c:2726; tx_size_search_methods row 3).
+        None if !cfg.pol.enable_tx_size_search => {
+            (cfg.pol, crate::tx_search::USE_LARGESTALL)
+        }
         None => (cfg.pol, crate::tx_search::USE_FULL_RD),
     };
     env.tx_mode_is_select = select_default && pass_method != crate::tx_search::USE_LARGESTALL;

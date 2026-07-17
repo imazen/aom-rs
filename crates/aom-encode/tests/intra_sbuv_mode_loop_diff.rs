@@ -85,11 +85,14 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
         for iter in 0..8 {
             // Sweep BOTH usage arms (ALLINTRA chroma trellis mult 13 /
             // GOOD 20).
-            let pol = if iter % 2 == 0 {
+            let mut pol = if iter % 2 == 0 {
                 TxTypeSearchPolicy::speed0_allintra()
             } else {
                 TxTypeSearchPolicy::speed0_good()
             };
+            // C9 `--use-intra-dct-only` toggle arm (chroma force + reset).
+            let use_intra_dct_only = iter % 4 == 3;
+            pol.use_intra_dct_only = use_intra_dct_only;
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
             let qindex = [16, 64, 128, 200, 255][(ci + iter) % 5] as usize;
@@ -358,6 +361,7 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
             );
 
             let cenv = CUvEnv {
+                use_intra_dct_only,
                 partition: 0,
                 bsize,
                 mi_row,

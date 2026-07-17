@@ -1440,6 +1440,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
             qm_levels: None,
         };
         let cfg = PickFrameCfg {
+            intra_tools: Default::default(),
             mode_costs: &mode_costs,
             tx_size_costs: &tx_size_costs,
             skip_costs: &skip_costs,

@@ -727,6 +727,7 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             qm_levels: None,
         };
         let pick_cfg = PickFrameCfg {
+            intra_tools: Default::default(),
             mode_costs: &mode_costs,
             tx_size_costs: &tx_size_costs,
             skip_costs: &skip_costs,
@@ -1192,6 +1193,7 @@ fn pack_tile_roundtrips_with_real_costs() {
             qm_levels: None,
         };
         let pick_cfg = PickFrameCfg {
+            intra_tools: Default::default(),
             mode_costs: &real.mode_costs,
             tx_size_costs: &real.tx_size_costs,
             skip_costs: &real.skip_costs,

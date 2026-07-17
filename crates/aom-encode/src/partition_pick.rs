@@ -554,6 +554,48 @@ pub struct PickFrameCfg<'a> {
     /// construction). The palette SEARCH itself additionally requires
     /// `av1_allow_palette(allow_screen_content_tools, bsize)` per leaf.
     pub palette_costs: Option<&'a crate::mode_costs::PaletteCosts>,
+    /// CLI intra-tool toggles (`oxcf.intra_mode_cfg` → the LUMA
+    /// candidate-loop `enable_*` gates; [`IntraToolCfg`]). `Default` = the
+    /// aomenc defaults (all enabled) = the pre-toggle behavior exactly.
+    pub intra_tools: IntraToolCfg,
+}
+
+/// `oxcf.intra_mode_cfg` LUMA candidate-loop tool toggles (av1_cx_iface.c
+/// `ctrl_set_enable_*`, defaults all ON) — threaded into every leaf's
+/// [`IntraSbyGates`] (the chroma loop's copies live on
+/// [`UvLoopPolicy`], supplied by the caller via `PickFrameCfg::uv_lp`).
+/// Distinct from the sf-driven gate fields (`disable_smooth_intra`,
+/// `intra_y_mode_mask`, …): C keeps both and the visit chain
+/// (`IntraSbyGates::visits`, intra_mode_search.c:1555-1594) reads them
+/// independently. `Default` = the aomenc defaults (all enabled).
+///
+/// `enable_filter_intra` / `enable_intra_edge_filter` are NOT here — they
+/// are SEQUENCE-header bits threaded separately (`PickFrameCfg::
+/// enable_filter_intra`, `SbEncodeEnv::disable_edge_filter`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntraToolCfg {
+    /// `--enable-diagonal-intra` (D45..D203; av1_is_diagonal_mode).
+    pub enable_diagonal_intra: bool,
+    /// `--enable-directional-intra` (V/H/D45..D67 + angle deltas).
+    pub enable_directional_intra: bool,
+    /// `--enable-smooth-intra` (SMOOTH/SMOOTH_V/SMOOTH_H).
+    pub enable_smooth_intra: bool,
+    /// `--enable-paeth-intra` (PAETH_PRED).
+    pub enable_paeth_intra: bool,
+    /// `--enable-angle-delta` (nonzero deltas on directional modes).
+    pub enable_angle_delta: bool,
+}
+
+impl Default for IntraToolCfg {
+    fn default() -> Self {
+        IntraToolCfg {
+            enable_diagonal_intra: true,
+            enable_directional_intra: true,
+            enable_smooth_intra: true,
+            enable_paeth_intra: true,
+            enable_angle_delta: true,
+        }
+    }
 }
 
 /// One leaf evaluation's differential-visibility record.
@@ -654,6 +696,15 @@ fn leaf_pick_sb_modes(
         );
     }
     let mut gates = IntraSbyGates::speed0(skip_mask);
+    // CLI intra-tool toggles (oxcf.intra_mode_cfg → the candidate-loop
+    // enable_* gates; av1_cx_iface.c defaults all ON). Independent of the
+    // sf-driven fields set below — C keeps both and the visit chain reads
+    // them separately (IntraSbyGates::visits, intra_mode_search.c:1555-1594).
+    gates.enable_diagonal_intra = cfg.intra_tools.enable_diagonal_intra;
+    gates.enable_directional_intra = cfg.intra_tools.enable_directional_intra;
+    gates.enable_smooth_intra = cfg.intra_tools.enable_smooth_intra;
+    gates.enable_paeth_intra = cfg.intra_tools.enable_paeth_intra;
+    gates.enable_angle_delta = cfg.intra_tools.enable_angle_delta;
     // Speed-2 all-intra intra-mode deltas (set_allintra_speed_features_framesize
     // _independent, speed_features.c:429/431): prune SMOOTH_H_PRED / SMOOTH_V_PRED
     // from the luma mode search (disable_smooth_intra), and restrict the
@@ -761,7 +812,10 @@ fn leaf_pick_sb_modes(
         // rate cost (`tx_search.rs`'s `tx_select` gate) into the RD search for
         // a symbol the pack stage never actually writes at lossless
         // (`pack.rs`'s `cfg.tx_mode_is_select && !env.lossless` gate).
-        tx_mode_is_select: !env.lossless,
+        // `select_tx_mode` (rdopt_utils.h): coded_lossless → ONLY_4X4;
+        // USE_LARGESTALL (--enable-tx-size-search=0 → level 3 at every
+        // stage) → TX_MODE_LARGEST; else TX_MODE_SELECT.
+        tx_mode_is_select: !env.lossless && cfg.pol.enable_tx_size_search,
         above_ctx: &above_y,
         left_ctx: &left_y,
         qm_levels: cfg.qm_levels,
@@ -773,17 +827,37 @@ fn leaf_pick_sb_modes(
     // threading the caller pol's CLI-driven skip_trellis/sharpness. None below
     // speed 4 (multi_winner_mode_type == MULTI_WINNER_MODE_OFF → single-pass).
     let wm_parts = (cfg.allintra && cfg.speed >= 4).then(|| {
-        let sf = SpeedFeatures::set_allintra(cfg.speed, cfg.allow_screen_content_tools, env.bd > 8);
+        let mut sf =
+            SpeedFeatures::set_allintra(cfg.speed, cfg.allow_screen_content_tools, env.bd > 8);
+        // `--enable-tx-size-search=0`: winner_mode_sf.tx_size_search_level = 3
+        // AFTER the speed derivation (speed_features.c:2726) → every stage
+        // method resolves USE_LARGESTALL.
+        if !cfg.pol.enable_tx_size_search {
+            sf.tx_size_search_level = 3;
+        }
         // multi_winner_mode_type: DEFAULT(2)/FAST(1) at speed 4/5 → the
         // winner-stats loop; OFF(0) at speed >= 6 → count 1 = the
         // single-best re-eval arm with no stats stored (intra_rd.rs).
+        let mut mode_eval_pol =
+            sf.tx_type_search_policy_for_stage(MODE_EVAL, cfg.pol.skip_trellis, cfg.pol.sharpness);
+        let mut winner_pol = sf.tx_type_search_policy_for_stage(
+            WINNER_MODE_EVAL,
+            cfg.pol.skip_trellis,
+            cfg.pol.sharpness,
+        );
+        // CLI tx-type toggles are stage-INDEPENDENT oxcf reads in C
+        // (get_tx_mask) — carry them from the caller's policy onto the
+        // derived stage policies; MODE_EVAL additionally ORs the CLI
+        // `--use-intra-default-tx-only` knob (rdopt_utils.h:579-581 — the
+        // caller's policy carries it; WINNER forces 0, :612).
+        for p in [&mut mode_eval_pol, &mut winner_pol] {
+            p.enable_flip_idtx = cfg.pol.enable_flip_idtx;
+            p.use_intra_dct_only = cfg.pol.use_intra_dct_only;
+        }
+        mode_eval_pol.use_default_intra_tx_type |= cfg.pol.use_default_intra_tx_type;
         (
-            sf.tx_type_search_policy_for_stage(MODE_EVAL, cfg.pol.skip_trellis, cfg.pol.sharpness),
-            sf.tx_type_search_policy_for_stage(
-                WINNER_MODE_EVAL,
-                cfg.pol.skip_trellis,
-                cfg.pol.sharpness,
-            ),
+            mode_eval_pol,
+            winner_pol,
             sf.tx_size_search_method_for_stage(MODE_EVAL),
             sf.tx_size_search_method_for_stage(WINNER_MODE_EVAL),
             sf.winner_mode_count_allowed(),
