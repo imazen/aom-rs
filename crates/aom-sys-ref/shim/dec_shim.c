@@ -2698,6 +2698,40 @@ int shim_noise_strength_fit_piecewise(const double *means, const double *stds,
   return ok;
 }
 
+/* Flat-block-finder differential oracle (C7 grain-estimator chunk 3): run the
+ * REAL exported aom_flat_block_finder_init/run over a `w×h` (stride=w) plane and
+ * copy the flat_blocks map (num_blocks_w*num_blocks_h bytes) into `out_flat`.
+ * `pixels` are u16; for use_highbd they are used as the uint16 image directly,
+ * otherwise truncated into a uint8 image (matching the Rust port, which reads
+ * u16 pixels uniformly). Returns num_flat (>=0) or -1 on error. Append-only. */
+int shim_flat_block_finder_run(const uint16_t *pixels, int w, int h,
+                               int block_size, int bit_depth, int use_highbd,
+                               uint8_t *out_flat) {
+  aom_flat_block_finder_t finder;
+  if (!aom_flat_block_finder_init(&finder, block_size, bit_depth, use_highbd))
+    return -1;
+  const int nbw = (w + block_size - 1) / block_size;
+  const int nbh = (h + block_size - 1) / block_size;
+  int num_flat;
+  if (use_highbd) {
+    num_flat = aom_flat_block_finder_run(&finder, (const uint8_t *)pixels, w, h,
+                                         w, out_flat);
+  } else {
+    uint8_t *u8 = (uint8_t *)malloc((size_t)w * h);
+    if (!u8) {
+      aom_flat_block_finder_free(&finder);
+      return -1;
+    }
+    for (int i = 0; i < w * h; ++i) u8[i] = (uint8_t)pixels[i];
+    num_flat = aom_flat_block_finder_run(&finder, u8, w, h, w, out_flat);
+    free(u8);
+  }
+  (void)nbw;
+  (void)nbh;
+  aom_flat_block_finder_free(&finder);
+  return num_flat;
+}
+
 /* Encode one KEY frame WITH fixed-denominator superres: the REAL
  * aom_codec_av1_cx public API with AV1E_SET_SUPERRES_MODE = AOM_SUPERRES_FIXED
  * and AV1E_SET_SUPERRES_DENOMINATOR = superres_denom (9..16). The encoder codes

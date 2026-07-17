@@ -12036,6 +12036,49 @@ pub fn ref_noise_strength_fit_piecewise(
     (ok != 0).then(|| (0..n as usize).map(|i| [xy[2 * i], xy[2 * i + 1]]).collect())
 }
 
+unsafe extern "C" {
+    fn shim_flat_block_finder_run(
+        pixels: *const u16,
+        w: i32,
+        h: i32,
+        block_size: i32,
+        bit_depth: i32,
+        use_highbd: i32,
+        out_flat: *mut u8,
+    ) -> i32;
+}
+
+/// Run the REAL `aom_flat_block_finder_init` + `_run` over a `w×h` plane
+/// (`pixels`, row-major, stride `w`) and return `(flat_blocks_map, num_flat)`.
+/// The map is `num_blocks_w * num_blocks_h` bytes. `use_highbd` selects the
+/// pixel read width on the C side (bit_depth drives normalization). `None` on
+/// C error.
+pub fn ref_flat_block_finder_run(
+    pixels: &[u16],
+    w: usize,
+    h: usize,
+    block_size: usize,
+    bit_depth: i32,
+    use_highbd: bool,
+) -> Option<(Vec<u8>, i32)> {
+    assert_eq!(pixels.len(), w * h);
+    let nbw = w.div_ceil(block_size);
+    let nbh = h.div_ceil(block_size);
+    let mut out = vec![0u8; nbw * nbh];
+    let num_flat = unsafe {
+        shim_flat_block_finder_run(
+            pixels.as_ptr(),
+            w as i32,
+            h as i32,
+            block_size as i32,
+            bit_depth,
+            use_highbd as i32,
+            out.as_mut_ptr(),
+        )
+    };
+    (num_flat >= 0).then_some((out, num_flat))
+}
+
 /// The REAL exported `aom_count_primitive_refsubexpfin`
 /// (aom_dsp/binary_codes_writer.c): coded bit count of
 /// `aom_write_primitive_refsubexpfin(n, k, ref, v)`.

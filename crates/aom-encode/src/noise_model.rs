@@ -295,6 +295,201 @@ impl NoiseStrengthSolver {
     }
 }
 
+/// `kLowPolyNumParams` — the planar (yd, xd, 1) low-order model.
+const K_LOW_POLY_NUM_PARAMS: usize = 3;
+
+/// `multiply_mat` (`aom_dsp/mathutils.h`): `res = m1 (m1_rows×inner) · m2
+/// (inner×m2_cols)`, row-major, plain `f64` accumulation.
+fn multiply_mat(
+    m1: &[f64],
+    m2: &[f64],
+    res: &mut [f64],
+    m1_rows: usize,
+    inner_dim: usize,
+    m2_cols: usize,
+) {
+    let mut idx = 0;
+    for row in 0..m1_rows {
+        for col in 0..m2_cols {
+            let mut sum = 0.0;
+            for inner in 0..inner_dim {
+                sum += m1[row * inner_dim + inner] * m2[inner * m2_cols + col];
+            }
+            res[idx] = sum;
+            idx += 1;
+        }
+    }
+}
+
+/// `aom_flat_block_finder_t` — finds low-gradient ("flat") blocks a noise model
+/// can safely sample. Port of `aom_flat_block_finder_*` (`aom_dsp/noise_model.c`).
+/// `A` is the fixed planar basis (`n×3`); `ata_inv` is `(AᵀA)⁻¹` (3×3),
+/// precomputed via the lazy-inverse solve. All `f64`.
+#[derive(Clone, Debug)]
+pub struct FlatBlockFinder {
+    a: Vec<f64>,              // n×3 planar basis
+    ata_inv: [f64; K_LOW_POLY_NUM_PARAMS * K_LOW_POLY_NUM_PARAMS],
+    block_size: usize,
+    normalization: f64,
+}
+
+impl FlatBlockFinder {
+    /// `aom_flat_block_finder_init(finder, block_size, bit_depth, use_highbd)`.
+    /// (`use_highbd` only distinguishes the pixel read width — the port reads
+    /// `u16` pixels uniformly, so it needs only `bit_depth` for normalization.)
+    pub fn new(block_size: usize, bit_depth: i32) -> Self {
+        let n = block_size * block_size;
+        let mut a = vec![0.0f64; K_LOW_POLY_NUM_PARAMS * n];
+        // AtA (3×3) accumulated, then inverted.
+        let mut eqns = EquationSystem::new(K_LOW_POLY_NUM_PARAMS);
+        let half = (block_size / 2) as f64;
+        for y in 0..block_size {
+            let yd = (y as f64 - half) / half;
+            for x in 0..block_size {
+                let xd = (x as f64 - half) / half;
+                let coords = [yd, xd, 1.0];
+                let row = y * block_size + x;
+                a[K_LOW_POLY_NUM_PARAMS * row] = yd;
+                a[K_LOW_POLY_NUM_PARAMS * row + 1] = xd;
+                a[K_LOW_POLY_NUM_PARAMS * row + 2] = 1.0;
+                for i in 0..K_LOW_POLY_NUM_PARAMS {
+                    for j in 0..K_LOW_POLY_NUM_PARAMS {
+                        eqns.a[K_LOW_POLY_NUM_PARAMS * i + j] += coords[i] * coords[j];
+                    }
+                }
+            }
+        }
+        // Lazy inverse: solve AtA · x = e_i for each identity column.
+        let mut ata_inv = [0.0f64; K_LOW_POLY_NUM_PARAMS * K_LOW_POLY_NUM_PARAMS];
+        for i in 0..K_LOW_POLY_NUM_PARAMS {
+            for b in eqns.b.iter_mut() {
+                *b = 0.0;
+            }
+            eqns.b[i] = 1.0;
+            eqns.solve();
+            for j in 0..K_LOW_POLY_NUM_PARAMS {
+                ata_inv[j * K_LOW_POLY_NUM_PARAMS + i] = eqns.x[j];
+            }
+        }
+        FlatBlockFinder {
+            a,
+            ata_inv,
+            block_size,
+            normalization: ((1u32 << bit_depth) - 1) as f64,
+        }
+    }
+
+    /// `aom_flat_block_finder_extract_block`: extract a (clamped-edge) block,
+    /// fit the planar model, and return `(plane, residual_block)`.
+    fn extract_block(&self, data: &[u16], w: usize, h: usize, stride: usize, offsx: usize, offsy: usize) -> (Vec<f64>, Vec<f64>) {
+        let bs = self.block_size;
+        let n = bs * bs;
+        let mut block = vec![0.0f64; n];
+        for yi in 0..bs {
+            let y = (offsy + yi).min(h - 1);
+            for xi in 0..bs {
+                let x = (offsx + xi).min(w - 1);
+                block[yi * bs + xi] = data[y * stride + x] as f64 / self.normalization;
+            }
+        }
+        let mut ata_inv_b = [0.0f64; K_LOW_POLY_NUM_PARAMS];
+        let mut plane_coords = [0.0f64; K_LOW_POLY_NUM_PARAMS];
+        let mut plane = vec![0.0f64; n];
+        multiply_mat(&block, &self.a, &mut ata_inv_b, 1, n, K_LOW_POLY_NUM_PARAMS);
+        multiply_mat(&self.ata_inv, &ata_inv_b, &mut plane_coords, K_LOW_POLY_NUM_PARAMS, K_LOW_POLY_NUM_PARAMS, 1);
+        multiply_mat(&self.a, &plane_coords, &mut plane, n, K_LOW_POLY_NUM_PARAMS, 1);
+        for i in 0..n {
+            block[i] -= plane[i];
+        }
+        (plane, block)
+    }
+
+    /// `aom_flat_block_finder_run`: score every block by gradient-covariance
+    /// flatness features, mark hard-thresholded flats, and additionally mark the
+    /// top-10th-percentile sigmoid scores. Returns `(flat_blocks map, num_flat)`.
+    /// The flat_blocks map is `num_blocks_w * num_blocks_h`, values `0/1/255`
+    /// exactly as C (`is_flat ? 255` then `|= 1` for percentile) — the count is
+    /// bit-exact; the percentile arm's `exp` sigmoid is the only libm-sensitive
+    /// step (`is_flat` and everything else is exact `f64`/`sqrt`).
+    pub fn run(&self, data: &[u16], w: usize, h: usize, stride: usize) -> (Vec<u8>, i32) {
+        let bs = self.block_size;
+        let n = bs * bs;
+        let k_trace = 0.15 / (32.0 * 32.0);
+        let k_ratio = 1.25;
+        let k_norm = 0.08 / (32.0 * 32.0);
+        let k_var = 0.005 / n as f64;
+        let nbw = (w + bs - 1) / bs;
+        let nbh = (h + bs - 1) / bs;
+        let mut num_flat = 0i32;
+        let mut flat_blocks = vec![0u8; nbw * nbh];
+        // (score, index) pairs.
+        let mut scores: Vec<(f32, usize)> = Vec::with_capacity(nbw * nbh);
+        scores.resize(nbw * nbh, (0.0, 0));
+
+        for by in 0..nbh {
+            for bx in 0..nbw {
+                let (_plane, block) = self.extract_block(data, w, h, stride, bx * bs, by * bs);
+                let (mut gxx, mut gxy, mut gyy) = (0.0f64, 0.0f64, 0.0f64);
+                let (mut mean, mut var) = (0.0f64, 0.0f64);
+                for yi in 1..(bs - 1) {
+                    for xi in 1..(bs - 1) {
+                        let gx = (block[yi * bs + xi + 1] - block[yi * bs + xi - 1]) / 2.0;
+                        let gy = (block[yi * bs + xi + bs] - block[yi * bs + xi - bs]) / 2.0;
+                        gxx += gx * gx;
+                        gxy += gx * gy;
+                        gyy += gy * gy;
+                        let value = block[yi * bs + xi];
+                        mean += value;
+                        var += value * value;
+                    }
+                }
+                let denom = ((bs - 2) * (bs - 2)) as f64;
+                mean /= denom;
+                gxx /= denom;
+                gxy /= denom;
+                gyy /= denom;
+                var = var / denom - mean * mean;
+
+                let trace = gxx + gyy;
+                let det = gxx * gyy - gxy * gxy;
+                let e1 = (trace + (trace * trace - 4.0 * det).sqrt()) / 2.0;
+                let e2 = (trace - (trace * trace - 4.0 * det).sqrt()) / 2.0;
+                let norm = e1;
+                let ratio = e1 / e2.max(1e-6);
+                let is_flat =
+                    trace < k_trace && ratio < k_ratio && norm < k_norm && var > k_var;
+                let weights = [-6682.0f64, -0.2056, 13087.0, -12434.0, 2.5694];
+                let mut sum_weights = weights[0] * var
+                    + weights[1] * ratio
+                    + weights[2] * trace
+                    + weights[3] * norm
+                    + weights[4];
+                sum_weights = fclamp(sum_weights, -25.0, 100.0);
+                let score = (1.0 / (1.0 + (-sum_weights).exp())) as f32;
+                let idx = by * nbw + bx;
+                flat_blocks[idx] = if is_flat { 255 } else { 0 };
+                scores[idx] = (if var > k_var { score } else { 0.0 }, idx);
+                num_flat += is_flat as i32;
+            }
+        }
+
+        // qsort by score (ascending). C's compare_scores is a strict float
+        // comparison returning 0 on ties; the flat_blocks OUTPUT depends only on
+        // the percentile threshold VALUE (`>=`), so tie-ordering is immaterial.
+        // Use a stable sort keyed on score only, mirroring the comparator.
+        scores.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+        let top_nth = nbw * nbh * 90 / 100;
+        let score_threshold = scores[top_nth].0;
+        for &(sc, index) in &scores {
+            if sc >= score_threshold {
+                num_flat += (flat_blocks[index] == 0) as i32;
+                flat_blocks[index] |= 1;
+            }
+        }
+        (flat_blocks, num_flat)
+    }
+}
+
 /// `aom_noise_strength_lut_t` — a piecewise-linear `(x, y)` curve.
 #[derive(Clone, Debug)]
 pub struct NoiseStrengthLut {

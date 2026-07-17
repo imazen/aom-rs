@@ -288,9 +288,15 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   trials bit-identical to the exported `aom_noise_strength_solver_*` / `_lut_eval` /
   `_fit_piecewise` across bd 8/10/12, varying bins/obs + a near-singular case (C-quirk faithful: the
   greedy LUT reduction leaves the `residual` array un-shifted on point removal). (3) `flat_block_finder`
-  (planar-model + threshold), (4) `noise_model` (AR estimate + `get_grain_parameters` quantize),
-  (5) `wiener_denoise_2d` + FFT, (6) `denoise_and_model_run` orchestrator + encoder wiring — all
-  still ABSENT.)
+  (planar-model + threshold) — **DONE (this landing):** `FlatBlockFinder` (init lazy-inverse of the
+  3-param planar `AᵀA`, `extract_block` planar-fit residual, `run` gradient-covariance eigen features
+  + hard `is_flat` threshold + 10th-percentile sigmoid ranking), differential `flat_block_finder_diff.rs`
+  48/48 trials bit-identical to the exported `aom_flat_block_finder_init`/`_run` (flat_blocks map +
+  num_flat) across bs 16/32 × bd 8/10/12 × exact+partial-edge sizes, anti-vacuous (356 flat / 3060
+  non-flat cells). NB the `exp` sigmoid (percentile arm) matches C's glibc `exp` bit-exactly on this
+  host; `is_flat` + all features are exact `f64`/`sqrt`. (4) `noise_model` (AR estimate +
+  `get_grain_parameters` quantize), (5) `wiener_denoise_2d` + FFT, (6) `denoise_and_model_run`
+  orchestrator + encoder wiring — all still ABSENT.)
 
 ### C8 — Partition controls — disable arms DONE (byte-exact); SB128 remains
 - **DONE (this landing, → section A):** `--enable-rect-partitions=0`, `--enable-ab-partitions=0`,
