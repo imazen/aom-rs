@@ -12313,3 +12313,20 @@ pub fn ref_encode_av1_kf_tune(
     out.truncate(n as usize);
     out
 }
+
+// ---------------------------------------------------------------------------
+// deltaq-mode=3 (DELTA_Q_PERCEPTUAL_AI, family C5) reference oracles.
+// Append-only; `av1_get_deltaq_offset` is a plain libaom.a export (rd.c:466),
+// a table walk over `av1_dc_quant_QTX` (no RTCD dispatch).
+// ---------------------------------------------------------------------------
+extern "C" {
+    fn av1_get_deltaq_offset(bit_depth: i32, qindex: i32, beta: f64) -> i32;
+}
+
+/// Reference `av1_get_deltaq_offset` (rd.c:466): the exported libaom fn that
+/// maps `(bit_depth, base qindex, beta)` to the qindex offset whose DC quant
+/// step is closest to `q(base)/sqrt(beta)`. `bit_depth` is the raw 8/10/12
+/// (`aom_bit_depth_t`).
+pub fn ref_av1_get_deltaq_offset(bit_depth: u8, qindex: i32, beta: f64) -> i32 {
+    unsafe { av1_get_deltaq_offset(i32::from(bit_depth), qindex, beta) }
+}

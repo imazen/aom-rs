@@ -21,11 +21,50 @@
 //! libm in both builds here (the same glibc), so the byte gates hold locally;
 //! `round` (half away from zero) == Rust `f64::round`.
 
-use aom_quant::av1_ac_quant_qtx;
+use aom_quant::{av1_ac_quant_qtx, av1_dc_quant_qtx};
 
 /// `MAXQ` / `MINQ` (av1/common/quant_common.h).
 const MAXQ: i32 = 255;
 const MINQ: i32 = 0;
+
+/// `av1_get_deltaq_offset` (rd.c:466): the qindex delta whose DC quantizer
+/// step is closest to `q(base) / sqrt(beta)`. `beta > 1` lowers the qindex
+/// (finer quant), `beta < 1` raises it. Walks the DC-quant table (
+/// [`av1_dc_quant_qtx`], exhaustively bit-exact vs C) one qindex at a time
+/// from `qindex` until the stepped-down/up quant crosses `newq`. Shared by
+/// both the Perceptual-AI arm ([`av1_get_sbq_perceptual_ai`]) and the
+/// rate-guided arm.
+pub fn av1_get_deltaq_offset(bit_depth: u8, qindex: i32, beta: f64) -> i32 {
+    debug_assert!(beta > 0.0);
+    let mut q = i32::from(av1_dc_quant_qtx(qindex, 0, bit_depth));
+    // `(int)rint(q / sqrt(beta))`: rint = round to nearest, ties to even, in
+    // the default rounding mode; the double is integer-valued so the int cast
+    // is exact.
+    let newq = (f64::from(q) / beta.sqrt()).round_ties_even() as i32;
+    let orig_qindex = qindex;
+    let mut qindex = qindex;
+    if newq == q {
+        return 0;
+    }
+    if newq < q {
+        while qindex > 0 {
+            qindex -= 1;
+            q = i32::from(av1_dc_quant_qtx(qindex, 0, bit_depth));
+            if newq >= q {
+                break;
+            }
+        }
+    } else {
+        while qindex < MAXQ {
+            qindex += 1;
+            q = i32::from(av1_dc_quant_qtx(qindex, 0, bit_depth));
+            if newq <= q {
+                break;
+            }
+        }
+    }
+    qindex - orig_qindex
+}
 
 /// `VAR_BOOST_MAX_DELTAQ_RANGE` (allintra_vis.c:39).
 const VAR_BOOST_MAX_DELTAQ_RANGE: i32 = 80;
