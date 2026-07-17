@@ -3222,6 +3222,7 @@ rule no wall ratios are claimed beyond the provisional noisy smoke in
   into `port_encode_cdef` (the speed gates' harness shape); SB128 CDEF-on
   (>64 mbmi arms are in place, pack envelope is SB64); CDEF_ADAPTIVE /
   tune=IQ out of envelope (documented in pickcdef.rs docs).
+
 ## #29 Palette RD search (Y + UV) — RD-CLOSE landing, 5/7 cells byte-exact (2026-07-17, screen-content track)
 
 **The first stills-parity bulk-port landing (PARITY.md section B row 1): the full
@@ -3389,3 +3390,76 @@ verdict on a cell the knob never reaches proves nothing).
   `encode_b_intra_dry`'s `output_enabled` arg into both envs — byte-inert for
   every existing gate (the flag is dead outside FINAL_PASS). Both trellis arms
   drive both sides through the real `pack_tile`.
+
+## C2 loop-restoration ENCODER search — BIT-IDENTICAL, second bulk-port family straight to PARITY section A (2026-07-17, LR bulk track)
+
+**`--enable-restoration=1` allintra speed-0 is BYTE-IDENTICAL to real aomenc — 8/8 gate
+cells + 8/8 decision equality** (e24cf09 write syntax, 96d3464 numeric core, dfd757e
+decision layer, 96534c4 wiring+gate). The full `av1/encoder/pickrst.c` search is ported;
+this was the highest-priority default-parity family (PARITY C2: C's allintra default is
+`enable_restoration=1` — av1_cx_iface.c:286, NOT touched by the allintra override).
+
+Four layers, each C-diffed at its own boundary:
+
+- **Write-side RU syntax** (`aom_entropy::lr`): `recenter_finite_nonneg` (forward) +
+  `write/count_primitive_{quniform,subexpfin,refsubexpfin}` (aom_dsp/binary_codes_writer.c)
+  + `write_wiener_filter` / `write_sgrproj_filter` / `write_lr_unit`
+  (loop_restoration_write_sb_coeffs) + the pickrst bit counters `count_wiener_bits` /
+  `count_sgrproj_bits`. Oracle: 400 randomized unit sequences BYTE-IDENTICAL to the REAL
+  C arithmetic writer (`shim_lr_units_roundtrip` — EXPORTED `aom_write_primitive_
+  refsubexpfin` + `aom_write_symbol` over REAL default LR CDFs), writer-side adapted CDFs
+  equal C's, pure-Rust roundtrip; `count_primitive_refsubexpfin` EXHAUSTIVE vs the
+  EXPORTED counter over all 4 coded (n,k) pairs (21,760 cells). `lr_write_diff.rs`.
+- **Search numeric core** (`aom_restore::pick`): `find_average(_highbd)`,
+  `compute_stats` (lowbd incl. `use_downsampled_wiener_stats` row accumulators; a
+  `dgd_origin` base gives the C pointer semantics for the ±3 window reads at plane
+  edges) + `compute_stats_highbd` (bit-depth divider), the separable-symmetric Wiener
+  solve (`linsolve_wiener` with the b/278065963 overflow scaling, `update_{a,b}_sep_sym`,
+  `wiener_decompose_sep_sym` 4-iter, `compute_score` identity gate, `finalize_sym_filter`),
+  SGR projection (`pixel_proj_error` lowbd+highbd, `calc_proj_params` +
+  `get_proj_subspace` with the C overflow guards, `encode_xq`). Oracles: EXPORTED
+  `av1_compute_stats[_highbd]_c`, `av1_{lowbd,highbd}_pixel_proj_error_c`,
+  `av1_calc_proj_params[_high_bd]_c`, `av1_selfguided_restoration_c` (the search's
+  flt0/flt1 producer diffed DIRECTLY) via the new `pickrst_shim.c` — M/H byte-identical
+  over 40×6×2×2 lowbd + 24×4×2×3 highbd cells, all 3 radius classes × bd 8/10/12.
+  HONEST GAP: the Wiener solve chain is static in C (no export) — transcribed, covered
+  by range/symmetry invariants + the e2e gate. `pick_diff.rs`.
+- **Decision layer** (`aom_restore::pick`): `PlaneCtx` staging (padded dgd +
+  `av1_extend_frame` + the encoder's TWO `save_boundary_lines` passes + trial dst —
+  REUSES the C-proven frame-walk internals, opened pub(crate); never re-ported),
+  `try_restoration_unit` (= `filter_unit` with stripe swaps, optimized_lr=0),
+  `search_norestore/wiener/sgrproj/switchable` with C's exact bits accounting
+  (AV1_PROB_COST_SHIFT) + `RDCOST_DBL_WITH_NATIVE_BD_DIST` f64 costing + the
+  dual-SGR/switchable penalties, `restoration_search` (tile → SB raster →
+  `corners_in_sb` units in CODING order for ref chaining; 150% last-unit + stripe
+  voffset limits), `pick_filter_restoration` (unit-size descent max→min with the
+  sb-width clamp, per-plane frame-type RD, all-none/worse-than-larger early breaks).
+  Self-consistency gates (`pick_search.rs`): perfect recon → all-NONE; noisy recon →
+  restoration found and applying it through the C-proven walk strictly reduces SSE
+  (bd8+bd10, 320×130 multi-unit); deterministic; sf disables constrain exactly.
+- **Encoder wiring + gate** (aom-encode pack + aom-bench): `pack_tile_lr` writes each
+  SB's corner RUs at the SB root BEFORE the partition symbol into the SAME adapting
+  tile context (per-tile `LrRefState`), `pack_tile` delegates with lr=None
+  (byte-identical); `EncodeCell::c_encode_lr` (AV1E_SET_ENABLE_RESTORATION=1) +
+  `port_encode_lr`: stock encode → derived-LF APPLY (`loop_filter_frame`, C's
+  loopfilter_frame ordering) → the ported search on (source, deblocked recon) with
+  `av1_fill_lr_rates` costs from frame-init LR CDFs + frame RDMULT +
+  `lr_search_sf_allintra` (framesize-independent allintra setters + the
+  qindex-dependent unit-size rule) → derived restoration header fields → repack with
+  interleaved RU params when any plane restores. Decisions DERIVED, never bootstrapped
+  (`parse_restoration_decision` witnesses real-vs-port at the bitstream level).
+
+**GATE (`lr_restoration_gate.rs`, aom-bench): 8 real-content cells, ALL BYTE-IDENTICAL,
+ALL decisions equal C's** — 64² cq{12,32,48}, 196² cq{20,48} (partial-SB edges), 352×288
+quantizer-00 cq{32,55} (multi-unit descent grids), b10 352×288 cq32. Decision shapes:
+all-NONE (cq12), WIENER-luma, SGRPROJ-luma, WIENER-all-3-planes (chroma 5-tap window +
+subsampled procunits), mixed SGR-luma+WIENER-chroma (b10), and the size descent picking
+128 at 196² cq20. Anti-vacuous floors (real-LR-active + port-LR-active) + full
+byte-identity + decision-equality asserts (hardened after measuring 8/8 EXACT).
+
+**Honest fractions:** e2e-gated = allintra speed-0 (full search) only. Speed 1–4 lpf_sf
+arms ported (`lr_search_sf_allintra`) but NOT e2e-gated yet; GOOD-mode setters not wired
+(asserted against); mono/4:4:4/bd12 gate cells absent; speed>=5 allintra is structurally
+LR-off in C (sf disable + seq-bit clear). Follow-ups: speed-arm cells, format cells,
+`pack_tile_from_trees` repack unification (drop the second search), SIMD for
+`compute_stats` (the search hot spot) on the Gate-3 track.

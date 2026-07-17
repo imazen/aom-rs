@@ -109,4 +109,22 @@ fn lr_restoration_search_rd_close_vs_real_aomenc() {
     );
 
     rd_close::assert_rd_close(&results, &bands);
+
+    // BYTE-IDENTITY assertions (the section-A gate): the first complete run
+    // measured 8/8 cells bit-identical with 8/8 decision equality, so this
+    // gate holds the feature at full byte-exactness — any weaker outcome is
+    // a regression, not a band question. (rd_close stays above for the
+    // richer failure report.)
+    assert_eq!(
+        decisions_equal,
+        results.len(),
+        "every cell's restoration decision must equal the C encoder's"
+    );
+    for r in &results {
+        assert!(
+            r.bit_identical,
+            "{}: LR-on encode must be BYTE-IDENTICAL to real aomenc (measured 8/8 on landing)",
+            r.label
+        );
+    }
 }
