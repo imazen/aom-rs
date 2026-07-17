@@ -73,6 +73,7 @@ Byte-identity gates landed and green on origin/main. Any regression here is a sh
 | Gate-3 perf cells byte-verified before timing | `aom-bench` `EncodeCell::assert_byte_exact` | 057bde2 |
 | **CDEF-strength RD search** (`--enable-cdef=1`, #7 / family C1): 14/14 cells — real content 196²/64² cq5..63 (cdef_bits=2 four-strength joint sets, per-unit literals) + mono/4:4:4/4:2:0/bd10 axes; speed-0 FULL search; two-pass encode→LF→search→pack | `encoder_gate_cdef_{real_content,synthetic_axes}_rd_close` (aom-bench; rd_close report + full byte-identity asserts) | 016d4dd + 9850da6 + c9ebf83 |
 | **Loop-restoration RD search** (`--enable-restoration=1`, family C2): 8/8 cells BYTE-IDENTICAL + 8/8 decisions equal C's — real content 64² cq{12,32,48}, 196² cq{20,48} (partial-SB edges), 352×288 cq{32,55} (multi-unit size-descent grids), b10 352×288 cq32; decision shapes covered: all-NONE, WIENER-luma, SGRPROJ-luma, WIENER-all-3-planes, mixed SGR-luma+WIENER-chroma (b10), unit-size descent picking 128; allintra speed-0 full search (all 16 SGR eps, ±{4,2,1} Wiener tap refine, 256→128→64 size loop) | `lr_restoration_gate.rs::lr_restoration_search_rd_close_vs_real_aomenc` (aom-bench; rd_close report + full byte-identity + decision-equality asserts) | e24cf09 + 96d3464 + dfd757e + 96534c4 |
+| **tune=IQ / tune=SSIMULACRA2 family** (`--tune=iq` / `--tune=ssimulacra2`, family C4): each bundle piece e2e byte-identical — QM-level formulas (`aom_get_qmlevel_luma_ssimulacra2` + `_444_chroma`), QM-PSNR dist metric (trellis + tx-search transform-domain distortion QM-weighted), `--sharpness` 0..7, `--enable-chroma-deltaq`, `--enable-adaptive-sharpness`, Variance-Boost `--deltaq-mode=6` — PLUS the **full composite bundle** (54/54 cells: mono/420/444 × 64/128/192 × cq12/32/50, CDEF overridden off = the separate C1 track, symbol-inert). All OFF by default (`TuneKnobs::default()` = PSNR). Anti-vacuous witnesses for sharpness/adaptive/variance-boost + `tune_shim_smoke` | `encoder_gate_tune_iq_e2e` (9 tests) + `qm_level_diff` + `tune_shim_smoke` | 2026-07-17 |
 
 ### Decoder (vs real `aom_codec_av1_dx`)
 
@@ -182,20 +183,32 @@ points are libaom v3.14.1 (`reference/libaom`). Defaults verified in
   `allow_screen_content_tools` as an input — the detection itself is unported. (S–M)
 - `--tune-content` screen/film forcing (gates the above). (S)
 
-### C4 — tune=IQ / tune=SSIMULACRA2 family — PARTIAL (M total) (#23 tail)
+### C4 — tune=IQ / tune=SSIMULACRA2 family — **PORTED, BIT-IDENTICAL → section A** (2026-07-17)
 The tune bundle (`handle_tuning`, av1_cx_iface.c:1938–1978): `enable_qm=1, qm_min=2,
 qm_max=10, sharpness=7, dist_metric=QM_PSNR, enable_cdef=ADAPTIVE, enable_chroma_deltaq=1,
 deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
-- PRESENT: IQ/SSIMULACRA2 rdmult weight (`rd.rs:208`, bit-exact); QM forward-quant +
-  `aom_get_qmlevel`/`aom_get_qmlevel_allintra` + wt_matrix (5b512bf, 40/40 byte gate);
-  trellis takes sharpness 0..7 (diffed); LF-init sharpness limits (decode side).
-- ABSENT: `aom_get_qmlevel_luma_ssimulacra2` + `aom_get_qmlevel_444_chroma` formulas
-  (quant_common.h:111/:150) (S); QM_PSNR dist metric in tx search/trellis
-  (`tx_search.c` `use_qm_dist_metric` :1150, `txb_rdopt.c` :347) (S–M); chroma deltaq
-  (`--enable-chroma-deltaq`) (S–M); `--sharpness` e2e threading incl. the
-  `av1_init_quantizer` rounding bias (`sharpness_adjustment`, av1_quantize.c:607) +
-  allintra edge-filter reduction (S–M); adaptive sharpness (`picklpf.c:232`) (S);
-  deltaq-mode=6 variance boost (see C5) (M).
+- **DONE — every piece e2e byte-identical to real aomenc + the full composite bundle** (all OFF
+  by default; `TuneKnobs::default()` = PSNR, the proven envelope is untouched). Gate:
+  `encoder_gate_tune_iq_e2e` (9 tests) + `qm_level_diff` + `tune_shim_smoke`:
+  1. QM-level formulas `aom_get_qmlevel_luma_ssimulacra2` + `aom_get_qmlevel_444_chroma`
+     (quant_common) — `qm_level_diff`, byte-exact vs the real C static inlines.
+  2. QM-PSNR dist metric (`dist_block_tx_domain_qm`; trellis `optimize_txb_qm` +
+     tx-search transform-domain distortion weighted by the forward QM only under
+     `use_qm_dist_metric`; txb_rdopt.c:346-351/:378-386) + `tune_shim_smoke` anti-vacuous.
+  3. `--sharpness` 0..7 (`av1_build_quantizer` rounding bias + trellis + LF level) + witness.
+  4. `--enable-chroma-deltaq` (`av1_set_quantizer` chroma delta-q arms, port-derived +
+     cross-checked vs the real header).
+  5. `--enable-adaptive-sharpness` (qindex-adaptive LF sharpness cap, picklpf.c) + witness.
+  6. `--deltaq-mode=6` Variance Boost (`allintra_vis.rs` per-SB source-variance qindex
+     modulation; `pack_tile`/`pack_tile_from_trees` per-SB delta-q threading) + witness.
+  - **Composite** (`encoder_gate_tune_composite_full_e2e`): the whole `--tune=iq` /
+    `--tune=ssimulacra2` bundle live at once, 54/54 cells byte-match (mono/420/444 ×
+    64/128/192 × cq12/32/50), proving the knobs compose.
+- **One bundle member NOT in the tune port: CDEF_ADAPTIVE.** The composite gate overrides
+  `enable_cdef=0` — CDEF is the separate, already-bit-exact C1 track (`av1_cdef_search`), applied
+  post-reconstruction so it is symbol-inert on the coded tile bytes. The tune-family port
+  deliberately does not own it; a full tune=IQ *with* CDEF-adaptive needs the C1 CDEF search wired
+  under the per-SB tune qindex (deferred, cross-track).
 
 ### C5 — aq-mode / deltaq-mode variants — ABSENT (M–L)
 - `--deltaq-mode=3` DELTA_Q_PERCEPTUAL_AI — the genuinely stills-specific arm:

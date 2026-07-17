@@ -3504,3 +3504,52 @@ Still PINNED (the L piece, `// HANDOFF:` in-file + HANDOFF-SCREEN.md): the coeff
 whole 8-step integration map (ModeGrid dvs/skips → LeafWinner → rd_pick hook →
 `encode_b_intra_dry` intrabc arm → pack → frame hash-table plumbing → harness knob → gate).
 Do NOT run an intrabc RD-closeness gate until the coeff arm lands.
+
+## C4 tune=IQ / tune=SSIMULACRA2 family — ALL 6 PIECES BYTE-EXACT + full composite (2026-07-17, tune track)
+
+- **Scope**: the `handle_tuning` bundle (`av1_cx_iface.c:1938-1978`) that `--tune=iq` /
+  `--tune=ssimulacra2` install — `enable_qm=1 qm(2,10)`, `sharpness=7`, `dist_metric=QM_PSNR`,
+  `enable_chroma_deltaq=1`, `deltaq_mode=6` (Variance Boost), `enable_cdef=CDEF_ADAPTIVE`; IQ adds
+  `enable_adaptive_sharpness=1`. **Everything OFF by default** (`TuneKnobs::default()` = PSNR); the
+  proven byte-exact envelope is untouched (`dist_block_tx_domain_qm` returns the plain
+  `dist_block_tx_domain` when `use_qm_dist_metric` is false — verified at the code level + by the
+  full envelope suite staying green with the port in tree).
+- **Each piece e2e byte-identical to real aomenc** (`encoder_gate_tune_iq_e2e`, 9 tests):
+  1. **QM-level formulas** `aom_get_qmlevel_luma_ssimulacra2` + `aom_get_qmlevel_444_chroma`
+     (`quant_common.rs`, `QM_FIRST/LAST_IQ_SSIMULACRA2` = 2/10) — `qm_level_diff` byte-exact vs the
+     real C static inlines (4 formulas × 6 ranges × qindex 0..=255).
+  2. **QM-PSNR dist metric** — the trellis distortion (`optimize_txb_qm`) AND the tx-search
+     transform-domain distortion (`dist_block_tx_domain_qm` = `aom_dist::block_error_qm`) weighted
+     by the forward QM only under `use_qm_dist_metric` (`txb_rdopt.c:346-351` dist fold,
+     `:378-386` the trellis rshift-7 vs 5 gain); `TxTypeSearchPolicy::with_tune_knobs` forces
+     transform-domain distortion on (`rdopt_utils.h:516-522`). Anti-vacuous: `tune_shim_smoke`
+     (aom-sys-ref) — the C shim's QM-PSNR stream genuinely differs from PSNR.
+  3. **`--sharpness` 0..7** — `av1_build_quantizer` rounding bias (`sharpness_adjustment`) + the
+     trellis scale + the LF `sharpness_level`. Witness `sharpness_witness_knobs_bite`:
+     `--sharpness=7` must change the C stream vs `--sharpness=0`.
+  4. **`--enable-chroma-deltaq`** — `av1_set_quantizer`'s chroma delta-q arms; the port DERIVES the
+     u/v dc/ac deltas from the knob and CROSS-CHECKS them against the real header (leak-free).
+  5. **`--enable-adaptive-sharpness`** — the qindex-adaptive LF `sharpness_level` cap
+     (`picklpf.c`; `frame_lf_sharpness`), cross-checked vs the real header. Witness: adaptive must
+     change a sharpness-7 stream at qindex 200.
+  6. **`--deltaq-mode=6` Variance Boost** — `allintra_vis.rs` full port
+     (`variance_boost_block_variance`, `av1_get_sbq_variance_boost`, `variance_boost_delta_q_res`,
+     `av1_adjust_q_from_delta_q_res`, `setup_delta_q_variance_boost`); `pack_tile` +
+     `pack_tile_from_trees` per-SB delta-q threading (`SbEncodeEnv::deltaq`, per-SB qindex +
+     rdmult + row re-select). Delta-q OFF reduces byte-identically to the prior path. Witness:
+     `--deltaq-mode=6` must change the C stream; `--deltaq-strength=200` must differ from 100.
+- **Composite** (`encoder_gate_tune_composite_full_e2e`, ADDED this landing): the whole bundle
+  live at once for both IQ and SSIMULACRA2 — QM + QM-PSNR + sharpness=7 + chroma-deltaq +
+  deltaq=6 (+ adaptive-sharpness for IQ). **54/54 cells byte-match** real `aomenc --tune=iq` /
+  `--tune=ssimulacra2` (mono/420/444 × 64/128/192 × cq12/32/50). Proves the knobs COMPOSE, not
+  merely that each works alone.
+- **The one bundle member NOT ported here: `CDEF_ADAPTIVE`.** The composite overrides
+  `enable_cdef=0` in the C reference: CDEF is the separate, already-bit-exact C1 track
+  (`av1_cdef_search`), applied post-reconstruction so it is symbol-inert on the coded tile bytes.
+  A full tune=IQ *with* CDEF-adaptive needs the C1 CDEF search wired under the per-SB tune qindex
+  (cross-track, deferred).
+- **Adoption / rebase**: adopted from the C4 predecessor WIP (worktree branches
+  `a07347614b295cb09` / `a6595a97d6d5ead8b`) — compiled (fixing the never-compiled pack.rs
+  delta-q threading), validated, composite arm added; rebased over the toggle-sweep (C8-C11) +
+  loop-restoration (C2) landings (additive conflict resolutions in `tx_search.rs` /
+  `partition_pick.rs` / `aom-sys-ref/src/lib.rs`, all keep-both).
