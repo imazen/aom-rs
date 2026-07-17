@@ -1,0 +1,22 @@
+measurement: Gate-3 deblock-SIMD callgrind Ir delta (highbd loop filter, all 4 widths)
+after commit: 1ce19a5 (deblock SIMD chunks A+B+C; lands on origin/main)
+before commit: 2d3831f (pre-deblock-SIMD base: transform SIMD + cdef/txb/intra-edge SIMD, SCALAR deblock)
+host: AMD EPYC-Genoa (Zen 4, avx512f), 16 cores, dedicated aom-rs box
+tool: valgrind-3.26.0 callgrind (Ir), profiling profile (release + debuginfo), NO -Ctarget-cpu
+dispatch: deblock SIMD runs its AVX2 (X64V3) path (NEON/WASM tiers exist; AVX-512 is a follow-up)
+commands (identical invocation before/after; run from each worktree root for corpus_dir):
+  ./target/profiling/gate3_profile dec port dec_mosaic_2k_cq20 3
+  ./target/profiling/gate3_profile dec port dec_mosaic_2k_cq40 3
+  callgrind_annotate --auto=no --inclusive=no <out>
+results (Ir refs, whole port decode incl. constant C-oracle setup):
+  cq20 after 3,024,137,482   before 3,374,647,537   (-10.4%)
+  cq40 after 2,069,029,723   before 2,372,417,902   (-12.8%)
+deblock filter-kernel cluster (scalar highbd::{filter,lpf}* -> simd::__arcane_lpf_impl_v3):
+  cq20  645,428,784 -> 290,949,096  (-54.9%)
+  cq40  579,726,584 -> 272,895,088  (-52.9%)
+isolation: set_lpf_parameters/get_filter_level/get_transform_size Ir byte-IDENTICAL before/after
+  (param derivation not vectorized), so whole-decode delta == filter-kernel delta to ~1%.
+parity: SIMD == scalar at every token tier (lpf_simd_diff, bd 8/10/12, both axes, all widths) +
+  SIMD == real C (hbd_lpf_diff dispatch-vs-C, lf_apply_diff frame-vs-C) in BOTH dispatch modes;
+  after binary's assert_byte_exact (port==C decode) passed on both cells.
+raw callgrind outputs: NOT committed (>300 KB each); regenerate via the commands above.

@@ -3223,6 +3223,66 @@ largest residual transform cost in encode (`av1_fdct4` 0.80%, `av1_fadst4`
 gate on %8); then AVX-512 (`X64V4`, 16-lane, native `vpsraq`), then NEON (falls
 to scalar — the perf gate box is x86). Design record: `HANDOFF-TXSIMD.md`.
 
+## Gate 3 — deblock loop-filter SIMD LANDED (2026-07-17, perf track): all 4 highbd filter widths, AVX2, bit-identical
+
+The deblock loop filter — the **top remaining scalar decode hotspot** after the
+transform stack (~17-25% of decode Ir on 2K/4K `aomenc --allintra` photographic
+stills, where CDEF/LR are off so deblock is the only live post-filter, per
+`benchmarks/decode_hotspots_2026-07-17.md`) — is now SIMD. AVX2 (`X64V3`); the
+scalar path is byte-untouched and `AOM_FORCE_SCALAR=1` routes to it.
+
+**What landed** (`crates/aom-loopfilter/src/simd.rs`, dispatched from
+`highbd::horizontal`/`vertical`; chunks A+B+C):
+- ONE `#[magetypes(define(i32x4), v3, neon, wasm128, -scalar)]` kernel for all
+  four highbd filter widths. Each `aom_highbd_lpf_*` call filters 4 edge
+  positions (AV1's 4-px segment) → the 4 SIMD lanes; the filter math runs once
+  across them instead of the scalar core's 4 sequential iterations.
+  - `filter4` (lpf_4): the base 4-tap filter — branchless (`& mask` / `& hev`
+    gates), i32-lane clamp (`scc`) + arithmetic-shift math.
+  - `lpf_6` / `lpf_8`: the wide (flat-region) weighted sums AND the filter4
+    fallback computed for all lanes, blended per lane on the `flat & mask` lane
+    mask (`i32x4::blend`) — the libaom branchless structure; the 8-tap p2/q2
+    blend against the ORIGINAL sample (filter4 leaves them).
+  - `lpf_14`: 3-way nested blend `use14 ? wide14 : (use8 ? wide8 : filter4)`,
+    matching the scalar `filter14 → filter8 → filter4` fallback chain.
+- All math in i32 lanes (the highbd path runs at bd up to 12, where the 14-tap
+  sums reach ~65520 — beyond i16). This reproduces the scalar i16 filter math +
+  i32 wide sums lane-for-lane (clamp ⊆ i16 range, 0/-1 lane-mask ANDs,
+  arithmetic shifts on in-range values; see `src/simd.rs` docs).
+
+**Parity (the zero-tolerance rule — SIMD MUST equal scalar; the decoder is the
+conformance oracle):**
+- Per-kernel differential (`tests/lpf_simd_diff.rs`): the dispatching entry ==
+  the never-dispatched scalar core, at EVERY archmage token permutation, over
+  bd 8/10/12 × both axes × all 4 widths × random pixels/thresholds (near-flat
+  strata to hit the flat/flat2 branches). Green in BOTH dispatch modes.
+- The pre-existing C-differentials now drive the SIMD live: `hbd_lpf_diff`
+  (dispatch-vs-REAL-C, 15k cases × bd × axis × width), `lf_apply_diff` (the full
+  `av1_loop_filter_frame` walk vs C) — green in BOTH modes.
+- Full workspace suite green in BOTH `just test-fast` and `test-fast-scalar`:
+  the decoder conformance gate + every encoder byte gate (the encoder's
+  LF-level RD search calls `loop_filter_frame` too, so it exercises this SIMD)
+  stay byte-identical with SIMD live.
+
+**Measured (callgrind Ir, port decode; `benchmarks/gate3_deblock_simd_2026-07-17.{md,meta}`):**
+before = `2d3831f` (transform SIMD + cdef/txb/intra-edge, SCALAR deblock),
+after = this landing:
+- `dec_mosaic_2k_cq20` (qindex 80): **3.375 B → 3.024 B Ir (−10.4%)**.
+- `dec_mosaic_2k_cq40` (qindex 160, deblock-heavy): **2.372 B → 2.069 B (−12.8%)**.
+- Deblock filter kernels alone: **−54.9% / −52.9%** (645/580 M → 291/273 M).
+  The whole-decode delta == the kernel delta to ~1% (the param-derivation Ir is
+  byte-identical before/after), so the win is entirely the filter kernels.
+- SIMD confirmed live: `simd::__arcane_lpf_impl_v3` (AVX2) is 10.96% of the
+  cq40 decode; no scalar `highbd::filter*` / `lpf_*` remain; the after binary's
+  port-decode == C-decode byte-verify passed.
+
+**Follow-ups (documented, by profile):** (1) the per-edge parameter derivation
+`set_lpf_parameters` + `get_filter_level` + `get_transform_size` (~127 M, ~4-6%
+of decode) — branchy grid-lookup code, a whole-strip-mask vectorization like
+libaom/rav1d, not a lane kernel; (2) a bd8 i16-lane path (2× lanes/register,
+must stay bit-identical for bd8 and keep the i32 path for bd10/12); (3) AVX-512
+(`X64V4`, 16-lane) + NEON (falls to scalar; the perf box is x86).
+
 ## #7 CDEF-strength RD search — BIT-IDENTICAL, first bulk-port family lands directly in PARITY section A (2026-07-17, CDEF bulk track)
 
 - **Scope**: the full `av1_cdef_search` (av1/encoder/pickcdef.c) for the
