@@ -181,9 +181,36 @@ fn replay_tree(
         let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
         let subsize = get_partition_subsize(bsize, p as i32) as usize;
         replay_tree(tree, cursor, mi_row, mi_col, subsize, mi_rows, mi_cols, out);
-        replay_tree(tree, cursor, mi_row, mi_col + hbs, subsize, mi_rows, mi_cols, out);
-        replay_tree(tree, cursor, mi_row + hbs, mi_col, subsize, mi_rows, mi_cols, out);
-        replay_tree(tree, cursor, mi_row + hbs, mi_col + hbs, subsize, mi_rows, mi_cols, out);
+        replay_tree(
+            tree,
+            cursor,
+            mi_row,
+            mi_col + hbs,
+            subsize,
+            mi_rows,
+            mi_cols,
+            out,
+        );
+        replay_tree(
+            tree,
+            cursor,
+            mi_row + hbs,
+            mi_col,
+            subsize,
+            mi_rows,
+            mi_cols,
+            out,
+        );
+        replay_tree(
+            tree,
+            cursor,
+            mi_row + hbs,
+            mi_col + hbs,
+            subsize,
+            mi_rows,
+            mi_cols,
+            out,
+        );
     }
 }
 
@@ -469,8 +496,7 @@ fn run_and_localize(cq_level: i32, mono: bool) -> bool {
                         eprintln!(
                             "kb11 intended child {i}: bsize {} mode {} adly {} tx_size {} \
                              skip_txfm {:?} uv {}",
-                            w.bsize, w.mode, w.angle_delta_y, w.tx_size,
-                            w.skip_txfm, w.uv_mode
+                            w.bsize, w.mode, w.angle_delta_y, w.tx_size, w.skip_txfm, w.uv_mode
                         );
                     } else {
                         eprintln!("kb11 intended child {i}: non-leaf {k:?}");
@@ -509,8 +535,26 @@ fn run_and_localize(cq_level: i32, mono: bool) -> bool {
 
     let mut real_seq = Vec::new();
     let mut ours_seq = Vec::new();
-    replay_tree(&t_real.tree, &mut 0, 0, 0, SB, mi_rows, mi_cols, &mut real_seq);
-    replay_tree(&t_ours.tree, &mut 0, 0, 0, SB, mi_rows, mi_cols, &mut ours_seq);
+    replay_tree(
+        &t_real.tree,
+        &mut 0,
+        0,
+        0,
+        SB,
+        mi_rows,
+        mi_cols,
+        &mut real_seq,
+    );
+    replay_tree(
+        &t_ours.tree,
+        &mut 0,
+        0,
+        0,
+        SB,
+        mi_rows,
+        mi_cols,
+        &mut ours_seq,
+    );
     let mut tree_diverged = false;
     for (r, o) in real_seq.iter().zip(ours_seq.iter()) {
         if (r.0, r.1, r.2) != (o.0, o.1, o.2) || r.3 != o.3 {

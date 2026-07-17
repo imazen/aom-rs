@@ -3620,8 +3620,8 @@ pub fn rd_use_partition_real(
         // PARTITION_NONE (:1861-1864).
         0 => {
             let (this_rdc, winner, sv) = leaf_pick_sb_modes(
-                env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, bsize,
-                0, &invalid,
+                env, cfg, tile, grid, recon_y, recon_u, recon_v, cfl, mi_row, mi_col, bsize, 0,
+                &invalid,
             );
             *last_source_variance = sv;
             visits.push(LeafVisit {
@@ -3765,8 +3765,12 @@ pub fn rd_use_partition_real(
         // PARTITION_SPLIT (:1940-1974).
         3 => {
             last_part_rdc = PartRdStats::init();
-            let mut kids: [SbTree; 4] =
-                [SbTree::Absent, SbTree::Absent, SbTree::Absent, SbTree::Absent];
+            let mut kids: [SbTree; 4] = [
+                SbTree::Absent,
+                SbTree::Absent,
+                SbTree::Absent,
+                SbTree::Absent,
+            ];
             #[allow(clippy::needless_range_loop)] // i drives y/x AND the kids slot
             for i in 0..4usize {
                 let y = mi_row + ((i as i32) >> 1) * hbs;
@@ -3812,7 +3816,8 @@ pub fn rd_use_partition_real(
     // (:2043-2047): fold the partition cost, recompute the rdcost.
     if last_part_rdc.rate < i32::MAX {
         last_part_rdc.rate += partition_cost[partition as usize];
-        last_part_rdc.rdcost = crate::rd::rdcost(env.rdmult, last_part_rdc.rate, last_part_rdc.dist);
+        last_part_rdc.rdcost =
+            crate::rd::rdcost(env.rdmult, last_part_rdc.rate, last_part_rdc.dist);
     }
 
     // (:2049-2062, the last_part/none winner selection): none_rdc and

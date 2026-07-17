@@ -349,9 +349,7 @@ fn set_vt_partitioning(
         get_variance(&mut node.part_variances.none);
         // For key frame: take split for bsize above 32X32 or very high
         // variance (:204-208).
-        if bsize > BLOCK_32X32
-            || i64::from(node.part_variances.none.variance) > (threshold << 4)
-        {
+        if bsize > BLOCK_32X32 || i64::from(node.part_variances.none.variance) > (threshold << 4) {
             return false;
         }
         // If variance is low, take the bsize (no split).
@@ -474,8 +472,7 @@ pub fn choose_var_based_partitioning_key(
                         let mut sse = 0u32;
                         let mut sum = 0i32;
                         if (x4_idx as i32) < pixels_wide && (y4_idx as i32) < pixels_high {
-                            let src_avg =
-                                avg_4x4(src_y, sb_off + y4_idx * stride + x4_idx, stride);
+                            let src_avg = avg_4x4(src_y, sb_off + y4_idx * stride + x4_idx, stride);
                             let dst_avg = 128;
                             sum = src_avg - dst_avg;
                             sse = (sum * sum) as u32;
@@ -511,24 +508,23 @@ pub fn choose_var_based_partitioning_key(
                 get_variance(&mut vtemp.part_variances.none);
                 if i64::from(vtemp.part_variances.none.variance) > thresholds[3] {
                     let split_index = 21 + lvl1_scale_idx + lvl2_idx;
-                    force_split[split_index] =
-                        if vbp_prune_16x16_split_using_min_max_sub_blk_var {
-                            // get_part_eval_based_on_sub_blk_var (:1530).
-                            let mut max_8x8 = 0i32;
-                            let mut min_8x8 = i32::MAX;
-                            for sp in &mut vtemp.split {
-                                get_variance(&mut sp.part_variances.none);
-                                max_8x8 = max_8x8.max(sp.part_variances.none.variance);
-                                min_8x8 = min_8x8.min(sp.part_variances.none.variance);
-                            }
-                            if i64::from(max_8x8 - min_8x8) > (thresholds[3] << 2) {
-                                PartEval::OnlySplit
-                            } else {
-                                PartEval::OnlyNone
-                            }
-                        } else {
+                    force_split[split_index] = if vbp_prune_16x16_split_using_min_max_sub_blk_var {
+                        // get_part_eval_based_on_sub_blk_var (:1530).
+                        let mut max_8x8 = 0i32;
+                        let mut min_8x8 = i32::MAX;
+                        for sp in &mut vtemp.split {
+                            get_variance(&mut sp.part_variances.none);
+                            max_8x8 = max_8x8.max(sp.part_variances.none.variance);
+                            min_8x8 = min_8x8.min(sp.part_variances.none.variance);
+                        }
+                        if i64::from(max_8x8 - min_8x8) > (thresholds[3] << 2) {
                             PartEval::OnlySplit
-                        };
+                        } else {
+                            PartEval::OnlyNone
+                        }
+                    } else {
+                        PartEval::OnlySplit
+                    };
                     force_split[5 + blk64_scale_idx + lvl1_idx] = PartEval::OnlySplit;
                     force_split[blk64_idx + 1] = PartEval::OnlySplit;
                     force_split[0] = PartEval::OnlySplit;
@@ -651,8 +647,8 @@ pub fn choose_var_based_partitioning_key(
                         stamps,
                         f,
                         NodeView {
-                            part_variances: &mut vt.split[blk64_idx].split[lvl1_idx]
-                                .split[lvl2_idx]
+                            part_variances: &mut vt.split[blk64_idx].split[lvl1_idx].split
+                                [lvl2_idx]
                                 .part_variances,
                         },
                         BLOCK_16X16,
@@ -761,7 +757,12 @@ pub fn get_partition_from_stamps(
     let horz_split = sshigh < bhigh;
     let split_idx = ((vert_split as usize) << 1) | horz_split as usize;
     debug_assert_ne!(split_idx, 0);
-    [PARTITION_INVALID, PARTITION_HORZ, PARTITION_VERT, PARTITION_SPLIT][split_idx]
+    [
+        PARTITION_INVALID,
+        PARTITION_HORZ,
+        PARTITION_VERT,
+        PARTITION_SPLIT,
+    ][split_idx]
 }
 
 #[cfg(test)]

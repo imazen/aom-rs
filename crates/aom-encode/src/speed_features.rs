@@ -458,10 +458,10 @@ impl SpeedFeatures {
             prune_rect_part_using_4x4_var_deviation: false, // init_part_sf:2317
             prune_rect_part_using_none_pred_mode: false, // init_part_sf:2318
             prune_sub_8x8_partition_level: 0, // init_part_sf:2321
-            prune_part4_search: 2, // allintra base (:355; init default 0)
-            default_max_partition_size: 15, // BLOCK_LARGEST = BLOCK_128X128 (init_part_sf:2286)
-            default_min_partition_size: 0, // BLOCK_4X4 (init_part_sf:2285)
-            partition_search_type: 0, // SEARCH_PARTITION (init_part_sf:2284)
+            prune_part4_search: 2,           // allintra base (:355; init default 0)
+            default_max_partition_size: 15,  // BLOCK_LARGEST = BLOCK_128X128 (init_part_sf:2286)
+            default_min_partition_size: 0,   // BLOCK_4X4 (init_part_sf:2285)
+            partition_search_type: 0,        // SEARCH_PARTITION (init_part_sf:2284)
             // rt_sf
             var_part_split_threshold_shift: 5, // init_rt_sf:2085
             // intra_sf
