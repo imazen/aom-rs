@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod simd;
+mod simd_variance;
 pub mod hadamard;
 
 const FILTER_BITS: i32 = 7;
@@ -168,7 +169,31 @@ pub fn highbd_sad_avg(
 
 /// libaom `highbd_variance64`: returns (sse: u64, sum: i64). Note `tsse`
 /// accumulates the 32-bit-truncated square (`(uint32_t)(diff*diff)`) into u64.
+///
+/// SIMD-dispatched (Gate 3): widths >= 8 take the magetypes kernel in
+/// `simd_variance.rs` (bit-identical on the pixel domain — see its module
+/// docs); width 4 and the `AOM_FORCE_SCALAR` pin run the scalar twin.
 fn highbd_variance64(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> (u64, i64) {
+    let _ = aom_dispatch::scalar_forced(); // one-time AOM_FORCE_SCALAR pin
+    if w < 8 {
+        return highbd_variance64_scalar(a, a_stride, b, b_stride, w, h);
+    }
+    archmage::incant!(
+        simd_variance::highbd_variance64_impl(a, a_stride, b, b_stride, w, h),
+        [v3, neon, wasm128, scalar]
+    )
+}
+
+/// The scalar transcription (the reference twin — never SIMD-routed). Public
+/// for the SIMD differential (`hbd_variance_simd_diff.rs`).
+pub fn highbd_variance64_scalar(
+    a: &[u16],
+    a_stride: usize,
+    b: &[u16],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> (u64, i64) {
     let mut tsum: i64 = 0;
     let mut tsse: u64 = 0;
     for y in 0..h {

@@ -110,8 +110,10 @@ dependencies = [
 name = "aom-dist"
 version = "0.0.1"
 dependencies = [
+ "aom-dispatch",
  "aom-sys-ref",
  "archmage",
+ "magetypes",
 ]
 
 [[package]]
