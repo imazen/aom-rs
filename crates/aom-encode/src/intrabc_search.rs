@@ -708,3 +708,566 @@ mod tests {
         assert!(found[0] && found[1], "both repeat positions in the table");
     }
 }
+
+// ---------------------------------------------------------------------------
+// chunk 3b/3c: the intrabc leaf search (rd_pick_intrabc_mode_sb, rdopt.c:3427)
+// ---------------------------------------------------------------------------
+
+use crate::encode_intra::TrellisOptType;
+use aom_entropy::dv_ref::{DvNbr, DvTileBounds, find_dv_ref_mvs, find_ref_dv, is_dv_valid};
+
+/// `default_txfm_partition_cdf` (entropymode.c) — the var-tx split-flag CDF
+/// defaults (relocated from the decoder's TileKf per its own FORK NOTE; the
+/// encoder needs the same table for the pack-side var-tx symbols + the
+/// frame-init `txfm_partition_cost` fill, rd.c:110).
+pub const DEFAULT_TXFM_PARTITION_CDF: [[u16; 3]; 21] = [
+    [4187, 0, 0],
+    [8922, 0, 0],
+    [11921, 0, 0],
+    [8453, 0, 0],
+    [14572, 0, 0],
+    [20635, 0, 0],
+    [13977, 0, 0],
+    [21881, 0, 0],
+    [21763, 0, 0],
+    [5589, 0, 0],
+    [12764, 0, 0],
+    [21487, 0, 0],
+    [6219, 0, 0],
+    [13460, 0, 0],
+    [18544, 0, 0],
+    [4753, 0, 0],
+    [11222, 0, 0],
+    [18368, 0, 0],
+    [4603, 0, 0],
+    [10367, 0, 0],
+    [16680, 0, 0],
+];
+
+/// The `txfm_partition_cost` slice of `av1_fill_mode_rates` (rd.c:108-111):
+/// per-context 2-symbol costs from the frame-init var-tx split CDF.
+pub fn fill_txfm_partition_costs(cdf: &[[u16; 3]; 21]) -> [[i32; 2]; 21] {
+    let mut out = [[0i32; 2]; 21];
+    for (o, row) in out.iter_mut().zip(cdf.iter()) {
+        aom_txb::cost_tokens_from_cdf(o, row, None);
+    }
+    out
+}
+
+/// Full-pel luma intrabc prediction: copy `w x h` from the RECON plane at the
+/// DV offset (regions are disjoint by DV validity — the source is fully
+/// reconstructed before this block).
+pub fn intrabc_predict_luma(
+    recon: &[u16],
+    block_off: usize,
+    stride: usize,
+    dv_row_px: i32,
+    dv_col_px: i32,
+    dst: &mut [u16],
+    dst_stride: usize,
+    w: usize,
+    h: usize,
+) {
+    let src_off =
+        (block_off as i64 + i64::from(dv_row_px) * stride as i64 + i64::from(dv_col_px)) as usize;
+    for r in 0..h {
+        let s = src_off + r * stride;
+        dst[r * dst_stride..r * dst_stride + w].copy_from_slice(&recon[s..s + w]);
+    }
+}
+
+/// Chroma intrabc prediction (the decoder's `intrabc_chroma_predict` mirror):
+/// the subsampled DV lands at full- or half-pel per axis; half-pel is the
+/// 2-tap {64,64} average (bit-identical closed form of the intrabc bilinear
+/// convolve at FILTER_BITS=7).
+#[allow(clippy::too_many_arguments)]
+pub fn intrabc_predict_chroma(
+    recon: &[u16],
+    block_off: usize,
+    stride: usize,
+    dv_row: i32, // 1/8 luma pel
+    dv_col: i32,
+    ss_x: usize,
+    ss_y: usize,
+    dst: &mut [u16],
+    dst_stride: usize,
+    w: usize,
+    h: usize,
+    bd: i32,
+) {
+    // av1_dv_offset / dec convention: chroma subpel = (dv >> ss) & 7 with the
+    // integer part floor-divided. dv is a multiple of 8 (full luma pel), so
+    // the chroma position is dv/8 >> ss with a half-pel remainder when the
+    // luma DV is odd in the subsampled axis.
+    let px_row = dv_row >> 3; // luma px
+    let px_col = dv_col >> 3;
+    let c_row = px_row >> ss_y;
+    let c_col = px_col >> ss_x;
+    let subpel_y = if ss_y == 1 { (px_row & 1) * 8 } else { 0 };
+    let subpel_x = if ss_x == 1 { (px_col & 1) * 8 } else { 0 };
+    let src_off = (block_off as i64 + i64::from(c_row) * stride as i64 + i64::from(c_col)) as usize;
+    let max = (1i32 << bd) - 1;
+    let clip = |v: i32| v.clamp(0, max) as u16;
+    match (subpel_x != 0, subpel_y != 0) {
+        (false, false) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                dst[r * dst_stride..r * dst_stride + w].copy_from_slice(&recon[s..s + w]);
+            }
+        }
+        (true, false) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                for c in 0..w {
+                    let a = recon[s + c] as i32;
+                    let b = recon[s + c + 1] as i32;
+                    dst[r * dst_stride + c] = clip((a + b + 1) >> 1);
+                }
+            }
+        }
+        (false, true) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                for c in 0..w {
+                    let a = recon[s + c] as i32;
+                    let b = recon[s + c + stride] as i32;
+                    dst[r * dst_stride + c] = clip((a + b + 1) >> 1);
+                }
+            }
+        }
+        (true, true) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                for c in 0..w {
+                    let a00 = recon[s + c] as i32;
+                    let a01 = recon[s + c + 1] as i32;
+                    let a10 = recon[s + c + stride] as i32;
+                    let a11 = recon[s + c + stride + 1] as i32;
+                    dst[r * dst_stride + c] = clip((a00 + a01 + a10 + a11 + 2) >> 2);
+                }
+            }
+        }
+    }
+}
+
+/// One committed block's DV projection for the search-side mi grid (the
+/// `DvNbr` source; also carries `skip_txfm` for `av1_get_skip_txfm_context`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DvCell {
+    pub bsize: u8,
+    pub mode: u8,
+    pub use_intrabc: bool,
+    pub skip_txfm: bool,
+    /// The block's DV (1/8 pel), meaningful when `use_intrabc`.
+    pub dv_row: i16,
+    pub dv_col: i16,
+}
+
+impl DvCell {
+    pub fn to_nbr(self) -> DvNbr {
+        DvNbr {
+            bsize: self.bsize as usize,
+            // KEY frame: intra/intrabc candidates carry INTRA_FRAME/NONE.
+            ref_frame0: 0,  // INTRA_FRAME
+            ref_frame1: -1, // NONE_FRAME
+            use_intrabc: self.use_intrabc,
+            mode: self.mode as i32,
+            mv0_row: i32::from(self.dv_row),
+            mv0_col: i32::from(self.dv_col),
+            mv1_row: 0,
+            mv1_col: 0,
+        }
+    }
+}
+
+/// `FULLPEL_MV` limits (mcomp.h `FullMvLimits`).
+#[derive(Clone, Copy, Debug)]
+pub struct FullMvLimits {
+    pub col_min: i32,
+    pub col_max: i32,
+    pub row_min: i32,
+    pub row_max: i32,
+}
+
+/// `av1_set_mv_search_range` (mcomp.c:233): intersect the caller's limits
+/// with the ±MAX_FULL_PEL_VAL window around the (subpel) ref MV.
+pub fn set_mv_search_range(lim: &mut FullMvLimits, ref_row: i32, ref_col: i32) {
+    const MAX_FULL_PEL_VAL: i32 = (1 << 11) - 1; // (1 << MAX_MVSEARCH_STEPS-1) - 1... mcomp.h: (1 << (MAX_MVSEARCH_STEPS - 1)) - 1 = 1023? see below
+    // mcomp.h: MAX_FULL_PEL_VAL = (1 << (MAX_MVSEARCH_STEPS - 1)) - 1, with
+    // MAX_MVSEARCH_STEPS = 11 -> 1023.
+    const MAX_FP: i32 = (1 << 10) - 1;
+    let _ = MAX_FULL_PEL_VAL;
+    const MV_LOW: i32 = -(1 << 14);
+    const MV_UPP: i32 = 1 << 14;
+    let mut col_min = ((ref_col + 7) >> 3) - MAX_FP;
+    let mut row_min = ((ref_row + 7) >> 3) - MAX_FP;
+    let mut col_max = (ref_col >> 3) + MAX_FP;
+    let mut row_max = (ref_row >> 3) + MAX_FP;
+    col_min = col_min.max((MV_LOW >> 3) + 1);
+    row_min = row_min.max((MV_LOW >> 3) + 1);
+    col_max = col_max.min((MV_UPP >> 3) - 1);
+    row_max = row_max.min((MV_UPP >> 3) - 1);
+    lim.col_min = lim.col_min.max(col_min);
+    lim.col_max = lim.col_max.min(col_max);
+    lim.row_min = lim.row_min.max(row_min);
+    lim.row_max = lim.row_max.min(row_max);
+    lim.col_max = lim.col_min.max(lim.col_max);
+    lim.row_max = lim.row_min.max(lim.row_max);
+}
+
+// ---------------------------------------------------------------------------
+// HANDOFF SKELETON — rd_pick_intrabc_mode_sb (rdopt.c:3427) leaf search.
+// Written straight-through at session end; COMPILE-UNVERIFIED beyond this
+// point is marked per-item. See HANDOFF-SCREEN.md (worktree root) for the
+// integration map + validation recipe.
+// ---------------------------------------------------------------------------
+
+/// Everything the leaf intrabc search needs. Construct in
+/// `partition_pick::leaf_pick_sb_modes` / thread through `rd_pick.rs` step 6
+/// (the currently-documented "envelope-excluded no-op" site).
+pub struct IntrabcLeafArgs<'a> {
+    // Geometry
+    pub sb_size: usize,
+    pub bsize: usize,
+    pub mi_row: i32,
+    pub mi_col: i32,
+    pub mi_rows: i32,
+    pub mi_cols: i32,
+    /// Tile bounds in mi units (single-tile: 0..mi_rows/cols).
+    pub tile: DvTileBounds,
+    pub mib_size_log2: i32,
+    pub up_available: bool,
+    pub left_available: bool,
+    pub is_chroma_ref: bool,
+    pub monochrome: bool,
+    pub ss_x: usize,
+    pub ss_y: usize,
+    pub bd: u8,
+    /// `mbmi->partition` at this leaf (find_dv_ref_mvs's has_tr input).
+    pub partition: usize,
+    // Pixels: SOURCE (hash query + residual base) and RECON (prediction src).
+    pub stride: usize,
+    pub src_y: &'a [u16],
+    pub src_u: &'a [u16],
+    pub src_v: &'a [u16],
+    pub recon_y: &'a [u16],
+    pub recon_u: &'a [u16],
+    pub recon_v: &'a [u16],
+    /// Block origin offsets (luma; chroma via the caller's chroma_plane_offset).
+    pub off_y: usize,
+    pub off_uv: usize,
+    // Search state
+    pub hash: &'a IntrabcHashTable,
+    pub dv_costs: &'a DvCosts,
+    /// Closure over the search ModeGrid's DvCell state (relative offsets from
+    /// (mi_row, mi_col) exactly as `find_dv_ref_mvs` requests them).
+    pub dv_grid: &'a dyn Fn(i32, i32) -> DvNbr,
+    // RD inputs
+    pub rdmult: i32,
+    /// `x->errorperbit = AOMMAX(rdmult >> 6, 1)` (av1_set_error_per_bit).
+    pub error_per_bit: i32,
+    pub intrabc_cost: &'a [i32; 2],
+    pub skip_costs: &'a [[i32; 2]; 3],
+    /// `av1_get_skip_txfm_context(xd)` from the DvCell grid's above/left skip
+    /// flags (0 when intrabc-off — the pre-existing invariant).
+    pub skip_ctx: usize,
+    pub txfm_partition_costs: &'a [[i32; 2]; 21],
+    // Coeff-arm inputs (HANDOFF: DCT_DCT-only; C searches the inter tx set)
+    pub rows_y: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows_u: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows_v: &'a aom_quant::PlaneQuantRows<'a>,
+    pub coeff_costs_y: &'a aom_txb::CoeffCostSet,
+    pub coeff_costs_uv: &'a aom_txb::CoeffCostSet,
+    /// Inter tx-type costs (TxTypeCosts.inter — HANDOFF: derive_real_costs
+    /// currently fills inter with a DUMMY zero cdf; fill from
+    /// `kf.inter_ext_tx` (flatten [4][4][17]) before enabling this search).
+    pub tx_type_costs: &'a aom_txb::TxTypeCosts,
+    pub sharpness: i32,
+    pub enable_optimize_b: TrellisOptType,
+    pub qm_levels: Option<[usize; 3]>,
+    /// Entropy neighbour ctx slices at this block (per plane, like the
+    /// intra leaf) for the coeff-arm txb_skip/dc_sign contexts.
+    pub above_ctx: [&'a [i8]; 3],
+    pub left_ctx: [&'a [i8]; 3],
+}
+
+/// The intrabc winner (mirrors `best_mbmi` + rd_stats of rdopt.c:3494-3646).
+#[derive(Clone, Debug)]
+pub struct IntrabcBest {
+    /// The winning DV (1/8 pel, full-pel multiples of 8).
+    pub dv_row: i32,
+    pub dv_col: i32,
+    /// The ref DV the mode-rate was computed against — the PACK must write
+    /// `diff = dv - dv_ref` (bitstream.c write_intrabc_info uses the STORED
+    /// search-time ref stack, mbmi_ext_frame->ref_mv_stack[0].this_mv).
+    pub dv_ref_row: i32,
+    pub dv_ref_col: i32,
+    /// The winning arm: true = skip_txfm (no residual coded).
+    pub skip_txfm: bool,
+    pub rate: i32,
+    pub dist: i64,
+    pub rdcost: i64,
+}
+
+/// `rd_pick_intrabc_mode_sb` (rdopt.c:3427), the HASH-CANDIDATE slice:
+/// dv-ref derivation + the two-direction mv-limit loop + the hash search
+/// (`av1_intrabc_hash_search`) + DV validity + the skip/DCT RD.
+///
+/// HANDOFF gaps vs C (each is a follow-up chunk):
+/// - NO `av1_full_pixel_search` (NSTEP diamond) and NO mesh/exhaustive
+///   follow-up (mcomp.c:1481/1615). Hash-only covers exact-repeat content;
+///   the diamond adds near-repeat wins. `exhaustive_searches_thresh` for
+///   screen content is (1<<20) (speed_features.c:379-381).
+/// - Coeff arm is DCT_DCT at the max uniform tx (C: av1_txfm_search ->
+///   av1_pick_recursive_tx_size_type_yrd = full inter tx-type set + var-tx
+///   quadtree split search, tx_search.c).
+/// - `get_mvpred_var_cost` uses this port's generic variance (C: fn_ptr vf).
+pub fn rd_pick_intrabc_mode_sb(a: &IntrabcLeafArgs, best_rd_in: i64) -> Option<IntrabcBest> {
+    let bw = crate::tx_search::BLK_W_B[a.bsize];
+    let bh = crate::tx_search::BLK_H_B[a.bsize];
+    // C gate: bsize must be square for the hash path (block_width == height).
+    // (av1_intrabc_hash_search returns INT_MAX otherwise; with the pixel
+    // search unported, non-square blocks simply have no candidates yet.)
+    if bw != bh {
+        return None;
+    }
+
+    // --- dv_ref (rdopt.c:3453-3478) ---
+    let (near_r, near_c, nearest_r, nearest_c) = {
+        // HANDOFF: find_dv_ref_mvs returns (nearest, near) as 4 i32s in the
+        // decoder port — VERIFY the tuple order against dv_ref.rs (the
+        // decoder call site) before trusting this destructure.
+        let (a_r, a_c, b_r, b_c) = find_dv_ref_mvs(
+            a.mi_row,
+            a.mi_col,
+            a.bsize,
+            a.partition,
+            a.up_available,
+            a.left_available,
+            a.tile,
+            a.mi_rows,
+            a.mi_cols,
+            1 << a.mib_size_log2,
+            a.dv_grid,
+        );
+        (b_r, b_c, a_r, a_c)
+    };
+    let (mut ref_r, mut ref_c) = if nearest_r == 0 && nearest_c == 0 {
+        (near_r, near_c)
+    } else {
+        (nearest_r, nearest_c)
+    };
+    if ref_r == 0 && ref_c == 0 {
+        let (rr, rc) = find_ref_dv(a.tile.mi_row_start, 1 << a.mib_size_log2, a.mi_row);
+        ref_r = rr;
+        ref_c = rc;
+    }
+    debug_assert_eq!(ref_r & 7, 0);
+    debug_assert_eq!(ref_c & 7, 0);
+
+    let sb_row = a.mi_row >> a.mib_size_log2;
+    let sb_col = a.mi_col >> a.mib_size_log2;
+    let mib = 1i32 << a.mib_size_log2;
+    const MI_SIZE: i32 = 4;
+
+    let mut best: Option<IntrabcBest> = None;
+    let mut best_rd = best_rd_in;
+
+    // IBC_MOTION_ABOVE=0, IBC_MOTION_LEFT=1; intrabc_search_level=0 (speed 0)
+    // searches BOTH (rdopt.c:3510-3512).
+    for dir in 0..2 {
+        let mut lim = if dir == 0 {
+            FullMvLimits {
+                col_min: (a.tile.mi_col_start - a.mi_col) * MI_SIZE,
+                col_max: (a.tile.mi_col_end - a.mi_col) * MI_SIZE - bw as i32,
+                row_min: (a.tile.mi_row_start - a.mi_row) * MI_SIZE,
+                row_max: (sb_row * mib - a.mi_row) * MI_SIZE - bh as i32,
+            }
+        } else {
+            let bottom_coded_mi_edge = ((sb_row + 1) * mib).min(a.tile.mi_row_end);
+            FullMvLimits {
+                col_min: (a.tile.mi_col_start - a.mi_col) * MI_SIZE,
+                col_max: (sb_col * mib - a.mi_col) * MI_SIZE - bw as i32,
+                row_min: (a.tile.mi_row_start - a.mi_row) * MI_SIZE,
+                row_max: (bottom_coded_mi_edge - a.mi_row) * MI_SIZE - bh as i32,
+            }
+        };
+        set_mv_search_range(&mut lim, ref_r, ref_c);
+        if lim.col_max < lim.col_min || lim.row_max < lim.row_min {
+            continue;
+        }
+
+        // --- av1_intrabc_hash_search (mcomp.c:1908) ---
+        let (h1, h2) = get_block_hash_value(a.hash, a.src_y, a.off_y, a.stride, bw, a.bd > 8);
+        let Some(bucket) = a.hash.buckets.get(&h1) else {
+            continue;
+        };
+        if bucket.len() <= 1 {
+            continue; // count <= 1 -> INT_MAX (the block always matches itself)
+        }
+        let x_pos = a.mi_col * MI_SIZE;
+        let y_pos = a.mi_row * MI_SIZE;
+        let mut best_hash_cost = i32::MAX;
+        let mut best_mv: Option<(i32, i32)> = None; // full-pel (row, col)
+        for cand in bucket.iter() {
+            if cand.hash_value2 != h2 {
+                continue;
+            }
+            let dv_r = (i32::from(cand.y) - y_pos) * 8;
+            let dv_c = (i32::from(cand.x) - x_pos) * 8;
+            if !is_dv_valid(
+                dv_r,
+                dv_c,
+                a.mi_row,
+                a.mi_col,
+                a.bsize,
+                a.tile,
+                a.mib_size_log2,
+                a.is_chroma_ref,
+                if a.monochrome { 1 } else { 3 },
+                a.ss_x as i32,
+                a.ss_y as i32,
+            ) {
+                continue;
+            }
+            let fm_r = i32::from(cand.y) - y_pos;
+            let fm_c = i32::from(cand.x) - x_pos;
+            if fm_r < lim.row_min || fm_r > lim.row_max || fm_c < lim.col_min || fm_c > lim.col_max
+            {
+                continue;
+            }
+            // get_mvpred_var_cost: variance(src, recon@mv) + mv_err_cost.
+            let ref_off =
+                (a.off_y as i64 + i64::from(fm_r) * a.stride as i64 + i64::from(fm_c)) as usize;
+            let var = variance_wxh(
+                a.src_y, a.off_y, a.stride, a.recon_y, ref_off, a.stride, bw, bh,
+            ) as i32;
+            let cost = var + mv_err_cost(dv_r - ref_r, dv_c - ref_c, a.dv_costs, a.error_per_bit);
+            if cost < best_hash_cost {
+                best_hash_cost = cost;
+                best_mv = Some((fm_r, fm_c));
+            }
+        }
+        let Some((fm_r, fm_c)) = best_mv else {
+            continue;
+        };
+        // HANDOFF: C also runs av1_full_pixel_search here when the hash
+        // missed OR always at intrabc_search_level == 0 (rdopt.c:3570) —
+        // pixelsme vs bestsme comparison. Unported.
+
+        let dv_r = fm_r * 8;
+        let dv_c = fm_c * 8;
+        // (validity re-checked above per candidate; C re-checks after the
+        // pixel search too, rdopt.c:3583-3590.)
+
+        // --- the RD (rdopt.c:3592-3646, av1_txfm_search approximated) ---
+        let rate_mv = mv_bit_cost_sub(dv_r, dv_c, ref_r, ref_c, a.dv_costs);
+        let rate_mode = a.intrabc_cost[1];
+
+        // Prediction into scratch (luma + chroma).
+        let mut pred_y = vec![0u16; bw * bh];
+        intrabc_predict_luma(
+            a.recon_y,
+            a.off_y,
+            a.stride,
+            fm_r,
+            fm_c,
+            &mut pred_y,
+            bw,
+            bw,
+            bh,
+        );
+        let (cw, ch) = (bw >> a.ss_x, bh >> a.ss_y);
+        let (mut pred_u, mut pred_v) = (Vec::new(), Vec::new());
+        if !a.monochrome && a.is_chroma_ref {
+            pred_u = vec![0u16; cw * ch];
+            pred_v = vec![0u16; cw * ch];
+            intrabc_predict_chroma(
+                a.recon_u,
+                a.off_uv,
+                a.stride,
+                dv_r,
+                dv_c,
+                a.ss_x,
+                a.ss_y,
+                &mut pred_u,
+                cw,
+                cw,
+                ch,
+                i32::from(a.bd),
+            );
+            intrabc_predict_chroma(
+                a.recon_v,
+                a.off_uv,
+                a.stride,
+                dv_r,
+                dv_c,
+                a.ss_x,
+                a.ss_y,
+                &mut pred_v,
+                cw,
+                cw,
+                ch,
+                i32::from(a.bd),
+            );
+        }
+
+        // SKIP arm: dist = sse << 4 (av1_dist_block pixel-domain scaling),
+        // rate = mode + mv + skip1. (C: av1_txfm_search's skip evaluation.)
+        let mut sse: u64 = 0;
+        for r in 0..bh {
+            for c in 0..bw {
+                let d =
+                    i64::from(a.src_y[a.off_y + r * a.stride + c]) - i64::from(pred_y[r * bw + c]);
+                sse += (d * d) as u64;
+            }
+        }
+        if !pred_u.is_empty() {
+            for r in 0..ch {
+                for c in 0..cw {
+                    let du = i64::from(a.src_u[a.off_uv + r * a.stride + c])
+                        - i64::from(pred_u[r * cw + c]);
+                    let dvv = i64::from(a.src_v[a.off_uv + r * a.stride + c])
+                        - i64::from(pred_v[r * cw + c]);
+                    sse += (du * du + dvv * dvv) as u64;
+                }
+            }
+        }
+        // HANDOFF: bd>8 scaling — C's sse for hbd is
+        // ROUND_POWER_OF_TWO(sse, (bd-8)*2) before <<4 (av1_dist_block /
+        // av1_block_error semantics). Verify against tx_search.rs's
+        // pixel-domain dist helpers and reuse those instead of this inline.
+        let skip_dist = (sse << 4) as i64;
+        let skip_rate = rate_mode + rate_mv + a.skip_costs[a.skip_ctx][1];
+        let skip_rdc = crate::rd::rdcost(a.rdmult, skip_rate, skip_dist);
+
+        // COEFF arm (DCT_DCT, max uniform tx, trellis) — HANDOFF: implement
+        // with xform_quant_optimize per txb over pred_y/u/v (the
+        // encode_intra.rs:438-465 call pattern), txfm_partition no-split
+        // costs (a.txfm_partition_costs at txfm_partition_context over the
+        // TXFM_CTX_INIT-seeded contexts), inter tx-type cost
+        // (a.tx_type_costs.inter[eset][sqr][DCT_DCT]), skip0 cost, and
+        // tx-domain/pixel dist per the intra walk's convention. Then
+        // this_rd = min(skip_arm, coeff_arm) exactly as av1_txfm_search
+        // compares (tx_search.c:3856-3908). Until then the skip arm alone
+        // stands in — biased against intrabc on inexact matches, ACCEPTABLE
+        // ONLY for bring-up; do NOT gate RD-closeness with this in place.
+        let this_rd = skip_rdc;
+        let (rate, dist, skip_txfm) = (skip_rate, skip_dist, true);
+
+        if this_rd < best_rd {
+            best_rd = this_rd;
+            best = Some(IntrabcBest {
+                dv_row: dv_r,
+                dv_col: dv_c,
+                dv_ref_row: ref_r,
+                dv_ref_col: ref_c,
+                skip_txfm,
+                rate,
+                dist,
+                rdcost: this_rd,
+            });
+        }
+    }
+    best
+}
