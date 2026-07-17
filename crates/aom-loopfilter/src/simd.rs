@@ -112,12 +112,6 @@ fn lpf_impl(
     th: u8,
     bd: i32,
 ) {
-    // Widths not yet vectorized fall through to the scalar transcription.
-    if width == 14 {
-        crate::highbd::lpf_scalar(width, buf, center, ts, step, bl, li, th, bd);
-        return;
-    }
-
     let shift = bd - 8;
     let bias: i32 = 0x80 << shift;
     let lim: i32 = 128 << shift;
@@ -131,8 +125,9 @@ fn lpf_impl(
     let scc = |v: i32x4| v.clamp(neg_lim, lim_hi);
     // |a - b| (a,b are u16 pixels widened to i32, so abs() is exact)
     let iabs = |a: i32x4, b: i32x4| (a - b).abs();
-    // rpo2(v, 3): round-power-of-two on a non-negative sum
+    // rpo2(v, n): round-power-of-two on a non-negative sum
     let rpo3 = |v: i32x4| (v + 4).shr_logical_const::<3>();
+    let rpo4 = |v: i32x4| (v + 8).shr_logical_const::<4>();
 
     let c = center as isize;
     // Gather tap `k` (offset k*ts from center) across the 4 edge positions
@@ -315,6 +310,79 @@ fn lpf_impl(
             let o_q1 = i32x4::blend(use_wide, w_q1, f_q1);
             let o_q2 = i32x4::blend(use_wide, w_q2, q2);
             store!(-3 => o_p2, -2 => o_p1, -1 => o_p0, 0 => o_q0, 1 => o_q1, 2 => o_q2);
+        }
+        14 => {
+            // taps p6(-7)..p0(-1), q0(0)..q6(6)
+            let p6 = load(-7);
+            let p5 = load(-6);
+            let p4 = load(-5);
+            let p3 = load(-4);
+            let p2 = load(-3);
+            let p1 = load(-2);
+            let p0 = load(-1);
+            let q0 = load(0);
+            let q1 = load(1);
+            let q2 = load(2);
+            let q3 = load(3);
+            let q4 = load(4);
+            let q5 = load(5);
+            let q6 = load(6);
+
+            let mask = fmask8(p3, p2, p1, p0, q0, q1, q2, q3);
+            let flat = flat4(p3, p2, p1, p0, q0, q1, q2, q3);
+            // flat2 = flat_mask4(1, p6,p5,p4,p0,q0,q4,q5,q6)
+            let flat2 = flat4(p6, p5, p4, p0, q0, q4, q5, q6);
+            let use8 = flat & mask;
+            let use14 = flat2 & use8;
+
+            // filter4 fallback (deepest else, taps p1,p0,q0,q1 with the 8-tap mask)
+            let (f_p1, f_p0, f_q0, f_q1) = filter4(p1, p0, q0, q1, mask);
+            // wide 8-tap (writes p2,p1,p0,q0,q1,q2)
+            let w8_p2 = rpo3(p3 * 3 + p2 * 2 + p1 + p0 + q0);
+            let w8_p1 = rpo3(p3 * 2 + p2 + p1 * 2 + p0 + q0 + q1);
+            let w8_p0 = rpo3(p3 + p2 + p1 + p0 * 2 + q0 + q1 + q2);
+            let w8_q0 = rpo3(p2 + p1 + p0 + q0 * 2 + q1 + q2 + q3);
+            let w8_q1 = rpo3(p1 + p0 + q0 + q1 * 2 + q2 + q3 * 2);
+            let w8_q2 = rpo3(p0 + q0 + q1 + q2 * 2 + q3 * 3);
+            // wide 14-tap (writes p5,p4,p3,p2,p1,p0,q0,q1,q2,q3,q4,q5)
+            let w14_p5 = rpo4(p6 * 7 + p5 * 2 + p4 * 2 + p3 + p2 + p1 + p0 + q0);
+            let w14_p4 = rpo4(p6 * 5 + p5 * 2 + p4 * 2 + p3 * 2 + p2 + p1 + p0 + q0 + q1);
+            let w14_p3 = rpo4(p6 * 4 + p5 + p4 * 2 + p3 * 2 + p2 * 2 + p1 + p0 + q0 + q1 + q2);
+            let w14_p2 =
+                rpo4(p6 * 3 + p5 + p4 + p3 * 2 + p2 * 2 + p1 * 2 + p0 + q0 + q1 + q2 + q3);
+            let w14_p1 =
+                rpo4(p6 * 2 + p5 + p4 + p3 + p2 * 2 + p1 * 2 + p0 * 2 + q0 + q1 + q2 + q3 + q4);
+            let w14_p0 =
+                rpo4(p6 + p5 + p4 + p3 + p2 + p1 * 2 + p0 * 2 + q0 * 2 + q1 + q2 + q3 + q4 + q5);
+            let w14_q0 =
+                rpo4(p5 + p4 + p3 + p2 + p1 + p0 * 2 + q0 * 2 + q1 * 2 + q2 + q3 + q4 + q5 + q6);
+            let w14_q1 =
+                rpo4(p4 + p3 + p2 + p1 + p0 + q0 * 2 + q1 * 2 + q2 * 2 + q3 + q4 + q5 + q6 * 2);
+            let w14_q2 = rpo4(p3 + p2 + p1 + p0 + q0 + q1 * 2 + q2 * 2 + q3 * 2 + q4 + q5 + q6 * 3);
+            let w14_q3 = rpo4(p2 + p1 + p0 + q0 + q1 + q2 * 2 + q3 * 2 + q4 * 2 + q5 + q6 * 4);
+            let w14_q4 = rpo4(p1 + p0 + q0 + q1 + q2 + q3 * 2 + q4 * 2 + q5 * 2 + q6 * 5);
+            let w14_q5 = rpo4(p0 + q0 + q1 + q2 + q3 + q4 * 2 + q5 * 2 + q6 * 7);
+
+            // 3-way nested select: use14 ? wide14 : (use8 ? wide8 : base).
+            // p5,p4,p3,q3,q4,q5 are written only by wide14 (base = original).
+            // p2,q2 by wide8+wide14 (base = original). p1,p0,q0,q1 by all
+            // three (base = filter4).
+            let o_p5 = i32x4::blend(use14, w14_p5, p5);
+            let o_p4 = i32x4::blend(use14, w14_p4, p4);
+            let o_p3 = i32x4::blend(use14, w14_p3, p3);
+            let o_p2 = i32x4::blend(use14, w14_p2, i32x4::blend(use8, w8_p2, p2));
+            let o_p1 = i32x4::blend(use14, w14_p1, i32x4::blend(use8, w8_p1, f_p1));
+            let o_p0 = i32x4::blend(use14, w14_p0, i32x4::blend(use8, w8_p0, f_p0));
+            let o_q0 = i32x4::blend(use14, w14_q0, i32x4::blend(use8, w8_q0, f_q0));
+            let o_q1 = i32x4::blend(use14, w14_q1, i32x4::blend(use8, w8_q1, f_q1));
+            let o_q2 = i32x4::blend(use14, w14_q2, i32x4::blend(use8, w8_q2, q2));
+            let o_q3 = i32x4::blend(use14, w14_q3, q3);
+            let o_q4 = i32x4::blend(use14, w14_q4, q4);
+            let o_q5 = i32x4::blend(use14, w14_q5, q5);
+            store!(
+                -6 => o_p5, -5 => o_p4, -4 => o_p3, -3 => o_p2, -2 => o_p1, -1 => o_p0,
+                0 => o_q0, 1 => o_q1, 2 => o_q2, 3 => o_q3, 4 => o_q4, 5 => o_q5,
+            );
         }
         _ => crate::highbd::lpf_scalar(width, buf, center, ts, step, bl, li, th, bd),
     }
