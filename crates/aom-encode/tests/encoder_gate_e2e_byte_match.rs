@@ -2527,6 +2527,192 @@ fn encoder_gate_speed6_noise_flatuv_allintra() {
     );
 }
 
+/// Gate 2 (`aomenc --cpu-used=7`) — the all-intra KEY **speed-7** path.
+/// {64,128}² × cq{12,32,48,63} × {flat,two-tone,vgrad,diag} × {mono,4:2:0}
+/// vs REAL `aomenc --cpu-used=7`: **64/64 cells byte-identical** (asserted).
+///
+/// Speed 7 is STRUCTURALLY NEW (speed_features.c:569-575, KB-11) — not a
+/// prune re-parameterization: `partition_search_type = VAR_BASED_PARTITION`
+/// replaces the whole RD partition search with a variance-threshold FIXED
+/// tree + an RD mode search over it (fast-allintra = the avifenc-style
+/// fast-stills path, so this is stills-parity scope):
+/// - `av1_choose_var_based_partitioning` (var_part.rs): 4x4-downsampled
+///   source variance tree, `120 * ac_q(qindex)`-based thresholds
+///   (`set_vbp_thresholds_key_frame`), KEY rules (64x64+ always split;
+///   16/32 split on threshold exceed; NONE under; edge-fit rect pairs) —
+///   stamped as mi-grid bsizes.
+/// - `av1_rd_use_partition` (partition_pick.rs `rd_use_partition_real`):
+///   walks the fixed tree with the NORMAL full-RD leaf mode search
+///   (`use_nonrd_pick_mode` stays 0 until speed 8) — HORZ/VERT mid-strip
+///   dry-encode propagation, SPLIT recursion with `do_recon = i != 3`,
+///   save/restore + the root OUTPUT_ENABLED winner walk, exactly the pick
+///   path's context shape. The allintra SB rdmult modifier is IDENTITY on
+///   this path (only av1_rd_pick_partition's root recomputes it —
+///   pack_tile skips the fold at speed >= 7).
+/// - `default_min_partition_size = BLOCK_8X8` (assertion-only: the KEY tree
+///   never stamps below 8x8); `cdef_pick_method = CDEF_PICK_FROM_Q` (CDEF
+///   off in allintra — inert); `mode_search_skip_flags |=
+///   FLAG_SKIP_INTRA_DIRMISMATCH` (consumer is the INTER-frame intra search
+///   only — inert); `var_part_split_threshold_shift = 7` (dead while
+///   `force_large_partition_blocks_intra == 0` — inert on KEY).
+/// - Everything else (the whole speed-6 feature set: intra loop, tx policy,
+///   winner-mode OFF restructure, LPF_PICK_FROM_Q) carries over unchanged.
+#[test]
+fn encoder_gate_speed7_textured_allintra() {
+    fn content_for(w: usize, h: usize, name: &str) -> Box<dyn Fn(usize, usize) -> u8> {
+        match name {
+            "two-tone" => Box::new(move |_r, c| if c < w / 2 { 72 } else { 168 }),
+            "vgrad" => Box::new(move |_r, c| (32 + c * 190 / w) as u8),
+            "diag" => Box::new(move |r, c| (32 + (r + c) * 190 / (w + h)) as u8),
+            "flat" => Box::new(move |_r, _c| 128u8),
+            other => panic!("unknown {other:?}"),
+        }
+    }
+    let mut failures: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for &(w, h) in &[(64usize, 64usize), (128usize, 128usize)] {
+        for &name in &["flat", "two-tone", "vgrad", "diag"] {
+            for &cq in &[12i32, 32, 48, 63] {
+                for &mono in &[true, false] {
+                    let content = content_for(w, h, name);
+                    let ok = attempt_case_content_uv(
+                        w,
+                        h,
+                        mono,
+                        1,
+                        1,
+                        2,
+                        cq,
+                        7,
+                        7,
+                        |r, c| content(r, c),
+                        |r, c| (60 + (r * 7 + c * 3) % 80) as u8,
+                    );
+                    let fmt = if mono { "mono" } else { "420" };
+                    eprintln!(
+                        "speed7 {name} {w}x{h} {fmt} cq{cq}: {}",
+                        if ok { "MATCH" } else { "DIFF" }
+                    );
+                    if !ok {
+                        failures.push(format!("{name} {w}x{h} {fmt} cq{cq}"));
+                    }
+                    total += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "encoder_gate_speed7_textured_allintra: {}/{total} cells byte-identical vs aomenc \
+         --cpu-used=7",
+        total - failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "every cpu-used=7 all-intra cell must byte-match real aomenc; diverging: {failures:?}"
+    );
+}
+
+/// Anti-vacuous witness for [`encoder_gate_speed7_textured_allintra`]: the
+/// port runs with the **speed-6** feature set (the full RD partition
+/// search) against REAL `aomenc --cpu-used=7` reference bytes and must
+/// DIVERGE — proving the speed-7 structural flip (VAR_BASED_PARTITION +
+/// rd_use_partition) is load-bearing, i.e. the 64/64 speed-7 gate is not
+/// vacuously matching a speed-6-equivalent search. vgrad content splits
+/// differently under the variance tree than under the RD search on these
+/// cells; the mono cell isolates the luma side. The paired speed-7 run on
+/// the same cells re-asserts the true match so this witness can never
+/// "pass" via a harness that ignores `speed`.
+#[test]
+fn encoder_gate_speed7_vs_speed6_sf_witness() {
+    let vgrad_64 = |_r: usize, c: usize| (32 + c * 190 / 64) as u8;
+    let uv = |r: usize, c: usize| (60 + (r * 7 + c * 3) % 80) as u8;
+    for &(mono, cq) in &[(true, 32i32), (false, 32)] {
+        let fmt = if mono { "mono" } else { "420" };
+        let cross = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 7, 6, vgrad_64, uv);
+        assert!(
+            !cross,
+            "vgrad 64x64 {fmt} cq{cq}: port with SPEED-6 features unexpectedly byte-matched \
+             aomenc --cpu-used=7 — the speed-7 witness cell has gone sf-equivalent; pick a new \
+             witness cell (or a speed-6 delta leaked into the speed-7 derivation)"
+        );
+        let true_match = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 7, 7, vgrad_64, uv);
+        assert!(
+            true_match,
+            "vgrad 64x64 {fmt} cq{cq}: the speed-7 witness cell must byte-match with the \
+             speed-7 features (it does in the full gate)"
+        );
+    }
+}
+
+/// Speed-7 coverage extension beyond the textured grid (the speed-6
+/// extension's exact content): pseudo-random noise luma + flat chroma. On
+/// this content the variance tree goes DEEP — 16x16s exceed thresholds[3]
+/// and force-split to 8x8 leaves (cq32's tile is ~1560 bytes vs the canon
+/// cells' tens) — so this exercises `rd_use_partition_real`'s full
+/// recursion: 8x8 NONE leaves, the `do_recon = i != 3` split-child
+/// propagation at every level, and the deep save/restore + root
+/// OUTPUT_ENABLED walk. cq12/cq32/cq48 (mono + 4:2:0) must BYTE-MATCH real
+/// `aomenc --cpu-used=7` — hard-asserted like the main gate.
+///
+/// **KB-11 OPEN CHARACTERIZATION — cq63 (both mono + 4:2:0) DIVERGES**, and
+/// this test asserts the divergence is still PRESENT (it FAILS the moment
+/// the cells start matching → promote to a full byte-match assert). This is
+/// the SAME two cells and the SAME root as KB-10's pinned-open speed-6
+/// near-tie — localized by `kb11_speed7_noise_localize.rs` (decode-both +
+/// intended-winner dump): the variance tree fixes the same SPLIT + four
+/// NONE-32x32 shape real uses (decoded trees IDENTICAL), every mode record
+/// matches, and the port's (mi 8,0) leaf carries tx_size TX_16X16 where
+/// real keeps TX_32X32 — KB-10's "(mi 8,0) 32x32 WINNER-pass uniform
+/// tx-size sweep picks TX_16X16 over TX_32X32 by 0.19%" near-tie verbatim
+/// (the leaf mode search is the same machinery at speeds 6 and 7; only the
+/// partition source changed, and both produce this same tree here). KB-10's
+/// next step (sibling-C RD dump of the winner sweep at (8,0)) closes both
+/// speeds' cells at once.
+#[test]
+fn encoder_gate_speed7_noise_flatuv_allintra() {
+    let noise = |r: usize, c: usize| {
+        let mut x = (r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (c as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        x ^= x >> 33;
+        (64 + (x % 129)) as u8
+    };
+    let flat_uv = |_r: usize, _c: usize| 128u8;
+    let mut failures: Vec<String> = Vec::new();
+    let mut open_matches: Vec<String> = Vec::new();
+    for &cq in &[12i32, 32, 48, 63] {
+        for &mono in &[true, false] {
+            let ok = attempt_case_content_uv(64, 64, mono, 1, 1, 2, cq, 7, 7, noise, flat_uv);
+            let fmt = if mono { "mono" } else { "420" };
+            eprintln!(
+                "speed7-noise-flatuv 64x64 {fmt} cq{cq}: {}",
+                if ok { "MATCH" } else { "DIFF" }
+            );
+            if cq == 63 {
+                // The pinned-open KB-11 cells (== the KB-10 near-tie; docs above).
+                if ok {
+                    open_matches.push(format!("64x64 {fmt} cq{cq}"));
+                }
+            } else if !ok {
+                failures.push(format!("64x64 {fmt} cq{cq}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "every asserted speed-7 noise/flat-uv cell must byte-match real aomenc; \
+         diverging: {failures:?}"
+    );
+    assert!(
+        open_matches.is_empty(),
+        "the pinned-open KB-11 cq63 near-tie cells started BYTE-MATCHING real aomenc \
+         ({open_matches:?}) — promote this characterization (and \
+         kb11_speed7_noise_localize.rs) to full byte-match asserts and close the KB-11 \
+         open item (KB-10's speed-6 twin likely closed too)"
+    );
+}
+
 /// **Speed-6 prep (chunk 1 building block):** `pick_filter_level_from_q`
 /// (lf_search.rs) — the `LPF_PICK_FROM_Q` closed-form KEY-frame LF-level
 /// derivation (picklpf.c:266-330, `lpf_pick` at allintra speed >= 6 per

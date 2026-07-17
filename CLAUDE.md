@@ -694,6 +694,116 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   sf-driven (`min(default_max, CLI cap, SB)` — BLOCK_64X64 through speed 5, unchanged
   consumer outcomes; BLOCK_32X32 at 6).
 
+### KB-11 — Encoder: `--cpu-used=7` speed-7 VAR_BASED_PARTITION — PORTED ✅ (64/64 canon; the KB-10-twin near-tie pinned open on the noise extension)
+- **Status (2026-07-17): the canon gate is 64/64 byte-identical** vs real aomenc
+  (`encoder_gate_speed7_textured_allintra`, {64,128}² × cq{12,32,48,63} ×
+  {flat,two-tone,vgrad,diag} × {mono,420}) + the anti-vacuous witness
+  (`encoder_gate_speed7_vs_speed6_sf_witness`: port with FULL speed-6 features vs
+  `aomenc --cpu-used=7` DIVERGES on `vgrad 64² cq32` mono+420; speed-7 features match) +
+  the deep-tree noise extension (`encoder_gate_speed7_noise_flatuv_allintra`, cq12/32/48
+  hard-asserted). Speed 7 is STRUCTURALLY NEW (speed_features.c:569-575) — the partition
+  tree is FIXED up front from variance thresholds, no RD partition search:
+  1. **`av1_choose_var_based_partitioning` KEY arm** (`var_part.rs::
+     choose_var_based_partitioning_key`): 4x4-downsampled variance tree
+     (`fill_variance_4x4avg`: `aom_avg_4x4(src) − 128` per 4x4 — [`avg_4x4`]
+     differentially locked 4000/4000 vs the REAL exported `aom_avg_4x4_c`,
+     `avg_4x4_diff.rs`); `set_vbp_thresholds_key_frame` (`threshold_base = 120 *
+     av1_ac_quant_QTX(qindex, 0, bd)`; <720p: t[2]=base/3, t[3]=base>>1; t[0]=t[1]=base;
+     t[4]=base<<2); stage-2 force-split (16x16 var > t[3] and 32x32 var > t[2] propagate
+     ONLY_SPLIT up; 64x64/128x128 have no key forcing rules but `set_vt_partitioning`'s
+     `bsize > BLOCK_32X32 → split` KEY rule caps NONE at 32x32); the assignment descent
+     with the sb64 boundary half-fit extensions (`bs_width_check = (w>>1)+1` at the frame
+     edge) and edge-fit VERT/HORZ pair stamps; leaves stamped as mi-grid bsizes at block
+     top-lefts (`set_block_size`), read back by `get_partition_from_stamps` (= C's
+     `get_partition`, av1_common_int.h:1775, ext-partition disambiguation included).
+     NOTE: interior rect stamps are reachable only on exact `variance == threshold` ties
+     (stage-2 forcing fires strictly-above, NONE strictly-below) — the rect arms' real
+     purpose is frame-edge blocks (unit-locked on a 48x48 frame).
+  2. **`av1_rd_use_partition`** (`partition_pick.rs::rd_use_partition_real`,
+     partition_search.c:1764): the fixed-tree walk running the EXISTING full-RD
+     `leaf_pick_sb_modes` per leaf (`use_nonrd_pick_mode` stays 0 until speed 8) with
+     C's exact context shape — HORZ/VERT strip-0-then-encode-then-strip-1
+     (`encode_b_intra_dry` mid-stage propagation, the rect stage's own pattern), SPLIT
+     recursion with `do_recon = i != 3` (last child skips its re-encode), per-node
+     save/restore + `if (do_recon) encode_sb` (OUTPUT_ENABLED at the SB root, DRY below).
+     Leaf budgets are `invalid_rdc` (INT64_MAX — no early-outs on a fixed tree).
+     **Structurally DEAD at allintra speed 7 (verified, documented in the fn docs, NOT
+     ported):** the PARTITION_NONE re-eval (:1827) + split-of-NONEs re-eval (:1986) —
+     both need `adjust_var_based_rd_partitioning` ∈ {1,2}/{>2}, which is **0 outside
+     REALTIME** (init :2288; setters :2002/:2896 are REALTIME-only) → the walk is a pure
+     replay, its RD totals decision-inert; `setup_block_rdmult`'s ALLINTRA
+     `intra_sb_rdmult_modifier` fold is IDENTITY (only av1_rd_pick_partition's root
+     recomputes the modifier, partition_search.c:5715 — the VBP path leaves the per-SB
+     reset 128, encodeframe.c:1303) → **`pack_tile` skips the SB rdmult fold at
+     speed >= 7** (byte-visible: the fold is live at speeds 0-6).
+  3. **sf deltas** (`speed7_allintra_deltas_match_source`): `partition_search_type =
+     VAR_BASED_PARTITION` (:571; pack_tile derives the branch inline as `allintra &&
+     speed >= 7` per the established pattern) + `default_min_partition_size = BLOCK_8X8`
+     (:570 — assertion-only: the KEY tree never stamps below 8x8; the RD-search max/min
+     clamps never run on this path). INERT (verified vs source): `cdef_pick_method =
+     CDEF_PICK_FROM_Q` (:572, CDEF off in allintra), `rt_sf.mode_search_skip_flags |=
+     FLAG_SKIP_INTRA_DIRMISMATCH` (:573 — sole consumer `search_intra_modes_in_interframe`,
+     rdopt.c:5824, inter frames only), `rt_sf.var_part_split_threshold_shift = 7` (:574 —
+     `set_vbp_thresholds_key_frame` reads it ONLY under
+     `rt_sf.force_large_partition_blocks_intra`, which is 0 below speed 8/720p+
+     [speed_features.c:327] and in this envelope; carried as a field for provenance).
+     Everything else carries the speed-6 set unchanged (incl. LPF_PICK_FROM_Q).
+- **PINNED OPEN — the KB-10 near-tie TWIN:** `noise 64² cq63` (mono + 420) on
+  `encoder_gate_speed7_noise_flatuv_allintra` diverges — localized by
+  `kb11_speed7_noise_localize.rs` (decode-both + the search's intended-winner dump):
+  decoded partition trees IDENTICAL (SPLIT + four NONE-32s — the variance tree fixes the
+  same shape real uses), every decoded mode record matches, and the port's (mi 8,0) leaf
+  carries **tx_size TX_16X16 where real keeps TX_32X32** — exactly KB-10's "(mi 8,0)
+  32×32 WINNER-pass uniform tx-size sweep picks TX_16X16 over TX_32X32 by 0.19%" cell
+  (same leaf machinery at speeds 6 and 7; the tx-plan difference desyncs the LARGEST-tx
+  parse — the decoded eob-50 / 420 "(8,8) tree diff" are desync artifacts). Both tests
+  assert the divergence PRESENT (fail on match → promote). Next step: KB-10's sibling-C
+  RD dump of the winner sweep at (8,0) — closes both speeds' cells at once.
+- **Unit locks:** `speed7_allintra_deltas_match_source` (+ speed-6 regression guard);
+  `avg_4x4_diff` (REAL-C kernel differential); var_part.rs threshold/shape/edge tests;
+  `kb11_speed7_noise_cq32_control_matches` (the localization harness's own soundness).
+- **Speed-8 prep facts (KB-12 seed, verified against source 2026-07-17):** speed 8 flips
+  `use_nonrd_pick_mode = 1` (speed_features.c:578) — the nonrd PICKMODE, the big one:
+  - `encode_nonrd_sb` (encodeframe.c:581-663): the SAME
+    `av1_choose_var_based_partitioning` (KEY arm already ported, var_part.rs) fixes the
+    tree, then **`av1_nonrd_use_partition`** (partition_search.c:2960) — a SINGLE-PASS
+    walk: per leaf `pick_sb_modes_nonrd` + `encode_b_nonrd` IMMEDIATELY (dry_run=0 — the
+    encode IS the output; NO save/restore, NO mid-strip re-encode, NO root winner walk;
+    `set_mode_eval_params(DEFAULT_EVAL)` per node). HORZ/VERT strips: pick+encode strip 0
+    then strip 1 (in-frame gated, `bsize > BLOCK_8X8` for strip 1). SPLIT: plain
+    recursion. `try_merge` (`nonrd_check_partition_merge_mode = 1`, :580) is
+    `!frame_is_intra_only`-gated → INERT on KEY; `nonrd_check_partition_split` stays 0;
+    `direct_partition_merging` is `!frame_is_intra_only` too.
+  - The KEY-intra leaf search is `hybrid_intra_mode_search` (partition_search.c:756):
+    `hybrid_intra_pickmode = 2` (:579) → full-RD `av1_rd_pick_intra_mode_sb` (the
+    EXISTING ported search) for `bsize < BLOCK_16X16 && x->source_variance >=
+    var_thresh[1] = 101`; else **`av1_nonrd_pick_intra_mode`** (nonrd_pickmode.c:1582) —
+    NEW machinery: `intra_mode_list` loop (RTC_INTRA_MODES = DC/V/H/SMOOTH) with
+    `intra_y_mode_bsize_mask_nrd` (:583-590: INTRA_DC only >= BLOCK_32X32, INTRA_DC_H_V
+    below — mask consumed where? verify: the mask gates the loop in nonrd inter path;
+    the intra-frame fn loops intra_mode_list directly), per-mode
+    `av1_estimate_block_intra` (foreach-txb SATD/model estimate, not full RD),
+    skip_txfm-cost fold + `bmode_costs[y_mode_costs[above_ctx][left_ctx]]`, tx_size =
+    min(max_txsize_lookup, biggest for tx_mode) — NO tx search, NO angle deltas, NO
+    filter-intra. Palette arm gated `enable_palette && allow_screen_content_tools`
+    (`prune_palette_search_nonrd = 1`, :582). CHROMA on the nonrd KEY path: locate it
+    (av1_nonrd_pick_intra_mode is PLANE_Y only — uv likely inside encode_b_nonrd's
+    encode_superblock or a uv estimate step; UNRESOLVED, first thing to trace).
+  - `x->source_variance` IS live at speed 8: choose_var computes it per SB
+    (var_based_part.c:1728, `use_nonrd_pick_mode && source_sad_nonrd > kLowSad`;
+    content_state_sb.source_sad_nonrd inits kMedSad per SB, encodeframe.c:1289) — but
+    verify what `pick_sb_modes_nonrd` re-derives per LEAF before trusting the SB value
+    in hybrid_intra's threshold.
+  - `var_part_split_threshold_shift = 8` (:581): STILL force_large-gated on KEY
+    (`force_large_partition_blocks_intra` rises only at speed>=8 AND 720p+ —
+    speed_features.c:326-328) → inert on sub-720p grids; LIVE at 720p+ (the
+    `set_vbp_thresholds_key_frame` shift-steps arm + thresholds[2]/[3] shift_val 1 —
+    port the arm when a 720p+ speed-8 cell lands).
+  - `encode_b_nonrd` (partition_search.c:2100): the single-pass leaf encode
+    (av1_update_state-equivalent + encode_superblock with dry_run=0 → tokens + cdf
+    updates inline as it walks — the pack IS the walk; the port's search/pack split
+    needs rethinking for this path, or model it as search==pack in one pass).
+
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
 Primary config = ALLINTRA (usage=2), speed-0 KEY frame. libaom's own allintra tuning
@@ -730,9 +840,11 @@ port-derived.
   `intra_tx_size_init_depth_rect` field — and the asserted per-feature-revert witness
   `encoder_gate_speed1_rect_and_4way_25` (in `encoder_gate_e2e_byte_match.rs`) re-diverges if either
   fix is reverted. (Earlier "need test cells to validate" note was stale.)
-- **#10 cpu-used 0..9 speed-feature sweep** (Gate 2) — speeds 0-6 DONE (KB-8/KB-9/KB-10;
-  6 = 64/64 canon + one pinned-open noise-cq63 near-tie pair). Remaining: speeds 7-9
-  (VAR_BASED_PARTITION + nonrd machinery — see the KB-10 speed-7 prep note).
+- **#10 cpu-used 0..9 speed-feature sweep** (Gate 2) — speeds 0-7 DONE (KB-8/KB-9/KB-10/KB-11;
+  6 and 7 = 64/64 canon each + the shared pinned-open noise-cq63 near-tie pair). Remaining:
+  speeds 8-9 (the nonrd PICKMODE — `use_nonrd_pick_mode`, `av1_nonrd_use_partition`
+  single-pass walk, `av1_nonrd_pick_intra_mode` + `hybrid_intra_mode_search` — see the
+  KB-12 prep facts in STATUS.md's cpu-used=7 section).
   (#8 qindex-from-cq and #21 decoder q62/q63 are DONE + CI-green — no longer remaining.)
 
 **Confirmed NON-divergences (ruled out — do not re-chase):**
