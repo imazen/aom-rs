@@ -1,0 +1,27 @@
+measurement: Gate-3 FIRST REAL wall-clock baseline (port vs REAL C oracle, zenbench paired)
+git commit: 53779d998390ca7bf42e4fb928b573401682b905 (transform-SIMD stack on main)
+date: 2026-07-17T08:36:06Z
+host: AMD EPYC-Genoa (Zen 4, avx512), 16 cores, dedicated aom-rs box
+tool: zenbench (interleaved paired rounds; c_oracle = per-group baseline, so the port
+  row's "vs base" CI IS the Gate-3 ratio). NO -Ctarget-cpu. release profile.
+command: cargo bench -p aom-bench --bench gate3   (`just bench-gate3`)
+box state: quiet at capture (load ~0.5), BUT zenbench flagged 3561 noisy rounds over the
+  3716s run (intermittent low-level contention from concurrent agents). Effect:
+- DECODE cells: gate-truncated to 4 rounds each (wider CIs) — real but low-n; re-measure
+  on a fully-idle box for tighter decode CIs.
+- ENCODE cells: full 10 rounds each, tight CIs (cv 1.5-11%) — solid.
+every cell byte-verifies port==C in setup before timing (assert_byte_exact).
+
+Gate-3 target: port <= 1.20x C. Current baseline is well above target on every cell — the
+SIMD track (transforms + kernels #1-#5) has landed but the port is still 1.4-3.9x C; the
+remaining scalar hot paths (W=4/H=4 transforms, deblock, entropy, get_nz_ctx, alloc) are the
+gap. This is the STARTING wall-clock line to drive down, not a passing gate.
+
+Port/C ratios (x = port_mean / c_mean):
+  decode: dec_64x64 1.77x | dec_196x196 2.57x | dec_352x288 q00 1.37x / q32 2.24x / q63 2.90x
+  encode s0: 64² cq12/32/63 2.58/2.35/3.73x | 128² 2.42/2.37/3.62x | 196² 2.64/2.72/3.75x
+  encode s4: 128² cq32 3.87x
+raw structured data: benchmarks/gate3_baseline_2026-07-17.zenbench.txt (re-readable;
+  cargo bench -- --format=csv|md|json reformats without re-running).
+note: instruction-count (callgrind) deltas for the transform SIMD specifically are in
+  benchmarks/gate3_transform_simd_2026-07-17.{md,meta} (enc -30.0%, dec -16.2% Ir).

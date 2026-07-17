@@ -1,0 +1,41 @@
+# zenbench results (complete)
+# git: 53779d998390ca7bf42e4fb928b573401682b905
+# 2026-07-17T08:36:06Z
+#
+# Re-read this file instead of re-running the benchmark.
+# Formats:  cargo bench -- --format=llm|csv|md|json
+# Env var:  ZENBENCH_FORMAT=llm cargo bench
+# Disable:  ZENBENCH_NO_SAVE=1 cargo bench
+#
+# Fields: group | benchmark | vs_base comparison | min mean median mad | throughput | n cv rounds calls
+#
+group=dec_64x64 benchmark=c_oracle  |  vs_base=baseline  |  min=88.56µs mean=92.36µs median=92.72µs mad=3.16µs  |  throughput=44.35 Mpx/s  |  n=4 cv=3.4% rounds=4 calls=32 mean_ci=[89.87µs 94.85µs] cold=293.42µs
+group=dec_64x64 benchmark=port  |  vs_base_pct=+76.67 ci=[+68.74% +84.60%] significant=true effect=11.61 p=1.0000  |  min=155.80µs mean=163.17µs median=161.74µs mad=7.33µs  |  throughput=25.10 Mpx/s  |  n=4 cv=4.9% rounds=4 calls=32 mean_ci=[156.80µs 169.55µs] cold=211.24µs
+group=dec_196x196 benchmark=c_oracle  |  vs_base=baseline  |  min=418.21µs mean=445.18µs median=435.79µs mad=15.28µs  |  throughput=86.29 Mpx/s  |  n=4 cv=7.1% rounds=4 calls=4 mean_ci=[423.36µs 476.39µs] cold=760.73µs
+group=dec_196x196 benchmark=port  |  vs_base_pct=+157.42 ci=[+152.24% +162.60%] significant=true effect=15.98 p=1.0000  |  min=1.10ms mean=1.15ms median=1.13ms mad=24.03µs  |  throughput=33.52 Mpx/s  |  n=4 cv=4.7% rounds=4 calls=4 mean_ci=[1.11ms 1.20ms] cold=1.16ms
+group=dec_352x288_q00 benchmark=c_oracle  |  vs_base=baseline  |  min=8.94ms mean=9.64ms median=9.15ms mad=268.08µs  |  throughput=10.52 Mpx/s  |  n=4 cv=11.7% rounds=4 calls=1 mean_ci=[8.97ms 10.73ms] cold=9.38ms
+group=dec_352x288_q00 benchmark=port  |  vs_base_pct=+37.38 ci=[+35.83% +38.69%] significant=true effect=3.03 p=1.0000  |  min=12.33ms mean=13.24ms median=12.78ms mad=451.20µs  |  throughput=7.66 Mpx/s  |  n=4 cv=9.4% rounds=4 calls=1 mean_ci=[12.47ms 14.46ms] cold=12.94ms
+group=dec_352x288_q32 benchmark=c_oracle  |  vs_base=baseline  |  min=2.40ms mean=2.59ms median=2.57ms mad=186.68µs  |  throughput=39.07 Mpx/s  |  n=4 cv=7.5% rounds=4 calls=1 mean_ci=[2.44ms 2.75ms] cold=2.41ms
+group=dec_352x288_q32 benchmark=port  |  vs_base_pct=+124.39 ci=[+106.75% +148.98%] significant=true effect=6.89 p=1.0000  |  min=5.30ms mean=5.82ms median=5.67ms mad=495.60µs  |  throughput=17.41 Mpx/s  |  n=4 cv=10.9% rounds=4 calls=1 mean_ci=[5.33ms 6.34ms] cold=5.39ms
+group=dec_352x288_q63 benchmark=c_oracle  |  vs_base=baseline  |  min=540.66µs mean=556.89µs median=557.51µs mad=14.65µs  |  throughput=182.04 Mpx/s  |  n=4 cv=2.4% rounds=4 calls=3 mean_ci=[546.22µs 567.40µs] cold=655.01µs
+group=dec_352x288_q63 benchmark=port  |  vs_base_pct=+189.62 ci=[+185.83% +193.42%] significant=true effect=53.05 p=1.0000  |  min=1.60ms mean=1.61ms median=1.60ms mad=9.58µs  |  throughput=62.85 Mpx/s  |  n=4 cv=1.5% rounds=4 calls=3 mean_ci=[1.60ms 1.64ms] cold=1.62ms
+group=enc_s0_64_cq12 benchmark=c_oracle  |  vs_base=baseline  |  min=75.80ms mean=79.51ms median=77.45ms mad=2.29ms  |  throughput=51.52 Kpx/s  |  n=10 cv=7.4% rounds=10 calls=1 mean_ci=[76.87ms 83.38ms] cold=77.40ms
+group=enc_s0_64_cq12 benchmark=port  |  vs_base_pct=+157.98 ci=[+154.52% +161.46%] significant=true effect=31.91 p=1.0000  |  min=194.79ms mean=200.53ms median=200.03ms mad=4.47ms  |  throughput=20.43 Kpx/s  |  n=10 cv=2.4% rounds=10 calls=1 mean_ci=[197.85ms 203.44ms] cold=195.57ms
+group=enc_s0_64_cq32 benchmark=c_oracle  |  vs_base=baseline  |  min=64.77ms mean=66.68ms median=66.69ms mad=1.28ms  |  throughput=61.43 Kpx/s  |  n=10 cv=1.7% rounds=10 calls=1 mean_ci=[66.02ms 67.32ms] cold=65.74ms
+group=enc_s0_64_cq32 benchmark=port  |  vs_base_pct=+135.43 ci=[+133.59% +137.10%] significant=true effect=44.22 p=0.0059  |  min=153.79ms mean=156.98ms median=156.71ms mad=3.96ms  |  throughput=26.09 Kpx/s  |  n=10 cv=1.7% rounds=10 calls=1 mean_ci=[155.40ms 158.56ms] cold=152.79ms
+group=enc_s0_64_cq63 benchmark=c_oracle  |  vs_base=baseline  |  min=15.46ms mean=15.79ms median=15.63ms mad=172.60µs  |  throughput=259.41 Kpx/s  |  n=10 cv=2.9% rounds=10 calls=1 mean_ci=[15.58ms 16.10ms] cold=15.50ms
+group=enc_s0_64_cq63 benchmark=port  |  vs_base_pct=+272.51 ci=[+269.20% +277.05%] significant=true effect=49.11 p=1.0000  |  min=57.71ms mean=60.35ms median=58.83ms mad=1.47ms  |  throughput=67.87 Kpx/s  |  n=10 cv=5.4% rounds=10 calls=1 mean_ci=[58.59ms 62.42ms] cold=57.40ms
+group=enc_s0_128_cq12 benchmark=c_oracle  |  vs_base=baseline  |  min=580.61ms mean=598.27ms median=598.13ms mad=8.19ms  |  throughput=27.39 Kpx/s  |  n=10 cv=1.8% rounds=10 calls=1 mean_ci=[592.08ms 604.59ms] cold=600.84ms
+group=enc_s0_128_cq12 benchmark=port  |  vs_base_pct=+141.89 ci=[+140.17% +143.84%] significant=true effect=57.60 p=1.0000  |  min=1.42s mean=1.45s median=1.45s mad=23.16ms  |  throughput=11.28 Kpx/s  |  n=10 cv=1.7% rounds=10 calls=1 mean_ci=[1.44s 1.47s] cold=1.48s
+group=enc_s0_128_cq32 benchmark=c_oracle  |  vs_base=baseline  |  min=431.30ms mean=446.74ms median=443.71ms mad=7.07ms  |  throughput=36.67 Kpx/s  |  n=10 cv=2.2% rounds=10 calls=1 mean_ci=[440.94ms 452.56ms] cold=464.33ms
+group=enc_s0_128_cq32 benchmark=port  |  vs_base_pct=+136.60 ci=[+133.38% +139.89%] significant=true effect=26.16 p=0.0059  |  min=1.01s mean=1.06s median=1.05s mad=36.48ms  |  throughput=15.50 Kpx/s  |  n=10 cv=3.0% rounds=10 calls=1 mean_ci=[1.04s 1.08s] cold=1.10s
+group=enc_s0_128_cq63 benchmark=c_oracle  |  vs_base=baseline  |  min=56.25ms mean=61.44ms median=59.06ms mad=1.41ms  |  throughput=266.68 Kpx/s  |  n=10 cv=11.2% rounds=10 calls=1 mean_ci=[58.13ms 65.83ms] cold=57.49ms
+group=enc_s0_128_cq63 benchmark=port  |  vs_base_pct=+261.58 ci=[+256.11% +267.60%] significant=true effect=17.20 p=0.0059  |  min=210.96ms mean=222.14ms median=219.16ms mad=9.36ms  |  throughput=73.75 Kpx/s  |  n=10 cv=5.1% rounds=10 calls=1 mean_ci=[216.35ms 229.41ms] cold=216.62ms
+group=enc_s0_196_cq12 benchmark=c_oracle  |  vs_base=baseline  |  min=355.29ms mean=366.03ms median=368.14ms mad=6.81ms  |  throughput=104.95 Kpx/s  |  n=10 cv=2.0% rounds=10 calls=1 mean_ci=[361.69ms 370.08ms] cold=384.68ms
+group=enc_s0_196_cq12 benchmark=port  |  vs_base_pct=+163.51 ci=[+161.01% +166.11%] significant=true effect=46.18 p=0.0059  |  min=945.08ms mean=964.50ms median=962.23ms mad=20.46ms  |  throughput=39.83 Kpx/s  |  n=10 cv=1.7% rounds=10 calls=1 mean_ci=[955.07ms 974.61ms] cold=1.02s
+group=enc_s0_196_cq32 benchmark=c_oracle  |  vs_base=baseline  |  min=229.01ms mean=240.89ms median=237.48ms mad=6.15ms  |  throughput=159.48 Kpx/s  |  n=10 cv=5.8% rounds=10 calls=1 mean_ci=[234.44ms 250.18ms] cold=239.17ms
+group=enc_s0_196_cq32 benchmark=port  |  vs_base_pct=+172.12 ci=[+170.25% +173.86%] significant=true effect=50.40 p=1.0000  |  min=631.93ms mean=649.61ms median=649.84ms mad=10.61ms  |  throughput=59.14 Kpx/s  |  n=10 cv=2.1% rounds=10 calls=1 mean_ci=[641.98ms 658.16ms] cold=628.58ms
+group=enc_s0_196_cq63 benchmark=c_oracle  |  vs_base=baseline  |  min=104.53ms mean=108.96ms median=108.29ms mad=3.67ms  |  throughput=352.57 Kpx/s  |  n=10 cv=3.6% rounds=10 calls=1 mean_ci=[106.82ms 111.39ms] cold=104.63ms
+group=enc_s0_196_cq63 benchmark=port  |  vs_base_pct=+275.01 ci=[+272.68% +277.22%] significant=true effect=78.97 p=1.0000  |  min=404.86ms mean=411.41ms median=410.03ms mad=4.02ms  |  throughput=93.38 Kpx/s  |  n=10 cv=1.5% rounds=10 calls=1 mean_ci=[408.20ms 415.50ms] cold=390.84ms
+group=enc_s4_128_cq32 benchmark=c_oracle  |  vs_base=baseline  |  min=1.92ms mean=2.03ms median=1.98ms mad=49.39µs  |  throughput=8.07 Mpx/s  |  n=10 cv=8.9% rounds=10 calls=1 mean_ci=[1.96ms 2.15ms] cold=2.05ms
+group=enc_s4_128_cq32 benchmark=port  |  vs_base_pct=+287.25 ci=[+282.42% +292.76%] significant=true effect=40.41 p=1.0000  |  min=7.47ms mean=7.82ms median=7.61ms mad=212.81µs  |  throughput=2.09 Mpx/s  |  n=10 cv=7.6% rounds=10 calls=1 mean_ci=[7.56ms 8.22ms] cold=7.93ms
