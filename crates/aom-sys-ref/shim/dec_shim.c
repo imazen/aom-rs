@@ -2648,6 +2648,56 @@ long shim_encode_av1_kf_film_grain_table(const uint16_t *y, const uint16_t *u,
   return rc ? rc : total;
 }
 
+#include "aom_dsp/noise_model.h"
+
+/* Noise-strength solver differential oracle (C7 grain-estimator chunk 2): run
+ * the REAL exported aom_noise_strength_solver_* over `nobs` (mean,std)
+ * observations and copy the solved per-bin strength curve (solver.eqns.x,
+ * `num_bins` doubles) into `out_x`. Returns 1 on success. The Rust port
+ * (aom_encode::noise_model::NoiseStrengthSolver) runs the identical sequence;
+ * the two solved curves must be bit-identical. Append-only addition. */
+int shim_noise_strength_solve(const double *means, const double *stds, int nobs,
+                              int num_bins, int bit_depth, double *out_x) {
+  aom_noise_strength_solver_t solver;
+  if (!aom_noise_strength_solver_init(&solver, num_bins, bit_depth)) return 0;
+  for (int i = 0; i < nobs; ++i)
+    aom_noise_strength_solver_add_measurement(&solver, means[i], stds[i]);
+  int ok = aom_noise_strength_solver_solve(&solver);
+  if (ok)
+    for (int i = 0; i < num_bins; ++i) out_x[i] = solver.eqns.x[i];
+  aom_noise_strength_solver_free(&solver);
+  return ok;
+}
+
+/* Same setup + solve, then aom_noise_strength_solver_fit_piecewise: copy the
+ * reduced LUT's (x,y) points into out_points_xy (2 doubles per point) and the
+ * count into *out_num_points. Returns 1 on success. Append-only addition. */
+int shim_noise_strength_fit_piecewise(const double *means, const double *stds,
+                                      int nobs, int num_bins, int bit_depth,
+                                      int max_points, double *out_points_xy,
+                                      int *out_num_points) {
+  aom_noise_strength_solver_t solver;
+  if (!aom_noise_strength_solver_init(&solver, num_bins, bit_depth)) return 0;
+  for (int i = 0; i < nobs; ++i)
+    aom_noise_strength_solver_add_measurement(&solver, means[i], stds[i]);
+  if (!aom_noise_strength_solver_solve(&solver)) {
+    aom_noise_strength_solver_free(&solver);
+    return 0;
+  }
+  aom_noise_strength_lut_t lut;
+  int ok = aom_noise_strength_solver_fit_piecewise(&solver, max_points, &lut);
+  if (ok) {
+    *out_num_points = lut.num_points;
+    for (int i = 0; i < lut.num_points; ++i) {
+      out_points_xy[2 * i] = lut.points[i][0];
+      out_points_xy[2 * i + 1] = lut.points[i][1];
+    }
+    aom_noise_strength_lut_free(&lut);
+  }
+  aom_noise_strength_solver_free(&solver);
+  return ok;
+}
+
 /* Encode one KEY frame WITH fixed-denominator superres: the REAL
  * aom_codec_av1_cx public API with AV1E_SET_SUPERRES_MODE = AOM_SUPERRES_FIXED
  * and AV1E_SET_SUPERRES_DENOMINATOR = superres_denom (9..16). The encoder codes

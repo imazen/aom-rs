@@ -11958,6 +11958,84 @@ pub fn ref_encode_av1_kf_film_grain_table(
     out
 }
 
+// ---------------------------------------------------------------------------
+// dec_shim.c (append-only): noise-strength solver differential oracle (C7
+// grain-estimator chunk 2). Drives the REAL exported aom_noise_strength_solver_*
+// over (mean,std) observations; the Rust port must reproduce the solved curve /
+// fitted LUT bit-for-bit.
+// ---------------------------------------------------------------------------
+unsafe extern "C" {
+    fn shim_noise_strength_solve(
+        means: *const f64,
+        stds: *const f64,
+        nobs: i32,
+        num_bins: i32,
+        bit_depth: i32,
+        out_x: *mut f64,
+    ) -> i32;
+    fn shim_noise_strength_fit_piecewise(
+        means: *const f64,
+        stds: *const f64,
+        nobs: i32,
+        num_bins: i32,
+        bit_depth: i32,
+        max_points: i32,
+        out_points_xy: *mut f64,
+        out_num_points: *mut i32,
+    ) -> i32;
+}
+
+/// Run the REAL `aom_noise_strength_solver_*` over `(means, stds)` observations
+/// and return the solved per-bin strength curve (`solver.eqns.x`, `num_bins`
+/// values), or `None` if the solve failed (singular).
+pub fn ref_noise_strength_solve(
+    means: &[f64],
+    stds: &[f64],
+    num_bins: usize,
+    bit_depth: i32,
+) -> Option<Vec<f64>> {
+    assert_eq!(means.len(), stds.len());
+    let mut out = vec![0.0f64; num_bins];
+    let ok = unsafe {
+        shim_noise_strength_solve(
+            means.as_ptr(),
+            stds.as_ptr(),
+            means.len() as i32,
+            num_bins as i32,
+            bit_depth,
+            out.as_mut_ptr(),
+        )
+    };
+    (ok != 0).then_some(out)
+}
+
+/// Run the REAL solver + `aom_noise_strength_solver_fit_piecewise` and return
+/// the reduced LUT points, or `None` on failure.
+pub fn ref_noise_strength_fit_piecewise(
+    means: &[f64],
+    stds: &[f64],
+    num_bins: usize,
+    bit_depth: i32,
+    max_points: i32,
+) -> Option<Vec<[f64; 2]>> {
+    assert_eq!(means.len(), stds.len());
+    let mut xy = vec![0.0f64; num_bins * 2];
+    let mut n = 0i32;
+    let ok = unsafe {
+        shim_noise_strength_fit_piecewise(
+            means.as_ptr(),
+            stds.as_ptr(),
+            means.len() as i32,
+            num_bins as i32,
+            bit_depth,
+            max_points,
+            xy.as_mut_ptr(),
+            &mut n,
+        )
+    };
+    (ok != 0).then(|| (0..n as usize).map(|i| [xy[2 * i], xy[2 * i + 1]]).collect())
+}
+
 /// The REAL exported `aom_count_primitive_refsubexpfin`
 /// (aom_dsp/binary_codes_writer.c): coded bit count of
 /// `aom_write_primitive_refsubexpfin(n, k, ref, v)`.

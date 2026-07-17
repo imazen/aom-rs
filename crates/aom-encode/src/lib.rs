@@ -27,6 +27,7 @@ pub mod intra_uv_rd;
 pub mod intrabc_search;
 pub mod lf_search;
 pub mod mode_costs;
+pub mod noise_model;
 pub mod nonrd_pickmode;
 pub mod obu_assemble;
 pub mod pack;
