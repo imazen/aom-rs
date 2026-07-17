@@ -32,6 +32,7 @@ use aom_entropy::header::{
     RestorationHeader,
 };
 use aom_entropy::obu::read_obu_header;
+use aom_entropy::partition::get_partition_subsize;
 use aom_entropy::rb::ReadBitBuffer;
 use aom_sys_ref as c;
 
@@ -317,5 +318,268 @@ fn palette_y_rd_close_gate() {
          on any screen cell (knob dead?)"
     );
 
+    // Graduate the byte-exact cells to a HARD byte-identity assert (PARITY
+    // Section A): these 4 screen cells + the real-content control are
+    // byte-identical to real aomenc and MUST stay so — a regression to
+    // merely-RD-close now FAILS loudly instead of passing on the RD band.
+    // The two 128² cells (`ui_420_128_cq32`, `text_420_128_cq20`) are PINNED
+    // as genuine palette-induced AB/4-way partition near-ties (see
+    // `decode_diff_palette_close_cells` + PARITY.md C3 / the KB-P palette
+    // near-tie note): they stay RD-close only.
+    const BYTE_EXACT_CELLS: &[&str] = &[
+        "text_mono_64_cq32",
+        "text_420_64_cq12",
+        "text_420_64_cq32",
+        "text_420_64_cq63",
+        "control_real64_cq32",
+    ];
+    for r in &results {
+        if BYTE_EXACT_CELLS.contains(&r.label.as_str()) {
+            assert!(
+                r.bit_identical,
+                "{}: expected BYTE-IDENTICAL (PARITY Section A) but diverged \
+                 ({:+.2}% size, {:+.3} zensim) — a byte-exact palette cell regressed",
+                r.label, r.size_delta_pct, r.zensim_drop
+            );
+        }
+    }
+
     rd_close::assert_rd_close(&results, &RdBands::default());
+}
+
+// ---------------------------------------------------------------------------
+// DECODE-BOTH localizer (diagnostic) for the two CLOSE 128² near-tie cells.
+// Encodes each cell with real aomenc (--enable-palette=1) AND the port, decodes
+// BOTH with the (bit-exact) port decoder, and finds the FIRST divergence:
+// partition node → leaf mode/tx/PALETTE field → reconstruction pixel. Prints
+// the exact (mi_row, mi_col) so the divergence can be root-caused C-faithfully.
+// Reuses the same cell generators as the gate (no drift). Not a hard gate.
+// ---------------------------------------------------------------------------
+
+const SB_BSIZE: usize = 12; // BLOCK_64X64
+const SB_MI: i32 = 16; // 64px / 4
+const MI_SIZE_WIDE_B: [usize; 22] = [
+    1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+];
+const PARTITION_NAMES: [&str; 10] = [
+    "NONE", "HORZ", "VERT", "SPLIT", "HORZ_A", "HORZ_B", "VERT_A", "VERT_B", "HORZ_4", "VERT_4",
+];
+
+fn replay_tree(
+    tree: &[i8],
+    cursor: &mut usize,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    mi_rows: i32,
+    mi_cols: i32,
+    out: &mut Vec<(i32, i32, usize, i8)>,
+) {
+    if mi_row >= mi_rows || mi_col >= mi_cols {
+        return;
+    }
+    let p = tree[*cursor];
+    out.push((mi_row, mi_col, bsize, p));
+    *cursor += 1;
+    if p as usize == 3 {
+        // PARTITION_SPLIT — the only type that recurses.
+        let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
+        let subsize = get_partition_subsize(bsize, p as i32) as usize;
+        for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
+            replay_tree(tree, cursor, mi_row + dr, mi_col + dc, subsize, mi_rows, mi_cols, out);
+        }
+    }
+}
+
+/// Returns `true` when the cell is byte-identical to real aomenc (a PINNED
+/// near-tie has been closed → promote it), `false` while it still diverges.
+fn localize_palette_cell(cell: &EncodeCell) -> bool {
+    // Palette-OFF control: is the divergence purely palette-induced?
+    let c_off = cell.c_encode_screen(false, false);
+    let port_off = cell.port_encode_with(&c_off, false);
+    let port_off_tu = rd_close::splice_frame_obu(&c_off, &port_off);
+    eprintln!(
+        "--- {} palette-OFF: c_off={}B port_off={}B bit_identical={}",
+        cell.label,
+        c_off.len(),
+        port_off_tu.len(),
+        port_off_tu == c_off
+    );
+
+    let c_tu = cell.c_encode_screen(true, false);
+    let port_on = cell.port_encode_with(&c_tu, true);
+    let port_tu = rd_close::splice_frame_obu(&c_tu, &port_on);
+    eprintln!(
+        "\n=== {} ===  c_tu={}B  port_tu={}B  bit_identical={}",
+        cell.label,
+        c_tu.len(),
+        port_tu.len(),
+        port_tu == c_tu
+    );
+    if port_tu == c_tu {
+        eprintln!("  already BYTE-EXACT — nothing to localize");
+        return true;
+    }
+
+    let (t_real, _, _) = aom_decode::frame::decode_frame_obus_prefilter(&c_tu)
+        .expect("decode of REAL aomenc bytes failed");
+    let (t_ours, _, _) = aom_decode::frame::decode_frame_obus_prefilter(&port_tu)
+        .expect("decode of PORT bytes failed");
+
+    let mi_cols = (cell.w as i32 + 3) >> 2;
+    let mi_rows = (cell.h as i32 + 3) >> 2;
+
+    // ---- partition trees, all SB roots in raster order ----
+    let mut real_seq = Vec::new();
+    let mut ours_seq = Vec::new();
+    let (mut cr, mut co) = (0usize, 0usize);
+    let mut sr = 0;
+    while sr < mi_rows {
+        let mut sc = 0;
+        while sc < mi_cols {
+            replay_tree(&t_real.tree, &mut cr, sr, sc, SB_BSIZE, mi_rows, mi_cols, &mut real_seq);
+            replay_tree(&t_ours.tree, &mut co, sr, sc, SB_BSIZE, mi_rows, mi_cols, &mut ours_seq);
+            sc += SB_MI;
+        }
+        sr += SB_MI;
+    }
+    for (r, o) in real_seq.iter().zip(ours_seq.iter()) {
+        assert_eq!(
+            (r.0, r.1, r.2),
+            (o.0, o.1, o.2),
+            "positions must stay locked until the first partition divergence"
+        );
+        if r.3 != o.3 {
+            eprintln!(
+                ">>> FIRST PARTITION DIVERGENCE at (mi_row={}, mi_col={}, bsize={}): real=PARTITION_{} ({}) ours=PARTITION_{} ({})",
+                r.0, r.1, r.2, PARTITION_NAMES[r.3 as usize], r.3, PARTITION_NAMES[o.3 as usize], o.3
+            );
+            return false;
+        }
+    }
+    eprintln!(
+        "partition trees agree (real_seq={} ours_seq={}); scanning leaves incl. palette",
+        real_seq.len(),
+        ours_seq.len()
+    );
+
+    // ---- leaf fields incl. palette size/colours, matched on (mi_row,mi_col) ----
+    for rb in &t_real.blocks {
+        if let Some(ob) = t_ours
+            .blocks
+            .iter()
+            .find(|b| b.mi_row == rb.mi_row && b.mi_col == rb.mi_col)
+        {
+            let modes_differ = ob.bsize != rb.bsize
+                || ob.partition != rb.partition
+                || ob.info.y_mode != rb.info.y_mode
+                || ob.info.angle_delta_y != rb.info.angle_delta_y
+                || ob.info.use_filter_intra != rb.info.use_filter_intra
+                || ob.tx_size != rb.tx_size
+                || ob.info.uv_mode != rb.info.uv_mode
+                || ob.info.cfl_alpha_idx != rb.info.cfl_alpha_idx
+                || ob.info.cfl_joint_sign != rb.info.cfl_joint_sign;
+            let palette_differs = ob.info.palette_size != rb.info.palette_size
+                || ob.info.palette_colors != rb.info.palette_colors;
+            let txbs_differ = ob.txbs != rb.txbs || ob.txbs_uv != rb.txbs_uv;
+            if modes_differ || palette_differs || txbs_differ {
+                eprintln!(
+                    ">>> FIRST LEAF MISMATCH at (mi_row={}, mi_col={}) [modes={modes_differ} palette={palette_differs} txbs={txbs_differ}]:\n    \
+                     real bsize={} part={} y={} adly={} uv={} cfl=({},{}) fi={} tx={} pal={:?} txbs={:?} txbs_uv={:?}\n    \
+                     ours bsize={} part={} y={} adly={} uv={} cfl=({},{}) fi={} tx={} pal={:?} txbs={:?} txbs_uv={:?}",
+                    rb.mi_row, rb.mi_col,
+                    rb.bsize, rb.partition, rb.info.y_mode, rb.info.angle_delta_y, rb.info.uv_mode,
+                    rb.info.cfl_alpha_idx, rb.info.cfl_joint_sign, rb.info.use_filter_intra, rb.tx_size,
+                    rb.info.palette_size, rb.txbs, rb.txbs_uv,
+                    ob.bsize, ob.partition, ob.info.y_mode, ob.info.angle_delta_y, ob.info.uv_mode,
+                    ob.info.cfl_alpha_idx, ob.info.cfl_joint_sign, ob.info.use_filter_intra, ob.tx_size,
+                    ob.info.palette_size, ob.txbs, ob.txbs_uv,
+                );
+                if palette_differs {
+                    eprintln!(
+                        "    real pal colours Y={:?} U={:?} V={:?}",
+                        &rb.info.palette_colors[0..8],
+                        &rb.info.palette_colors[8..16],
+                        &rb.info.palette_colors[16..24]
+                    );
+                    eprintln!(
+                        "    ours pal colours Y={:?} U={:?} V={:?}",
+                        &ob.info.palette_colors[0..8],
+                        &ob.info.palette_colors[8..16],
+                        &ob.info.palette_colors[16..24]
+                    );
+                }
+                return false;
+            }
+        }
+    }
+    eprintln!("all shared leaves agree on modes/palette/txb — scanning reconstruction");
+
+    // ---- reconstruction diff (luma then chroma) ----
+    for (name, (rr, rstride, rw, rh), (orr, ostride, ow, oh)) in [
+        (
+            "luma",
+            (&t_real.recon, t_real.stride, t_real.width, t_real.height),
+            (&t_ours.recon, t_ours.stride, t_ours.width, t_ours.height),
+        ),
+        (
+            "U",
+            (&t_real.recon_u, t_real.stride_uv, t_real.width_uv, t_real.height_uv),
+            (&t_ours.recon_u, t_ours.stride_uv, t_ours.width_uv, t_ours.height_uv),
+        ),
+        (
+            "V",
+            (&t_real.recon_v, t_real.stride_uv, t_real.width_uv, t_real.height_uv),
+            (&t_ours.recon_v, t_ours.stride_uv, t_ours.width_uv, t_ours.height_uv),
+        ),
+    ] {
+        for row in 0..rh.min(oh) {
+            for col in 0..rw.min(ow) {
+                let rv = rr[row * rstride + col];
+                let ov = orr[row * ostride + col];
+                if rv != ov {
+                    eprintln!(
+                        ">>> FIRST {name} RECON DIVERGENCE at (row={row}, col={col}): real={rv} ours={ov}"
+                    );
+                    return false;
+                }
+            }
+        }
+    }
+    eprintln!("reconstruction planes IDENTICAL — byte divergence is pure entropy coding (unexpected)");
+    false
+}
+
+/// PINNED near-tie guard + localizer for the two CLOSE 128² palette cells.
+///
+/// Both cells are byte-exact with palette OFF; palette ON tips a genuine
+/// AB/4-way partition RD near-tie (the palette machinery — `av1_allow_palette`,
+/// `av1_get_palette_bsize_ctx`/`_mode_ctx`, k-means, neighbour cache/ctx
+/// stamping — is all verified C-faithful, and the 64² palette cells are
+/// byte-exact, so this is NOT a palette-cost bug). Localized (decode-both):
+///   - `ui_420_128_cq32`   : (mi 0,0)  BLOCK_32X32 real HORZ_B vs port HORZ_4
+///   - `text_420_128_cq20` : (mi 8,20) BLOCK_16X16 real VERT   vs port VERT_A
+/// Same class as the KB-10/KB-11 pinned near-ties; closing it needs a sibling-C
+/// per-candidate partition-RD dump (the deferred next step). The test ASSERTS
+/// the divergence is still present — if either cell becomes byte-exact, this
+/// FAILS so it gets promoted into `BYTE_EXACT_CELLS` above.
+#[test]
+fn decode_diff_palette_close_cells() {
+    c::ref_init();
+    let ui_exact =
+        localize_palette_cell(&screen_cell("ui_420_128_cq32", 128, 128, false, 32, ui_luma, ui_chroma));
+    let text_exact = localize_palette_cell(&screen_cell(
+        "text_420_128_cq20",
+        128,
+        128,
+        false,
+        20,
+        text_luma,
+        ui_chroma,
+    ));
+    assert!(
+        !ui_exact && !text_exact,
+        "a PINNED palette near-tie became byte-exact — promote it into \
+         BYTE_EXACT_CELLS in palette_y_rd_close_gate: ui_exact={ui_exact} text_exact={text_exact}"
+    );
 }
