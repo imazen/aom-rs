@@ -909,6 +909,14 @@ impl EncodeCell {
         let mib_size_log2 = if s.sb_size_128 { 5u32 } else { 4u32 };
         let mi_cols = mi_dim(s.max_frame_width);
         let mi_rows = mi_dim(s.max_frame_height);
+        // SB128: the seq header's `use_128x128_superblock` bit (parsed above)
+        // selects the live superblock geometry. sb64 keeps the module SB/SB_MI
+        // constants (BLOCK_64X64 / 16 mi); sb128 -> BLOCK_128X128 / 32 mi /
+        // 128 px. Threaded into the SB grid, partition SB caps, pack walk, LF
+        // grid and (out-of-default) delta-q setup below.
+        let sb_block = if s.sb_size_128 { 15usize } else { SB };
+        let sb_mi = if s.sb_size_128 { 2 * SB_MI } else { SB_MI };
+        let sb_px = (sb_mi * 4) as usize;
 
         let cfg = FrameHeaderObu {
             prefix: FrameHeaderPrefix {
@@ -1075,10 +1083,10 @@ impl EncodeCell {
         // Partial-SB support: CEIL the SB walk and replicate-extend the
         // source into the SB-aligned overhang (the chroma_ss_e2e recipe).
         let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y) };
-        let n_sb_x = ((mi_cols + SB_MI - 1) / SB_MI).max(1);
-        let n_sb_y = ((mi_rows + SB_MI - 1) / SB_MI).max(1);
-        let sb_px_w = n_sb_x as usize * 64;
-        let sb_px_h = n_sb_y as usize * 64;
+        let n_sb_x = ((mi_cols + sb_mi - 1) / sb_mi).max(1);
+        let n_sb_y = ((mi_rows + sb_mi - 1) / sb_mi).max(1);
+        let sb_px_w = n_sb_x as usize * sb_px;
+        let sb_px_h = n_sb_y as usize * sb_px;
         let stride = 320.max(sb_px_w + 4);
         let buf_h = (sb_px_h + 4).max(h + 4);
         let extend_plane = |dst: &mut [u16], pw: usize, ph: usize| {
@@ -1125,8 +1133,8 @@ impl EncodeCell {
                 bd,
                 &quants,
                 &deq,
-                SB,
-                SB_MI,
+                sb_block,
+                sb_mi,
                 !knobs.enable_intra_edge_filter,
             )
         });
@@ -1140,7 +1148,7 @@ impl EncodeCell {
             for r in 0..n_sb_y {
                 for c in 0..n_sb_x {
                     let adj = aom_encode::allintra_vis::setup_delta_q_perceptual_ai(
-                        map, qindex, bd, res, SB_MI, r * SB_MI, c * SB_MI, running,
+                        map, qindex, bd, res, sb_mi, r * sb_mi, c * sb_mi, running,
                     );
                     used |= adj != qindex;
                     running = adj;
@@ -1173,7 +1181,7 @@ impl EncodeCell {
         let speed = self.speed;
         let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
         let env = SbEncodeEnv {
-            sb_size: SB,
+            sb_size: sb_block,
             mi_rows,
             mi_cols,
             tile_row_start: 0,
@@ -1221,7 +1229,7 @@ impl EncodeCell {
                 delta_q_res: dq3_res,
                 deltaq_strength: 0,
                 perceptual_ai: weber_map.as_ref(),
-                sb_mi: SB_MI,
+                sb_mi,
             }),
             use_chroma_trellis_rd_mult: allintra,
             coeff_costs_y: &real.coeff_costs_y,
@@ -1295,9 +1303,10 @@ impl EncodeCell {
                 i32::from(allintra)
             },
             // C's set_max_min_partition_size (partition_strategy.h:214):
-            // min(sf default, CLI dim, sb). SB is 64 in this harness (12).
-            max_partition_size: knobs.max_partition_bsize(sf.default_max_partition_size, 12),
-            min_partition_size: knobs.min_partition_bsize(12),
+            // min(sf default, CLI dim, sb). `sb_block` is the live SB size
+            // (BLOCK_64X64 or, at --sb-size=128, BLOCK_128X128).
+            max_partition_size: knobs.max_partition_bsize(sf.default_max_partition_size, sb_block),
+            min_partition_size: knobs.min_partition_bsize(sb_block),
             enable_1to4_partitions: knobs.enable_1to4_partitions,
             enable_ab_partitions: knobs.enable_ab_partitions,
             allow_screen_content_tools: p.allow_screen_content_tools,
@@ -1332,8 +1341,8 @@ impl EncodeCell {
             0,
             n_sb_y,
             n_sb_x,
-            SB_MI,
-            SB,
+            sb_mi,
+            sb_block,
         );
         assert_eq!(
             trees.len(),
@@ -1345,7 +1354,7 @@ impl EncodeCell {
 
         // Port-derived loop-filter level. allintra `lpf_pick` is DUAL for
         // speed 0..=3 and NON_DUAL for speed >= 4 (speed_features.c:496).
-        let mi_grid = build_lf_mi_grid(&trees, mi_rows, mi_cols, n_sb_x, SB_MI, SB);
+        let mi_grid = build_lf_mi_grid(&trees, mi_rows, mi_cols, n_sb_x, sb_mi, sb_block);
         let lf_frame = LfSearchFrame {
             recon_y: &recon_y,
             recon_u: &recon_u,
@@ -1530,8 +1539,8 @@ impl EncodeCell {
                     0,
                     n_sb_y,
                     n_sb_x,
-                    SB_MI,
-                    SB,
+                    sb_mi,
+                    sb_block,
                     Some(&lr_pack),
                 );
                 assert_eq!(

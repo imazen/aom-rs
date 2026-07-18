@@ -8598,6 +8598,18 @@ pub mod cx_ctrl {
     /// envelope (intrabc off); the ctrl exists for completeness.
     pub const AV1E_SET_DV_COST_UPD_FREQ: i32 = 142;
 
+    /// `--sb-size=64|128` (`AV1E_SET_SUPERBLOCK_SIZE`, aomcx.h:664, verified
+    /// value 56). The argument is an `aom_superblock_size_t`
+    /// (aom_codec.h:347-350): `AOM_SUPERBLOCK_SIZE_64X64 = 0`,
+    /// [`AOM_SUPERBLOCK_SIZE_128X128`]` = 1`, `AOM_SUPERBLOCK_SIZE_DYNAMIC = 2`.
+    /// Applied through the generic `ref_encode_av1_kf_ctrls` path (the shim
+    /// runs any `(id, val)` pair via `aom_codec_control`); not in
+    /// [`PROBE_TABLE`] (the constant is directly header-verified, and the
+    /// existing `shim_cx_ctrl_id_by_probe` probe order is append-only).
+    pub const AV1E_SET_SUPERBLOCK_SIZE: i32 = 56;
+    /// `aom_superblock_size_t` value for `--sb-size=128` (aom_codec.h:349).
+    pub const AOM_SUPERBLOCK_SIZE_128X128: i32 = 1;
+
     /// `(probe_index, constant)` table for the header cross-check test —
     /// probe order matches `shim_cx_ctrl_id_by_probe` (dec_shim.c).
     pub const PROBE_TABLE: [(i32, i32); 25] = [

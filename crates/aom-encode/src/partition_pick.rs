@@ -2962,6 +2962,12 @@ pub fn rd_pick_partition_real(
     let partition4_allowed_base = cfg.enable_1to4_partitions
         && do_rectangular_split
         && bsize > ext_partition_eval_thresh // > BLOCK_8X8 through speed 4
+        // No 4-way at BLOCK_128X128: 128x32 / 32x128 are not in the block-size
+        // enum (partition_search.c:4166 `partition4_allowed &= bsize !=
+        // BLOCK_128X128`; the valid-types helper repeats it, :5181). Inert at
+        // sb64 (bsize never 128) but load-bearing at sb128 — without it a 128
+        // root would probe an invalid HORZ_4/VERT_4 subsize.
+        && bsize != 15 // BLOCK_128X128
         && has_rows
         && has_cols;
     // prune_part4_search (partition_search.c:4152): disables 4-way when the
