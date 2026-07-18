@@ -193,6 +193,19 @@ pub struct RdPickIntraBest {
     pub dist: i64,
     /// `rd_cost->rdcost`.
     pub rdcost: i64,
+    /// `mbmi->use_intrabc` — set when the step-6 intrabc arm
+    /// (`rd_pick_intrabc_mode_sb`) beat the assembled intra `rd`. When true the
+    /// `y`/`uv` mode fields are dead (C sets DC_PRED/UV_DC_PRED); the block is
+    /// coded as intra-block-copy at the DV below.
+    pub use_intrabc: bool,
+    /// The winning DV (`mbmi->mv[0]`, 1/8-pel, full-pel multiples of 8) and the
+    /// ref DV the mode-rate was computed against (the pack signals `dv-dv_ref`).
+    pub dv_row: i32,
+    pub dv_col: i32,
+    pub dv_ref_row: i32,
+    pub dv_ref_col: i32,
+    /// `mbmi->skip_txfm` on the intrabc arm (the min(skip,coeff) winner).
+    pub skip_txfm: bool,
 }
 
 /// The [`rd_pick_intra_mode_sb`] outcome: `best: None` models the
@@ -266,6 +279,7 @@ pub fn rd_pick_intra_mode_sb(
     coeff_costs_y: &CoeffCostSet,
     re: ReencodeParams,
     mut uv: Option<RdPickUvArgs>,
+    intrabc: Option<&crate::intrabc_search::IntrabcLeafArgs>,
 ) -> RdPickIntraOutcome {
     // (2) the luma search.
     let outcome = rd_pick_intra_sby_mode_y(y_env, recon_y, sby_cfg, var_cache, best_rd);
@@ -404,7 +418,45 @@ pub fn rd_pick_intra_mode_sb(
     let rate = y.rate + uv_outcome.rate() + y_env.skip_costs[y_env.skip_ctx][0];
     let dist = y.dist + uv_outcome.dist();
     let rd = rdcost(y_env.rdmult, rate, dist);
-    // (6) rd_pick_intrabc_mode_sb: envelope-excluded no-op (module docs).
+
+    // (6) rd_pick_intrabc_mode_sb (rdopt.c:3688): when the frame allows intrabc
+    // (screen content), run the DV search and, if it beats the assembled intra
+    // `rd`, overwrite the winner tuple with the intrabc DV (C's `*mbmi =
+    // best_mbmi`, which sets DC_PRED/UV_DC_PRED — the y/uv mode fields go dead).
+    let mut ibc = (false, 0i32, 0i32, 0i32, 0i32, false, rate, dist, rd);
+    if let Some(a) = intrabc {
+        // best_rd for the intrabc search = min(caller budget, the intra rd we
+        // just assembled), exactly C's `best_rd = rd_cost->rdcost` guard at
+        // rdopt.c:3686-3688.
+        let ibc_budget = best_rd.min(rd);
+        // Recon (prediction source): recon_y is our param; chroma recon lives on
+        // the uv args. The intra search has finished mutating recon_y, so a
+        // shared reborrow here is sound.
+        let (ru, rv): (&[u16], &[u16]) = match uv.as_mut() {
+            Some(av) => (&*av.recon_u, &*av.recon_v),
+            None => (&[], &[]),
+        };
+        if let Some(win) =
+            crate::intrabc_search::rd_pick_intrabc_mode_sb(a, &*recon_y, ru, rv, ibc_budget)
+        {
+            if win.rdcost < rd {
+                ibc = (
+                    true,
+                    win.dv_row,
+                    win.dv_col,
+                    win.dv_ref_row,
+                    win.dv_ref_col,
+                    win.skip_txfm,
+                    win.rate,
+                    win.dist,
+                    win.rdcost,
+                );
+            }
+        }
+    }
+    let (use_intrabc, dv_row, dv_col, dv_ref_row, dv_ref_col, ibc_skip, out_rate, out_dist, out_rd) =
+        ibc;
+
     // (7) ctx->mic / ctx->tx_type_map: the returned winner state.
     RdPickIntraOutcome {
         best: Some(RdPickIntraBest {
@@ -413,9 +465,15 @@ pub fn rd_pick_intra_mode_sb(
             store_y,
             reencode,
             tx_type_map,
-            rate,
-            dist,
-            rdcost: rd,
+            rate: out_rate,
+            dist: out_dist,
+            rdcost: out_rd,
+            use_intrabc,
+            dv_row,
+            dv_col,
+            dv_ref_row,
+            dv_ref_col,
+            skip_txfm: ibc_skip,
         }),
         intra_modes_rd_cost: rd_table,
     }

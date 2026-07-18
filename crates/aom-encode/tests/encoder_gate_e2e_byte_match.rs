@@ -630,6 +630,7 @@ fn attempt_case_content_uv_sep(
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+        intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,
         tx_size_costs: &real.tx_size_costs,

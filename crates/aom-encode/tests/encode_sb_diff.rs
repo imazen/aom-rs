@@ -163,6 +163,11 @@ fn gen_winner(rng: &mut Rng, bsize: usize, reduced: bool) -> LeafWinner {
         uv_edge_filter_type: 0,
         tx_type_map: map,
         skip_txfm: false,
+        use_intrabc: false,
+        dv_row: 0,
+        dv_col: 0,
+        dv_ref_row: 0,
+        dv_ref_col: 0,
         // Synthetic fixture: this file drives encode_b_intra_dry/pack_leaf
         // directly from a hand-rolled winner, never through
         // leaf_pick_sb_modes's real AB-reuse-relevant path -- a placeholder

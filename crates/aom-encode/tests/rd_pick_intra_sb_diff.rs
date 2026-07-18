@@ -510,6 +510,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                     &coeff_costs_y,
                     re,
                     uv_args,
+                    None, // intrabc: non-screen differential envelope
                 )
             };
 

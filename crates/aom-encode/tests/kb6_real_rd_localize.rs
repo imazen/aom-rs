@@ -528,6 +528,7 @@ fn localize_real_speed(
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+        intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,
         tx_size_costs: &real.tx_size_costs,

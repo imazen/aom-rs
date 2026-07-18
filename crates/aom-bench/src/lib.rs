@@ -1470,6 +1470,7 @@ impl EncodeCell {
             allow_screen_content_tools: p.allow_screen_content_tools,
             qm_levels: None,
             palette_costs: knobs.enable_palette.then_some(&real.palette_costs),
+            intrabc: None, // set below when p.allow_intrabc (screen content)
         };
         let pack_cfg = aom_encode::pack::PackCfg {
             enable_filter_intra: knobs.enable_filter_intra,

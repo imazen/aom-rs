@@ -338,6 +338,12 @@ pub struct ModeGrid {
     /// enables the palette search — non-palette frames pay nothing.
     pub pal_sizes: Vec<[u8; 2]>,
     pub pal_colors: Vec<[u16; 24]>,
+    /// Per-mi winner DV projection (`mbmi->mv[0]`/`use_intrabc`/`skip_txfm`),
+    /// stamped alongside `modes`. Read by the intrabc leaf search's dv-ref
+    /// derivation (`find_dv_ref_mvs` neighbour source) and the skip-txfm
+    /// context. Empty (never indexed) unless the frame enables the intrabc
+    /// search — non-intrabc frames pay nothing (exactly like `pal_sizes`).
+    pub dvs: Vec<crate::intrabc_search::DvCell>,
     pub stride: usize,
 }
 
@@ -350,20 +356,33 @@ impl ModeGrid {
             bsizes: vec![0; mi_rows * mi_cols],
             pal_sizes: Vec::new(),
             pal_colors: Vec::new(),
+            dvs: Vec::new(),
+            stride: mi_cols,
+        }
+    }
+    /// [`Self::dc`] + allocated palette / intrabc-DV neighbour state (screen-
+    /// content frames only). `intrabc` allocates the DV grid the leaf search
+    /// reads; `palette` allocates the palette-cache/ctx grid.
+    pub fn dc_screen(mi_rows: usize, mi_cols: usize, palette: bool, intrabc: bool) -> Self {
+        let n = mi_rows * mi_cols;
+        ModeGrid {
+            modes: vec![0; n],
+            uv_modes: vec![0; n],
+            bsizes: vec![0; n],
+            pal_sizes: if palette { vec![[0; 2]; n] } else { Vec::new() },
+            pal_colors: if palette { vec![[0; 24]; n] } else { Vec::new() },
+            dvs: if intrabc {
+                vec![crate::intrabc_search::DvCell::default(); n]
+            } else {
+                Vec::new()
+            },
             stride: mi_cols,
         }
     }
     /// [`Self::dc`] + allocated palette-neighbour state (palette-search
     /// frames only).
     pub fn dc_with_palette(mi_rows: usize, mi_cols: usize) -> Self {
-        ModeGrid {
-            modes: vec![0; mi_rows * mi_cols],
-            uv_modes: vec![0; mi_rows * mi_cols],
-            bsizes: vec![0; mi_rows * mi_cols],
-            pal_sizes: vec![[0; 2]; mi_rows * mi_cols],
-            pal_colors: vec![[0; 24]; mi_rows * mi_cols],
-            stride: mi_cols,
-        }
+        Self::dc_screen(mi_rows, mi_cols, true, false)
     }
     #[allow(clippy::too_many_arguments)]
     fn stamp(
@@ -375,6 +394,7 @@ impl ModeGrid {
         uv_mode: u8,
         pal: Option<&crate::palette_search::PaletteYInfo>,
         pal_uv: Option<&crate::palette_search::PaletteUvInfo>,
+        dv: crate::intrabc_search::DvCell,
         mi_rows: i32,
         mi_cols: i32,
     ) {
@@ -403,7 +423,19 @@ impl ModeGrid {
                 self.pal_sizes[base..base + cols].fill(psz);
                 self.pal_colors[base..base + cols].fill(pcol);
             }
+            if !self.dvs.is_empty() {
+                self.dvs[base..base + cols].fill(dv);
+            }
         }
+    }
+    /// The above/left neighbour DV projection for `find_dv_ref_mvs` — the
+    /// `DvNbr` at `(mi_row, mi_col)`. Returns the intra default (`use_intrabc =
+    /// false`) when the grid carries no DV state or the cell is out of frame.
+    fn dv_at(&self, mi_row: i32, mi_col: i32) -> crate::intrabc_search::DvCell {
+        if self.dvs.is_empty() || mi_row < 0 || mi_col < 0 {
+            return crate::intrabc_search::DvCell::default();
+        }
+        self.dvs[mi_row as usize * self.stride + mi_col as usize]
     }
     /// The above/left neighbour palette projection for `av1_get_palette_cache`
     /// / `av1_get_palette_mode_ctx` — `None` when the grid carries no palette
@@ -554,10 +586,37 @@ pub struct PickFrameCfg<'a> {
     /// construction). The palette SEARCH itself additionally requires
     /// `av1_allow_palette(allow_screen_content_tools, bsize)` per leaf.
     pub palette_costs: Option<&'a crate::mode_costs::PaletteCosts>,
+    /// The intrabc (intra-block-copy) leaf-search frame state — `Some` models
+    /// `oxcf.kf_cfg.enable_intrabc` on a frame whose header codes
+    /// `allow_intrabc` (screen content). Carries the source-frame hash table +
+    /// DV signalling costs + var-tx split costs the `rd_pick_intrabc_mode_sb`
+    /// arm needs. `None` = every non-screen envelope, byte-stable by
+    /// construction (the step-6 arm never runs).
+    pub intrabc: Option<IntrabcFrameCfg<'a>>,
     /// CLI intra-tool toggles (`oxcf.intra_mode_cfg` → the LUMA
     /// candidate-loop `enable_*` gates; [`IntraToolCfg`]). `Default` = the
     /// aomenc defaults (all enabled) = the pre-toggle behavior exactly.
     pub intra_tools: IntraToolCfg,
+}
+
+/// Frame-constant inputs for the intrabc leaf search (the parts of
+/// [`crate::intrabc_search::IntrabcLeafArgs`] that don't vary per leaf). Built
+/// once per frame in `pack_tile` when intrabc is enabled.
+#[derive(Clone, Copy)]
+pub struct IntrabcFrameCfg<'a> {
+    /// The source-frame hash table (`build_intrabc_hash_table` from the SOURCE
+    /// luma, encodeframe.c:2199).
+    pub hash: &'a crate::intrabc_search::IntrabcHashTable,
+    /// `x->dv_costs` (`av1_fill_dv_costs` from the frame's ndvc CDFs).
+    pub dv_costs: &'a crate::intrabc_search::DvCosts,
+    /// `txfm_partition_cost` (`fill_txfm_partition_costs`, rd.c:108).
+    pub txfm_partition_costs: [[i32; 2]; 21],
+    /// `x->errorperbit = AOMMAX(rdmult >> 6, 1)` (av1_set_error_per_bit).
+    pub error_per_bit: i32,
+    /// `x->sadperbit` (`av1_set_sad_per_bit`).
+    pub sad_per_bit: i32,
+    /// `cpi->mv_search_params.mv_step_param` (`av1_init_search_range(max(w,h))`).
+    pub mv_step_param: usize,
 }
 
 /// `oxcf.intra_mode_cfg` LUMA candidate-loop tool toggles (av1_cx_iface.c
@@ -1197,6 +1256,85 @@ fn leaf_pick_sb_modes(
         cfg.uv_lp
     };
 
+    // Intrabc leaf-search args (Some only on a screen-content frame that codes
+    // `allow_intrabc`). The dv_grid closure reads the search ModeGrid's DV
+    // state at offsets relative to (mi_row, mi_col) — exactly what
+    // `find_dv_ref_mvs` requests.
+    let dv_grid_closure = |rr: i32, rc: i32| grid.dv_at(mi_row + rr, mi_col + rc).to_nbr();
+    let ibc_args = cfg.intrabc.as_ref().map(|ibc| {
+        // av1_get_skip_txfm_context(xd) = above->skip_txfm + left->skip_txfm.
+        let skip_ctx = (if up_available {
+            usize::from(grid.dv_at(mi_row - 1, mi_col).skip_txfm)
+        } else {
+            0
+        }) + (if left_available {
+            usize::from(grid.dv_at(mi_row, mi_col - 1).skip_txfm)
+        } else {
+            0
+        });
+        crate::intrabc_search::IntrabcLeafArgs {
+            sb_size: env.sb_size,
+            bsize,
+            mi_row,
+            mi_col,
+            mi_rows: env.mi_rows,
+            mi_cols: env.mi_cols,
+            tile: aom_entropy::dv_ref::DvTileBounds {
+                mi_row_start: env.tile_row_start,
+                mi_row_end: env.tile_row_end,
+                mi_col_start: env.tile_col_start,
+                mi_col_end: env.tile_col_end,
+            },
+            mib_size_log2: MI_SIZE_WIDE_B[env.sb_size].trailing_zeros() as i32,
+            up_available,
+            left_available,
+            is_chroma_ref,
+            monochrome: env.monochrome,
+            ss_x: env.ss_x,
+            ss_y: env.ss_y,
+            bd: env.bd,
+            partition,
+            stride: env.stride,
+            src_y: env.src_y,
+            src_u: env.src_u,
+            src_v: env.src_v,
+            off_y: ref_off_y,
+            off_uv: ref_off_uv,
+            hash: ibc.hash,
+            dv_costs: ibc.dv_costs,
+            dv_grid: &dv_grid_closure,
+            rdmult: env.rdmult,
+            qindex: cfg.qindex,
+            reduced_tx_set_used: env.reduced_tx_set_used,
+            error_per_bit: ibc.error_per_bit,
+            sad_per_bit: ibc.sad_per_bit,
+            mv_step_param: ibc.mv_step_param,
+            intrabc_cost: &cfg.mode_costs.intrabc_cost,
+            skip_costs: cfg.skip_costs,
+            skip_ctx,
+            txfm_partition_costs: &ibc.txfm_partition_costs,
+            rows_y: env.rows_y,
+            rows_u: env.rows_u,
+            rows_v: env.rows_v,
+            coeff_costs_y: env.coeff_costs_y,
+            coeff_costs_uv: env.coeff_costs_uv,
+            tx_type_costs: env.tx_type_costs,
+            sharpness: env.sharpness,
+            enable_optimize_b: env.enable_optimize_b,
+            qm_levels: env.qm_levels,
+            above_ctx: [
+                &tile.above_ectx[0][..],
+                &tile.above_ectx[1][..],
+                &tile.above_ectx[2][..],
+            ],
+            left_ctx: [
+                &tile.left_ectx[0][..],
+                &tile.left_ectx[1][..],
+                &tile.left_ectx[2][..],
+            ],
+        }
+    });
+
     let outcome = {
         let uv_args = if env.monochrome {
             None
@@ -1243,6 +1381,7 @@ fn leaf_pick_sb_modes(
             env.coeff_costs_y,
             re,
             uv_args,
+            ibc_args.as_ref(),
         )
     };
 
@@ -1290,7 +1429,12 @@ fn leaf_pick_sb_modes(
                 tx_type_map: best.tx_type_map,
                 palette_y: best.y.palette_y.clone(),
                 palette_uv,
-                skip_txfm: false,
+                skip_txfm: best.use_intrabc && best.skip_txfm,
+                use_intrabc: best.use_intrabc,
+                dv_row: best.dv_row,
+                dv_col: best.dv_col,
+                dv_ref_row: best.dv_ref_row,
+                dv_ref_col: best.dv_ref_col,
                 raw_rdstats: stats,
             };
             (stats, Some(winner), source_variance)
@@ -1557,6 +1701,7 @@ fn rd_pick_4partition(
                 wi.uv_mode as u8,
                 wi.palette_y.as_ref(),
                 wi.palette_uv.as_ref(),
+                wi.dv_cell(),
                 env.mi_rows,
                 env.mi_cols,
             );
@@ -1931,6 +2076,7 @@ fn rd_pick_ab_part(
                 wi.uv_mode as u8,
                 wi.palette_y.as_ref(),
                 wi.palette_uv.as_ref(),
+                wi.dv_cell(),
                 env.mi_rows,
                 env.mi_cols,
             );
@@ -2680,6 +2826,7 @@ pub fn rd_pick_partition_real(
                 w0.uv_mode as u8,
                 w0.palette_y.as_ref(),
                 w0.palette_uv.as_ref(),
+                w0.dv_cell(),
                 env.mi_rows,
                 env.mi_cols,
             );
@@ -3240,6 +3387,7 @@ fn stamp_grid_from_tree(
                 w.uv_mode as u8,
                 w.palette_y.as_ref(),
                 w.palette_uv.as_ref(),
+                w.dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3270,6 +3418,7 @@ fn stamp_grid_from_tree(
                 subs[0].uv_mode as u8,
                 subs[0].palette_y.as_ref(),
                 subs[0].palette_uv.as_ref(),
+                subs[0].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3282,6 +3431,7 @@ fn stamp_grid_from_tree(
                     subs[1].uv_mode as u8,
                     subs[1].palette_y.as_ref(),
                     subs[1].palette_uv.as_ref(),
+                    subs[1].dv_cell(),
                     mi_rows,
                     mi_cols,
                 );
@@ -3298,6 +3448,7 @@ fn stamp_grid_from_tree(
                 subs[0].uv_mode as u8,
                 subs[0].palette_y.as_ref(),
                 subs[0].palette_uv.as_ref(),
+                subs[0].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3310,6 +3461,7 @@ fn stamp_grid_from_tree(
                     subs[1].uv_mode as u8,
                     subs[1].palette_y.as_ref(),
                     subs[1].palette_uv.as_ref(),
+                    subs[1].dv_cell(),
                     mi_rows,
                     mi_cols,
                 );
@@ -3334,6 +3486,7 @@ fn stamp_grid_from_tree(
                     w.uv_mode as u8,
                     w.palette_y.as_ref(),
                     w.palette_uv.as_ref(),
+                    w.dv_cell(),
                     mi_rows,
                     mi_cols,
                 );
@@ -3357,6 +3510,7 @@ fn stamp_grid_from_tree(
                     w.uv_mode as u8,
                     w.palette_y.as_ref(),
                     w.palette_uv.as_ref(),
+                    w.dv_cell(),
                     mi_rows,
                     mi_cols,
                 );
@@ -3377,6 +3531,7 @@ fn stamp_grid_from_tree(
                 subs[0].uv_mode as u8,
                 subs[0].palette_y.as_ref(),
                 subs[0].palette_uv.as_ref(),
+                subs[0].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3388,6 +3543,7 @@ fn stamp_grid_from_tree(
                 subs[1].uv_mode as u8,
                 subs[1].palette_y.as_ref(),
                 subs[1].palette_uv.as_ref(),
+                subs[1].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3399,6 +3555,7 @@ fn stamp_grid_from_tree(
                 subs[2].uv_mode as u8,
                 subs[2].palette_y.as_ref(),
                 subs[2].palette_uv.as_ref(),
+                subs[2].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3415,6 +3572,7 @@ fn stamp_grid_from_tree(
                 subs[0].uv_mode as u8,
                 subs[0].palette_y.as_ref(),
                 subs[0].palette_uv.as_ref(),
+                subs[0].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3426,6 +3584,7 @@ fn stamp_grid_from_tree(
                 subs[1].uv_mode as u8,
                 subs[1].palette_y.as_ref(),
                 subs[1].palette_uv.as_ref(),
+                subs[1].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3437,6 +3596,7 @@ fn stamp_grid_from_tree(
                 subs[2].uv_mode as u8,
                 subs[2].palette_y.as_ref(),
                 subs[2].palette_uv.as_ref(),
+                subs[2].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3453,6 +3613,7 @@ fn stamp_grid_from_tree(
                 subs[0].uv_mode as u8,
                 subs[0].palette_y.as_ref(),
                 subs[0].palette_uv.as_ref(),
+                subs[0].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3464,6 +3625,7 @@ fn stamp_grid_from_tree(
                 subs[1].uv_mode as u8,
                 subs[1].palette_y.as_ref(),
                 subs[1].palette_uv.as_ref(),
+                subs[1].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3475,6 +3637,7 @@ fn stamp_grid_from_tree(
                 subs[2].uv_mode as u8,
                 subs[2].palette_y.as_ref(),
                 subs[2].palette_uv.as_ref(),
+                subs[2].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3491,6 +3654,7 @@ fn stamp_grid_from_tree(
                 subs[0].uv_mode as u8,
                 subs[0].palette_y.as_ref(),
                 subs[0].palette_uv.as_ref(),
+                subs[0].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3502,6 +3666,7 @@ fn stamp_grid_from_tree(
                 subs[1].uv_mode as u8,
                 subs[1].palette_y.as_ref(),
                 subs[1].palette_uv.as_ref(),
+                subs[1].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3513,6 +3678,7 @@ fn stamp_grid_from_tree(
                 subs[2].uv_mode as u8,
                 subs[2].palette_y.as_ref(),
                 subs[2].palette_uv.as_ref(),
+                subs[2].dv_cell(),
                 mi_rows,
                 mi_cols,
             );
@@ -3714,6 +3880,7 @@ pub fn rd_use_partition_real(
                     w0.uv_mode as u8,
                     w0.palette_y.as_ref(),
                     w0.palette_uv.as_ref(),
+                    w0.dv_cell(),
                     env.mi_rows,
                     env.mi_cols,
                 );
@@ -4263,6 +4430,7 @@ fn nonrd_leaf_pick_and_encode(
             w.uv_mode as u8,
             w.palette_y.as_ref(),
             w.palette_uv.as_ref(),
+            w.dv_cell(),
             env.mi_rows,
             env.mi_cols,
         );
@@ -4369,6 +4537,11 @@ fn nonrd_leaf_pick_and_encode(
         uv_edge_filter_type,
         tx_type_map: vec![0; mi_w * mi_h], // DCT_DCT
         skip_txfm: false,
+        use_intrabc: false,
+        dv_row: 0,
+        dv_col: 0,
+        dv_ref_row: 0,
+        dv_ref_col: 0,
         raw_rdstats: pick.rd,
         // Palette is guarded dead on the nonrd estimate arm (init_mbmi_nonrd
         // zeroes palette sizes; the palette search arm needs
@@ -4390,6 +4563,7 @@ fn nonrd_leaf_pick_and_encode(
         w.uv_mode as u8,
         w.palette_y.as_ref(),
         w.palette_uv.as_ref(),
+        w.dv_cell(),
         env.mi_rows,
         env.mi_cols,
     );

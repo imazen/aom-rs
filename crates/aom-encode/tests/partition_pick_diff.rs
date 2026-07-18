@@ -456,6 +456,7 @@ impl CPick<'_> {
                     palette: None,
                 })
             },
+            None, // intrabc: this differential is a non-screen envelope
         );
         match outcome.best {
             None => (PartRdStats::invalid(), None),
@@ -489,6 +490,11 @@ impl CPick<'_> {
                     uv_edge_filter_type: chroma_edge_filter_type,
                     tx_type_map: best.tx_type_map,
                     skip_txfm: false,
+                    use_intrabc: false,
+                    dv_row: 0,
+                    dv_col: 0,
+                    dv_ref_row: 0,
+                    dv_ref_col: 0,
                     raw_rdstats: stats,
                     palette_y: None,
                     palette_uv: None,
@@ -1443,6 +1449,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
             deltaq: None,
         };
         let cfg = PickFrameCfg {
+            intrabc: None,
             intra_tools: Default::default(),
             mode_costs: &mode_costs,
             tx_size_costs: &tx_size_costs,

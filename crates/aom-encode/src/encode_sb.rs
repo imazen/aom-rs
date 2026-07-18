@@ -213,8 +213,20 @@ pub struct LeafWinner {
     /// — `Some` when the chroma winner is UV palette (`uv_mode` is
     /// UV_DC_PRED then).
     pub palette_uv: Option<crate::palette_search::PaletteUvInfo>,
-    /// `mbmi->skip_txfm` (0 throughout the KEY intra path).
+    /// `mbmi->skip_txfm` (0 throughout the KEY intra path; may be 1 on an
+    /// intrabc leaf whose RD picked the skip arm).
     pub skip_txfm: bool,
+    /// `mbmi->use_intrabc` — the leaf is an intra-block-copy block (screen
+    /// content only, gated on `allow_intrabc`). When set, `mode`/`uv_mode` are
+    /// DC_PRED/UV_DC_PRED (dead) and the block copies from the recon at the DV.
+    pub use_intrabc: bool,
+    /// `mbmi->mv[0]` (1/8-pel, full-pel multiples of 8): the winning DV.
+    pub dv_row: i32,
+    pub dv_col: i32,
+    /// The ref DV the mode-rate was computed against — the pack writes the
+    /// signalled diff `dv - dv_ref` (`write_intrabc_info`).
+    pub dv_ref_row: i32,
+    pub dv_ref_col: i32,
     /// `ctx->rd_stats` (the PICK_MODE_CONTEXT's own raw mode-search RD,
     /// BEFORE any enclosing stage adds its partition-type `pt_cost` —
     /// `leaf_pick_sb_modes`'s own returned [`PartRdStats`], unconditionally
@@ -254,7 +266,27 @@ impl LeafWinner {
             palette_y: None,
             palette_uv: None,
             skip_txfm: false,
+            use_intrabc: false,
+            dv_row: 0,
+            dv_col: 0,
+            dv_ref_row: 0,
+            dv_ref_col: 0,
             raw_rdstats: PartRdStats::invalid(),
+        }
+    }
+
+    /// The block's per-mi DV projection for the search-side [`ModeGrid`] DV
+    /// grid (the `find_dv_ref_mvs` neighbour source + skip context). Intra
+    /// winners project `use_intrabc = false`, dv = 0.
+    pub fn dv_cell(&self) -> crate::intrabc_search::DvCell {
+        crate::intrabc_search::DvCell {
+            bsize: self.bsize as u8,
+            // DC_PRED for an intrabc block (dead otherwise).
+            mode: if self.use_intrabc { 0 } else { self.mode as u8 },
+            use_intrabc: self.use_intrabc,
+            skip_txfm: self.skip_txfm,
+            dv_row: self.dv_row as i16,
+            dv_col: self.dv_col as i16,
         }
     }
 }
