@@ -61,7 +61,7 @@ Byte-identity gates landed and green on origin/main. Any regression here is a sh
 | bd10 non-4:2:0 (444/422 × 64²/128²) | `encoder_gate_bd10_non420_e2e_kb4_repro` | 1ecfafb |
 | bd10/bd12 full-frame mono+4:2:0 | `encoder_gate_bd10_diff` | 20f1e70, 800e6fc |
 | 4:2:2 / 4:4:4 bd8 full-frame | `encoder_gate_chroma_ss_e2e` | 2ee900d, 0eb42eb (#26) |
-| Coded-lossless cq0 **mono** (4:2:0 still open — KB-5) | `encoder_gate_lossless_cq0_e2e_kb5_repro` | ba560eb |
+| Coded-lossless cq0 **mono + 4:2:0** bd8 (both hard-asserted; KB-5 closed / #32) | `encoder_gate_lossless_cq0_e2e_kb5_repro` | ba560eb (mono) + KB-5 420 fix |
 | QM-on forward-quant (`--enable-qm`, 40 cells bd8+bd10) | `qm_encode_witness` | 5b512bf (parts 624e91d/a066cf8/abb68d9) |
 | Multi-tile encode (2×1/1×2/2×2, 4:4:4 128²) | `encoder_gate_multitile_e2e` | f6e6319 |
 | **C8 partition-control disable arms** (`--enable-rect-partitions=0`, `--enable-ab-partitions=0`, `--enable-1to4-partitions=0`, `--min-partition-size=16`, `--max-partition-size=32`, square-only 8..32 band) × real-content 64²(cq32/63)+128²(cq12), each knob anti-vacuity-witnessed (must change the C stream) | `toggles_rd_close::toggles_c8_*` (hard `bit_identical` pins) | (this landing) |
@@ -367,19 +367,32 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   (S–M); `--full-still-picture-hdr` / annexb framing arms (S).
 - `--min-q/--max-q/--min-cr` clamps (S).
 
-### C12 — Lossless tail — PARTIAL (S)
-- KB-5 remainder: 4:2:0 cq0 chroma RD near-tie (≤1 rdcost unit, first 16×16 node). Mono is
-  byte-exact + gated. Next: lossless chroma UV-RD differential at qindex 0.
+### C12 — Lossless tail — DONE (→ Section A) — mono + 4:2:0 both byte-exact
+- **DONE (KB-5 closed, #32):** coded-lossless cq0 KEY is byte-exact for BOTH mono AND 4:2:0 bd8,
+  hard-asserted in `encoder_gate_lossless_cq0_e2e_kb5_repro`. The former "4:2:0 cq0 chroma RD
+  near-tie" was a search-SPACE gap (CfL was banned at coded-lossless in the SEARCH), not RD math:
+  fixed by routing the leaf `cfl_allowed` through
+  `aom_entropy::partition::is_cfl_allowed(bsize, lossless, ss_x, ss_y)` (C allows CfL at lossless
+  when the partition size == the transform size). See CLAUDE.md KB-5.
+- **Remaining (follow-up, S):** highbd lossless (bd10/12) — the mono+420 byte-exact envelope is bd8.
 
-### C13 — Speed levels 6–9 — PARTIAL (speed-6 in flight by another track)
-- `--cpu-used=6`: chunk 1 landed (5935250, LPF_PICK_FROM_Q). 7–9: allintra speed-feature
-  deltas unported (speed_features.c:527+); includes `top_intra_model_count_allowed=2` at
-  speed≥6 and the speed-7+ realtime-leaning arms. (M per level)
+### C13 — Speed levels 6–9 — DONE (→ Section A) — Gate-2 (cpu 0–9) byte-complete
+- **DONE (KB-10 / KB-11 / KB-12):** speeds 6, 7, 8, 9 all landed byte-identical on the synthetic
+  canon grids (Section-A cpu-used rows). Speed 6 = new machinery (LPF_PICK_FROM_Q + partition prunes
+  + predict_dc skip + 8×8 NN tx-depth prune + winner-mode restructure), 64/64; speed 7 =
+  VAR_BASED_PARTITION fixed-tree + `av1_rd_use_partition`, 64/64; speeds 8/9 = the nonrd PICKMODE
+  (`av1_nonrd_use_partition` single-pass walk + `av1_nonrd_pick_intra_mode`), speed 9 64/64 +
+  speed 8 60/64. `top_intra_model_count_allowed=2` lands at speed≥6. See CLAUDE.md KB-10/11/12.
+- **Remaining (pinned near-ties, self-promoting — NOT coverage gaps):** speed-6/7 noise-cq63
+  (mi 8,0) TX_16X16-vs-TX_32X32 (KB-10/11); the 4 speed-8 `diag` estimate-arm V/H near-ties
+  (KB-12); the nonrd bd10/12 + lossless + screen-palette arms (asserted dead on the 8-bit canon
+  grid). Real content at cpu≥1 is a separate residual (KB-13, 24/60 at cpu 1–4).
 
 ### Priority order (proposed)
 ~~1. **C2 LR search**~~ DONE (section A, 2026-07-17) → ~~2. **C1 CDEF search**~~ DONE
 (section A, 2026-07-17) → 3. **C3 screen content** (web stills) → 4. **C4
 tune=IQ/SSIMULACRA2 tail** (image-quality tuning, small pieces) → 5. **C5 deltaq 3/6** →
 6. C8/C9/C10 toggle threading (cheap wins, many S) → 7. C6 superres, C7 film grain →
-8. C11/C12 tails → C13 speeds 7–9. (C2/C1 leftovers — LR speed-1..4 e2e arms, CDEF FAST
-levels e2e — are follow-ups within their families, below the C3+ fronts.)
+8. C11/C12 tails → ~~C13 speeds 7–9~~ **DONE (KB-10/11/12, Gate-2 complete)**. (C2/C1
+leftovers — LR speed-1..4 e2e arms, CDEF FAST levels e2e — are follow-ups within their families,
+below the C3+ fronts.)

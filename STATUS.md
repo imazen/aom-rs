@@ -329,10 +329,16 @@ both tracks, fully bit-exact.**
 
 `xtask/coverage.py` enumerates the live libaom feature surface (aomenc/aomdec
 `--help` + `aomcx.h` control enums) = **349 features**; a feature is green only
-if `coverage/feature_map.json` maps it to a passing test. Current: **0/349**
-(no kernel maps to a *complete* CLI feature yet). This is the truthful coverage
-state. Kernel-level differential coverage is tracked separately in
-`checklist.json` (transform/quant/entropy/intra/loopfilter/dist all green).
+if `coverage/feature_map.json` maps it to a passing test. Current: **90/349
+(25.79%)** — 48/182 cli-enc, 42/147 control, 0/20 cli-dec. `feature_map.json`
+was populated (2026-07-18) from `PARITY.md` Section A: every byte-exact-gated
+single-frame/ALLINTRA/KEY knob maps to its byte-identity gate (each knob = its
+`--flag` id + its `AV1E_SET_*`/`AOME_SET_*` id). The 259 red are mostly
+out-of-scope-inter + application-I/O + getters + the genuinely-absent
+single-frame features in the master gap matrix `coverage-audit/COVERAGE.md` —
+NOT all real single-frame gaps; against the ~133-knob single-frame denominator
+coverage is far higher. Kernel-level differential coverage is tracked separately
+in `checklist.json` (transform/quant/entropy/intra/loopfilter/dist all green).
 
 - **CDEF direction search** (`av1/common/cdef_block.c`), both tracks:
   `cdef_find_dir` (8x8 partial-sum direction cost search) over bd 8/10/12.
@@ -371,22 +377,32 @@ libaom; FFI is inherently unsafe and is isolated there).
 
 ## Next candidates
 
-1. **Top-level uncompressed-header assembly** — `write_uncompressed_header_obu` /
-   `write_sequence_header_obu` now that all 14 content components are bit-exact: the
-   ordering + the frame-type / show-frame / ref-frame-signaling state machine
-   (order_hint, primary_ref_frame, ref_frame_idx, delta_frame_id, refresh flags),
-   plus the seq-header framing (profile/timing/decoder-model/color-config) and the
-   inline trailing flags (reference_mode/skip_mode/warped/reduced_tx_set). Needs an
-   AV1_COMMON-shaped state struct; produces a full header byte-for-byte.
-2. **Per-superblock tile-data signaling** — the aom_writer (arithmetic-coder) side of
-   delta-q/delta-lf + the mode-info symbols, distinct from the aom_wb header path.
-3. **Mode & partition search (RDO)** — the hardest bit-identity target; drives
-   encode_coding_block_plane per candidate (RD-cost inputs are all bit-exact now).
-4. **Intra prediction** (`av1/common/reconintra`, `aom_dsp` intra predictors) —
-   per-mode bit-exact, differential per predictor.
-5. AVX2/NEON SIMD specializations (perf gate), each diffed lane-level vs scalar.
-6. **Decoder conformance corpus run** (gate 1) — wire the AV1 conformance vectors +
-   libaom decode tests through the ported decoder path.
+The 2026-07-13 list (top-level header assembly / per-SB tile-data signaling / mode &
+partition RDO / intra prediction / decoder conformance) is **DONE**: the encoder
+byte-matches real `aomenc` across ALLINTRA speed 0–9 (synthetic 64/64 each; real
+decoded-conformance content 30/30 at speed 0), the seq/frame OBU + tile-data + mode-info
+symbol writers are all bit-exact, every intra mode is byte-exact, and the decoder passes
+the Gate-1 conformance corpus (intra scope, incl. q62/q63 — KB-1 fixed). **The live gap
+matrix is now `coverage-audit/COVERAGE.md`** (the 2026-07-18 synthesis of the three
+coverage audits). Current fronts, by tier:
+
+1. **Loop-restoration default-parity** (Tier-1, highest-value) — LR is ON by default in
+   allintra, but the byte-exact LR search is wired only behind `--enable-restoration=1`,
+   not the default path; wire the existing search into the default encode (and fix
+   CLAUDE.md's stale "LR OFF by default" line).
+2. **Real-content byte-parity at cpu-used≥1** (Tier-1, KB-13) — synthetic gates 64/64 at
+   every speed, but decoded-conformance content is 24/60 at cpu 1–4 (interior BLOCK_16X16/
+   8X8 partition-prune near-ties; the port under-prunes).
+3. **Header self-derivation** (Tier-1) — drop the Gate-3 bootstrap caveat (wire the #8
+   qindex mapping into encode composition, self-derive tile/CICP), + level/tier
+   `av1_get_seq_level_idx` (the one genuinely-missing header algorithm).
+4. **Structural single-frame features** (Tier-2, see COVERAGE.md) — SB128 encode,
+   `prune_tx_type_using_stats` (≥480p cpu≥2), IntraBC leaf coeff-arm/DV-search,
+   `--quant-b-adapt`, the AQ / deltaq-2-wavelet / superres-auto / grain-estimation /
+   tune=vmaf/butteraugli families.
+5. **Perf gate (Gate-3)** — AVX2/NEON SIMD specializations, each diffed lane-level vs scalar.
+6. **Pinned near-ties** (Tier-3, self-promoting) — use-intra-dct-only chroma, palette 2/7,
+   speed-6/7 noise-cq63, speed-8 diag — each a sibling-C RD dump away.
 
 ## Real-bitstream decode milestone (2026-07-14, decoder track)
 
