@@ -610,6 +610,7 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
         mi: &mi_grid,
         mi_rows,
         mi_cols,
+        delta_lf_present: false,
     };
     let derived_lf = pick_filter_level(&lf_frame, allintra, 0, false);
     eprintln!(

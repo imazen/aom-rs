@@ -89,6 +89,12 @@ const PARTITION_VERT_B: i32 = 7;
 const PARTITION_HORZ_4: i32 = 8;
 const PARTITION_VERT_4: i32 = 9;
 
+/// `DEFAULT_DELTA_LF_RES` (av1/common/enums.h:505) — the `--delta-lf-mode=1`
+/// per-SB delta-lf grid resolution.
+const DELTA_LF_RES: i32 = 2;
+/// `MAX_LOOP_FILTER` (av1/common/av1_loopfilter.h:27) — the delta-lf clamp.
+const MAX_LOOP_FILTER: i32 = 63;
+
 /// Frame-level pack-stage constants beyond what [`SbEncodeEnv`] already
 /// carries for the residual recompute.
 #[derive(Clone, Copy, Debug)]
@@ -246,11 +252,19 @@ pub fn kf_block_state(cfg: &PackCfg, env: &SbEncodeEnv, mib_size: i32) -> KfBloc
         allow_intrabc: false,
         cdef_bits: 0,
         dq_present: cfg.delta_q_present,
-        dlf_present: false,
+        // `--delta-lf-mode=1`: delta-lf rides on the delta-q framework
+        // (`env.deltaq` Some => a firing delta-q mode). `delta_lf_res =
+        // DEFAULT_DELTA_LF_RES` (2), `delta_lf_multi = DEFAULT_DELTA_LF_MULTI`
+        // (0/single). encodeframe.c:2321-2324.
+        dlf_present: env.deltaq.map_or(false, |d| d.delta_lf_present),
         dlf_multi: false,
         num_planes: if env.monochrome { 1 } else { 3 },
         dq_res: cfg.delta_q_res,
-        dlf_res: 0,
+        dlf_res: if env.deltaq.map_or(false, |d| d.delta_lf_present) {
+            DELTA_LF_RES
+        } else {
+            0
+        },
         monochrome: env.monochrome,
         is_chroma_ref: true,
         cfl_allowed: false,
@@ -322,13 +336,27 @@ pub fn pack_leaf(
         palette_colors[8..8 + p.size].copy_from_slice(&p.colors_u[..p.size]);
         palette_colors[16..16 + p.size].copy_from_slice(&p.colors_v[..p.size]);
     }
+    // `--delta-lf-mode=1` per-SB delta-lf (setup_delta_q, encodeframe.c:380-383):
+    // `delta_lf_from_base = ((delta_qindex/4 + res/2) & ~(res-1))` clamped to
+    // [-MAX_LOOP_FILTER, MAX_LOOP_FILTER], where `delta_qindex = current_qindex
+    // - FRAME base_qindex`. Every leaf in an SB derives the same value (shared
+    // SB qindex); only the SB-root leaf actually codes it (super_block_upper_left
+    // gate in write_delta_q_params_sb). `delta_lf[lf_id]` mirrors it (multi off).
+    let delta_lf_val = if env.deltaq.map_or(false, |d| d.delta_lf_present) {
+        let delta_qindex = sb_current_qindex - cfg.base_qindex;
+        let lfmask = !(DELTA_LF_RES - 1);
+        let dlf = (delta_qindex / 4 + DELTA_LF_RES / 2) & lfmask;
+        dlf.clamp(-MAX_LOOP_FILTER, MAX_LOOP_FILTER)
+    } else {
+        0
+    };
     let info = MbModeInfoKf {
         segment_id: 0,
         skip: i32::from(winner.skip_txfm),
         cdef_strength,
         current_qindex: sb_current_qindex,
-        delta_lf: [0; 4],
-        delta_lf_from_base: 0,
+        delta_lf: [delta_lf_val; 4],
+        delta_lf_from_base: delta_lf_val,
         use_intrabc: 0,
         dv_row: 0,
         dv_col: 0,

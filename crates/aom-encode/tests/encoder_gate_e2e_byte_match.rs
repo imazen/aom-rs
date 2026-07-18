@@ -747,6 +747,7 @@ fn attempt_case_content_uv_sep(
         mi: &mi_grid,
         mi_rows,
         mi_cols,
+        delta_lf_present: false,
     };
     // allintra `lpf_pick` is DUAL (`LPF_PICK_FROM_FULL_IMAGE`) for speed 0..=3,
     // NON_DUAL for speed 4/5 (speed_features.c:496), and the closed-form
@@ -1140,6 +1141,7 @@ fn lf_derived_vs_real_on_real_recon(
         mi: &mi_real,
         mi_rows: cfg_real.mi_rows,
         mi_cols: cfg_real.mi_cols,
+        delta_lf_present: false,
     };
     let d = pick_filter_level(&lf, allintra, 0, false);
     (

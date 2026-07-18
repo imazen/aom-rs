@@ -581,6 +581,7 @@ fn port_encode_superres(cell: &EncodeCell, denom: i32, bootstrap: &[u8]) -> Vec<
         mi: &mi_grid,
         mi_rows,
         mi_cols,
+        delta_lf_present: false,
     };
     let derived_lf = pick_filter_level(&lf_frame, true, 0, false);
     if derived_lf.filter_level[0] != 0 || derived_lf.filter_level[1] != 0 {

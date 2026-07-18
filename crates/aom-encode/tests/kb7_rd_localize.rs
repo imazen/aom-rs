@@ -532,6 +532,7 @@ fn localize_cell(w: usize, h: usize, cq_level: i32, speed: i32, name: &str) -> b
         mi: &mi_grid,
         mi_rows,
         mi_cols,
+        delta_lf_present: false,
     };
     let derived_lf = pick_filter_level(&lf_frame, allintra, 0, allintra && speed >= 4);
     let mut p2 = p.clone();

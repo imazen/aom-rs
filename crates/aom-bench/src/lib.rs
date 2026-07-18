@@ -419,6 +419,12 @@ pub struct ToggleKnobs {
     /// LOAD-BEARING (port-without-prune must diverge from real aomenc, port-with
     /// must match). Default false — not emitted by [`ToggleKnobs::c_ctrls`].
     pub disable_tx_stats_prune: bool,
+    /// `--delta-lf-mode=1` (`AV1E_SET_DELTALF_MODE`): derive per-SB
+    /// `delta_lf_from_base` from each SB's `delta_qindex` and code it alongside
+    /// the delta-qindex. Rides on a firing delta-q mode (combine with
+    /// `deltaq_mode2`/`deltaq_mode3`). The C side must be driven with
+    /// `AV1E_SET_DELTALF_MODE = 1` (+ the delta-q ctrl).
+    pub delta_lf_mode: bool,
 }
 
 impl Default for ToggleKnobs {
@@ -452,6 +458,7 @@ impl Default for ToggleKnobs {
             deltaq_mode3: false,
             deltaq_mode2: false,
             disable_tx_stats_prune: false,
+            delta_lf_mode: false,
         }
     }
 }
@@ -1265,6 +1272,35 @@ impl EncodeCell {
             p.delta_q.delta_q_present = dq2_present;
         }
 
+        // --delta-lf-mode=1: `enable_deltalf_mode = (deltaq_mode != NO_DELTA_Q)
+        // && deltalf_mode` (cx_iface.c:1326) -> `delta_lf_present_flag`
+        // (encodeframe.c:2321). Rides on a firing delta-q mode; the per-SB
+        // delta_lf is derived from delta_qindex in pack_leaf. DEFAULT_DELTA_LF_RES
+        // = 2, DEFAULT_DELTA_LF_MULTI = 0. Cross-check the real header, then write.
+        let dlf_present = knobs.delta_lf_mode && (dq3_present || dq2_present);
+        if knobs.delta_lf_mode {
+            assert_eq!(
+                p.delta_q.delta_lf_present, dlf_present,
+                "{}: derived delta_lf_present must match the real --delta-lf-mode=1 header",
+                self.label
+            );
+            if dlf_present {
+                assert_eq!(
+                    p.delta_q.delta_lf_res, 2,
+                    "{}: real delta_lf_res must be DEFAULT_DELTA_LF_RES (2)",
+                    self.label
+                );
+                assert!(
+                    !p.delta_q.delta_lf_multi,
+                    "{}: real delta_lf_multi must be DEFAULT_DELTA_LF_MULTI (single)",
+                    self.label
+                );
+                p.delta_q.delta_lf_res = 2;
+                p.delta_q.delta_lf_multi = false;
+            }
+            p.delta_q.delta_lf_present = dlf_present;
+        }
+
         let speed = self.speed;
         let mut sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
         // Framesize-dependent tx-type stats prune (set_allintra_speed_feature_
@@ -1336,6 +1372,7 @@ impl EncodeCell {
                     perceptual_ai: weber_map.as_ref(),
                     perceptual_wavelet: None,
                     sb_mi,
+                    delta_lf_present: dlf_present,
                 })
             } else if dq2_present {
                 Some(aom_encode::encode_sb::DeltaQFrameCtx {
@@ -1347,6 +1384,7 @@ impl EncodeCell {
                     perceptual_ai: None,
                     perceptual_wavelet: Some(dq2_screen),
                     sb_mi,
+                    delta_lf_present: dlf_present,
                 })
             } else {
                 None
@@ -1480,7 +1518,49 @@ impl EncodeCell {
 
         // Port-derived loop-filter level. allintra `lpf_pick` is DUAL for
         // speed 0..=3 and NON_DUAL for speed >= 4 (speed_features.c:496).
-        let mi_grid = build_lf_mi_grid(&trees, mi_rows, mi_cols, n_sb_x, sb_mi, sb_block);
+        let mut mi_grid = build_lf_mi_grid(&trees, mi_rows, mi_cols, n_sb_x, sb_mi, sb_block);
+        // --delta-lf-mode=1: the LF trial deblock (and thus the derived
+        // filter_level) reads per-SB delta_lf via get_filter_level. Re-derive
+        // the exact per-SB qindex the pack used (same running-base chain) → the
+        // per-SB delta_lf → stamp the grid. This mirrors pack_leaf's per-SB
+        // delta_lf compute so the LF grid == the coded tile's delta_lf.
+        if dlf_present {
+            let sb_px = (sb_mi * 4) as usize;
+            let npl = (sb_px * sb_px).trailing_zeros();
+            let mut running = qindex;
+            let mut dlf_per_sb = Vec::with_capacity((n_sb_x * n_sb_y) as usize);
+            for r in 0..n_sb_y {
+                for c in 0..n_sb_x {
+                    let adj = if dq3_present {
+                        aom_encode::allintra_vis::setup_delta_q_perceptual_ai(
+                            weber_map.as_ref().unwrap(),
+                            qindex,
+                            bd,
+                            dq3_res,
+                            sb_mi,
+                            r * sb_mi,
+                            c * sb_mi,
+                            running,
+                        )
+                    } else {
+                        let sb_off = (r * sb_mi) as usize * 4 * stride + (c * sb_mi) as usize * 4;
+                        aom_encode::allintra_vis::setup_delta_q_perceptual(
+                            &src_y_strided, sb_off, stride, bd, qindex, dq2_screen, sb_px, sb_px,
+                            npl, dq2_res, running,
+                        )
+                    };
+                    running = adj;
+                    // delta_lf_from_base = ((delta_qindex/4 + res/2) & ~(res-1)),
+                    // res = DEFAULT_DELTA_LF_RES = 2, clamped (encodeframe.c:380).
+                    let delta_qindex = adj - qindex;
+                    let dlf = ((delta_qindex / 4 + 1) & !1).clamp(-63, 63);
+                    dlf_per_sb.push(dlf);
+                }
+            }
+            aom_encode::lf_search::stamp_lf_delta_lf(
+                &mut mi_grid, &dlf_per_sb, mi_rows, mi_cols, n_sb_x, sb_mi,
+            );
+        }
         let lf_frame = LfSearchFrame {
             recon_y: &recon_y,
             recon_u: &recon_u,
@@ -1498,6 +1578,7 @@ impl EncodeCell {
             mi: &mi_grid,
             mi_rows,
             mi_cols,
+            delta_lf_present: dlf_present,
         };
         let derived_lf = pick_filter_level(&lf_frame, allintra, 0, allintra && speed >= 4);
         p.loopfilter.filter_level = derived_lf.filter_level;

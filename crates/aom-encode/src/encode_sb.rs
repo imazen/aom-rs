@@ -356,6 +356,12 @@ pub struct DeltaQFrameCtx<'a> {
     /// `mi_size_wide[sb_size]` — the SB mi extent the mode-3 per-SB wiener
     /// window uses (unused when `perceptual_ai` is `None`).
     pub sb_mi: i32,
+    /// `--delta-lf-mode=1` (`enable_deltalf_mode`, gated on `deltaq_mode !=
+    /// NO_DELTA_Q`): when true the per-SB `delta_lf_from_base` is derived from
+    /// each SB's `delta_qindex` (`setup_delta_q`, encodeframe.c:377-399) and
+    /// coded alongside the delta-qindex. `delta_lf_res = DEFAULT_DELTA_LF_RES`
+    /// (2), `delta_lf_multi = DEFAULT_DELTA_LF_MULTI` (0/single).
+    pub delta_lf_present: bool,
 }
 
 /// One leaf's re-encode outputs (differential visibility).

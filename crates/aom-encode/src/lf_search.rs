@@ -144,6 +144,13 @@ pub struct LfSearchFrame<'a> {
     pub mi: &'a [LfMi],
     pub mi_rows: i32,
     pub mi_cols: i32,
+    /// `delta_q_info.delta_lf_present_flag` (`--delta-lf-mode=1`): when true the
+    /// trial deblock reads each mi's `delta_lf_from_base` via `get_filter_level`
+    /// (av1_loopfilter.c:73-88), so the derived frame filter_level depends on
+    /// the per-SB delta-lf. `false` (default) = the uniform-level envelope. The
+    /// per-SB `delta_lf_from_base` must be stamped into `mi` (see
+    /// [`stamp_lf_delta_lf`]).
+    pub delta_lf_present: bool,
 }
 
 /// The derived per-frame loop-filter state (`struct loopfilter`'s
@@ -187,7 +194,7 @@ fn try_filter_plane(
         mode_ref_delta_enabled: true,
         ref_deltas: DEFAULT_REF_DELTAS,
         mode_deltas: DEFAULT_MODE_DELTAS,
-        delta_lf_present: false,
+        delta_lf_present: f.delta_lf_present,
         delta_lf_multi: false,
         lossless: [false; 8],
         seg: Default::default(),
@@ -542,6 +549,38 @@ pub fn build_lf_mi_grid(
         );
     }
     mi
+}
+
+/// `--delta-lf-mode=1`: overwrite each SB's `delta_lf_from_base` in an already-
+/// built [`build_lf_mi_grid`] grid from the per-SB delta-lf values (SB raster
+/// order, matching `setup_delta_q`'s stamp of `mi_alloc[..].delta_lf_from_base`
+/// over the whole SB, encodeframe.c:388-398). `get_filter_level` reads
+/// `delta_lf_from_base` (single mode); the multi `delta_lf[]` is only read when
+/// `delta_lf_multi`, off in this envelope. `LfMi.delta_lf_from_base` is `i8`
+/// (values are already clamped to [-63, 63]).
+pub fn stamp_lf_delta_lf(
+    mi: &mut [LfMi],
+    delta_lf_per_sb: &[i32],
+    mi_rows: i32,
+    mi_cols: i32,
+    n_sb_cols: i32,
+    sb_mi: i32,
+) {
+    let stride = mi_cols as usize;
+    for (idx, &dlf) in delta_lf_per_sb.iter().enumerate() {
+        let sb_r = (idx as i32 / n_sb_cols) * sb_mi;
+        let sb_c = (idx as i32 % n_sb_cols) * sb_mi;
+        let rows = sb_mi.min(mi_rows - sb_r) as usize;
+        let cols = sb_mi.min(mi_cols - sb_c) as usize;
+        let dlf8 = dlf as i8;
+        for r in 0..rows {
+            let base = (sb_r as usize + r) * stride + sb_c as usize;
+            for cell in &mut mi[base..base + cols] {
+                cell.delta_lf_from_base = dlf8;
+                cell.delta_lf = [dlf8; 4]; // FRAME_LF_COUNT
+            }
+        }
+    }
 }
 
 fn lf_cell(bsize: usize, w: &LeafWinner) -> LfMi {

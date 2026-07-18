@@ -574,6 +574,7 @@ fn run_tune_case(
             perceptual_ai: None, // Variance Boost (mode 6), not Perceptual-AI
             perceptual_wavelet: None, // nor Perceptual wavelet (mode 2)
             sb_mi: 0,
+            delta_lf_present: false,
         }),
         tune,
     };
@@ -666,6 +667,7 @@ fn run_tune_case(
         mi: &mi_grid,
         mi_rows,
         mi_cols,
+        delta_lf_present: false,
     };
     let lf_sharpness = aom_encode::lf_search::frame_lf_sharpness(
         true,

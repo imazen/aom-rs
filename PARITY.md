@@ -78,6 +78,7 @@ Byte-identity gates landed and green on origin/main. Any regression here is a sh
 | **Superres encoder-side, FIXED denom, bd8 + bd10/12** (`--superres-mode=fixed --superres-denominator=D`, family C6): **13/13 bd8 + 16/16 bd10/12 cells BYTE-IDENTICAL** — bd8 real-content 196² 4:2:0 (denoms 9/12/14 × cq{20,32,48}) + mono (denoms 9/12 × cq{20,48}); bd10/12 textured-synthetic 128² 4:2:0 (denoms 9/12/14 × cq{20,48}) + mono (denoms 9/12 × cq32), 8 cells/bit-depth. The source is downscaled horizontally to the coded `FrameWidth` via the ported non-normative `av1_resize_plane` (bd8) / `highbd_resize_plane` (bd10/12) (`aom_encode::resize`, differentially bit-exact vs the exported C symbols — interpolate 5-band + down2_symeven/symodd + resize_multistep + `coded_superres_width`), encoded at the reduced width (existing speed-0 KEY machinery, mi grid sized to coded_w), superres denom + upscaled width signalled in the header (`write_superres_scale`); port+C decoders agree on the upscaled recon. Superres OFF by default. **Anti-vacuity**: `scale_denominator == D`, `coded_w < w`. **Follow-ups (Section C6)**: the 8-bit denom-16-even-width optimized-scaler corner (`av1_resize_and_extend_frame`), and AUTO/QTHRESH/RANDOM denom selection + the recode loop. | `encoder_gate_superres_{fixed_real_content,fixed_mono,fixed_highbd}_rd_close` (aom-bench; rd_close report + full byte-identity asserts) | 2505b49f (kernel) + 68703b1 (bd8) + (this bd10/12 landing) |
 | **C7 film-grain table-inject** (`--film-grain-table` / `AV1E_SET_FILM_GRAIN_TABLE`): the port's OWN grain-table reader + lookup (`aom-encode/src/grain_table.rs`, port of `aom_dsp/grain_table.c` `aom_film_grain_table_read`/`_lookup`) → `FilmGrainParams` → the already-bit-exact `write_film_grain_params` header writer. Byte-identical vs real aomenc on 4:2:0 bd8 REAL content (64² cq20/32, 128² cq12) + mono/444/bd10 synthetic × built-in test vectors 1/2/6/15 (rich full-chroma / max-lag / chroma-points-absent / chroma-scaling-from-luma). Grain is decode-side synthesis → coded tiles UNCHANGED (the C shim replicates the plain `encode_kf_pass` control set so only the seq present bit + frame grain block are added). No-bootstrap-leak witness: injecting a different vector's params DIVERGES. | `film_grain_gate.rs::film_grain_table_inject_{420_real,format_axes}` + `film_grain_no_bootstrap_leak_witness` (aom-bench) | (this landing) |
 | **`--deltaq-mode=3` DELTA_Q_PERCEPTUAL_AI** (family C5, the stills-specific perceptual-AI arm): 7/7 cells BYTE-IDENTICAL to real aomenc `--deltaq-mode=3` — real content 192²/192×128/128×192 4:2:0 cq12..63 (9/6 SBs each get a distinct wiener qindex; the delta fires + the port reproduces it). Full port of `av1_set_mb_wiener_variance` (per-8x8 intra-SATD search + FP-quantize + Weber stats + the `norm_wiener_variance` `estimate`+2-iter refinement), the map reductions (`get_{satd,sse,max_scale,window_wiener_var,var_perceptual_ai}`), `av1_get_sbq_perceptual_ai` + `av1_get_deltaq_offset` (`av1_get_deltaq_offset` differentially locked 18432/18432 vs the exported C fn), and the per-SB pack threading (`setup_delta_q_perceptual_ai` → the shared `av1_adjust_q_from_delta_q_res`, reusing the mode-6 `DeltaQFrameCtx`). OFF by default; anti-vacuous knob-bites witness. **Highbd (bd10/12) DONE** (this landing): the FP-quantize arm dispatches `av1_highbd_quantize_fp` for bd>8 in `av1_set_mb_wiener_variance` (the only bd8-specific step; predict/subtract/DCT/inverse/Weber were already bd-parameterized); 5 bd10 + 1 bd10 non-square + 3 bd12 (bd10-content ×4 promoted) cells added to the gate, all byte-identical. Scope: bd8/10/12 4:2:0, dims a multiple of 64/8px (196²-partial-SB is the remaining follow-up). | `encoder_gate_deltaq_mode3_e2e` (`deltaq_mode3_e2e.rs`: `deltaq_mode3_perceptual_ai_e2e` 16/16 hard byte-match incl. bd10/12 + `deltaq_mode3_knob_bites`) + `deltaq_perceptual_ai_diff` (`get_deltaq_offset_matches_c`) | 2026-07-17 + (this bd10/12 landing) |
+| **`--delta-lf-mode=1` DELTA_LF** (family C5): 7/7 cells BYTE-IDENTICAL to real aomenc `--delta-lf-mode=1 --deltaq-mode=2` — real content 192²/192×128/128×192 4:2:0 cq12..63. Per-SB `delta_lf_from_base = ((delta_qindex/4 + res/2) & ~(res-1))` clamped (setup_delta_q, encodeframe.c:380-383, `DEFAULT_DELTA_LF_RES=2`, single/`DEFAULT_DELTA_LF_MULTI=0`), derived from each SB's `delta_qindex` (reuses the mode-2/3 delta-q) in `pack_leaf` + coded via the already-plumbed `write_delta_q_params_sb` delta-lf arm. The frame `filter_level` DEPENDS on delta-lf: the LF pick's trial deblock reads `mbmi->delta_lf_from_base` via `get_filter_level` (av1_loopfilter.c:73-88), so the port stamps the per-SB delta-lf into the LF mi grid (`stamp_lf_delta_lf`) + sets `LfSearchFrame::delta_lf_present`. OFF by default (rides on a firing delta-q mode); anti-vacuous knob-bites witness. Scope: bd8 4:2:0, dims a multiple of the 64px SB. | `delta_lf_mode_e2e` (`delta_lf_mode_e2e.rs`: 7/7 hard byte-match + `delta_lf_mode_knob_bites`) | 2026-07-18 |
 | **`--deltaq-mode=2` DELTA_Q_PERCEPTUAL** (family C5, the wavelet-AC-energy arm; `DELTA_Q_PERCEPTUAL_MODULATION==1`): 7/7 cells BYTE-IDENTICAL to real aomenc `--deltaq-mode=2` — real content 192²/192×128/128×192 4:2:0 cq12..63 (per-SB wavelet energy modulates the qindex; the delta fires + the port reproduces it, decode-verified: C's per-SB `current_qindex` == the port's). Full port of the 5/3 dyadic dwt (`av1_fdwt8x8_uint8_input` + `haar_ac_sad` + `av1_haar_ac_sad_mxn_uint8_input`, dwt.c — a pure-C RTCD entry, no SIMD, so bit-exact to real aomenc; differentially locked vs the exported C fn), `haar_ac_energy`/`av1_block_wavelet_energy_level`/`av1_compute_q_from_energy_level_deltaq_mode` (aq_variance.c, single-frame `energy_midpoint=10.0`), and the `av1_rc_bits_per_mb`(KEY/AOM_Q)/`find_qindex_by_rate`/`av1_compute_qdelta_by_rate` rate model (ratectrl.c), per-SB pack threading (`setup_delta_q_perceptual` → the shared `av1_adjust_q_from_delta_q_res`, reusing the mode-3/6 `DeltaQFrameCtx`). OFF by default; anti-vacuous knob-bites witness. Scope: bd8 4:2:0, dims a multiple of the 64px SB (highbd + partial-SB are follow-ups). | `deltaq_mode2_perceptual_wavelet_e2e` (`deltaq_mode2_e2e.rs`: 7/7 hard byte-match + `deltaq_mode2_knob_bites`) + `deltaq_perceptual_wavelet_diff` (`haar_ac_sad_mxn_matches_c`) | 2026-07-18 |
 
 ### Decoder (vs real `aom_codec_av1_dx`)
@@ -247,10 +248,39 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   `--deltaq-strength`. (M)
 - `--deltaq-mode=1` OBJECTIVE (base default) is TPL-gated (encodeframe.c:343) — **inert
   for a lone still**; document-only.
-- `--aq-mode=1/2` (variance/complexity segmentation): `aq_variance.c` `av1_vaq_frame_setup`,
-  `aq_complexity.c` — requires the two-pass path to fire on stills (shim note). (M, low
-  priority) `--delta-lf-mode` (S–M).
-- Encoder-side per-SB delta-q/delta-lf tile signaling (writer side). (S–M, shared)
+- `--delta-lf-mode=1` DELTA_LF — **PORTED, BIT-IDENTICAL → section A** (2026-07-18): per-SB
+  `delta_lf_from_base` derived from `delta_qindex` in `pack_leaf` + the LF-pick delta-lf
+  application (`stamp_lf_delta_lf` + `LfSearchFrame::delta_lf_present`). Rides on a firing
+  delta-q mode (gated tested with `--deltaq-mode=2`). **Follow-ups:** `delta_lf_multi=1`
+  (per-plane-type deltas — `DEFAULT_DELTA_LF_MULTI=0` so untested), highbd, partial-SB.
+- `--aq-mode=1/2` (variance/complexity segmentation): `aq_variance.c` `av1_vaq_frame_setup`
+  (VARIANCE_AQ) / `aq_complexity.c` `av1_setup_in_frame_q_adj`+`av1_caq_select_segment`
+  (COMPLEXITY_AQ). **Fires single-pass** (encoder.c:3494, NOT two-pass-gated; single-pass
+  uses degenerate `avg_energy=0` → `avg_ratio=rate_ratio[0]=2.2`), but is the **first
+  single-frame use of SEGMENTATION ENCODE**: it enables `cm->seg`, sets 8 per-segment
+  `SEG_LVL_ALT_Q` deltas (`av1_compute_qdelta_by_rate(rate_ratio[i]/avg_ratio)` — the same
+  rate model as mode 2, already ported), selects `mbmi->segment_id` per block from the block
+  energy (VARIANCE_AQ: `mbmi->segment_id = av1_log_block_var(...)`-mapped, partition_search.c:
+  603-608; COMPLEXITY_AQ: `av1_caq_select_segment`, :963), codes `write_segment_id` (writer
+  proven), and re-selects per-segment quantizers in the RD search + pack. The seg-map decision
+  + per-segment quantizer threading through the search/pack is the remaining work. (M–L,
+  segmentation-encode plumbing). NOTE: `av1_log_block_var` is used but a SEPARATE fn from the
+  mode-2 wavelet path.
+- `--deltaq-mode=4` USER_RATING_BASED: `av1_get_sbq_user_rating_based` reads an EXTERNAL per-SB
+  rating map `cpi->mb_delta_q` (from `--rate-distribution-info` / `AV1E_SET_RATE_DISTRIBUTION_INFO`)
+  — needs the external-file plumbing; ABSENT.
+- `--deltaq-mode=5` HDR / `enable_hdr_deltaq`: `av1_get_q_for_hdr` **asserts bd10** AND is a
+  NO-OP under `DISABLE_HDR_LUMA_DELTAQ=1` (encoder.h:101 — returns `base_qindex`, so
+  `deltaq_used=0` → `delta_q_present` resets to 0). **INERT** in the shipped build; document-only.
+- `--enable-rate-guide-deltaq` / `--rate-distribution-info` (`get_rate_guided_quantizer`,
+  allintra_vis.c:688) — needs the external rate-file plumbing (`ext_rate_guided_quantization`);
+  ABSENT.
+- `--auto-intra-tools-off` (`automatic_intra_tools_off` + `model_rd_sse`, allintra_vis.c:515) —
+  needs `--deltaq-mode=3`; disables smooth/paeth/cfl/diagonal intra on high-Q low-q frames via
+  a `model_rd_sse` frame accumulation gate. Self-contained (no seg/LF/external), a moderate
+  intra-search-space arm; ABSENT.
+- Encoder-side per-SB delta-q/delta-lf tile signaling (writer side): **DONE** (delta-q via mode
+  2/3/6, delta-lf via `--delta-lf-mode=1`).
 
 ### C6 — Superres (encode side) — FIXED + QTHRESH/AUTO/RANDOM + denom-16 scaler DONE; only the AUTO recode loop remains (inter follow-up)
 - `--superres-mode/-denominator/-kf-denominator/-qthresh/-kf-qthresh`. Default NONE.
