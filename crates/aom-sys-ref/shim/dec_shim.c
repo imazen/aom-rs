@@ -2202,6 +2202,133 @@ void shim_find_dv_ref_mvs(
   free(grid);
 }
 
+/* Facade for av1_find_mv_refs at a SINGLE inter reference `rf0` (the
+ * generalized single-ref inter MV scan, av1/common/mvref_common.c ->
+ * setup_ref_mv_list) + av1_find_best_ref_mvs. Same synthetic MI grid as
+ * shim_find_dv_ref_mvs. Global motion is IDENTITY (cm memset 0 => wmtype 0 =>
+ * gm_mv (0,0)); `allow_ref_frame_mvs` is exercised with an all-INVALID
+ * cm->tpl_mvs (the empty-motion-field envelope the Rust port models), so every
+ * add_tpl_ref_mv returns before its projection math. Extracts the full output
+ * surface: mode_context[rf0], ref_mv_count[rf0], ref_mv_stack[rf0][].this_mv,
+ * ref_mv_weight[rf0][], av1_find_best_ref_mvs nearest/near, global_mvs[rf0]. */
+void shim_find_inter_mv_refs(
+    int rf0, int mi_row, int mi_col, int bsize, int own_partition, int up_available,
+    int left_available, int tile_mi_row_start, int tile_mi_row_end,
+    int tile_mi_col_start, int tile_mi_col_end, int frame_mi_rows, int frame_mi_cols,
+    int mib_size, int allow_ref_frame_mvs, const int8_t *sign_bias,
+    int allow_high_precision_mv, int is_integer_mv, const uint8_t *g_bsize,
+    const int8_t *g_ref_frame0, const int8_t *g_ref_frame1, const uint8_t *g_use_intrabc,
+    const uint8_t *g_mode, const int16_t *g_mv0_row, const int16_t *g_mv0_col,
+    const int16_t *g_mv1_row, const int16_t *g_mv1_col, int *out_mode_context,
+    int *out_ref_mv_count, int *out_stack_row, int *out_stack_col, int *out_weight,
+    int *out_nearest_row, int *out_nearest_col, int *out_near_row, int *out_near_col,
+    int *out_global_row, int *out_global_col) {
+  const size_t n = (size_t)DV_GRID_DIM * (size_t)DV_GRID_DIM;
+  MB_MODE_INFO *pool = (MB_MODE_INFO *)calloc(n, sizeof(MB_MODE_INFO));
+  MB_MODE_INFO **grid = (MB_MODE_INFO **)calloc(n, sizeof(MB_MODE_INFO *));
+  for (size_t i = 0; i < n; ++i) {
+    pool[i].bsize = (BLOCK_SIZE)g_bsize[i];
+    pool[i].ref_frame[0] = (MV_REFERENCE_FRAME)g_ref_frame0[i];
+    pool[i].ref_frame[1] = (MV_REFERENCE_FRAME)g_ref_frame1[i];
+    pool[i].use_intrabc = g_use_intrabc[i] ? 1 : 0;
+    pool[i].mode = (PREDICTION_MODE)g_mode[i];
+    pool[i].mv[0].as_mv.row = g_mv0_row[i];
+    pool[i].mv[0].as_mv.col = g_mv0_col[i];
+    pool[i].mv[1].as_mv.row = g_mv1_row[i];
+    pool[i].mv[1].as_mv.col = g_mv1_col[i];
+    grid[i] = &pool[i];
+  }
+  size_t self_idx = (size_t)mi_row * DV_GRID_DIM + (size_t)mi_col;
+  pool[self_idx].bsize = (BLOCK_SIZE)bsize;
+  pool[self_idx].partition = (PARTITION_TYPE)own_partition;
+
+  AV1_COMMON cm;
+  MACROBLOCKD xd;
+  SequenceHeader sp;
+  memset(&cm, 0, sizeof(cm));
+  memset(&xd, 0, sizeof(xd));
+  memset(&sp, 0, sizeof(sp));
+  sp.sb_size = (mib_size >= 32) ? BLOCK_128X128 : BLOCK_64X64;
+  cm.seq_params = &sp;
+  cm.mi_params.mi_rows = frame_mi_rows;
+  cm.mi_params.mi_cols = frame_mi_cols;
+  cm.mi_params.mi_stride = DV_GRID_DIM;
+  cm.features.allow_ref_frame_mvs = allow_ref_frame_mvs;
+  cm.features.allow_high_precision_mv = allow_high_precision_mv;
+  cm.features.cur_frame_force_integer_mv = is_integer_mv;
+  for (int i = 0; i < REF_FRAMES; ++i) cm.ref_frame_sign_bias[i] = sign_bias[i];
+  /* cm.global_motion left all-zero => wmtype IDENTITY => gm_mv (0,0). */
+
+  /* All-INVALID temporal motion field: every add_tpl_ref_mv returns at the
+   * `mfmv0.as_int == INVALID_MV` check before touching cur_frame/order-hint. */
+  TPL_MV_REF *tpl = (TPL_MV_REF *)calloc(n, sizeof(TPL_MV_REF));
+  for (size_t i = 0; i < n; ++i) tpl[i].mfmv0.as_int = INVALID_MV;
+  cm.tpl_mvs = tpl;
+
+  xd.mi_row = mi_row;
+  xd.mi_col = mi_col;
+  xd.mi_stride = DV_GRID_DIM;
+  xd.mi = &grid[self_idx];
+  xd.width = mi_size_wide[bsize];
+  xd.height = mi_size_high[bsize];
+  xd.up_available = up_available;
+  xd.left_available = left_available;
+  xd.tile.mi_row_start = tile_mi_row_start;
+  xd.tile.mi_row_end = tile_mi_row_end;
+  xd.tile.mi_col_start = tile_mi_col_start;
+  xd.tile.mi_col_end = tile_mi_col_end;
+  xd.mb_to_top_edge = -(mi_row * 4 * 8);
+  xd.mb_to_bottom_edge = (frame_mi_rows - mi_size_high[bsize] - mi_row) * 4 * 8;
+  xd.mb_to_left_edge = -(mi_col * 4 * 8);
+  xd.mb_to_right_edge = (frame_mi_cols - mi_size_wide[bsize] - mi_col) * 4 * 8;
+  xd.is_last_vertical_rect = 0;
+  if (xd.width < xd.height) {
+    if (!((mi_col + xd.width) & (xd.height - 1))) xd.is_last_vertical_rect = 1;
+  }
+  xd.is_first_horizontal_rect = 0;
+  if (xd.width > xd.height) {
+    if (!(mi_row & (xd.width - 1))) xd.is_first_horizontal_rect = 1;
+  }
+
+  uint8_t ref_mv_count[MODE_CTX_REF_FRAMES];
+  CANDIDATE_MV ref_mv_stack[MODE_CTX_REF_FRAMES][MAX_REF_MV_STACK_SIZE];
+  uint16_t ref_mv_weight[MODE_CTX_REF_FRAMES][MAX_REF_MV_STACK_SIZE];
+  int_mv mv_ref_list[MODE_CTX_REF_FRAMES][MAX_MV_REF_CANDIDATES];
+  int_mv global_mvs[MODE_CTX_REF_FRAMES];
+  int16_t mode_context[MODE_CTX_REF_FRAMES];
+  memset(ref_mv_count, 0, sizeof(ref_mv_count));
+  memset(ref_mv_stack, 0, sizeof(ref_mv_stack));
+  memset(ref_mv_weight, 0, sizeof(ref_mv_weight));
+  memset(mv_ref_list, 0, sizeof(mv_ref_list));
+  memset(global_mvs, 0, sizeof(global_mvs));
+  memset(mode_context, 0, sizeof(mode_context));
+
+  av1_find_mv_refs(&cm, &xd, &pool[self_idx], (MV_REFERENCE_FRAME)rf0, ref_mv_count,
+                   ref_mv_stack, ref_mv_weight, mv_ref_list, global_mvs, mode_context);
+
+  int_mv nearest_mv, near_mv;
+  av1_find_best_ref_mvs(allow_high_precision_mv, mv_ref_list[rf0], &nearest_mv, &near_mv,
+                        is_integer_mv);
+
+  *out_mode_context = mode_context[rf0];
+  *out_ref_mv_count = ref_mv_count[rf0];
+  for (int i = 0; i < MAX_REF_MV_STACK_SIZE; ++i) {
+    out_stack_row[i] = ref_mv_stack[rf0][i].this_mv.as_mv.row;
+    out_stack_col[i] = ref_mv_stack[rf0][i].this_mv.as_mv.col;
+    out_weight[i] = ref_mv_weight[rf0][i];
+  }
+  *out_nearest_row = nearest_mv.as_mv.row;
+  *out_nearest_col = nearest_mv.as_mv.col;
+  *out_near_row = near_mv.as_mv.row;
+  *out_near_col = near_mv.as_mv.col;
+  *out_global_row = global_mvs[rf0].as_mv.row;
+  *out_global_col = global_mvs[rf0].as_mv.col;
+
+  free(tpl);
+  free(pool);
+  free(grid);
+}
+
 /* Facade for the real `static inline` av1_find_ref_dv (mvref_common.h): only
  * `tile->mi_row_start` is read. */
 void shim_find_ref_dv(int mi_row, int mib_size, int tile_mi_row_start, int *out_row,

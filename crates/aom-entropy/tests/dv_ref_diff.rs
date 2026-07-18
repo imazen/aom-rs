@@ -12,7 +12,8 @@
 //! independently of their own correctness.
 
 use aom_entropy::dv_ref::{
-    assign_and_validate_dv, find_dv_ref_mvs, find_ref_dv, is_dv_valid, DvNbr, DvTileBounds,
+    assign_and_validate_dv, find_dv_ref_mvs, find_inter_mv_refs, find_ref_dv, is_dv_valid, DvNbr,
+    DvTileBounds,
 };
 use aom_sys_ref::{self as c, RefDvNbr};
 
@@ -478,5 +479,203 @@ fn assign_and_validate_dv_matches_composed_c() {
     }
     eprintln!(
         "assign_and_validate_dv_matches_composed_c: {total} cases matched the composed-C oracle"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Generalized single-reference INTER MV scan (`find_inter_mv_refs`) vs the REAL
+// exported `av1_find_mv_refs(ref_frame = rf0)` + `av1_find_best_ref_mvs`.
+//
+// Global motion is IDENTITY on both sides (the walking-skeleton target +
+// `01-size-*` ratchets), so `gm = (0,0)` / `wmtype = 0` and the port passes
+// `global_mv = (0,0)`, `gm_wmtype = 0`. `allow_ref_frame_mvs` is exercised with
+// an all-INVALID temporal field (the port's modelled envelope). The scan's
+// spatial candidates, `mode_context`/`newmv_count`, `ref_mv_weight`/stack rank,
+// single-ref extension + sign-bias negation, and `av1_find_best_ref_mvs`
+// precision-lowering are all randomized.
+// ---------------------------------------------------------------------------
+
+/// A grid biased toward INTER neighbours (refs LAST/LAST2/LAST3, single AND
+/// compound, full inter mode range so `have_newmv_in_inter_mode` fires), plus
+/// intra / intrabc / NONE cells to exercise `is_inter_block` gating and the
+/// single-ref match filter.
+fn random_inter_grid(rng: &mut Rng) -> Vec<RefDvNbr> {
+    let mut g = vec![RefDvNbr::default(); DIM * DIM];
+    for cell in g.iter_mut() {
+        let bsize = rng.range(0, 22) as u8;
+        let class = rng.next() % 100;
+        if class < 50 {
+            // inter block: ref0 in {LAST,LAST2,LAST3}; ref1 single or compound.
+            cell.bsize = bsize;
+            cell.ref_frame0 = rng.range(1, 4) as i8;
+            cell.ref_frame1 = if rng.next().is_multiple_of(2) {
+                -1
+            } else {
+                rng.range(1, 8) as i8
+            };
+            cell.use_intrabc = false;
+            // NEARESTMV(13)..NEW_NEWMV(24) — includes the NEW-mv modes.
+            cell.mode = rng.range(13, 25) as u8;
+            cell.mv0_row = rng.range(-1200, 1200) as i16;
+            cell.mv0_col = rng.range(-1200, 1200) as i16;
+            cell.mv1_row = rng.range(-1200, 1200) as i16;
+            cell.mv1_col = rng.range(-1200, 1200) as i16;
+        } else if class < 70 {
+            // plain intra: gated out by is_inter_block.
+            cell.bsize = bsize;
+            cell.ref_frame0 = 0;
+            cell.ref_frame1 = -1;
+            cell.use_intrabc = false;
+            cell.mode = rng.range(0, 13) as u8;
+        } else if class < 85 {
+            // intrabc: is_inter_block true (use_intrabc), but ref0 == INTRA_FRAME
+            // never matches rf0 >= LAST and contributes no single-ref candidate.
+            cell.bsize = bsize;
+            cell.ref_frame0 = 0;
+            cell.ref_frame1 = -1;
+            cell.use_intrabc = true;
+            cell.mode = 0;
+            cell.mv0_row = (rng.range(-256, 256) * 8) as i16;
+            cell.mv0_col = (rng.range(-256, 256) * 8) as i16;
+        } else {
+            // NONE sentinel.
+            cell.bsize = bsize;
+            cell.ref_frame0 = -1;
+            cell.ref_frame1 = -1;
+            cell.use_intrabc = false;
+            cell.mode = 0;
+        }
+    }
+    g
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InterCase {
+    rf0: i32,
+    base: Case,
+    allow_ref_frame_mvs: bool,
+    sign_bias: [i8; 8],
+    allow_high_precision_mv: bool,
+    is_integer_mv: bool,
+}
+
+fn random_inter_case(rng: &mut Rng) -> InterCase {
+    let base = random_case(rng);
+    let rf0 = rng.range(1, 4) as i32; // LAST/LAST2/LAST3
+    let allow_ref_frame_mvs = rng.next().is_multiple_of(2);
+    let mut sign_bias = [0i8; 8];
+    for s in sign_bias.iter_mut() {
+        *s = (rng.next() % 2) as i8;
+    }
+    let allow_high_precision_mv = rng.next().is_multiple_of(2);
+    let is_integer_mv = rng.next() % 4 == 0;
+    InterCase {
+        rf0,
+        base,
+        allow_ref_frame_mvs,
+        sign_bias,
+        allow_high_precision_mv,
+        is_integer_mv,
+    }
+}
+
+fn run_one_inter(
+    case: InterCase,
+    grid: &[RefDvNbr],
+) -> (aom_entropy::dv_ref::InterMvRefs, c::RefInterMvRefs) {
+    let b = case.base;
+    let up_available = b.mi_row > b.tile.mi_row_start;
+    let left_available = b.mi_col > b.tile.mi_col_start;
+
+    let rust_grid = grid_fn(grid, b.mi_row, b.mi_col);
+    let rust_out = find_inter_mv_refs(
+        case.rf0,
+        b.mi_row,
+        b.mi_col,
+        b.bsize,
+        b.own_partition,
+        up_available,
+        left_available,
+        b.tile,
+        b.frame_mi_rows,
+        b.frame_mi_cols,
+        b.mib_size,
+        case.allow_ref_frame_mvs,
+        (0, 0),
+        0,
+        case.sign_bias,
+        case.allow_high_precision_mv,
+        case.is_integer_mv,
+        rust_grid,
+    );
+
+    let c_out = c::ref_find_inter_mv_refs(
+        case.rf0,
+        b.mi_row,
+        b.mi_col,
+        b.bsize,
+        b.own_partition,
+        up_available,
+        left_available,
+        b.tile.mi_row_start,
+        b.tile.mi_row_end,
+        b.tile.mi_col_start,
+        b.tile.mi_col_end,
+        b.frame_mi_rows,
+        b.frame_mi_cols,
+        b.mib_size,
+        case.allow_ref_frame_mvs,
+        case.sign_bias,
+        case.allow_high_precision_mv,
+        case.is_integer_mv,
+        grid,
+    );
+    (rust_out, c_out)
+}
+
+#[test]
+fn find_inter_mv_refs_matches_c() {
+    let mut rng = Rng(0x51ce_b00c_0000_0001);
+    let n_grids = 200;
+    let cases_per_grid = 15;
+    let mut total = 0u32;
+    for g in 0..n_grids {
+        let mut grid_rng =
+            Rng(0xa11c_e5ce_0000_0001 ^ (g as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let grid = random_inter_grid(&mut grid_rng);
+        for _ in 0..cases_per_grid {
+            let case = random_inter_case(&mut rng);
+            let (r, c_out) = run_one_inter(case, &grid);
+
+            assert_eq!(
+                r.mode_context, c_out.mode_context,
+                "case {total} mode_context {case:?}"
+            );
+            assert_eq!(
+                r.ref_mv_count as i32, c_out.ref_mv_count,
+                "case {total} ref_mv_count {case:?}"
+            );
+            let count = r.ref_mv_count as usize;
+            for i in 0..count {
+                assert_eq!(
+                    r.stack[i], c_out.stack[i],
+                    "case {total} stack[{i}] {case:?}"
+                );
+                assert_eq!(
+                    r.weight[i] as i32, c_out.weight[i],
+                    "case {total} weight[{i}] {case:?}"
+                );
+            }
+            assert_eq!(r.nearest, c_out.nearest, "case {total} nearest {case:?}");
+            assert_eq!(r.near, c_out.near, "case {total} near {case:?}");
+            assert_eq!(
+                r.global_mv, c_out.global_mv,
+                "case {total} global_mv {case:?}"
+            );
+            total += 1;
+        }
+    }
+    eprintln!(
+        "find_inter_mv_refs_matches_c: {total} cases x {n_grids} distinct grids value-identical vs C (av1_find_mv_refs single-ref)"
     );
 }

@@ -339,7 +339,7 @@ pub fn ref_cdef_filter16(
 extern "C" {
     fn shim_sad(idx: i32, s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
     fn shim_variance(idx: i32, a: *const u8, as_: i32, b: *const u8, bs: i32, sse: *mut u32)
-    -> u32;
+        -> u32;
     fn shim_subpel_var(
         idx: i32,
         a: *const u8,
@@ -4848,7 +4848,11 @@ pub fn ref_uleb_decode(buffer: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut length = 0usize;
     let rc = unsafe { aom_uleb_decode(buffer.as_ptr(), buffer.len(), &mut value, &mut length) };
-    if rc == 0 { Some((value, length)) } else { None }
+    if rc == 0 {
+        Some((value, length))
+    } else {
+        None
+    }
 }
 
 /// Reference `aom_write_bit_buffer`: apply a sequence of literal ops (kind 0 =
@@ -11918,6 +11922,47 @@ unsafe extern "C" {
         out_near_row: *mut i32,
         out_near_col: *mut i32,
     );
+    #[allow(clippy::too_many_arguments)]
+    fn shim_find_inter_mv_refs(
+        rf0: i32,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: i32,
+        own_partition: i32,
+        up_available: i32,
+        left_available: i32,
+        tile_mi_row_start: i32,
+        tile_mi_row_end: i32,
+        tile_mi_col_start: i32,
+        tile_mi_col_end: i32,
+        frame_mi_rows: i32,
+        frame_mi_cols: i32,
+        mib_size: i32,
+        allow_ref_frame_mvs: i32,
+        sign_bias: *const i8,
+        allow_high_precision_mv: i32,
+        is_integer_mv: i32,
+        g_bsize: *const u8,
+        g_ref_frame0: *const i8,
+        g_ref_frame1: *const i8,
+        g_use_intrabc: *const u8,
+        g_mode: *const u8,
+        g_mv0_row: *const i16,
+        g_mv0_col: *const i16,
+        g_mv1_row: *const i16,
+        g_mv1_col: *const i16,
+        out_mode_context: *mut i32,
+        out_ref_mv_count: *mut i32,
+        out_stack_row: *mut i32,
+        out_stack_col: *mut i32,
+        out_weight: *mut i32,
+        out_nearest_row: *mut i32,
+        out_nearest_col: *mut i32,
+        out_near_row: *mut i32,
+        out_near_col: *mut i32,
+        out_global_row: *mut i32,
+        out_global_col: *mut i32,
+    );
     fn shim_find_ref_dv(
         mi_row: i32,
         mib_size: i32,
@@ -12041,6 +12086,135 @@ pub fn ref_find_dv_ref_mvs(
         );
     }
     (nr, nc, rr, rc)
+}
+
+/// The C-side output surface of [`ref_find_inter_mv_refs`] — mirrors the port's
+/// `aom_entropy::dv_ref::InterMvRefs` (C `uint16_t` weight / `uint8_t` count
+/// widened to `i32` for the FFI boundary). Only `[0, ref_mv_count)` of
+/// `stack`/`weight` is meaningful.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RefInterMvRefs {
+    pub mode_context: i32,
+    pub ref_mv_count: i32,
+    pub stack: [(i32, i32); 8],
+    pub weight: [i32; 8],
+    pub nearest: (i32, i32),
+    pub near: (i32, i32),
+    pub global_mv: (i32, i32),
+}
+
+/// The REAL exported `av1_find_mv_refs` at a SINGLE inter reference `rf0` +
+/// `av1_find_best_ref_mvs`, driven over the same synthetic
+/// `REF_DV_GRID_DIM x REF_DV_GRID_DIM` grid as [`ref_find_dv_ref_mvs`] — the
+/// oracle for `aom_entropy::dv_ref::find_inter_mv_refs`. Global motion is
+/// IDENTITY; `allow_ref_frame_mvs` runs against an all-INVALID `tpl_mvs` (the
+/// empty-motion-field envelope the port models).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_find_inter_mv_refs(
+    rf0: i32,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    own_partition: usize,
+    up_available: bool,
+    left_available: bool,
+    tile_mi_row_start: i32,
+    tile_mi_row_end: i32,
+    tile_mi_col_start: i32,
+    tile_mi_col_end: i32,
+    frame_mi_rows: i32,
+    frame_mi_cols: i32,
+    mib_size: i32,
+    allow_ref_frame_mvs: bool,
+    sign_bias: [i8; 8],
+    allow_high_precision_mv: bool,
+    is_integer_mv: bool,
+    grid: &[RefDvNbr],
+) -> RefInterMvRefs {
+    assert_eq!(grid.len(), REF_DV_GRID_DIM * REF_DV_GRID_DIM);
+    let n = grid.len();
+    let mut g_bsize = Vec::with_capacity(n);
+    let mut g_ref_frame0 = Vec::with_capacity(n);
+    let mut g_ref_frame1 = Vec::with_capacity(n);
+    let mut g_use_intrabc = Vec::with_capacity(n);
+    let mut g_mode = Vec::with_capacity(n);
+    let mut g_mv0_row = Vec::with_capacity(n);
+    let mut g_mv0_col = Vec::with_capacity(n);
+    let mut g_mv1_row = Vec::with_capacity(n);
+    let mut g_mv1_col = Vec::with_capacity(n);
+    for c in grid {
+        g_bsize.push(c.bsize);
+        g_ref_frame0.push(c.ref_frame0);
+        g_ref_frame1.push(c.ref_frame1);
+        g_use_intrabc.push(c.use_intrabc as u8);
+        g_mode.push(c.mode);
+        g_mv0_row.push(c.mv0_row);
+        g_mv0_col.push(c.mv0_col);
+        g_mv1_row.push(c.mv1_row);
+        g_mv1_col.push(c.mv1_col);
+    }
+    let mut mode_context = 0i32;
+    let mut ref_mv_count = 0i32;
+    let mut stack_row = [0i32; 8];
+    let mut stack_col = [0i32; 8];
+    let mut weight = [0i32; 8];
+    let (mut nr, mut nc, mut rr, mut rc) = (0i32, 0i32, 0i32, 0i32);
+    let (mut gr, mut gc) = (0i32, 0i32);
+    unsafe {
+        shim_find_inter_mv_refs(
+            rf0,
+            mi_row,
+            mi_col,
+            bsize as i32,
+            own_partition as i32,
+            up_available as i32,
+            left_available as i32,
+            tile_mi_row_start,
+            tile_mi_row_end,
+            tile_mi_col_start,
+            tile_mi_col_end,
+            frame_mi_rows,
+            frame_mi_cols,
+            mib_size,
+            allow_ref_frame_mvs as i32,
+            sign_bias.as_ptr(),
+            allow_high_precision_mv as i32,
+            is_integer_mv as i32,
+            g_bsize.as_ptr(),
+            g_ref_frame0.as_ptr(),
+            g_ref_frame1.as_ptr(),
+            g_use_intrabc.as_ptr(),
+            g_mode.as_ptr(),
+            g_mv0_row.as_ptr(),
+            g_mv0_col.as_ptr(),
+            g_mv1_row.as_ptr(),
+            g_mv1_col.as_ptr(),
+            &mut mode_context,
+            &mut ref_mv_count,
+            stack_row.as_mut_ptr(),
+            stack_col.as_mut_ptr(),
+            weight.as_mut_ptr(),
+            &mut nr,
+            &mut nc,
+            &mut rr,
+            &mut rc,
+            &mut gr,
+            &mut gc,
+        );
+    }
+    let mut stack = [(0i32, 0i32); 8];
+    for i in 0..8 {
+        stack[i] = (stack_row[i], stack_col[i]);
+    }
+    RefInterMvRefs {
+        mode_context,
+        ref_mv_count,
+        stack,
+        weight,
+        nearest: (nr, nc),
+        near: (rr, rc),
+        global_mv: (gr, gc),
+    }
 }
 
 /// The REAL `static inline` `av1_find_ref_dv` (`mvref_common.h`) — see
@@ -12722,9 +12896,9 @@ pub fn ref_noise_model_fit(
     } else {
         None
     };
-    let cpath = table_path.as_ref().map(|p| {
-        std::ffi::CString::new(p.to_str().expect("utf8 path")).expect("path NUL")
-    });
+    let cpath = table_path
+        .as_ref()
+        .map(|p| std::ffi::CString::new(p.to_str().expect("utf8 path")).expect("path NUL"));
     let cpath_ptr = cpath.as_ref().map_or(core::ptr::null(), |c| c.as_ptr());
     let _ = table_path.as_ref().map(std::fs::remove_file); // clear stale
 
@@ -12816,7 +12990,11 @@ pub fn ref_wiener_denoise_2d(
     use_highbd: bool,
     plane_lens: [usize; 3],
 ) -> Option<[Vec<u16>; 3]> {
-    let mut out = [vec![0u16; plane_lens[0]], vec![0u16; plane_lens[1]], vec![0u16; plane_lens[2]]];
+    let mut out = [
+        vec![0u16; plane_lens[0]],
+        vec![0u16; plane_lens[1]],
+        vec![0u16; plane_lens[2]],
+    ];
     let (o0, rest) = out.split_at_mut(1);
     let (o1, o2) = rest.split_at_mut(1);
     let ok = unsafe {
@@ -13432,7 +13610,9 @@ pub fn ref_av1_haar_ac_sad_mxn_uint8_input(
     num_8x8_rows: i32,
     num_8x8_cols: i32,
 ) -> i64 {
-    unsafe { av1_haar_ac_sad_mxn_uint8_input(input.as_ptr(), stride, 0, num_8x8_rows, num_8x8_cols) }
+    unsafe {
+        av1_haar_ac_sad_mxn_uint8_input(input.as_ptr(), stride, 0, num_8x8_rows, num_8x8_cols)
+    }
 }
 
 // ---- av1/common/resize.c: encoder-side source downscale (exported C) ----
