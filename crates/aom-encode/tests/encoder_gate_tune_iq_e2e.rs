@@ -572,6 +572,7 @@ fn run_tune_case(
             delta_q_res,
             deltaq_strength: port.deltaq_strength,
             perceptual_ai: None, // Variance Boost (mode 6), not Perceptual-AI
+            perceptual_wavelet: None, // nor Perceptual wavelet (mode 2)
             sb_mi: 0,
         }),
         tune,

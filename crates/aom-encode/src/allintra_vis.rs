@@ -247,6 +247,315 @@ pub fn setup_delta_q_perceptual_ai(
 }
 
 // ===========================================================================
+// `--deltaq-mode=2` (DELTA_Q_PERCEPTUAL, wavelet AC energy — the arm selected
+// by `DELTA_Q_PERCEPTUAL_MODULATION == 1`, encodeframe.h:25). Ports (libaom
+// v3.14.1):
+//   - dwt.c: the 5/3 dyadic wavelet (`av1_fdwt8x8_uint8_input`, a pure-C RTCD
+//     entry — `#define av1_fdwt8x8_uint8_input av1_fdwt8x8_uint8_input_c`, no
+//     SIMD) + `haar_ac_sad` + `av1_haar_ac_sad_mxn_uint8_input`.
+//   - aq_variance.c: `haar_ac_energy` (:124) / `log_block_wavelet_energy`
+//     (:138) / `av1_block_wavelet_energy_level` (:143) /
+//     `av1_compute_q_from_energy_level_deltaq_mode` (:153).
+//   - ratectrl.c: `av1_rc_bits_per_mb` (:271, the KEY-frame / AOM_Q allintra
+//     arm: neither CBR branch fires) / `find_qindex_by_rate` (:1420) /
+//     `av1_compute_qdelta_by_rate` (:2676).
+//   - `DEFAULT_DELTA_Q_RES_PERCEPTUAL` (= [`DELTA_Q_RES_PERCEPTUAL`] = 4) is
+//     the mode-2 delta-q grid (encodeframe.c:2287-2288), same as mode 3.
+//
+// Single-frame (lone still): `energy_midpoint = DEFAULT_E_MIDPOINT` (10.0) —
+// `is_stat_consumption_stage_twopass` is false, so no two-pass frame-average.
+// **Scope (this landing): bd8** (the dwt reads the u8 source directly);
+// frame dims a multiple of the 64px SB (every SB reads a full in-frame 64x64,
+// like the mode-3 initial scope). All `log1p`/`round` resolve to the same
+// glibc libm as the C build (the Variance-Boost `log2` envelope note applies).
+// ===========================================================================
+
+/// `tran_low_t` (av1/common/enums.h) — the wavelet coefficient type.
+type TranLow = i32;
+
+/// `analysis_53_row` (dwt.c:20): one row 5/3 lifting pass. `x` is the copied
+/// input row (C memcpy's it before the call, so reads never see the in-place
+/// output writes); `out[0..hw]` receives the lowpass, `out[hw..]` the highpass
+/// (C's `lowpass = &c[row]`, `highpass = &c[row] + hw`, non-overlapping).
+fn analysis_53_row(length: usize, x: &[TranLow], out: &mut [TranLow], hw: usize) {
+    let half = length >> 1;
+    let mut xi = 0usize;
+    for k in 0..half - 1 {
+        out[k] = x[xi] * 2;
+        let r = x[xi];
+        xi += 1;
+        out[hw + k] = x[xi] - ((r + x[xi + 1] + 1) >> 1);
+        xi += 1;
+    }
+    let last = half - 1;
+    out[last] = x[xi] * 2;
+    let r_tail = x[xi];
+    xi += 1;
+    out[hw + last] = x[xi] - r_tail;
+    // Update pass: `*a += (r + *b + 1) >> 1`, `r` seeded from `*highpass`.
+    let mut r = out[hw];
+    for k in 0..half {
+        out[k] += (r + out[hw + k] + 1) >> 1;
+        r = out[hw + k];
+    }
+}
+
+/// `analysis_53_col` (dwt.c:46): the column 5/3 lifting pass (different lowpass
+/// scaling + highpass rounding than the row pass). `x` is the copied input
+/// column; `out[0..hh]` lowpass, `out[hh..]` highpass.
+fn analysis_53_col(length: usize, x: &[TranLow], out: &mut [TranLow], hh: usize) {
+    let half = length >> 1;
+    let mut xi = 0usize;
+    for k in 0..half - 1 {
+        out[k] = x[xi];
+        let r = x[xi];
+        xi += 1;
+        out[hh + k] = ((x[xi] * 2) - (r + x[xi + 1]) + 2) >> 2;
+        xi += 1;
+    }
+    let last = half - 1;
+    out[last] = x[xi];
+    let r_tail = x[xi];
+    xi += 1;
+    out[hh + last] = (x[xi] - r_tail + 1) >> 1;
+    let mut r = out[hh];
+    for k in 0..half {
+        out[k] += (r + out[hh + k] + 1) >> 1;
+        r = out[hh + k];
+    }
+}
+
+/// `av1_fdwt8x8_uint8_input_c` (dwt.c:112) = `dyadic_analyze_53_uint8_input(4,
+/// 8, 8, input, stride, output, pitch_c=8, dwt_scale_bits=2, hbd)`. Loads the
+/// 8x8 source `<< 2`, then runs 4 levels of the separable 5/3 analysis (the
+/// last level bails at `nh < 2`). `output` is the 8x8 coefficient block, row
+/// stride 8. bd8 reads the u8 source; the hbd arm reads the u16 (unused in
+/// this landing but written to match the C dispatch on `hbd`).
+fn av1_fdwt8x8_uint8_input(src: &[u16], off: usize, stride: usize, bd: u8, output: &mut [TranLow; 64]) {
+    const SCALE: i32 = 2;
+    let hbd = bd > 8;
+    for i in 0..8 {
+        for j in 0..8 {
+            let px = src[off + i * stride + j];
+            let v = if hbd { i32::from(px) } else { i32::from(px as u8) };
+            output[i * 8 + j] = v << SCALE;
+        }
+    }
+    let mut hh = 8usize;
+    let mut hw = 8usize;
+    let mut line = [0i32; 8];
+    let mut col_out = [0i32; 8];
+    for _lv in 0..4 {
+        let nh = hh;
+        hh = (hh + 1) >> 1;
+        let nw = hw;
+        hw = (hw + 1) >> 1;
+        if nh < 2 || nw < 2 {
+            return;
+        }
+        for i in 0..nh {
+            line[..nw].copy_from_slice(&output[i * 8..i * 8 + nw]);
+            analysis_53_row(nw, &line[0..nw], &mut output[i * 8..i * 8 + nw], hw);
+        }
+        for j in 0..nw {
+            for i in 0..nh {
+                line[i] = output[i * 8 + j];
+            }
+            analysis_53_col(nh, &line[0..nh], &mut col_out[0..nh], hh);
+            for i in 0..nh {
+                output[i * 8 + j] = col_out[i];
+            }
+        }
+    }
+}
+
+/// `haar_ac_sad` (dwt.c:117): the sum of `|coeff|` over the three AC quadrants
+/// of the 8x8 wavelet block (every position except the top-left 4x4 LL band).
+fn haar_ac_sad_8x8(output: &[TranLow; 64]) -> i32 {
+    let mut acsad = 0i32;
+    for r in 0..8usize {
+        for c in 0..8usize {
+            if r >= 4 || c >= 4 {
+                acsad += output[r * 8 + c].abs();
+            }
+        }
+    }
+    acsad
+}
+
+/// `av1_haar_ac_sad_mxn_uint8_input` (dwt.c:135): the total AC wavelet energy
+/// of a `num_8x8_rows`×`num_8x8_cols` grid of 8x8 blocks starting at `off`.
+fn haar_ac_sad_mxn(
+    src: &[u16],
+    off: usize,
+    stride: usize,
+    bd: u8,
+    num_8x8_rows: usize,
+    num_8x8_cols: usize,
+) -> i64 {
+    let mut energy = 0i64;
+    let mut out = [0i32; 64];
+    for r8 in 0..num_8x8_rows {
+        for c8 in 0..num_8x8_cols {
+            let blk_off = off + c8 * 8 + r8 * 8 * stride;
+            av1_fdwt8x8_uint8_input(src, blk_off, stride, bd, &mut out);
+            energy += i64::from(haar_ac_sad_8x8(&out));
+        }
+    }
+    energy
+}
+
+/// Differential entry point for [`haar_ac_sad_mxn`] (the dwt + AC-SAD chain),
+/// matching the exported `av1_haar_ac_sad_mxn_uint8_input` signature. `src`
+/// holds u8 samples (bd8) in a u16 buffer with the given `stride`.
+#[doc(hidden)]
+pub fn haar_ac_sad_mxn_for_test(
+    src: &[u16],
+    off: usize,
+    stride: usize,
+    bd: u8,
+    num_8x8_rows: usize,
+    num_8x8_cols: usize,
+) -> i64 {
+    haar_ac_sad_mxn(src, off, stride, bd, num_8x8_rows, num_8x8_cols)
+}
+
+/// `haar_ac_energy` (aq_variance.c:124): the SB wavelet AC energy normalized by
+/// pixel count. `sb_w`/`sb_h` are the SB pixel dims (`block_size_wide/high[bs]`)
+/// and `num_pels_log2` is `num_pels_log2_lookup[bs]` (= `log2(sb_w*sb_h)`).
+/// **Exact cast order:** C is `(unsigned int)((uint64_t)var * 256) >> npl` —
+/// the truncating u32 cast binds tighter than `>>`, so the product is narrowed
+/// to 32 bits *before* the shift.
+fn haar_ac_energy(src: &[u16], off: usize, stride: usize, bd: u8, sb_w: usize, sb_h: usize, num_pels_log2: u32) -> u32 {
+    let var = haar_ac_sad_mxn(src, off, stride, bd, sb_h / 8, sb_w / 8);
+    (((var as u64).wrapping_mul(256)) as u32) >> num_pels_log2
+}
+
+/// `DEFAULT_E_MIDPOINT` (aq_variance.c:122) — the single-frame wavelet-energy
+/// midpoint (two-pass uses the frame average instead).
+const DEFAULT_E_MIDPOINT: f64 = 10.0;
+/// `ENERGY_MIN` / `ENERGY_MAX` (aq_variance.c:33-34).
+const ENERGY_MIN: i32 = -4;
+const ENERGY_MAX: i32 = 1;
+/// `segment_id[ENERGY_SPAN]` (aq_variance.c:39), indexed by `energy - ENERGY_MIN`.
+const SEGMENT_ID: [usize; 6] = [0, 1, 1, 2, 3, 4];
+/// `deltaq_rate_ratio[MAX_SEGMENTS]` (aq_variance.c:31).
+const DELTAQ_RATE_RATIO: [f64; 8] = [2.5, 2.0, 1.5, 1.0, 0.75, 1.0, 1.0, 1.0];
+
+/// `av1_block_wavelet_energy_level` (aq_variance.c:143): the clamped rounded
+/// log-wavelet-energy of the SB relative to the (single-frame) midpoint.
+fn block_wavelet_energy_level(src: &[u16], off: usize, stride: usize, bd: u8, sb_w: usize, sb_h: usize, num_pels_log2: u32) -> i32 {
+    let haar_sad = haar_ac_energy(src, off, stride, bd, sb_w, sb_h, num_pels_log2);
+    // log_block_wavelet_energy = log1p((double)haar_sad).
+    let energy = f64::from(haar_sad).ln_1p() - DEFAULT_E_MIDPOINT;
+    // clamp((int)round(energy), ENERGY_MIN, ENERGY_MAX). C round() = ties away
+    // from zero == Rust f64::round.
+    (energy.round() as i32).clamp(ENERGY_MIN, ENERGY_MAX)
+}
+
+/// `av1_rc_bits_per_mb` (ratectrl.c:271) for the **KEY-frame / AOM_Q allintra**
+/// path with `correction_factor = 1.0`: neither the CBR-inter nor the
+/// CBR-keyframe branch fires (`rc_cfg.mode != AOM_CBR`), so it reduces to
+/// `(int)(enumerator / q)`. `enumerator = get_bpmb_enumerator(KEY, screen)`
+/// (ratectrl.c:255): 2_000_000 (non-screen) / 1_000_000 (screen).
+fn rc_bits_per_mb_key(qindex: i32, bit_depth: u8, is_screen_content: bool) -> i32 {
+    let q = av1_convert_qindex_to_q(qindex, bit_depth);
+    let enumerator: i32 = if is_screen_content { 1_000_000 } else { 2_000_000 };
+    (f64::from(enumerator) * 1.0 / q) as i32
+}
+
+/// `find_qindex_by_rate` (ratectrl.c:1420): the smallest qindex in
+/// `[best, worst]` whose modeled bits-per-mb is `<= desired`. Binary search
+/// (`> desired` raises the floor).
+fn find_qindex_by_rate(desired_bits_per_mb: i32, bit_depth: u8, is_screen_content: bool, best: i32, worst: i32) -> i32 {
+    let mut low = best;
+    let mut high = worst;
+    while low < high {
+        let mid = (low + high) >> 1;
+        let mid_bits = rc_bits_per_mb_key(mid, bit_depth, is_screen_content);
+        if mid_bits > desired_bits_per_mb {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+/// `av1_compute_qdelta_by_rate` (ratectrl.c:2676): the qindex delta to hit
+/// `rate_target_ratio` × the base bits-per-mb, searching `[best, worst]`.
+/// `best`/`worst` are `rc->best_quality`/`rc->worst_quality`
+/// (`av1_quantizer_to_qindex(rc_min/max_quantizer)` — 0/255 for the allintra
+/// default `--min-q=0 --max-q=63`).
+fn compute_qdelta_by_rate(qindex: i32, bit_depth: u8, is_screen_content: bool, rate_target_ratio: f64, best: i32, worst: i32) -> i32 {
+    let base_bits_per_mb = rc_bits_per_mb_key(qindex, bit_depth, is_screen_content);
+    let target_bits_per_mb = (rate_target_ratio * f64::from(base_bits_per_mb)) as i32;
+    let target_index = find_qindex_by_rate(target_bits_per_mb, bit_depth, is_screen_content, best, worst);
+    target_index - qindex
+}
+
+/// `av1_compute_q_from_energy_level_deltaq_mode` (aq_variance.c:153) under
+/// `DELTA_Q_PERCEPTUAL_MODULATION == 1`: map the clamped wavelet energy level
+/// to a rate segment, take the rate-ratio qindex delta, apply the lossless
+/// guard, and add to the base. `best`/`worst` = `rc->best/worst_quality`.
+#[allow(clippy::too_many_arguments)]
+fn compute_q_from_energy_level(base_qindex: i32, bit_depth: u8, is_screen_content: bool, block_var_level: i32, best: i32, worst: i32) -> i32 {
+    debug_assert!((ENERGY_MIN..=ENERGY_MAX).contains(&block_var_level));
+    let rate_level = SEGMENT_ID[(block_var_level - ENERGY_MIN) as usize];
+    let mut qindex_delta = compute_qdelta_by_rate(
+        base_qindex,
+        bit_depth,
+        is_screen_content,
+        DELTAQ_RATE_RATIO[rate_level],
+        best,
+        worst,
+    );
+    // Disallow a segment qindex 0 when the base is not 0 (lossless guard).
+    if base_qindex != 0 && (base_qindex + qindex_delta) == 0 {
+        qindex_delta = -base_qindex + 1;
+    }
+    base_qindex + qindex_delta
+}
+
+/// `rc->best/worst_quality` for the allintra default `--min-q=0 --max-q=63`
+/// (`av1_quantizer_to_qindex(0)=0`, `(63)=255`).
+pub const PERCEPTUAL_BEST_QUALITY: i32 = MINQ;
+pub const PERCEPTUAL_WORST_QUALITY: i32 = MAXQ;
+
+/// The per-SB qindex of `setup_delta_q` (encodeframe.c:330-342) under
+/// `DELTA_Q_PERCEPTUAL` (mode 2, wavelet arm): the SB wavelet energy level
+/// ([`block_wavelet_energy_level`]) → the rate-ratio qindex
+/// ([`compute_q_from_energy_level`], keyed on the FRAME `base_qindex`), then
+/// the SAME deadzone-quantize against the RUNNING `current_base_qindex` modes
+/// 3/6 use. `sb_w`/`sb_h` are the SB pixel dims (`block_size_wide/high`),
+/// `num_pels_log2` is `num_pels_log2_lookup[sb_size]`.
+#[allow(clippy::too_many_arguments)]
+pub fn setup_delta_q_perceptual(
+    src: &[u16],
+    sb_off: usize,
+    stride: usize,
+    bd: u8,
+    base_qindex: i32,
+    is_screen_content: bool,
+    sb_w: usize,
+    sb_h: usize,
+    num_pels_log2: u32,
+    delta_q_res: i32,
+    current_base_qindex: i32,
+) -> i32 {
+    let level = block_wavelet_energy_level(src, sb_off, stride, bd, sb_w, sb_h, num_pels_log2);
+    let current = compute_q_from_energy_level(
+        base_qindex,
+        bd,
+        is_screen_content,
+        level,
+        PERCEPTUAL_BEST_QUALITY,
+        PERCEPTUAL_WORST_QUALITY,
+    );
+    av1_adjust_q_from_delta_q_res(delta_q_res, current_base_qindex, current)
+}
+
+// ===========================================================================
 // `--deltaq-mode=3` (DELTA_Q_PERCEPTUAL_AI, family C5): the wiener-variance
 // per-superblock qindex map. Ports (libaom v3.14.1, allintra_vis.c):
 //   - `WeberStats` (encoder.h:2363): the per-8x8 source/recon statistics.

@@ -405,6 +405,12 @@ pub struct ToggleKnobs {
     /// `AV1E_SET_DELTAQ_MODE = 3` (the reference bootstrap stream). PORT-side
     /// only — not emitted by [`ToggleKnobs::c_ctrls`].
     pub deltaq_mode3: bool,
+    /// `--deltaq-mode=2` (`DELTA_Q_PERCEPTUAL`, wavelet AC energy): when set,
+    /// the port derives the per-SB qindex from the SB source wavelet energy
+    /// ([`aom_encode::allintra_vis::setup_delta_q_perceptual`]) and threads it
+    /// into the pack. The C side must be driven with `AV1E_SET_DELTAQ_MODE = 2`.
+    /// PORT-side only — not emitted by [`ToggleKnobs::c_ctrls`].
+    pub deltaq_mode2: bool,
 }
 
 impl Default for ToggleKnobs {
@@ -436,6 +442,7 @@ impl Default for ToggleKnobs {
             coeff_cost_upd_freq: 0,
             mode_cost_upd_freq: 0,
             deltaq_mode3: false,
+            deltaq_mode2: false,
         }
     }
 }
@@ -1178,6 +1185,61 @@ impl EncodeCell {
             p.delta_q.delta_q_present = dq3_present;
         }
 
+        // --deltaq-mode=2 (DELTA_Q_PERCEPTUAL, wavelet AC energy): replay the
+        // per-SB wavelet-energy qindex to derive delta_q_present + deltaq_used,
+        // cross-check the real --deltaq-mode=2 header (leak-free), then write.
+        // `is_screen_content_type` (the rate-model enumerator) tracks
+        // `allow_screen_content_tools` on this (photographic, non-screen)
+        // envelope; a mismatch would perturb the qindex and fail the byte gate.
+        let dq2_screen = p.allow_screen_content_tools;
+        let (dq2_present, dq2_res) = if knobs.deltaq_mode2 {
+            let res = aom_encode::allintra_vis::DELTA_Q_RES_PERCEPTUAL;
+            // SB pixel extent (64 or 128 for sb128); num_pels_log2 = log2(sb_px²).
+            let num_pels_log2 = (sb_px * sb_px).trailing_zeros();
+            let mut running = qindex;
+            let mut used = false;
+            for r in 0..n_sb_y {
+                for c in 0..n_sb_x {
+                    let sb_off =
+                        (r * sb_mi) as usize * 4 * stride + (c * sb_mi) as usize * 4;
+                    let adj = aom_encode::allintra_vis::setup_delta_q_perceptual(
+                        &src_y_strided,
+                        sb_off,
+                        stride,
+                        bd,
+                        qindex,
+                        dq2_screen,
+                        sb_px,
+                        sb_px,
+                        num_pels_log2,
+                        res,
+                        running,
+                    );
+                    used |= adj != qindex;
+                    running = adj;
+                }
+            }
+            (used && qindex > 0, res)
+        } else {
+            (false, 0)
+        };
+        if knobs.deltaq_mode2 {
+            assert_eq!(
+                p.delta_q.delta_q_present, dq2_present,
+                "{}: derived delta_q_present must match the real --deltaq-mode=2 header",
+                self.label
+            );
+            if dq2_present {
+                assert_eq!(
+                    p.delta_q.delta_q_res, dq2_res,
+                    "{}: derived delta_q_res must match the real header",
+                    self.label
+                );
+                p.delta_q.delta_q_res = dq2_res;
+            }
+            p.delta_q.delta_q_present = dq2_present;
+        }
+
         let speed = self.speed;
         let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
         let env = SbEncodeEnv {
@@ -1222,15 +1284,31 @@ impl EncodeCell {
             // the qm_encode_witness gate, not this harness).
             qm_levels: None,
             tune: Default::default(),
-            deltaq: dq3_present.then(|| aom_encode::encode_sb::DeltaQFrameCtx {
-                quants: &quants,
-                deq: &deq,
-                base_qindex: qindex,
-                delta_q_res: dq3_res,
-                deltaq_strength: 0,
-                perceptual_ai: weber_map.as_ref(),
-                sb_mi,
-            }),
+            deltaq: if dq3_present {
+                Some(aom_encode::encode_sb::DeltaQFrameCtx {
+                    quants: &quants,
+                    deq: &deq,
+                    base_qindex: qindex,
+                    delta_q_res: dq3_res,
+                    deltaq_strength: 0,
+                    perceptual_ai: weber_map.as_ref(),
+                    perceptual_wavelet: None,
+                    sb_mi,
+                })
+            } else if dq2_present {
+                Some(aom_encode::encode_sb::DeltaQFrameCtx {
+                    quants: &quants,
+                    deq: &deq,
+                    base_qindex: qindex,
+                    delta_q_res: dq2_res,
+                    deltaq_strength: 0,
+                    perceptual_ai: None,
+                    perceptual_wavelet: Some(dq2_screen),
+                    sb_mi,
+                })
+            } else {
+                None
+            },
             use_chroma_trellis_rd_mult: allintra,
             coeff_costs_y: &real.coeff_costs_y,
             coeff_costs_uv: &real.coeff_costs_uv,
@@ -1319,8 +1397,14 @@ impl EncodeCell {
             signal_gate: qindex > 0,
             allow_update_cdf: !p.prefix.disable_cdf_update,
             base_qindex: qindex,
-            delta_q_present: dq3_present,
-            delta_q_res: if dq3_present { dq3_res } else { 0 },
+            delta_q_present: dq3_present || dq2_present,
+            delta_q_res: if dq3_present {
+                dq3_res
+            } else if dq2_present {
+                dq2_res
+            } else {
+                0
+            },
             allow_screen_content_tools: p.allow_screen_content_tools,
         };
 

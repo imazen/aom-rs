@@ -1146,6 +1146,29 @@ pub fn pack_tile_lr(
                         mi_col,
                         search_base_qindex,
                     )
+                } else if let Some(is_screen) = dq.perceptual_wavelet {
+                    // `setup_delta_q` (encodeframe.c:330, DELTA_Q_PERCEPTUAL):
+                    // the SB source wavelet AC energy → the rate-ratio qindex,
+                    // deadzone-quantized against the running base. SB is square
+                    // (sb_mi×sb_mi); num_pels_log2 = log2(sb_px²).
+                    let sb_off = env.base_y
+                        + (mi_row as usize * 4) * env.stride
+                        + mi_col as usize * 4;
+                    let sb_px = dq.sb_mi as usize * 4;
+                    let num_pels_log2 = (sb_px * sb_px).trailing_zeros();
+                    crate::allintra_vis::setup_delta_q_perceptual(
+                        env.src_y,
+                        sb_off,
+                        env.stride,
+                        env.bd,
+                        dq.base_qindex,
+                        is_screen,
+                        sb_px,
+                        sb_px,
+                        num_pels_log2,
+                        dq.delta_q_res,
+                        search_base_qindex,
+                    )
                 } else {
                     let sb_off = env.base_y
                         + (mi_row as usize * 4) * env.stride

@@ -343,8 +343,16 @@ pub struct DeltaQFrameCtx<'a> {
     /// qindex comes from this precomputed wiener-variance map
     /// ([`crate::allintra_vis::av1_get_sbq_perceptual_ai`]) instead of the
     /// source-variance boost. `None` = `--deltaq-mode=6` (Variance Boost, the
-    /// [`deltaq_strength`](Self::deltaq_strength) path).
+    /// [`deltaq_strength`](Self::deltaq_strength) path) unless
+    /// [`perceptual_wavelet`](Self::perceptual_wavelet) selects mode 2.
     pub perceptual_ai: Option<&'a crate::allintra_vis::WeberVarMap>,
+    /// `Some(is_screen_content)` selects `--deltaq-mode=2`
+    /// (`DELTA_Q_PERCEPTUAL`, wavelet AC energy): the per-SB qindex comes from
+    /// the SB source wavelet energy ([`crate::allintra_vis::setup_delta_q_perceptual`]).
+    /// The bool is `cpi->is_screen_content_type` (the rate-model enumerator).
+    /// Mutually exclusive with [`perceptual_ai`](Self::perceptual_ai) (mode 3);
+    /// when both are `None` the ctx is `--deltaq-mode=6` (Variance Boost).
+    pub perceptual_wavelet: Option<bool>,
     /// `mi_size_wide[sb_size]` — the SB mi extent the mode-3 per-SB wiener
     /// window uses (unused when `perceptual_ai` is `None`).
     pub sb_mi: i32,

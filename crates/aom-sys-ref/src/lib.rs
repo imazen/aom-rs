@@ -12778,6 +12778,35 @@ pub fn ref_av1_get_deltaq_offset(bit_depth: u8, qindex: i32, beta: f64) -> i32 {
     unsafe { av1_get_deltaq_offset(i32::from(bit_depth), qindex, beta) }
 }
 
+// ---------------------------------------------------------------------------
+// deltaq-mode=2 (DELTA_Q_PERCEPTUAL, wavelet AC energy) reference oracle.
+// `av1_haar_ac_sad_mxn_uint8_input` (dwt.c:135) is a plain libaom.a export
+// whose only kernel, `av1_fdwt8x8_uint8_input`, is a pure-C RTCD entry
+// (`#define av1_fdwt8x8_uint8_input av1_fdwt8x8_uint8_input_c`, no SIMD), so
+// this links directly without RTCD setup.
+// ---------------------------------------------------------------------------
+extern "C" {
+    fn av1_haar_ac_sad_mxn_uint8_input(
+        input: *const u8,
+        stride: i32,
+        hbd: i32,
+        num_8x8_rows: i32,
+        num_8x8_cols: i32,
+    ) -> i64;
+}
+
+/// Reference `av1_haar_ac_sad_mxn_uint8_input` (dwt.c:135): the total AC
+/// wavelet energy of a `num_8x8_rows`×`num_8x8_cols` grid of 8x8 blocks over an
+/// 8-bit (`hbd = 0`) source with the given `stride`.
+pub fn ref_av1_haar_ac_sad_mxn_uint8_input(
+    input: &[u8],
+    stride: i32,
+    num_8x8_rows: i32,
+    num_8x8_cols: i32,
+) -> i64 {
+    unsafe { av1_haar_ac_sad_mxn_uint8_input(input.as_ptr(), stride, 0, num_8x8_rows, num_8x8_cols) }
+}
+
 // ---- av1/common/resize.c: encoder-side source downscale (exported C) ----
 extern "C" {
     fn av1_resize_plane(
