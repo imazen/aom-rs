@@ -1,9 +1,23 @@
-//! IntraBC (intra block copy) SEARCH machinery — chunk 3a of the
-//! screen-content stills family: the source-frame hash table
-//! (`av1/encoder/hash_motion.c` + the CRC-32C calculator, `hash.c`), the
-//! block hash query, the hash candidate search (`av1_intrabc_hash_search`,
-//! mcomp.c:1908), and the DV signalling cost table
-//! (`av1_build_nmv_cost_table` / `av1_fill_dv_costs`, encodemv.c / rd.c:708).
+//! IntraBC (intra block copy) SEARCH machinery — the screen-content stills
+//! DV search + skip-arm RD (`rd_pick_intrabc_mode_sb`, rdopt.c:3427):
+//! - the source-frame hash table (`av1/encoder/hash_motion.c` + the CRC-32C
+//!   calculator, `hash.c`) + block hash query + `av1_intrabc_hash_search`
+//!   (mcomp.c:1908);
+//! - the DV signalling cost table (`av1_build_nmv_cost_table` /
+//!   `av1_fill_dv_costs`, encodemv.c / rd.c:708) + mv_cost / mv_err_cost /
+//!   mvsad_err_cost forms;
+//! - the full-pel search (`av1_full_pixel_search`, mcomp.c:1768): the NSTEP
+//!   `full_pixel_diamond` + `full_pixel_exhaustive` mesh (the pixel search
+//!   ALWAYS runs at `intrabc_search_level 0`);
+//! - `predict_skip_txfm` (tx_search.c:183) + the skip-arm RD.
+//!
+//! **Coeff-arm scope (honest, KB-14):** this offers an intrabc candidate ONLY
+//! in the skip regime (luma `predict_skip_txfm` fires AND chroma is an exact
+//! match), where `av1_txfm_search` forces `skip_txfm=1` and BYPASSES the inter
+//! var-tx coeff arm — that arm (`av1_pick_recursive_tx_size_type_yrd` quadtree
+//! + `prune_tx_2D` / `ml_predict_tx_split` + the var-tx pack) is NOT ported, so
+//! real screen content (which codes most intrabc blocks via the coeff arm) is
+//! PINNED, not byte-exact. See `rd_close_intrabc` + PARITY C3.
 //!
 //! Faithfulness notes:
 //! - CRC input serialization: the C feeds `uint32_t[4]` buffers to CRC32C as
@@ -1617,12 +1631,11 @@ pub fn rd_pick_intrabc_mode_sb(
 ) -> Option<IntrabcBest> {
     let bw = crate::tx_search::BLK_W_B[a.bsize];
     let bh = crate::tx_search::BLK_H_B[a.bsize];
-    // C gate: bsize must be square for the hash path (block_width == height).
-    // (av1_intrabc_hash_search returns INT_MAX otherwise; with the pixel
-    // search unported, non-square blocks simply have no candidates yet.)
-    if bw != bh {
-        return None;
-    }
+    // Only the HASH is square-gated (`av1_intrabc_hash_search` returns INT_MAX
+    // when block_width != block_height, mcomp.c:1918); the full-pel pixel
+    // search runs for every bsize. (Non-square intrabc IS common — real screen
+    // content codes many 4x8 / 8x4 / 16x4 intrabc blocks via the diamond.)
+    let hash_eligible = bw == bh;
 
     // --- dv_ref (rdopt.c:3453-3478) ---
     // find_dv_ref_mvs returns (nearest_row, nearest_col, near_row, near_col)
@@ -1702,8 +1715,13 @@ pub fn rd_pick_intrabc_mode_sb(
         // pixel search ALWAYS runs at intrabc_search_level 0 (rdopt.c:3570).
         let mut bestsme: i64 = i64::MAX;
         let mut best_mv: Option<(i32, i32)> = None; // full-pel (row, col)
-        let (h1, h2) = get_block_hash_value(a.hash, a.src_y, a.off_y, a.stride, bw, a.bd > 8);
-        if let Some(bucket) = a.hash.buckets.get(&h1) {
+        // Square blocks only (mcomp.c:1918) query the source-frame hash.
+        let (h1, h2) = if hash_eligible {
+            get_block_hash_value(a.hash, a.src_y, a.off_y, a.stride, bw, a.bd > 8)
+        } else {
+            (u32::MAX, 0)
+        };
+        if let Some(bucket) = a.hash.buckets.get(&h1).filter(|_| hash_eligible) {
             if bucket.len() > 1 {
                 let x_pos = a.mi_col * MI_SIZE;
                 let y_pos = a.mi_row * MI_SIZE;

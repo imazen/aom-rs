@@ -954,6 +954,44 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   pixels), fix before any denom-16 superres decode ships. **Next step:** decode-both localize the
   first diverging column of a denom-16 upscaled row vs the C `av1_upscale_normative` oracle.
 
+### KB-15 — Encoder: IntraBC (screen content) — SEARCH + skip-arm + wiring LANDED; PINNED on the inter var-tx COEFF ARM
+- **Status (2026-07-18):** `rd_pick_intrabc_mode_sb` (`aom-encode/src/intrabc_search.rs`) is WIRED
+  (rd_pick.rs step 6 → real, `PickFrameCfg::intrabc` gated on `p.allow_intrabc`) and runs the full
+  DV search under the screen-content gate. LANDED: the source-frame hash (chunk 3a) + the **NSTEP
+  `full_pixel_diamond`** (site config + `diamond_search_sad` coarse→fine + `UPDATE_SEARCH_STEP`
+  num00 collapse) + the **`full_pixel_exhaustive` mesh** (screen `exhaustive_searches_thresh=1<<20`);
+  the pixel search ALWAYS runs at `intrabc_search_level 0` (rdopt.c:3570). Geometry unit-locked
+  (`nstep_config_matches_c`, `mv_step_param_matches_c`, `diamond_finds_exact_repeat`). The HASH is
+  square-gated (mcomp.c:1918); the diamond runs for EVERY bsize (non-square intrabc supported).
+  `predict_skip_txfm` (tx_search.c:183) + `set_skip_txfm` hbd sse: the port offers intrabc ONLY in
+  the skip regime (luma predict_skip fires AND chroma exact match), where `av1_txfm_search` forces
+  `skip_txfm=1` and BYPASSES the coeff arm → the skip RD (`mode+mv+skip1`, `dist=sse`) is byte-exact.
+  Full wiring: `LeafWinner`/`RdPickIntraBest` fields, `ModeGrid` DV grid (`dc_screen`, 25 stamp
+  sites), `encode_b_intra_dry` intrabc arm (predict-from-recon + skip entropy reset + skip txfm ctx),
+  `pack_leaf` (use_intrabc + DV diff, skip tx/coeff), harness (hash from source luma, LF forced 0,
+  `ToggleKnobs::enable_intrabc`, `PackCfg::allow_intrabc`).
+- **PINNED — real-content byte-exactness blocked on the inter var-tx COEFF ARM (the L piece).**
+  Real screen content codes the MAJORITY of intrabc blocks via the COEFF arm (nonzero quantized
+  residual) and as NON-SQUARE shapes: measured on a 196² conformance crop (`intra_only-intrabc-
+  extreme-dv` @ (480,180) cq48), C uses **49 intrabc blocks = 39 coeff-arm + 42 non-square, only 10
+  skip**. The port codes those blocks as intra and the frame diverges. NOT ported (the remaining
+  work): `av1_pick_recursive_tx_size_type_yrd` inter var-tx quadtree (`select_tx_size_and_type` /
+  `select_tx_block` / `try_tx_block_no_split`/`_split`) + `prune_tx_2D` + `ml_predict_tx_split` NN
+  prunes + the var-tx WRITE path in pack (`write_tx_size_vartx` exists in aom-entropy, unused by
+  pack) + `derive_real_costs` inter tx-cost fill (currently a DUMMY zero cdf; source from
+  `kf.inter_ext_tx`). The 420 skip subset ALSO needs a chroma-eob-0 check (currently `chroma_sse==0`,
+  exact-only). No synthetic content found that makes aomenc use ONLY skip-square intrabc (intra wins
+  on synthetic repeats; real content uses the coeff arm) — so the skip-arm alone byte-matches 0 real
+  cells today.
+- **Gate:** `rd_close_intrabc::intrabc_dv_search_pinned` (aom-bench) — asserts anti-vacuous (C
+  genuinely codes intrabc on the crop, via decode census) + PINS the divergence self-promotingly (a
+  byte-match fails → promote into `BYTE_EXACT_CELLS`). Envelope UNTOUCHED: non-screen frames
+  (`allow_intrabc=0`) are byte-inert — palette gate + `partition_pick_diff` + `rd_pick_intra_sb_diff`
+  all green.
+- **Next step:** port the inter var-tx coeff arm (the txfm agent's spec is the map: select_tx_block
+  recursion + prune_tx_2D + ml_predict_tx_split + var-tx pack + the derive_real_costs one-liner),
+  then the chroma-eob-0 skip check; graduate the cells it closes.
+
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
 Primary config = ALLINTRA (usage=2), speed-0 KEY frame. libaom's own allintra tuning

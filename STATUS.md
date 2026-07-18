@@ -3,6 +3,17 @@
 Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
 (single-thread deterministic config, `reference/BUILD_CONFIG.md`).
 
+**2026-07-18 — IntraBC (C3 screen content): SEARCH + skip-arm + full wiring LANDED, PINNED on
+the coeff arm.** `rd_pick_intrabc_mode_sb` is wired (rd_pick.rs step 6 → real, gated on
+`p.allow_intrabc`) and runs the full DV search: hash + NSTEP `full_pixel_diamond` + mesh (geometry
+unit-locked) + `predict_skip_txfm` + the skip-arm RD (byte-exact in the skip regime). Full
+integration: LeafWinner/ModeGrid DV grid/rd_pick hook/encode_b_intra_dry arm/pack/harness. **Real
+screen content is PINNED, not byte-exact** — it codes the majority of intrabc blocks via the inter
+var-tx COEFF arm (measured: 39/49 coeff, 24/49 non-square on a 196² conformance crop), which is NOT
+ported (`select_tx_block` recursion + prune_tx_2D/ml_predict_tx_split NN + var-tx pack). Gate
+`rd_close_intrabc::intrabc_dv_search_pinned` (anti-vacuous + self-promoting pin). Envelope untouched.
+See CLAUDE.md KB-15 + PARITY C3.
+
 ## Done (bit-exact vs C oracle, differential-fuzz verified)
 
 - **C7 film-grain table-inject** (`--film-grain-table`, encoder side) — the port's own
