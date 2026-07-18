@@ -32,8 +32,11 @@ See CLAUDE.md KB-15 + PARITY C3.
   and `sb128_partial_sb_e2e` (partial-SB-at-128: 192² + the KB-6 196² frame × cq{32,63} — the
   KB-6 partial-SB machinery generalizes to 128-SBs byte-exact), each with a sb128-vs-sb64
   anti-vacuity witness. Closes the KB-1 encoder cross-check (the >64-block txb order had never
-  been exercised — the SB64 gates have no >64 blocks). Deferred: a coded 128-LEAF at a frame edge
-  (partial-SB cells split to ≤64); non-default-knob × sb128; speed≥1 × sb128.
+  been exercised — the SB64 gates have no >64 blocks). Chroma formats (`sb128_chroma_format_e2e`):
+  mono (4:0:0) + 4:4:4 coded-128-leaf byte-exact (proves the mu-64 interleave is ss-generic), with
+  ONE pinned high-qindex near-tie `mono 256² cq63` (self-promoting — 4:2:0/4:4:4 cq63 + mono cq55
+  all match, so it is a KB-10/11/12-class RD near-tie, not a mu-64 bug). Deferred: a coded 128-LEAF
+  at a frame edge (partial-SB cells split to ≤64); non-default-knob × sb128; speed≥1 × sb128.
   See PARITY.md C8.
 - **C7 film-grain table-inject** (`--film-grain-table`, encoder side) — the port's own
   grain-table reader/lookup (`aom-encode/src/grain_table.rs`, port of `aom_dsp/grain_table.c`)

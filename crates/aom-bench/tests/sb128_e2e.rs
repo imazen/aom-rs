@@ -308,3 +308,94 @@ fn sb128_partial_sb_e2e() {
         "SB128 partial-SB cells NOT byte-exact vs real aomenc --sb-size=128: {failures:?}"
     );
 }
+
+/// A 256² diagonal-ramp `EncodeCell` in the requested chroma format. `mono`
+/// gives 4:0:0; otherwise `ss` picks 4:2:0 (`(1,1)`) or 4:4:4 (`(0,0)`). Luma
+/// is `synthetic_diag`'s ramp; chroma (when present) a smooth low-freq ramp.
+fn diag256_fmt(label: &str, mono: bool, ss_x: usize, ss_y: usize, cq: i32) -> EncodeCell {
+    let (w, h) = (256usize, 256usize);
+    let mut y = vec![0u16; w * h];
+    for r in 0..h {
+        for col in 0..w {
+            y[r * w + col] = (32 + (r + col) * 190 / (w + h)) as u16;
+        }
+    }
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
+    };
+    let mut uv = vec![0u16; cw * ch];
+    for r in 0..ch {
+        for col in 0..cw {
+            uv[r * cw + col] = (64 + (r * 3 + col * 3) / 8 % 60) as u16;
+        }
+    }
+    EncodeCell {
+        label: label.to_string(),
+        w,
+        h,
+        mono,
+        ss_x,
+        ss_y,
+        usage: 2,
+        cq_level: cq,
+        speed: 0,
+        bd: 8,
+        y,
+        u: uv.clone(),
+        v: uv,
+    }
+}
+
+/// SB128 × CHROMA FORMAT — the coded-128-leaf pack interleave across mono
+/// (4:0:0) and 4:4:4, complementing the 4:2:0 `sb128_coded_128_leaf_e2e`. 4:4:4
+/// exercises the chroma mu-64 walk with ss=0 (chroma chunks == luma chunks,
+/// `round_pow2(_, 0)` identity); mono exercises luma-only interleave. Content
+/// is the smooth diagonal ramp that codes a 128-level leaf at high cq.
+///
+/// PINNED NEAR-TIE — `mono 256² cq63` diverges (port codes 1 fewer byte,
+/// KB-2/KB-10/KB-12 "cheaper RD decision" signature). NOT a mu-64 bug: the
+/// 4:2:0 (`sb128_coded_128_leaf_e2e`) AND 4:4:4 128-leaf cells at cq63 byte-
+/// match, and mono cq55 byte-matches — so the mu-64 search/re-encode/pack is
+/// proven correct; only the mono-cq63 combination (no chroma RD to break the
+/// tie at qindex ~252) tips a partition/mode/tx near-tie, exactly the class the
+/// KB-10/KB-11/KB-12 high-qindex cells are pinned as. Closing it needs a
+/// sibling-C per-candidate RD dump (the KB-3/KB-7 method); the pin asserts the
+/// divergence PRESENT so a fix self-promotes it.
+#[test]
+fn sb128_chroma_format_e2e() {
+    c::ref_init();
+    let sb128 = [(AV1E_SET_SUPERBLOCK_SIZE, AOM_SUPERBLOCK_SIZE_128X128)];
+    // (label, mono, ss_x, ss_y, cq, expect_byte_exact)
+    let cells: &[(&str, bool, usize, usize, i32, bool)] = &[
+        ("mono_cq55", true, 1, 1, 55, true),
+        ("444_cq55", false, 0, 0, 55, true),
+        ("444_cq63", false, 0, 0, 63, true),
+        ("mono_cq63", true, 1, 1, 63, false), // PINNED near-tie
+    ];
+    for &(label, mono, ss_x, ss_y, cq, expect_exact) in cells {
+        let cell = diag256_fmt(label, mono, ss_x, ss_y, cq);
+        let c_ref = cell.c_encode_ctrls(&sb128);
+        assert!(!c_ref.is_empty(), "{label}: C sb128 encode failed");
+        let port = cell.port_encode_with(&c_ref, &ToggleKnobs::default());
+        let real = EncodeCell::frame_obu_payload(&c_ref);
+        let byte_exact = port == real;
+        if expect_exact {
+            assert!(
+                byte_exact,
+                "{label}: sb128 chroma-format cell NOT byte-exact vs real aomenc \
+                 --sb-size=128 (port {} B vs real {} B)",
+                port.len(),
+                real.len()
+            );
+        } else {
+            assert!(
+                !byte_exact,
+                "{label}: the pinned mono-cq63 sb128 near-tie now BYTE-MATCHES \
+                 — promote it to expect_exact=true (a fix or a benign encoder \
+                 change closed it)"
+            );
+        }
+    }
+}

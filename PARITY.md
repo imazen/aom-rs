@@ -411,9 +411,16 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   byte-exact** — `sb128_partial_sb_e2e` (192² + the KB-6 196² conformance frame × cq{32,63}): the
   KB-6 partial-SB machinery (distortion visible-clips, `set_partition_cost_for_edge_blk`, the
   frame-edge entropy-stamp tail-zero) combines cleanly with the 128-SB geometry + the mu-64
-  edge-clip. Deferred: a coded 128-LEAF at a frame edge (the partial-SB cells split to ≤64, so the
-  128-leaf mu-64 edge-clip itself is still untested); non-default knob × sb128 combos; speed≥1 ×
-  sb128.
+  edge-clip. **Chroma formats — mono (4:0:0) + 4:4:4 coded-128-leaf also byte-exact**
+  (`sb128_chroma_format_e2e`): 4:4:4 exercises the chroma mu-64 interleave at ss=0 (chroma chunks ==
+  luma chunks), mono the luma-only interleave — proving the mu-64 machinery is ss-generic-correct.
+  **One PINNED near-tie: `mono 256² cq63`** (port codes 1 fewer byte, the KB-2/KB-10/KB-12 "cheaper
+  RD decision" signature) — NOT a mu-64 bug (4:2:0 + 4:4:4 128-leaves at cq63 AND mono cq55 all
+  byte-match; only mono-cq63, with no chroma RD to break a qindex-252 tie, flips), same class as the
+  pinned KB-10/KB-11/KB-12 high-qindex near-ties; the gate asserts the divergence PRESENT
+  (self-promoting), closing needs a sibling-C RD dump. Deferred: a coded 128-LEAF at a frame edge
+  (the partial-SB cells split to ≤64, so the 128-leaf mu-64 edge-clip itself is still untested);
+  non-default knob × sb128 combos; speed≥1 × sb128.
 - External partition / `--partition-info-path` / `--sb-qp-sweep`: diagnostic, lowest
   priority. (M, defer)
 
