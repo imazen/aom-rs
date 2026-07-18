@@ -3367,3 +3367,110 @@ long shim_resize_and_extend_frame_8bit(const uint16_t *in, int width, int height
   aom_free_frame_buffer(&dst);
   return 0;
 }
+
+#include "aom_dsp/noise_util.h"
+#include "aom_mem/aom_mem.h"
+#include "config/aom_dsp_rtcd.h"
+
+/* Noise-FFT differential oracle (C7 grain-estimator, Wiener-denoise front end):
+ * run the REAL RTCD-dispatched aom_fftNxN_float over an n*n real input and copy
+ * the packed 2*n*n spectrum into `out`. On this host the dispatch picks SSE2
+ * (n=4) / AVX2 (n=8,16,32) -- both use non-fused _mm*_{add,sub,mul}_ps, so the
+ * result is bit-identical to the scalar path the Rust port
+ * (aom_encode::noise_fft::fft2d) mirrors. Buffers are 32-byte aligned (the AVX2
+ * path uses aligned loads). Requires ref_init (RTCD). Returns 1. Append-only. */
+int shim_noise_fft2d(int block_size, const float *input, float *out) {
+  int n = block_size;
+  float *in = (float *)aom_memalign(32, sizeof(float) * n * n);
+  float *tmp = (float *)aom_memalign(32, sizeof(float) * 2 * n * n);
+  float *o = (float *)aom_memalign(32, sizeof(float) * 2 * n * n);
+  if (!in || !tmp || !o) {
+    aom_free(in);
+    aom_free(tmp);
+    aom_free(o);
+    return 0;
+  }
+  memset(tmp, 0, sizeof(float) * 2 * n * n);
+  memset(o, 0, sizeof(float) * 2 * n * n);
+  memcpy(in, input, sizeof(float) * n * n);
+  int ok = 1;
+  switch (block_size) {
+    case 2: aom_fft2x2_float(in, tmp, o); break;
+    case 4: aom_fft4x4_float(in, tmp, o); break;
+    case 8: aom_fft8x8_float(in, tmp, o); break;
+    case 16: aom_fft16x16_float(in, tmp, o); break;
+    case 32: aom_fft32x32_float(in, tmp, o); break;
+    default: ok = 0;
+  }
+  if (ok) memcpy(out, o, sizeof(float) * 2 * n * n);
+  aom_free(in);
+  aom_free(tmp);
+  aom_free(o);
+  return ok;
+}
+
+/* Inverse counterpart: aom_ifftNxN_float over a packed 2*n*n input -> n*n real
+ * output. The AVX2 ifft's small-column tail calls the SCALAR aom_fft1d_N (also
+ * non-fused -- verified 0 fma in fft.c.o), so the whole transform is
+ * bit-identical to the Rust port's ifft2d. Returns 1. Append-only. */
+int shim_noise_ifft2d(int block_size, const float *input, float *out) {
+  int n = block_size;
+  float *in = (float *)aom_memalign(32, sizeof(float) * 2 * n * n);
+  float *tmp = (float *)aom_memalign(32, sizeof(float) * 2 * n * n);
+  float *o = (float *)aom_memalign(32, sizeof(float) * n * n);
+  if (!in || !tmp || !o) {
+    aom_free(in);
+    aom_free(tmp);
+    aom_free(o);
+    return 0;
+  }
+  memset(tmp, 0, sizeof(float) * 2 * n * n);
+  memset(o, 0, sizeof(float) * n * n);
+  memcpy(in, input, sizeof(float) * 2 * n * n);
+  int ok = 1;
+  switch (block_size) {
+    case 2: aom_ifft2x2_float(in, tmp, o); break;
+    case 4: aom_ifft4x4_float(in, tmp, o); break;
+    case 8: aom_ifft8x8_float(in, tmp, o); break;
+    case 16: aom_ifft16x16_float(in, tmp, o); break;
+    case 32: aom_ifft32x32_float(in, tmp, o); break;
+    default: ok = 0;
+  }
+  if (ok) memcpy(out, o, sizeof(float) * n * n);
+  aom_free(in);
+  aom_free(tmp);
+  aom_free(o);
+  return ok;
+}
+
+/* Noise-transform pipeline oracle: exercise the full public aom_noise_tx_*
+ * sequence (forward -> add_energy -> filter -> inverse) over one n*n block,
+ * matching aom_encode::noise_fft::NoiseTx. `psd` is the filter PSD (n*n),
+ * `out_denoised` receives the inverse result (n*n), `out_energy` receives the
+ * |coeff|^2 accumulation from add_energy on the forward spectrum (n*n, zeroed
+ * first). Requires ref_init. Returns 1. Append-only. */
+int shim_noise_tx_pipeline(int block_size, const float *data, const float *psd,
+                           float *out_denoised, float *out_energy) {
+  int n = block_size;
+  struct aom_noise_tx_t *tx = aom_noise_tx_malloc(block_size);
+  if (!tx) return 0;
+  float *in = (float *)aom_memalign(32, sizeof(float) * n * n);
+  float *o = (float *)aom_memalign(32, sizeof(float) * n * n);
+  if (!in || !o) {
+    aom_free(in);
+    aom_free(o);
+    aom_noise_tx_free(tx);
+    return 0;
+  }
+  memcpy(in, data, sizeof(float) * n * n);
+  for (int i = 0; i < n * n; ++i) out_energy[i] = 0.f;
+  aom_noise_tx_forward(tx, in);
+  aom_noise_tx_add_energy(tx, out_energy);
+  aom_noise_tx_filter(tx, psd);
+  aom_noise_tx_inverse(tx, o);
+  memcpy(out_denoised, o, sizeof(float) * n * n);
+  aom_free(in);
+  aom_free(o);
+  aom_noise_tx_free(tx);
+  return 1;
+}

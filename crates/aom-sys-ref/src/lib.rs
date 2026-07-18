@@ -12576,6 +12576,63 @@ pub fn ref_flat_block_finder_run(
     (num_flat >= 0).then_some((out, num_flat))
 }
 
+unsafe extern "C" {
+    fn shim_noise_fft2d(block_size: i32, input: *const f32, out: *mut f32) -> i32;
+    fn shim_noise_ifft2d(block_size: i32, input: *const f32, out: *mut f32) -> i32;
+    fn shim_noise_tx_pipeline(
+        block_size: i32,
+        data: *const f32,
+        psd: *const f32,
+        out_denoised: *mut f32,
+        out_energy: *mut f32,
+    ) -> i32;
+}
+
+/// Run the REAL RTCD-dispatched `aom_fftNxN_float` over an `n×n` real `input`
+/// and return the packed `2·n·n` `[re, im]` spectrum. `None` for an unsupported
+/// block size. The dispatched impl (SSE2/AVX2, non-fused) is bit-identical to
+/// the scalar path `aom_encode::noise_fft::fft2d` mirrors.
+pub fn ref_noise_fft2d(block_size: usize, input: &[f32]) -> Option<Vec<f32>> {
+    assert_eq!(input.len(), block_size * block_size);
+    let mut out = vec![0.0f32; 2 * block_size * block_size];
+    let ok = unsafe { shim_noise_fft2d(block_size as i32, input.as_ptr(), out.as_mut_ptr()) };
+    (ok != 0).then_some(out)
+}
+
+/// Run the REAL RTCD-dispatched `aom_ifftNxN_float` over a packed `2·n·n`
+/// `input` and return the `n×n` real output. `None` for an unsupported size.
+pub fn ref_noise_ifft2d(block_size: usize, input: &[f32]) -> Option<Vec<f32>> {
+    assert_eq!(input.len(), 2 * block_size * block_size);
+    let mut out = vec![0.0f32; block_size * block_size];
+    let ok = unsafe { shim_noise_ifft2d(block_size as i32, input.as_ptr(), out.as_mut_ptr()) };
+    (ok != 0).then_some(out)
+}
+
+/// Run the REAL `aom_noise_tx_*` pipeline (forward → add_energy → filter →
+/// inverse) over one `n×n` block. Returns `(denoised, energy)`, each `n×n`.
+/// Mirrors `aom_encode::noise_fft::NoiseTx`. `None` for an unsupported size.
+pub fn ref_noise_tx_pipeline(
+    block_size: usize,
+    data: &[f32],
+    psd: &[f32],
+) -> Option<(Vec<f32>, Vec<f32>)> {
+    let n = block_size * block_size;
+    assert_eq!(data.len(), n);
+    assert_eq!(psd.len(), n);
+    let mut denoised = vec![0.0f32; n];
+    let mut energy = vec![0.0f32; n];
+    let ok = unsafe {
+        shim_noise_tx_pipeline(
+            block_size as i32,
+            data.as_ptr(),
+            psd.as_ptr(),
+            denoised.as_mut_ptr(),
+            energy.as_mut_ptr(),
+        )
+    };
+    (ok != 0).then_some((denoised, energy))
+}
+
 /// The REAL exported `aom_count_primitive_refsubexpfin`
 /// (aom_dsp/binary_codes_writer.c): coded bit count of
 /// `aom_write_primitive_refsubexpfin(n, k, ref, v)`.
