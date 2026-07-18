@@ -38,8 +38,10 @@ use aom_encode::intra_uv_rd::UvLoopPolicy;
 use aom_encode::lf_search::{LfSearchFrame, build_lf_mi_grid, pick_filter_level};
 use aom_encode::obu_assemble::assemble_frame_obu_payload_single_tile;
 use aom_encode::pack::{LrPackParams, pack_tile, pack_tile_lr};
-use aom_encode::partition_pick::PickFrameCfg;
-use aom_encode::rd::{EncMode, FrameUpdateType, TuneMetric, av1_compute_rd_mult_based_on_qindex};
+use aom_encode::partition_pick::{IntrabcFrameCfg, PickFrameCfg};
+use aom_encode::rd::{
+    EncMode, FrameUpdateType, TuneMetric, av1_compute_rd_mult_based_on_qindex, av1_set_sad_per_bit,
+};
 use aom_encode::real_costs::derive_real_costs;
 use aom_encode::speed_features::SpeedFeatures;
 use aom_entropy::enc::OdEcEnc;
@@ -425,6 +427,14 @@ pub struct ToggleKnobs {
     /// `deltaq_mode2`/`deltaq_mode3`). The C side must be driven with
     /// `AV1E_SET_DELTALF_MODE = 1` (+ the delta-q ctrl).
     pub delta_lf_mode: bool,
+    /// `--enable-intrabc=1` (screen content). Like `enable_palette`, this is
+    /// the PORT's intrabc RD-search enable — the C side is driven via
+    /// [`EncodeCell::c_encode_screen`]. When the frame header codes
+    /// `allow_intrabc`, the pack ALWAYS writes the per-block `use_intrabc`
+    /// flags (the decoder reads them unconditionally); this knob only gates
+    /// whether the port RUNS the DV search (so `false` gives the all-intra
+    /// witness against `true`). Default OFF.
+    pub enable_intrabc: bool,
 }
 
 impl Default for ToggleKnobs {
@@ -459,6 +469,7 @@ impl Default for ToggleKnobs {
             deltaq_mode2: false,
             disable_tx_stats_prune: false,
             delta_lf_mode: false,
+            enable_intrabc: false,
         }
     }
 }
@@ -1425,6 +1436,56 @@ impl EncodeCell {
             enable_angle_delta: knobs.enable_angle_delta,
             ..UvLoopPolicy::speed0_allintra()
         };
+        // Intrabc (screen content): the frame header codes `allow_intrabc`
+        // (from the `--enable-intrabc=1` C encode); the port runs the DV search
+        // when the knob is also on. `av1_init_search_range(max(w,h))` =
+        // mv_step_param; the hash table is built ONCE from the SOURCE luma.
+        let init_search_range = |size: i32| -> usize {
+            let size = size.max(16);
+            let mut sr = 0usize;
+            while (size << sr) < 1023 {
+                sr += 1;
+            }
+            sr.min(9)
+        };
+        if p.allow_intrabc && !knobs.enable_intrabc {
+            // Witness path: the header codes allow_intrabc but the search is off;
+            // the pack still writes use_intrabc=0 flags. (No assert — this is the
+            // intentional PORT(off) anti-vacuous case.)
+        }
+        let ibc_hash = (p.allow_intrabc && knobs.enable_intrabc).then(|| {
+            aom_encode::intrabc_search::build_intrabc_hash_table(
+                &src_y_strided,
+                0,
+                stride,
+                w,
+                h,
+                bd > 8,
+                64,
+            )
+        });
+        let ibc_dv_costs = ibc_hash.as_ref().map(|_| {
+            aom_encode::intrabc_search::fill_dv_costs(
+                &kf_write.ndvc_joints,
+                &kf_write.ndvc_comp0,
+                &kf_write.ndvc_comp1,
+            )
+        });
+        let ibc_txfm_costs = aom_encode::intrabc_search::fill_txfm_partition_costs(
+            &aom_encode::intrabc_search::DEFAULT_TXFM_PARTITION_CDF,
+        );
+        let ibc_frame = match (ibc_hash.as_ref(), ibc_dv_costs.as_ref()) {
+            (Some(hash), Some(dv_costs)) => Some(IntrabcFrameCfg {
+                hash,
+                dv_costs,
+                txfm_partition_costs: ibc_txfm_costs,
+                error_per_bit: (rdmult >> 6).max(1),
+                sad_per_bit: av1_set_sad_per_bit(qindex, bd),
+                mv_step_param: init_search_range(w.max(h) as i32),
+            }),
+            _ => None,
+        };
+
         let pick_cfg = PickFrameCfg {
             intra_tools: aom_encode::partition_pick::IntraToolCfg {
                 enable_diagonal_intra: knobs.enable_diagonal_intra,
@@ -1470,7 +1531,7 @@ impl EncodeCell {
             allow_screen_content_tools: p.allow_screen_content_tools,
             qm_levels: None,
             palette_costs: knobs.enable_palette.then_some(&real.palette_costs),
-            intrabc: None, // set below when p.allow_intrabc (screen content)
+            intrabc: ibc_frame,
         };
         let pack_cfg = aom_encode::pack::PackCfg {
             enable_filter_intra: knobs.enable_filter_intra,
@@ -1487,6 +1548,7 @@ impl EncodeCell {
                 0
             },
             allow_screen_content_tools: p.allow_screen_content_tools,
+            allow_intrabc: p.allow_intrabc,
         };
 
         let mut recon_y = src_y_strided.clone();
@@ -1582,9 +1644,19 @@ impl EncodeCell {
             delta_lf_present: dlf_present,
         };
         let derived_lf = pick_filter_level(&lf_frame, allintra, 0, allintra && speed >= 4);
-        p.loopfilter.filter_level = derived_lf.filter_level;
-        p.loopfilter.filter_level_u = derived_lf.filter_level_u;
-        p.loopfilter.filter_level_v = derived_lf.filter_level_v;
+        // C gates av1_pick_filter_level on `!coded_lossless && !allow_intrabc`
+        // (picklpf.c); a screen-content intrabc frame forces the deblock levels
+        // to 0 (the decoder does the same; LR is off ⇒ the LR stage below is
+        // dead for intrabc). Otherwise use the derived levels.
+        if p.allow_intrabc {
+            p.loopfilter.filter_level = [0, 0];
+            p.loopfilter.filter_level_u = 0;
+            p.loopfilter.filter_level_v = 0;
+        } else {
+            p.loopfilter.filter_level = derived_lf.filter_level;
+            p.loopfilter.filter_level_u = derived_lf.filter_level_u;
+            p.loopfilter.filter_level_v = derived_lf.filter_level_v;
+        }
 
         // ---- loop-restoration ENCODER stage (`--enable-restoration` parity).
         // C pipeline (encoder.c `loopfilter_frame` -> `cdef_restoration_frame`):

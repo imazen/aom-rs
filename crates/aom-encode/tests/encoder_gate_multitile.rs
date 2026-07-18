@@ -345,6 +345,7 @@ fn attempt_multitile_case(
         delta_q_present: false,
         delta_q_res: 0,
         allow_screen_content_tools: p.allow_screen_content_tools,
+        allow_intrabc: false,
     };
 
     // Shared full-frame reconstruction buffers -- each tile writes only its own

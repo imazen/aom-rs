@@ -134,6 +134,10 @@ pub struct PackCfg {
     /// reads it, so omitting it desyncs the whole tile-group. MUST equal the
     /// value the real frame header carries.
     pub allow_screen_content_tools: bool,
+    /// The frame header's `allow_intrabc` bit — when true, every KEY block
+    /// codes a `use_intrabc` flag (and its DV when set), exactly as the decoder
+    /// reads it. MUST equal the value the real frame header carries.
+    pub allow_intrabc: bool,
 }
 
 /// Per-64x64-unit CDEF signalling inputs for a CDEF-enabled pack walk —
@@ -249,7 +253,7 @@ pub fn kf_block_state(cfg: &PackCfg, env: &SbEncodeEnv, mib_size: i32) -> KfBloc
         sb_size: env.sb_size,
         bsize: env.sb_size,
         coded_lossless: env.lossless,
-        allow_intrabc: false,
+        allow_intrabc: cfg.allow_intrabc,
         cdef_bits: 0,
         dq_present: cfg.delta_q_present,
         // `--delta-lf-mode=1`: delta-lf rides on the delta-q framework
@@ -357,9 +361,19 @@ pub fn pack_leaf(
         current_qindex: sb_current_qindex,
         delta_lf: [delta_lf_val; 4],
         delta_lf_from_base: delta_lf_val,
-        use_intrabc: 0,
-        dv_row: 0,
-        dv_col: 0,
+        use_intrabc: i32::from(winner.use_intrabc),
+        // write_intrabc_info signals the diff dv - dv_ref (encode_mv,
+        // MV_SUBPEL_NONE); dead (0) for a non-intrabc leaf.
+        dv_row: if winner.use_intrabc {
+            winner.dv_row - winner.dv_ref_row
+        } else {
+            0
+        },
+        dv_col: if winner.use_intrabc {
+            winner.dv_col - winner.dv_ref_col
+        } else {
+            0
+        },
         y_mode: winner.mode as i32,
         angle_delta_y: winner.angle_delta_y,
         uv_mode: winner.uv_mode as i32,
@@ -463,7 +477,13 @@ pub fn pack_leaf(
     //     own stamp) -- the stamp itself happens inside encode_b_intra_dry
     //     below (its step 6), unconditionally, matching set_txfm_ctxs being
     //     called with the same args on both branch sides for intra. ----
-    if cfg.tx_mode_is_select && bsize > 0 && !env.lossless {
+    // Intrabc leaf: the block is is_inter, so the tx size follows the INTER
+    // path. In this port's skip-only intrabc scope the block always chose the
+    // skip arm ⇒ no var-tx quadtree symbol and no coeffs (the decoder infers
+    // the fallback tx size from tx_mode, frame.rs:1933) — so the whole tx-size
+    // symbol + coeff write below is skipped (guarded by `!winner.use_intrabc`
+    // here and `!winner.skip_txfm` at the coeff write).
+    if cfg.tx_mode_is_select && bsize > 0 && !env.lossless && !winner.use_intrabc {
         let a0 = mi_col as usize;
         let l0 = (mi_row & 31) as usize;
         let ctx = get_tx_size_context(
@@ -1069,11 +1089,12 @@ pub fn pack_tile_lr(
     let mi_cols = env.mi_cols as usize;
     let mut search_tile = TileCtxState::zeroed(mi_cols);
     let mut pack_tile_ctx = TileCtxState::zeroed(mi_cols);
-    let mut grid = if pick_cfg.palette_costs.is_some() {
-        ModeGrid::dc_with_palette(env.mi_rows as usize, mi_cols)
-    } else {
-        ModeGrid::dc(env.mi_rows as usize, mi_cols)
-    };
+    let mut grid = ModeGrid::dc_screen(
+        env.mi_rows as usize,
+        mi_cols,
+        pick_cfg.palette_costs.is_some(),
+        pick_cfg.intrabc.is_some(),
+    );
     let mut nbr = MiNbrGrid::zeroed(mi_cols);
     let mut kfs = kf_block_state(pack_cfg, env, sb_mi);
     let mut trees = Vec::new();

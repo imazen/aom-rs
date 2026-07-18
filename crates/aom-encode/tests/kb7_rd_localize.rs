@@ -488,6 +488,7 @@ fn localize_cell(w: usize, h: usize, cq_level: i32, speed: i32, name: &str) -> b
         delta_q_present: false,
         delta_q_res: 0,
         allow_screen_content_tools: p.allow_screen_content_tools,
+        allow_intrabc: false,
     };
 
     let mut recon_y = src_y_strided.clone();

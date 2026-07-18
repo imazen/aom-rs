@@ -1413,15 +1413,18 @@ fn leaf_pick_sb_modes(
                     // uv_mode on chroma-ref blocks; packing is chroma-ref-gated).
                     _ => (0, 0, 0, 0, None),
                 };
+            // An intrabc winner codes DC_PRED / UV_DC_PRED (C's `*mbmi =
+            // best_mbmi`, rdopt.c:3595-3596) — the y/uv mode fields go dead, and
+            // the neighbour mode context (ModeGrid / MiNbrKf) must see DC_PRED.
             let winner = LeafWinner {
                 bsize,
-                mode: best.y.mode,
-                angle_delta_y: best.y.angle_delta,
-                use_filter_intra: best.y.use_filter_intra,
-                filter_intra_mode: best.y.filter_intra_mode,
+                mode: if best.use_intrabc { 0 } else { best.y.mode },
+                angle_delta_y: if best.use_intrabc { 0 } else { best.y.angle_delta },
+                use_filter_intra: !best.use_intrabc && best.y.use_filter_intra,
+                filter_intra_mode: if best.use_intrabc { 0 } else { best.y.filter_intra_mode },
                 tx_size: best.y.tx_size,
                 luma_edge_filter_type,
-                uv_mode,
+                uv_mode: if best.use_intrabc { 0 } else { uv_mode },
                 angle_delta_uv,
                 cfl_alpha_idx,
                 cfl_alpha_signs,

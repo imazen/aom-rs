@@ -776,6 +776,7 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             // `allow_palette = false`). The SCT=on palette path is covered by
             // `encoder_gate_e2e_byte_match`'s real-stream cases.
             allow_screen_content_tools: false,
+            allow_intrabc: false,
         };
 
         // ---- pack ----
@@ -1247,6 +1248,7 @@ fn pack_tile_roundtrips_with_real_costs() {
             // `allow_palette = false`). The SCT=on palette path is covered by
             // `encoder_gate_e2e_byte_match`'s real-stream cases.
             allow_screen_content_tools: false,
+            allow_intrabc: false,
         };
 
         // ---- pack ----

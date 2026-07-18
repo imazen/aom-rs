@@ -547,6 +547,85 @@ pub fn encode_b_intra_dry(
     }
     let is_chroma_ref = is_chroma_reference(mi_row, mi_col, bsize, env.ss_x, env.ss_y);
 
+    // Intra-block-copy leaf: predict from the recon at the DV, then (skip arm,
+    // the only regime this port codes intrabc in — see rd_pick_intrabc_mode_sb)
+    // reset the coeff entropy context to 0 and stamp the skip txfm context.
+    // No residual, no coeff txbs. C: encode_superblock's inter arm +
+    // av1_reset_entropy_context (skip) + set_txfm_ctxs(skip).
+    if winner.use_intrabc {
+        let bw = crate::tx_search::BLK_W_B[bsize];
+        let bh = crate::tx_search::BLK_H_B[bsize];
+        let ref_off_y = env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+        let a0 = mi_col as usize;
+        let l0 = (mi_row & 31) as usize;
+        let (fm_r, fm_c) = (winner.dv_row / 8, winner.dv_col / 8);
+        // Luma: predict into scratch (reads recon at the DV), then commit.
+        let mut pred = vec![0u16; bw * bh];
+        crate::intrabc_search::intrabc_predict_luma(
+            recon_y, ref_off_y, env.stride, fm_r, fm_c, &mut pred, bw, bw, bh,
+        );
+        for r in 0..bh {
+            recon_y[ref_off_y + r * env.stride..ref_off_y + r * env.stride + bw]
+                .copy_from_slice(&pred[r * bw..r * bw + bw]);
+        }
+        // Reset luma coeff entropy context (skip → cul 0).
+        state.above_ectx[0][a0..a0 + mi_w].fill(0);
+        state.left_ectx[0][l0..l0 + mi_h].fill(0);
+
+        let mut u_out = None;
+        let mut v_out = None;
+        if !env.monochrome && is_chroma_ref {
+            let ref_off_uv =
+                chroma_plane_offset(env.base_uv, env.stride, mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+            let plane_bsize = get_plane_block_size(bsize, env.ss_x, env.ss_y);
+            let (pmw, pmh) = (MI_SIZE_WIDE_B[plane_bsize], MI_SIZE_HIGH_B[plane_bsize]);
+            let (cw, ch) = (bw >> env.ss_x, bh >> env.ss_y);
+            let au = (mi_col >> env.ss_x) as usize;
+            let lu = ((mi_row & 31) >> env.ss_y) as usize;
+            for (plane, recon) in [(1usize, &mut *recon_u), (2usize, &mut *recon_v)] {
+                let mut cpred = vec![0u16; cw * ch];
+                crate::intrabc_search::intrabc_predict_chroma(
+                    recon, ref_off_uv, env.stride, winner.dv_row, winner.dv_col, env.ss_x, env.ss_y,
+                    &mut cpred, cw, cw, ch, i32::from(env.bd),
+                );
+                for r in 0..ch {
+                    recon[ref_off_uv + r * env.stride..ref_off_uv + r * env.stride + cw]
+                        .copy_from_slice(&cpred[r * cw..r * cw + cw]);
+                }
+                state.above_ectx[plane][au..au + pmw].fill(0);
+                state.left_ectx[plane][lu..lu + pmh].fill(0);
+            }
+            u_out = Some(EncodeIntraPlaneOutcome {
+                txbs: Vec::new(),
+                ta: Vec::new(),
+                tl: Vec::new(),
+            });
+            v_out = Some(EncodeIntraPlaneOutcome {
+                txbs: Vec::new(),
+                ta: Vec::new(),
+                tl: Vec::new(),
+            });
+        }
+        // set_txfm_ctxs skip convention: ctx = block width/height in pixels.
+        state.above_tctx[a0..a0 + mi_w].fill((mi_w * 4) as u8);
+        state.left_tctx[l0..l0 + mi_h].fill((mi_h * 4) as u8);
+
+        return LeafEncodeOut {
+            mi_row,
+            mi_col,
+            bsize,
+            is_chroma_ref,
+            store_y: false,
+            y: EncodeIntraPlaneOutcome {
+                txbs: Vec::new(),
+                ta: Vec::new(),
+                tl: Vec::new(),
+            },
+            u: u_out,
+            v: v_out,
+        };
+    }
+
     // encode_superblock step 1: store_y = store_cfl_required(cm, xd).
     let store_y = store_cfl_required(env.monochrome, is_chroma_ref, winner.uv_mode);
 

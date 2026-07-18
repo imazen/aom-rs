@@ -465,6 +465,7 @@ fn run_and_localize(cq_level: i32, mono: bool) -> bool {
         allow_update_cdf: !p.prefix.disable_cdf_update,
         base_qindex: qindex,
         allow_screen_content_tools: p.allow_screen_content_tools,
+        allow_intrabc: false,
         delta_q_present: false,
         delta_q_res: 0,
     };

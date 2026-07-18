@@ -454,6 +454,7 @@ fn localize_mono(
         delta_q_present: false,
         delta_q_res: 0,
         allow_screen_content_tools: p.allow_screen_content_tools,
+        allow_intrabc: false,
     };
 
     let mut recon_y = src_y_strided.clone();

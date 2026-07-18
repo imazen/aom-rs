@@ -617,6 +617,7 @@ fn run_tune_case(
         delta_q_present,
         delta_q_res,
         allow_screen_content_tools: p.allow_screen_content_tools,
+        allow_intrabc: false,
     };
 
     let mut recon_y = src_y_strided.clone();
