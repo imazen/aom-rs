@@ -65,15 +65,29 @@ so no mutex). This is the STEP-0 tool for every future ratchet target.
 - **Chunk 0** (`aom-recon` crate, `reconstruct_txb`) is already wired into aom-decode
   (`crates/aom-decode/src/lib.rs:160` `use aom_recon::reconstruct_txb;`) — use it for 1e.
 
-## In progress (parallel background agent)
-- **Chunk 1d — new `aom-inter` crate** (single-ref translational MC facade over
-  `aom-convolve`): a sibling-worktree agent is building `build_inter_predictor` (facade
-  dispatch copy/x/y/2d by subpel + `extend_mc_border` + subpel/chroma-offset derivation)
-  with a differential vs the exported C `inter_predictor`. It appends to `aom-sys-ref`
-  (`shim/inter_shim.c` + `build.rs` + `src/lib.rs`) and the workspace `Cargo.toml`. NOT yet
-  on main as of this writing — check `git log origin/main` for an `aom-inter` commit.
-  Note: `aom-convolve` kernels (`convolve_{x,y,2d}_sr`, lowbd, filter types 0/1/2) are
-  ALREADY byte-exact vs C (120k-case `convolve_diff.rs`), round_0=3 / round_1=11.
+## Chunk 1d — LANDED (`9b6a061`, verified)
+- **`aom-inter` crate** (`crates/aom-inter/src/lib.rs`): single-ref translational MC.
+  ```rust
+  pub fn build_inter_predictor(
+      ref_plane:&[u16], ref_stride:usize, ref_w:usize, ref_h:usize,
+      dst:&mut[u16], dst_off:usize, dst_stride:usize,
+      blk_x:usize, blk_y:usize, w:usize, h:usize,
+      mv_row:i32, mv_col:i32, ss_x:usize, ss_y:usize, filter_x:usize, filter_y:usize)
+  ```
+  plus `pub fn inter_predictor(..)` (facade) + `pub fn build_mc_border(..)`. Ported from
+  `dec_calc_subpel_params` (unscaled), `build_mc_border`/`extend_mc_border`,
+  `inter_predictor`→`av1_convolve_2d_facade`→`convolve_2d_facade_single`. u16 bd8 planes
+  gathered into a u8 scratch for the aom-convolve kernels.
+- **Differentials (byte-identical vs real C), all passing** (`tests/inter_pred_diff.rs`):
+  `facade_matches_c` 40k iters vs C `inter_predictor` (sizes {8,16,32,64}², subpel 0..15
+  each axis, filters 0..2, incl. dual-filter 2-D); `build_mc_border_matches_c` 40k iters vs
+  C `build_mc_border` (all 4 OOB edges); smoke test of the full public path.
+- **Limitations (later chunks):** `w<=4`/`h<=4` 4-tap NOT handled (`debug_assert!(w>4&&h>4)`;
+  aom-convolve is 8-tap only — the 64x64 target's 64/32-wide blocks are fine, but the 16x16
+  RATCHET will hit sub-8-wide blocks → port `av1_get_interp_filter_params_with_block_size`
+  4-tap first). No highbd / compound / OBMC / warp / scaled. The frame-edge MV clamp
+  `clamp_mv_to_umv_border_sb` (reconinter.h:343, needs `mb_to_*_edge`) is the CALLER's job
+  (apply it in the 1c driver before calling `build_inter_predictor`).
 
 ## Architecture map (verified file:line — from source, not the roadmap's drifted refs)
 
@@ -171,7 +185,24 @@ frame 0 then N via the public codec API, return frame N's planes) — append to 
 AFTER the 1d agent lands to avoid a shim collision.
 
 ## Honest fraction
-DONE: STEP-0 de-risk (+ corrected target with full evidence); Chunk 1c CDF tables
-(verified, on main). IN FLIGHT: Chunk 1d MC crate (parallel agent). NOT STARTED: 1a/1b, the
-1c mode-info driver, 1e, 1f. **The frame-1 byte-exact gate is NOT met** — the skeleton is
-NOT done.
+DONE (verified, on main): STEP-0 de-risk (+ corrected target with full evidence); Chunk 1c
+CDF tables (`b1fe0a3`); **Chunk 1d MC crate `aom-inter` (`9b6a061`, 80k-iter differentials
+byte-identical vs C)**. NOT STARTED: 1a (multi-frame loop + RefFrame — aom-decode has zero
+multi-frame state), 1b (inter header state wiring), the 1c inter mode-info DRIVER +
+generalized `dv_ref` scan (mode_context/newmv_count), 1e (reconstruct), 1f (gate). **The
+frame-1 byte-exact gate is NOT met — the skeleton is NOT done.**
+
+### Recommended continuation order (MC + CDFs are now ready)
+1. **1c generalized scan first** (self-contained, cleanly differential-verifiable now that
+   aom-sys-ref is free): extend `dv_ref.rs` `find_dv_ref_mvs` → an inter `find_inter_mv_refs`
+   emitting `mode_context`/`newmv_count` (restore the dropped `av1_mode_context_analyzer`
+   arm + `process_single_ref_mv_candidate` sign-bias + gm_mv). Differential: extend
+   `shim_find_dv_ref_mvs` (dec_shim.c) to a real LAST_FRAME ref + extract `mode_context`.
+   For the 64x64 target this returns EMPTY + the isolated-block mode_context.
+2. **1a multi-frame loop + RefFrame** (aom-decode): stateful decoder; frame 0 via the
+   existing path (verify frame-0 md5 unchanged as a regression), store filtered recon as a
+   RefFrame; parse frame 1's header.
+3. **1c driver** wiring the dormant readers (+ the scan) for the single inter block, then
+   **1e** (`build_inter_predictor` → `reconstruct_txb`), then **1f** (`scope_for` + md5 gate).
+Verify the PARSE against the `/tmp/inspect_frame` census (mode=NEWMV, ref=LAST, the mv)
+before chasing pixels.
