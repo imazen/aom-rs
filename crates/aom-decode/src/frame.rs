@@ -469,7 +469,6 @@ fn parse_frame_header(
     let key_shown = !probe.prefix.show_existing_frame
         && probe.prefix.frame_type == 0
         && probe.prefix.show_frame;
-    let coded_lossless = key_shown && frame_coded_lossless(&probe);
     // Superres codes the tile info (and everything after the frame size) over the
     // DOWNSCALED mi grid — `compute_image_size` derives MiCols from the reduced
     // FrameWidth. The frame size (including the superres denom) is read correctly
@@ -478,26 +477,57 @@ fn parse_frame_header(
     // downscaled mi grid (composed with the coded-lossless re-parse).
     let superres_denom = probe.frame_size.scale_denominator;
     let superres = crate::superres::superres_scaled(superres_denom);
-    let (p, mut rb) = if coded_lossless || superres {
-        let mut cfg2 = cfg.clone();
-        if coded_lossless {
+    // Under superres the probe's full (upscaled-width) tile_info is OVER-SIZED, so
+    // every field the probe reads after it — the quant params included — comes off
+    // a shifted bit position and is garbage. `coded_lossless` MUST therefore be
+    // decided from quant read with the CORRECT (downscaled) grid; detecting it from
+    // the probe's garbage FALSE-POSITIVES (a normal frame reads as qindex 0), which
+    // would then drop the loop-filter + CDEF header sections and desync the
+    // tile-data offset (KB-14: the denom-16 exact-2:1 corner, where the coded frame
+    // is a single 64-wide superblock, was the first stream to trip this). So when
+    // superres is active, parse a probe on the downscaled grid FIRST and reuse it as
+    // the final header (re-parsing only if it turns out to be coded-lossless).
+    let sr_probe = superres.then(|| {
+        let coded_w = crate::superres::coded_frame_width(
+            probe.frame_size.superres_upscaled_width,
+            superres_denom,
+        );
+        let mut cfg_sr = cfg.clone();
+        cfg_sr.superres_scaled = true;
+        cfg_sr.tile_info = tile_limits(mi_dim(coded_w), mi_rows, mib_size_log2);
+        let mut rb_sr = ReadBitBuffer::new(payload);
+        let p_sr = read_uncompressed_header(&mut rb_sr, &cfg_sr);
+        (cfg_sr, p_sr, rb_sr)
+    });
+    let coded_lossless =
+        key_shown && frame_coded_lossless(sr_probe.as_ref().map_or(&probe, |(_, p_sr, _)| p_sr));
+    let (p, mut rb) = match sr_probe {
+        // Superres. `cfg_sr`/`p_sr` already use the downscaled grid; `p_sr` was
+        // parsed with coded_lossless=false (all_lossless is always false under
+        // superres = coded_lossless && !superres_scaled). Reuse it unless the frame
+        // is coded-lossless, which gates the loop-filter/CDEF sections off and needs
+        // one more parse with the flag set.
+        Some((mut cfg_sr, p_sr, rb_sr)) => {
+            if coded_lossless {
+                cfg_sr.coded_lossless = true;
+                let mut rb2 = ReadBitBuffer::new(payload);
+                let p2 = read_uncompressed_header(&mut rb2, &cfg_sr);
+                (p2, rb2)
+            } else {
+                (p_sr, rb_sr)
+            }
+        }
+        // No superres: the probe is authoritative. Re-parse only for coded-lossless
+        // (all_lossless = coded_lossless && !superres_scaled = coded_lossless).
+        None if coded_lossless => {
+            let mut cfg2 = cfg.clone();
             cfg2.coded_lossless = true;
+            cfg2.all_lossless = true;
+            let mut rb2 = ReadBitBuffer::new(payload);
+            let p2 = read_uncompressed_header(&mut rb2, &cfg2);
+            (p2, rb2)
         }
-        // all_lossless = coded_lossless && !superres_scaled (decodeframe.c).
-        cfg2.all_lossless = coded_lossless && !superres;
-        if superres {
-            cfg2.superres_scaled = true;
-            let coded_w = crate::superres::coded_frame_width(
-                probe.frame_size.superres_upscaled_width,
-                superres_denom,
-            );
-            cfg2.tile_info = tile_limits(mi_dim(coded_w), mi_rows, mib_size_log2);
-        }
-        let mut rb2 = ReadBitBuffer::new(payload);
-        let p2 = read_uncompressed_header(&mut rb2, &cfg2);
-        (p2, rb2)
-    } else {
-        (probe, rb)
+        None => (probe, rb),
     };
 
     // --- envelope gates, in bitstream order ---

@@ -18,6 +18,8 @@ use aom_decode::frame::{
 use aom_decode::superres::coded_frame_width;
 use aom_sys_ref as c;
 
+mod common;
+
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -291,4 +293,108 @@ fn superres_lr_composed_byte_identical_to_c() {
         "no superres+LR stream carried restoration syntax ({lr_seen}) — LR composition unproven"
     );
     eprintln!("superres+LR: {n} streams byte-identical, {lr_seen} carried LR syntax");
+}
+
+/// KB-14 REGRESSION GATE: superres denom-16 (exact-2:1) streams whose CODED frame
+/// is a single 64-wide superblock (`coded_w <= 64`, one SB column, recon stride
+/// 64), decoded byte-identically to the C decoder + a golden per-plane MD5.
+///
+/// This is the corner that shipped broken. Before the fix in
+/// `parse_frame_header`, the header PROBE parses on the full (upscaled-width) mi
+/// grid, so for a superres frame its tile_info is over-sized and the quant that
+/// follows is read off a shifted bit position — garbage that false-detects as
+/// coded-lossless. The decoder then dropped the loop-filter + CDEF header sections
+/// and desynced the tile-data offset, decoding the whole luma plane to a flat 128.
+/// The mono/colour gates above never reached this: their smallest coded width was
+/// 50 AND photographic content dodged the false-positive. These widths give a
+/// coded frame of exactly one SB column, and the smooth low-rate content reliably
+/// trips the false-lossless read — so reverting the fix flips every cell here to
+/// the flat-128 mismatch. NO graceful skip: every cell is a hard byte-identity +
+/// golden-MD5 assertion.
+#[test]
+fn superres_denom16_single_sb_column_byte_identical_kb14() {
+    const DENOM: i32 = 16;
+    // (upscaled_w, height, cq, golden_md5_of_luma). Every upscaled width here has
+    // a denom-16 coded width <= 64 (a single 64-wide SB column). Height 128 = two
+    // SB rows (the first SB row was the plane region that went flat).
+    let cases: &[(usize, usize, i32, &str)] = &[
+        (128, 128, 32, "7d213a6efe512fd978e13617f03dc97a"), // exact 2:1 -> coded 64
+        (126, 128, 32, "9a5a0910eaec10ab4fd82bd287f6a94b"), // coded 63
+        (120, 128, 32, "adb13a28a4e42e09578dade8e16e41b5"), // coded 60
+        (116, 128, 32, "e95ae2f7b9ca0de93ab35cd81c00ebfa"), // coded 58
+        (100, 128, 32, "329ff483a9d71c2227cef04dd6c4fa6d"), // coded 50
+    ];
+    let mut n = 0u32;
+    for &(w, h, cq, golden) in cases {
+        let y = gen_plane(w, h, 8, 0x51 ^ w as u64 ^ ((h as u64) << 20), false);
+        let bytes = c::ref_encode_av1_kf_superres(
+            &y,
+            &[],
+            &[],
+            w,
+            h,
+            8,
+            true,
+            1,
+            1,
+            cq,
+            0,
+            false,
+            false,
+            0,
+            DENOM,
+        );
+        assert!(
+            bytes.len() > 50,
+            "{w}x{h}: suspiciously small superres stream ({})",
+            bytes.len()
+        );
+
+        // Anti-vacuous: a real exact-2:1 downscale to a single-SB-column coded frame.
+        let coded_w = coded_frame_width(w as i32, DENOM);
+        assert!(
+            (33..=64).contains(&coded_w),
+            "{w}: coded_w {coded_w} is not a single 64-wide SB column (KB-14 regime)"
+        );
+        assert!(
+            coded_w < w as i32,
+            "{w}: no real downscale (coded {coded_w})"
+        );
+
+        // Port full-pipeline decode + the C gold oracle at the upscaled dims.
+        let port = decode_frame_obus(&bytes)
+            .unwrap_or_else(|e| panic!("{w}x{h} D{DENOM}: port decode rejected: {e}"));
+        let cref = c::ref_decode_av1_kf(&bytes, w, h);
+        assert_eq!((port.width, port.height), (w, h), "{w}x{h}: upscaled dims");
+        assert_eq!(cref.info[0], 8, "bd8");
+        assert!(cref.info[1] != 0, "monochrome");
+
+        // The KB-14 signature was a FLAT luma plane (upscaled DC-128). Guard it
+        // explicitly so a revert reads as "flat luma", not just "!= C".
+        assert!(
+            port.y.iter().any(|&px| px != port.y[0]),
+            "{w}x{h} D{DENOM}: upscaled luma is constant — KB-14 flat-128 regression"
+        );
+        // THE GATE: byte-identical to the C decoder.
+        assert_eq!(
+            port.y, cref.y,
+            "{w}x{h} D{DENOM}: LUMA mismatch vs C decoder (KB-14 single-SB-column superres)"
+        );
+        assert!(port.u.is_empty() && port.v.is_empty(), "mono has no chroma");
+
+        // Golden per-plane MD5 anchor — locks the exact decoded pixels forever.
+        let got = common::md5::planes_hex(&[&port.y]);
+        eprintln!("  KB-14 {w}x{h} cq{cq} coded_w={coded_w}: luma md5 {got}");
+        assert_eq!(
+            got, golden,
+            "{w}x{h} D{DENOM}: golden luma MD5 drift (got {got}, expected {golden})"
+        );
+        n += 1;
+    }
+    assert_eq!(
+        n as usize,
+        cases.len(),
+        "all KB-14 single-SB-column cells ran"
+    );
+    eprintln!("KB-14 denom-16 single-SB-column: {n} streams byte-identical + golden MD5");
 }

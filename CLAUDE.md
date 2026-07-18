@@ -944,23 +944,41 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
 - **Tracking:** task **#39**. Next: sibling-C RD/prune dump at a representative 16X16 node (the
   KB-3/KB-7 method) to find which prune C applies that the port doesn't; graduate the cells it closes.
 
-### KB-14 — Decoder: superres denom-16 (exact-2:1) horizontal UPSCALE diverges from C — REAL divergence (decoder track)
-- **Symptom (found 2026-07-18 via the ENCODER superres QTHRESH gate):** for a superres KEY stream
-  coded at denom **16** (coded_width = UpscaledWidth/2 exactly; e.g. 128→64), the port decoder's
-  normative horizontal upscale disagrees with the C decoder on the luma recon — **on a
-  BYTE-IDENTICAL stream** (the port ENCODER emits the exact real-aomenc bytes, `port_tu == c_tu`,
-  proven in `encoder_gate_superres_qthresh_e2e`). So this is purely a decoder-side upscale bug, NOT
-  an encoder issue. Denoms **9..15 are fine** (the FIXED superres gate decode-both-agrees at
-  9/12/14, and the RANDOM e2e at 9/11/14/15) — only the exact-2:1 ratio (denom 16) trips it.
-- **Likely locus:** `aom-decode/src/superres.rs` — `upscale_plane` / `get_upscale_convolve_x0` /
-  `get_upscale_convolve_step` at `in_length*2 == out_length` (the `err`/x0 fixed-point init or the
-  step for the exact-half ratio). Denom-16 superres decode was never exercised before (the FIXED
-  gate asserted-OUT of the denom-16 corner), so this path is newly reached.
-- **Scope/impact:** decoder-only; the encoder is byte-exact at denom 16. The encoder superres gate
-  skips the (redundant) decode-both cross-check for byte-identical streams and asserts the encode
-  byte-identity instead, so it is green; this KB tracks the decoder fix. Per zero-tolerance (wrong
-  pixels), fix before any denom-16 superres decode ships. **Next step:** decode-both localize the
-  first diverging column of a denom-16 upscaled row vs the C `av1_upscale_normative` oracle.
+### KB-14 — Decoder: superres single-SB-column coded frame decoded flat — FIXED ✅ (header coded-lossless false-positive; NOT the upscale)
+- **FIXED 2026-07-18.** Root cause is the HEADER PARSE, **not** the normative upscale (the original
+  "likely locus: `upscale_plane`/`get_upscale_convolve_x0`" guess was WRONG — `superres.rs` is
+  byte-faithful to `av1_convolve_horiz_rs_c`; the coded recon fed to it was already flat).
+- **Symptom (found 2026-07-18 via the ENCODER superres QTHRESH gate):** a superres KEY stream whose
+  CODED frame is **a single 64-wide superblock** (`coded_w <= 64`, one SB column, recon stride 64 —
+  first reached at denom 16 / exact-2:1, e.g. 128→64) decoded to a **flat-128 luma plane** (the
+  whole first SB row went to the DC no-neighbour default; content cascaded wrong below it). The
+  encoder was byte-exact (`port_tu == c_tu`); purely decoder-side.
+- **Root cause (decode-both localized):** the two-phase header parse in `parse_frame_header`
+  (`aom-decode/src/frame.rs`). The PROBE parses on the full (upscaled-width) mi grid; under superres
+  its `tile_info` is OVER-SIZED, so every field the probe reads after it — the quant params included
+  — comes off a shifted bit position and is garbage. `coded_lossless` was computed from that garbage
+  probe (`frame_coded_lossless(&probe)`), and for these streams it **FALSE-POSITIVED** (a normal
+  qindex-128 frame read as lossless). The superres re-parse then set `cfg2.coded_lossless = true`,
+  which **drops the loop-filter + CDEF header sections** (`read_uncompressed_header`'s
+  `if !coded_lossless` gate), so the header ended ~2 bytes early → `tile_data_off` off by 2 → the
+  tile arithmetic decoder started on the wrong bytes → SB(0,0)'s BLOCK_64X64/TX_64X64 read
+  `EOB=1`/skip where C reads real coeffs → flat-128. Why only `coded_w<=64`: only there does the
+  probe's sb_cols (upscaled) differ from the coded sb_cols such that the misread quant lands on a
+  lossless-looking pattern (denoms 9-15 and wider coded frames keep sb_cols matching, so the probe's
+  quant was accidentally still right; single-SB-column plain frames re-parse identically and always
+  worked). CONTENT/qindex-dependent because whether the garbage looks lossless depends on the exact
+  bits.
+- **Fix:** derive `coded_lossless` from quant read with the CORRECT (downscaled) mi grid. When
+  superres is active, parse a probe on the downscaled `tile_info` FIRST and decide lossless from IT
+  (reused as the final header unless it really is coded-lossless). Handles all four cases (±superres
+  × ±lossless); non-superres path unchanged. `frame.rs` `parse_frame_header` (~L490-528).
+- **Regression gate (Gate-1, asserted, NO graceful skip):**
+  `superres_denom16_single_sb_column_byte_identical_kb14` in `aom-decode/tests/superres_diff.rs` — 5
+  single-SB-column upscaled widths (128/126/120/116/100 → coded 64/63/60/58/50) at denom 16, each
+  decoded byte-identical to the C decoder + a golden per-plane MD5 (shared `tests/common/md5.rs`) +
+  an explicit "flat-128" guard. **Proven revert-catching:** stashing only the `frame.rs` fix flips
+  every cell to the flat-128 mismatch. The existing `superres_diff` denoms 9/12/16 arms + the full
+  Gate-1 conformance corpus + `real_bitstream` (incl. sb128/multi-tile) stay green.
 
 ### KB-15 — Encoder: IntraBC (screen content) — SEARCH + skip-arm + wiring LANDED; PINNED on the inter var-tx COEFF ARM
 - **Status (2026-07-18):** `rd_pick_intrabc_mode_sb` (`aom-encode/src/intrabc_search.rs`) is WIRED
