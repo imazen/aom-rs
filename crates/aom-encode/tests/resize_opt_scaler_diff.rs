@@ -68,3 +68,18 @@ fn optimized_scaler_2to1_horizontal_matches_c() {
         check(kind, 160, 96, 80, 96);
     }
 }
+
+/// Partial-block dims: dst width/height NOT a multiple of 16 — the last 16×16
+/// block clips to a smaller `work_w`/`work_h`, taking C's `aom_scaled_2d_c`
+/// border path. A denom-16 superres frame whose coded width isn't a multiple of
+/// 16 (e.g. 100→50) hits this, so it must be bit-exact too.
+#[test]
+fn optimized_scaler_partial_blocks_match_c() {
+    c::ref_init();
+    for kind in 0..5u32 {
+        check(kind, 100, 100, 50, 100); // dst 50x100: partial cols AND rows
+        check(kind, 72, 72, 36, 72); // dst 36x72
+        check(kind, 40, 40, 20, 40); // dst 20x40 (single partial col block)
+        check(kind, 196, 100, 98, 100); // dst 98x100 (superres 196@denom16-ish)
+    }
+}
