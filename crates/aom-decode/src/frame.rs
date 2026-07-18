@@ -376,6 +376,22 @@ fn parse_frame_header(
     payload: &[u8],
     is_obu_frame: bool,
 ) -> Result<ParsedFrame, String> {
+    parse_frame_header_ext(seq, payload, is_obu_frame, false)
+}
+
+/// [`parse_frame_header`] with an `allow_inter` gate. When `false` (the
+/// single-KEY-frame path), an inter frame is rejected as before. When `true`
+/// (the multi-frame [`decode_frames`] path), an INTER frame is accepted: the
+/// ref-mv gate inputs `read_uncompressed_header` consumes
+/// (`might_allow_ref_frame_mvs`, `cur_frame_force_integer_mv`) are derived from
+/// the sequence header (the `01-size-*` envelope: `enable_ref_frame_mvs` +
+/// `enable_order_hint`, `force_integer_mv == 0`, non-error-resilient).
+fn parse_frame_header_ext(
+    seq: &SequenceHeaderObu,
+    payload: &[u8],
+    is_obu_frame: bool,
+    allow_inter: bool,
+) -> Result<ParsedFrame, String> {
     let s = &seq.seq_header;
     let c = &seq.color_config;
     let num_planes = if c.monochrome { 1 } else { 3 };
@@ -385,7 +401,7 @@ fn parse_frame_header(
     let mi_cols = mi_dim(s.max_frame_width);
     let mi_rows = mi_dim(s.max_frame_height);
 
-    let cfg = FrameHeaderObu {
+    let mut cfg = FrameHeaderObu {
         prefix: FrameHeaderPrefix {
             reduced_still_picture_hdr: seq.reduced_still_picture_hdr,
             decoder_model_info_present_flag: seq.decoder_model_info_present_flag,
@@ -451,6 +467,15 @@ fn parse_frame_header(
         // when the stream is coded-lossless.
         ..Default::default()
     };
+    if allow_inter {
+        // Ref-mv gate input `read_uncompressed_header`'s inter branch consumes.
+        // `use_ref_frame_mvs = enable_ref_frame_mvs && enable_order_hint &&
+        // !error_resilient_mode && !FrameIsIntra` (spec 5.9.2); the envelope is
+        // non-error-resilient, so derive from the sequence flags.
+        // (`cur_frame_force_integer_mv` is read from the stream by the prefix,
+        // so it is NOT set here.)
+        cfg.might_allow_ref_frame_mvs = s.enable_ref_frame_mvs && s.enable_order_hint;
+    }
 
     // Two-phase header parse for coded-lossless. `read_uncompressed_header` gates
     // its loop-filter / CDEF / restoration / tx-mode reads on
@@ -534,8 +559,11 @@ fn parse_frame_header(
     if p.prefix.show_existing_frame {
         return Err("show_existing_frame".into());
     }
-    if p.prefix.frame_type != 0 {
-        return Err(format!("frame_type {} (KEY only)", p.prefix.frame_type));
+    // frame_type: 0=KEY, 1=INTER, 2=INTRA_ONLY, 3=SWITCH. The single-frame path
+    // accepts only KEY; the multi-frame path additionally accepts INTER (the
+    // inter walking-skeleton envelope).
+    if p.prefix.frame_type != 0 && !(allow_inter && p.prefix.frame_type == 1) {
+        return Err(format!("frame_type {} (unsupported)", p.prefix.frame_type));
     }
     if !p.prefix.show_frame {
         return Err("unshown frame".into());
@@ -642,48 +670,15 @@ fn parse_frame_header(
 /// to cropped planes. Hard-errors on anything outside the documented envelope.
 pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, String> {
     let (mut t, cfg, header) = decode_frame_obus_prefilter(data)?;
-    if header.loopfilter.filter_level != [0, 0] {
-        apply_deblock(&mut t, &cfg, &header);
-    }
-    // The C decoder's do_cdef gate (decodeframe.c:5417): !skip_loop_filter
-    // (a decoder option, always off here) && !coded_lossless (rejected
-    // upstream) && any CDEF syntax present. allow_intrabc (which would force
-    // cdef_bits == 0) and multi-tile large-scale decoding are rejected too.
-    let cd = &header.cdef;
-    let do_cdef = cd.cdef_bits != 0 || cd.cdef_strengths[0] != 0 || cd.cdef_uv_strengths[0] != 0;
-    let do_lr = cfg.lr.any_enabled();
-    let do_superres = superres::superres_scaled(header.frame_size.scale_denominator);
-    // decodeframe.c:5422: optimized_loop_restoration = !do_cdef && !do_superres.
-    // The non-optimized arm saves the DEBLOCKED rows (pre-CDEF) as internal
-    // stripe boundary context before CDEF runs, and the CDEF output rows as
-    // frame-edge context after; the optimized arm saves nothing (the frame's own
-    // rows are the context). Superres ALWAYS takes the non-optimized arm (even
-    // with CDEF off) because the boundary rows must be upscaled.
-    let optimized_lr = !do_cdef && !do_superres;
-    let mut pre_cdef =
-        (do_lr && !optimized_lr).then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
-    if do_cdef {
-        apply_cdef(&mut t, &cfg, &header);
-    }
-    // Superres upscale (decodeframe.c:5451 `superres_post_decode`): AFTER CDEF,
-    // BEFORE loop restoration. Horizontal-only; widens the coded (downscaled)
-    // recon back to UpscaledWidth. The pre-CDEF deblocked snapshot that feeds
-    // LR's internal stripe boundaries is upscaled the same way — matching C's
-    // `save_deblock_boundary_lines`, which runs `av1_upscale_normative_rows` on
-    // those boundary rows — so LR runs entirely in the upscaled domain.
-    if do_superres {
-        let (ds_stride, ds_stride_uv) = (t.stride, t.stride_uv);
-        apply_superres(&mut t, &cfg, &header);
-        if let Some((dy, du, dv)) = pre_cdef.take() {
-            let (uy, _, uu, uv, _) =
-                superres_upscale_planes(&dy, &du, &dv, ds_stride, ds_stride_uv, &cfg, &header);
-            pre_cdef = Some((uy, uu, uv));
-        }
-    }
-    if do_lr {
-        apply_restoration(&mut t, &cfg, pre_cdef.as_ref(), optimized_lr);
-    }
-    let mut fd = finish_frame(t, &cfg, &header);
+    run_post_filters(&mut t, &cfg, &header);
+    Ok(finish_and_grain(t, &cfg, &header))
+}
+
+/// Crop the filtered reconstruction to the display planes and apply film grain
+/// (the final post-reconstruction output stage). Shared by [`decode_frame_obus`]
+/// and the multi-frame [`decode_frames`] path.
+fn finish_and_grain(t: KfTileDecode, cfg: &KfTileConfig, header: &FrameHeaderObu) -> FrameDecode {
+    let mut fd = finish_frame(t, cfg, header);
     // Film grain is applied at the decoder as the final post-reconstruction
     // output stage (av1_add_film_grain), on the cropped display planes, exactly
     // as `aom_codec_get_frame` does. Byte-identical to C (film_grain_diff.rs).
@@ -708,7 +703,127 @@ pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, String> {
         fd.u = gu;
         fd.v = gv;
     }
-    Ok(fd)
+    fd
+}
+
+/// Decode an AV1 bitstream that may contain INTER frames after the KEY frame,
+/// returning one [`FrameDecode`] per shown frame in decode order. The inter
+/// walking-skeleton envelope (`av1-1-b8-01-size-*`): a KEY frame 0 whose
+/// filtered reconstruction becomes the single `LAST` reference for the inter
+/// frames that follow (`primary_ref = NONE`, single reference, no forward CDF
+/// chain). The single-KEY-frame [`decode_frame_obus`] is unchanged.
+pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, String> {
+    let mut pos = 0usize;
+    let mut seq: Option<SequenceHeaderObu> = None;
+    let mut pending_header: Option<FrameHeaderObu> = None;
+    let mut out: Vec<FrameDecode> = Vec::new();
+    // The reference DPB: for this envelope a single stored `LAST` reference is
+    // sufficient (frame 0's filtered recon feeds every following inter frame).
+    let mut last_ref: Option<crate::RefFrame> = None;
+
+    while pos < data.len() {
+        let h = read_obu_header(&data[pos..]).ok_or("bad OBU header")?;
+        if !h.obu_has_size_field {
+            return Err("OBU without size field".into());
+        }
+        let (size, size_len) =
+            uleb_decode(&data[pos + h.header_len..]).ok_or("bad OBU size leb128")?;
+        let body = pos + h.header_len + size_len;
+        let end = body + size as usize;
+        if end > data.len() {
+            return Err("OBU size past end of data".into());
+        }
+        let payload = &data[body..end];
+
+        match h.obu_type {
+            2 => {} // OBU_TEMPORAL_DELIMITER
+            1 => {
+                let mut rb = ReadBitBuffer::new(payload);
+                let sh = read_sequence_header_obu(&mut rb);
+                let cc = &sh.color_config;
+                if !cc.monochrome {
+                    let ss = (cc.subsampling_x, cc.subsampling_y);
+                    if !matches!(ss, (0, 0) | (1, 0) | (1, 1)) {
+                        return Err(format!("unsupported subsampling {ss:?}"));
+                    }
+                }
+                seq = Some(sh);
+            }
+            3 => {
+                let sh = seq.as_ref().ok_or("frame header before sequence header")?;
+                let pf = parse_frame_header_ext(sh, payload, false, true)?;
+                pending_header = Some(pf.header);
+            }
+            4 | 6 => {
+                let sh = seq.as_ref().ok_or("frame before sequence header")?;
+                let (header, tile_data) = if h.obu_type == 6 {
+                    let pf = parse_frame_header_ext(sh, payload, true, true)?;
+                    let off = pf.tile_data_off.unwrap();
+                    (pf.header, &payload[off..])
+                } else {
+                    let header = pending_header
+                        .take()
+                        .ok_or("tile group without frame header")?;
+                    let mut rb = ReadBitBuffer::new(payload);
+                    read_full_tile_group(&mut rb, &header.tile_info)?;
+                    let off = rb.bytes_read();
+                    (header, &payload[off..])
+                };
+                let (mut t, cfg, hdr) = if header.prefix.frame_type == 1 {
+                    let last = last_ref
+                        .as_ref()
+                        .ok_or("inter frame decoded before any reference frame")?;
+                    decode_inter_tile_payload(sh, &header, tile_data, last)?
+                } else {
+                    decode_tile_payload(sh, &header, tile_data)?
+                };
+                run_post_filters(&mut t, &cfg, &hdr);
+                // Store the FILTERED reconstruction (pre-crop, pre-film-grain) as
+                // the reference for later frames. Every `01-size-*` frame refreshes
+                // at least one slot; a single stored `LAST` covers this envelope.
+                if hdr.prefix.refresh_frame_flags != 0 {
+                    last_ref = Some(crate::RefFrame::from_filtered(&t, hdr.prefix.order_hint));
+                }
+                out.push(finish_and_grain(t, &cfg, &hdr));
+            }
+            5 | 15 => {} // OBU_METADATA | OBU_PADDING
+            t => return Err(format!("unsupported OBU type {t}")),
+        }
+        pos = end;
+    }
+
+    if out.is_empty() {
+        return Err("no frame in stream".into());
+    }
+    Ok(out)
+}
+
+/// The INTER analogue of [`decode_tile_payload`]: build the shared tile config +
+/// the inter frame-level config (single `LAST` reference) and drive the inter
+/// tile decode.
+fn decode_inter_tile_payload(
+    seq: &SequenceHeaderObu,
+    p: &FrameHeaderObu,
+    tile_data: &[u8],
+    last: &crate::RefFrame,
+) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), String> {
+    let cfg = build_tile_cfg(seq, p);
+    let inter = crate::InterFrameCfg {
+        last,
+        allow_high_precision_mv: p.allow_high_precision_mv,
+        cur_frame_force_integer_mv: p.cur_frame_force_integer_mv,
+        interp_filter: p.interp_filter,
+        switchable_motion_mode: p.switchable_motion_mode,
+        allow_ref_frame_mvs: p.allow_ref_frame_mvs,
+        reference_mode_select: p.reference_mode_select,
+        enable_dual_filter: seq.seq_header.enable_dual_filter,
+        allow_warped_motion: p.allow_warped_motion,
+        skip_mode_allowed: p.skip_mode_allowed,
+        order_hint: p.prefix.order_hint,
+    };
+    let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
+    let t = crate::decode_frame_tiles_inter(&tiles, &cfg, &inter, 0);
+    Ok((t, cfg, p.clone()))
 }
 
 /// Run [`aom_restore::frame::loop_restoration_filter_frame`] over the
@@ -856,6 +971,56 @@ pub fn apply_superres(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderO
     t.stride_uv = s_uv;
 }
 
+/// The in-place post-reconstruction filter pipeline (deblock -> CDEF ->
+/// superres -> loop restoration), mutating `t` from the tile-decoded pre-filter
+/// state to the final FILTERED reconstruction (still mi-aligned, pre-crop,
+/// pre-film-grain). Shared by [`decode_frame_obus`] (single KEY frame) and the
+/// multi-frame [`crate::inter::decode_frames`] path (where the filtered result
+/// also becomes a reference frame).
+pub(crate) fn run_post_filters(t: &mut KfTileDecode, cfg: &KfTileConfig, header: &FrameHeaderObu) {
+    if header.loopfilter.filter_level != [0, 0] {
+        apply_deblock(t, cfg, header);
+    }
+    // The C decoder's do_cdef gate (decodeframe.c:5417): !skip_loop_filter
+    // (a decoder option, always off here) && !coded_lossless (rejected
+    // upstream) && any CDEF syntax present. allow_intrabc (which would force
+    // cdef_bits == 0) and multi-tile large-scale decoding are rejected too.
+    let cd = &header.cdef;
+    let do_cdef = cd.cdef_bits != 0 || cd.cdef_strengths[0] != 0 || cd.cdef_uv_strengths[0] != 0;
+    let do_lr = cfg.lr.any_enabled();
+    let do_superres = superres::superres_scaled(header.frame_size.scale_denominator);
+    // decodeframe.c:5422: optimized_loop_restoration = !do_cdef && !do_superres.
+    // The non-optimized arm saves the DEBLOCKED rows (pre-CDEF) as internal
+    // stripe boundary context before CDEF runs, and the CDEF output rows as
+    // frame-edge context after; the optimized arm saves nothing (the frame's own
+    // rows are the context). Superres ALWAYS takes the non-optimized arm (even
+    // with CDEF off) because the boundary rows must be upscaled.
+    let optimized_lr = !do_cdef && !do_superres;
+    let mut pre_cdef =
+        (do_lr && !optimized_lr).then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
+    if do_cdef {
+        apply_cdef(t, cfg, header);
+    }
+    // Superres upscale (decodeframe.c:5451 `superres_post_decode`): AFTER CDEF,
+    // BEFORE loop restoration. Horizontal-only; widens the coded (downscaled)
+    // recon back to UpscaledWidth. The pre-CDEF deblocked snapshot that feeds
+    // LR's internal stripe boundaries is upscaled the same way — matching C's
+    // `save_deblock_boundary_lines`, which runs `av1_upscale_normative_rows` on
+    // those boundary rows — so LR runs entirely in the upscaled domain.
+    if do_superres {
+        let (ds_stride, ds_stride_uv) = (t.stride, t.stride_uv);
+        apply_superres(t, cfg, header);
+        if let Some((dy, du, dv)) = pre_cdef.take() {
+            let (uy, _, uu, uv, _) =
+                superres_upscale_planes(&dy, &du, &dv, ds_stride, ds_stride_uv, cfg, header);
+            pre_cdef = Some((uy, uu, uv));
+        }
+    }
+    if do_lr {
+        apply_restoration(t, cfg, pre_cdef.as_ref(), optimized_lr);
+    }
+}
+
 /// Everything [`decode_frame_obus`] does up to (but not including) the loop
 /// filter: OBU walk, header parse + envelope gates, tile decode. Returns the
 /// mi-aligned pre-filter reconstruction + the tile config + the parsed frame
@@ -956,6 +1121,16 @@ fn decode_tile_payload(
     p: &FrameHeaderObu,
     tile_data: &[u8],
 ) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), String> {
+    let cfg = build_tile_cfg(seq, p);
+    let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
+    let t = decode_frame_tiles_kf(&tiles, &cfg, 0);
+    Ok((t, cfg, p.clone()))
+}
+
+/// Build the per-frame tile config shared by the KEY ([`decode_tile_payload`])
+/// and INTER ([`decode_inter_tile_payload`]) tile-decode entries — one source
+/// of truth so the two paths cannot drift.
+fn build_tile_cfg(seq: &SequenceHeaderObu, p: &FrameHeaderObu) -> KfTileConfig {
     let s = &seq.seq_header;
     let c = &seq.color_config;
     let (ss_x, ss_y) = if c.monochrome {
@@ -973,7 +1148,7 @@ fn decode_tile_payload(
         p.frame_size.superres_upscaled_width,
         p.frame_size.scale_denominator,
     );
-    let cfg = KfTileConfig {
+    KfTileConfig {
         mi_rows: mi_dim(s.max_frame_height),
         mi_cols: mi_dim(coded_width),
         bd: c.bit_depth,
@@ -1020,10 +1195,7 @@ fn decode_tile_payload(
         qm_u: p.quant.qmatrix_level_u as usize,
         qm_v: p.quant.qmatrix_level_v as usize,
         disable_cdf_update: p.prefix.disable_cdf_update,
-    };
-    let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
-    let t = decode_frame_tiles_kf(&tiles, &cfg, 0);
-    Ok((t, cfg, p.clone()))
+    }
 }
 
 /// Crop the (post-filter) mi-aligned recon to the frame dims and assemble the

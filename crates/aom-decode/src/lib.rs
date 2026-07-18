@@ -180,7 +180,9 @@ fn reconstruct_txb_wht(
     aom_transform::inv_txfm2d::av1_highbd_iwht4x4_add(&dqcoeff, dst, stride, eob, bd);
 }
 use aom_entropy::dec::OdEcDec;
-use aom_entropy::dv_ref::{DvGrid, DvNbr, DvTileBounds, assign_and_validate_dv, find_dv_ref_mvs};
+use aom_entropy::dv_ref::{
+    DvGrid, DvNbr, DvTileBounds, assign_and_validate_dv, find_dv_ref_mvs, find_inter_mv_refs,
+};
 use aom_entropy::partition::{
     KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, PaletteNbrKf, TXFM_CTX_INIT, TxMode,
     allow_palette as av1_allow_palette, bsize_to_max_depth, bsize_to_tx_size_cat,
@@ -627,6 +629,119 @@ pub struct KfTileDecode {
     /// (`loop_restoration_read_sb_coeffs`); empty when the plane's frame
     /// restoration type is `RESTORE_NONE`.
     pub lr_units: [Vec<aom_entropy::lr::LrUnitInfo>; 3],
+}
+
+/// A stored reference frame for inter prediction: the FILTERED reconstruction
+/// (post deblock/CDEF/superres/loop-restoration, PRE film-grain) at the coded
+/// (post-superres upscaled) resolution, superblock-aligned strides matching the
+/// producing `KfTileDecode`. `build_inter_predictor` (aom-inter) reads these
+/// planes and edge-replicates OOB reads, so no explicit border is needed. The
+/// walking-skeleton target (`av1-1-b8-01-size-64x64` frame 1) references only
+/// frame 0's `RefFrame`.
+#[derive(Clone, Debug)]
+pub struct RefFrame {
+    pub y: Vec<u16>,
+    pub u: Vec<u16>,
+    pub v: Vec<u16>,
+    pub stride: usize,
+    pub stride_uv: usize,
+    /// Plane valid dimensions (coded pixels) for edge replication.
+    pub width: usize,
+    pub height: usize,
+    pub width_uv: usize,
+    pub height_uv: usize,
+    pub order_hint: i32,
+}
+
+impl RefFrame {
+    /// Capture the filtered reconstruction from a post-filtered `KfTileDecode`
+    /// (call after [`crate::frame::run_post_filters`], before crop/film-grain).
+    pub fn from_filtered(t: &KfTileDecode, order_hint: i32) -> Self {
+        RefFrame {
+            y: t.recon.clone(),
+            u: t.recon_u.clone(),
+            v: t.recon_v.clone(),
+            stride: t.stride,
+            stride_uv: t.stride_uv,
+            width: t.width,
+            height: t.height,
+            width_uv: t.width_uv,
+            height_uv: t.height_uv,
+            order_hint,
+        }
+    }
+}
+
+/// The inter-frame-level state the inter mode-info driver + motion compensation
+/// need beyond the shared [`KfTileConfig`]: the single reference frame and the
+/// header flags that gate the per-block reads. The walking-skeleton envelope
+/// (single LAST reference, `SINGLE_REFERENCE` mode, `primary_ref = NONE`,
+/// `tx_mode = LARGEST`, no segmentation / skip-mode / delta-q).
+#[derive(Clone, Copy)]
+pub struct InterFrameCfg<'r> {
+    /// The single reference (`LAST_FRAME`): frame 0's filtered recon.
+    pub last: &'r RefFrame,
+    pub allow_high_precision_mv: bool,
+    pub cur_frame_force_integer_mv: bool,
+    /// Frame-level `interp_filter` (`4 == SWITCHABLE`).
+    pub interp_filter: i32,
+    pub switchable_motion_mode: bool,
+    pub allow_ref_frame_mvs: bool,
+    pub reference_mode_select: bool,
+    pub enable_dual_filter: bool,
+    pub allow_warped_motion: bool,
+    pub skip_mode_allowed: bool,
+    pub order_hint: i32,
+}
+
+/// The inter mode-info CDFs, built inline from the `default_cdfs` tables (the
+/// `primary_ref = NONE` default-context load). For the single-inter-block
+/// walking skeleton these need no cross-block adaptation (no CDF is re-read
+/// within one block), so a fresh copy per block is byte-exact; the multi-inter-
+/// block ratchet will need them threaded like [`KfFrameContext`].
+struct InterCdfs {
+    intra_inter: [[u16; 3]; 4],
+    single_ref: [[[u16; 3]; 6]; 3],
+    newmv: [[u16; 3]; 6],
+    zeromv: [[u16; 3]; 2],
+    refmv: [[u16; 3]; 6],
+    drl: [[u16; 3]; 3],
+    switchable_interp: [[u16; 4]; 16],
+    nmv_joints: [u16; 5],
+    nmv_comps: [[u16; 69]; 2],
+}
+
+impl InterCdfs {
+    fn defaults() -> Self {
+        use aom_entropy::default_cdfs as d;
+        InterCdfs {
+            intra_inter: d::DEFAULT_INTRA_INTER,
+            single_ref: d::DEFAULT_SINGLE_REF,
+            newmv: d::DEFAULT_NEWMV,
+            zeromv: d::DEFAULT_ZEROMV,
+            refmv: d::DEFAULT_REFMV,
+            drl: d::DEFAULT_DRL,
+            switchable_interp: d::DEFAULT_SWITCHABLE_INTERP,
+            nmv_joints: d::DEFAULT_NMV_JOINTS,
+            nmv_comps: d::DEFAULT_NMV_COMPS,
+        }
+    }
+
+    /// Assemble the 16-entry ref-frame CDF array `read_ref_frames` indexes: the
+    /// single-reference sub-tree slots `[10..16]` selected at their pred
+    /// contexts from the neighbour ref counts. Compound slots `[0..10]` are
+    /// unused under `SINGLE_REFERENCE` (never read).
+    fn ref_frame_cdfs(&self, rc: &[u8; 8]) -> [[u16; 3]; 16] {
+        use aom_entropy::partition as p;
+        let mut cdfs = [[0u16; 3]; 16];
+        cdfs[10] = self.single_ref[p::single_ref_p1_context(rc) as usize][0];
+        cdfs[11] = self.single_ref[p::pred_ctx_brfarf2_or_arf(rc) as usize][1];
+        cdfs[12] = self.single_ref[p::pred_ctx_ll2_or_l3gld(rc) as usize][2];
+        cdfs[13] = self.single_ref[p::pred_ctx_last_or_last2(rc) as usize][3];
+        cdfs[14] = self.single_ref[p::pred_ctx_last3_or_gld(rc) as usize][4];
+        cdfs[15] = self.single_ref[p::pred_ctx_brf_or_arf2(rc) as usize][5];
+        cdfs
+    }
 }
 
 /// One tile's mi-space extent within the frame (`TileInfo::mi_row_start` /
@@ -1208,6 +1323,10 @@ struct TileKf<'c> {
     /// This tile's mi-space extent (`xd->tile`) — see [`TileBoundsKf`]. Set
     /// by `start_tile` at the beginning of each tile's decode.
     tile: TileBoundsKf,
+    /// When set, this frame is an INTER frame: `decode_block` takes the inter
+    /// mode-info + motion-compensation path ([`TileKf::decode_block_inter`])
+    /// instead of the KEY intra path. `None` for a KEY frame (the default).
+    inter: Option<InterFrameCfg<'c>>,
 }
 
 impl<'c> TileKf<'c> {
@@ -1388,6 +1507,7 @@ impl<'c> TileKf<'c> {
             }),
             lr_refs: aom_entropy::lr::LrRefState::default(),
             tile: TileBoundsKf::whole_frame(cfg),
+            inter: None,
         };
         // Run the same per-tile reset `start_tile` applies to any later tile
         // — for the first (or only) tile this re-touches already-fresh state
@@ -1622,6 +1742,353 @@ impl<'c> TileKf<'c> {
 
     /// One leaf block: `parse_decode_block` (mode info + tx sizing + skip
     /// entropy-reset) followed by the intra `decode_token_recon_block` txb loop.
+    /// The INTER-frame single-block mode-info + motion-compensation path,
+    /// mirroring `read_inter_frame_mode_info` + `read_inter_block_mode_info`
+    /// (decodemv.c) then `dec_build_inter_predictors` (decodeframe.c) for the
+    /// walking-skeleton envelope (STEP-0 census of `av1-1-b8-01-size-64x64`
+    /// frame 1): single LAST reference, `SINGLE_REFERENCE`, `SIMPLE_TRANSLATION`
+    /// (no overlappable neighbours), `TX_MODE_LARGEST`, `skip = 1` (pure MC, no
+    /// residual). The pre-mode reads that are no-ops in this envelope
+    /// (segment_id, skip_mode, cdef-for-skip, delta-q) are asserted off.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_block_inter(
+        &mut self,
+        dec: &mut OdEcDec,
+        cdfs: &mut KfFrameContext,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: usize,
+        partition: usize,
+        inter: &InterFrameCfg,
+    ) {
+        use aom_entropy::partition as ep;
+        // PREDICTION_MODE inter values (enums.h).
+        const NEARESTMV: i32 = 13;
+        const NEARMV: i32 = 14;
+        const GLOBALMV: i32 = 15;
+        const NEWMV: i32 = 16;
+        const SWITCHABLE: i32 = 4;
+
+        let cfg = self.cfg;
+        let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
+        let cols = cfg.mi_cols;
+        let up_available = mi_row > self.tile.mi_row_start;
+        let left_available = mi_col > self.tile.mi_col_start;
+
+        // Envelope invariants (STEP-0 census): these pre-mode reads are inert.
+        assert!(!cfg.seg.enabled, "inter skeleton: segmentation off");
+        assert!(!inter.skip_mode_allowed, "inter skeleton: skip_mode off");
+        assert!(!cfg.delta_q_present, "inter skeleton: delta-q off");
+        assert!(
+            cfg.tx_mode == TxMode::Largest,
+            "inter skeleton: TX_MODE_LARGEST"
+        );
+
+        // Neighbour projections for the mode-info contexts.
+        let (above_mi, left_mi) = self.neighbours(mi_row, mi_col);
+        let above_dv = up_available.then(|| self.mi_dv[((mi_row - 1) * cols + mi_col) as usize]);
+        let left_dv = left_available.then(|| self.mi_dv[(mi_row * cols + mi_col - 1) as usize]);
+        let dv_inter = |d: DvNbr| d.use_intrabc || d.ref_frame0 > 0;
+
+        let mut icdfs = InterCdfs::defaults();
+
+        // --- read_inter_frame_mode_info pre-mode reads ---
+        // segment_id (seg off -> 0); skip_mode (allowed off -> 0): no reads.
+        // read_skip_txfm.
+        let skip_ctx = ep::skip_txfm_context(
+            above_mi.map_or(0, |m| m.skip_txfm),
+            left_mi.map_or(0, |m| m.skip_txfm),
+        ) as usize;
+        let skip = ep::read_skip(dec, &mut cdfs.skip[skip_ctx], false);
+        // read_cdef: the first NON-skip block in a CDEF unit reads the strength;
+        // a skip block reads nothing (envelope: single skip block -> no read).
+        // read_delta_q_params: delta_q_present off -> no read.
+
+        // read_is_inter_block.
+        let ii_ctx = ep::get_intra_inter_context(
+            up_available,
+            above_dv.is_some_and(dv_inter),
+            left_available,
+            left_dv.is_some_and(dv_inter),
+        ) as usize;
+        let is_inter = ep::read_is_inter(dec, &mut icdfs.intra_inter[ii_ctx], false, false);
+        assert_eq!(is_inter, 1, "inter skeleton: the single block is inter");
+
+        // --- read_inter_block_mode_info (single reference) ---
+        let rc = ep::collect_neighbors_ref_counts(
+            up_available,
+            above_dv.is_some_and(|d| d.use_intrabc),
+            above_dv.map_or(0, |d| d.ref_frame0),
+            above_dv.map_or(-1, |d| d.ref_frame1),
+            left_available,
+            left_dv.is_some_and(|d| d.use_intrabc),
+            left_dv.map_or(0, |d| d.ref_frame0),
+            left_dv.map_or(-1, |d| d.ref_frame1),
+        );
+        let mut ref_cdfs = icdfs.ref_frame_cdfs(&rc);
+        let (is_compound, _crt, ref0, ref1) = ep::read_ref_frames(
+            dec,
+            &mut ref_cdfs,
+            false,
+            false,
+            inter.reference_mode_select,
+            false,
+        );
+        assert!(
+            !is_compound && ref0 == 1 && ref1 == -1,
+            "inter skeleton: single LAST reference"
+        );
+
+        // find_inter_mv_refs (identity GM, empty temporal field per the census).
+        let dv_tile = DvTileBounds {
+            mi_row_start: self.tile.mi_row_start,
+            mi_row_end: self.tile.mi_row_end,
+            mi_col_start: self.tile.mi_col_start,
+            mi_col_end: self.tile.mi_col_end,
+        };
+        let mib_size = self.st.mib_size;
+        let grid = MiDvGrid {
+            mi_dv: &self.mi_dv,
+            cols: cfg.mi_cols,
+            rows: cfg.mi_rows,
+            mi_row,
+            mi_col,
+        };
+        let imv = find_inter_mv_refs(
+            ref0,
+            mi_row,
+            mi_col,
+            bsize,
+            partition,
+            up_available,
+            left_available,
+            dv_tile,
+            cfg.mi_rows,
+            cfg.mi_cols,
+            mib_size,
+            inter.allow_ref_frame_mvs,
+            (0, 0),
+            0,
+            [0i8; 8],
+            inter.allow_high_precision_mv,
+            inter.cur_frame_force_integer_mv,
+            grid,
+        );
+
+        // read_inter_mode (single-ref: mode_context passes through verbatim).
+        let mode = ep::read_inter_mode(
+            dec,
+            &mut icdfs.newmv,
+            &mut icdfs.zeromv,
+            &mut icdfs.refmv,
+            imv.mode_context,
+        );
+        // read_drl_idx: weights as u16 (values are well under 2^16, see dv_ref).
+        let weights_u16: [u16; 8] = std::array::from_fn(|i| imv.weight[i] as u16);
+        let ref_mv_idx = ep::read_drl_idx(
+            dec,
+            &mut icdfs.drl,
+            mode,
+            imv.ref_mv_count as i32,
+            &weights_u16,
+        );
+
+        // assign_mv: resolve the predictor per mode, then read the MV.
+        let precision = if inter.cur_frame_force_integer_mv {
+            -1
+        } else if inter.allow_high_precision_mv {
+            1
+        } else {
+            0
+        };
+        let (mv_row, mv_col) = match mode {
+            NEWMV => {
+                // ref_mv[0] = nearest, or stack[ref_mv_idx] when the list has >1.
+                let base = if imv.ref_mv_count > 1 {
+                    imv.stack[ref_mv_idx as usize]
+                } else {
+                    imv.nearest
+                };
+                let [c0, c1] = &mut icdfs.nmv_comps;
+                let (dr, dc) = ep::read_mv(dec, &mut icdfs.nmv_joints, c0, c1, precision);
+                (base.0 + dr, base.1 + dc)
+            }
+            NEARESTMV => imv.nearest,
+            NEARMV => {
+                if ref_mv_idx > 0 {
+                    imv.stack[(1 + ref_mv_idx) as usize]
+                } else {
+                    imv.near
+                }
+            }
+            GLOBALMV => (0, 0), // identity global motion (census: all IDENTITY)
+            _ => panic!("inter skeleton: unexpected single-ref mode {mode}"),
+        };
+
+        // read_mb_interp_filter: SWITCHABLE, per-direction. For a block with no
+        // available neighbours (the whole 64x64 SB), both neighbour filter types
+        // are SWITCHABLE_FILTERS so the context is `dir*INTER_FILTER_DIR_OFFSET +
+        // SWITCHABLE_FILTERS` (dir0=3, dir1=11). av1_get_pred_context_switchable_
+        // interp's neighbour-filter branch (a filter grid) is ratchet work.
+        assert!(
+            !up_available && !left_available,
+            "inter skeleton: interp-filter neighbour context not yet stored"
+        );
+        const SWITCHABLE_FILTERS: usize = 3;
+        const INTER_FILTER_DIR_OFFSET: usize = 8;
+        let is_switchable = inter.interp_filter == SWITCHABLE;
+        let interp_needed = true; // NEWMV/SIMPLE/non-global: av1_is_interp_needed
+        let ctx0 = SWITCHABLE_FILTERS;
+        let ctx1 = INTER_FILTER_DIR_OFFSET + SWITCHABLE_FILTERS;
+        // read_mb_interp_filter borrows two distinct CDF rows (dir0 != dir1);
+        // the adapted state is not re-read within a single block.
+        let (f0, f1) = {
+            let mut c0 = icdfs.switchable_interp[ctx0];
+            let mut c1 = icdfs.switchable_interp[ctx1];
+            ep::read_mb_interp_filter(
+                dec,
+                &mut c0,
+                &mut c1,
+                interp_needed,
+                is_switchable,
+                inter.enable_dual_filter,
+            )
+        };
+        // av1_extract_interp_filter: dir0 = y_filter, dir1 = x_filter.
+        let (filter_y, filter_x) = (f0 as usize, f1 as usize);
+
+        // read_motion_mode: no overlappable neighbours -> SIMPLE_TRANSLATION,
+        // read nothing (motion_mode_allowed early-outs, blockd.h:1480).
+
+        // tx_size: TX_MODE_LARGEST -> the single per-block size, no symbol read.
+        let tx_size = tx_size_from_tx_mode(bsize, cfg.tx_mode);
+
+        // --- motion compensation into the reconstruction (skip=1: no residual) ---
+        assert_eq!(
+            skip, 1,
+            "inter skeleton: single block is skip (no residual)"
+        );
+        let (cmv_row, cmv_col) = clamp_mv_to_umv_border(mv_row, mv_col, mi_row, mi_col, bsize, cfg);
+        let bw = (MI_SIZE_WIDE[bsize] * 4) as usize;
+        let bh = (MI_SIZE_HIGH[bsize] * 4) as usize;
+        let last = inter.last;
+        // Luma.
+        let blk_x = (mi_col * 4) as usize;
+        let blk_y = (mi_row * 4) as usize;
+        let dst_off = blk_y * self.stride + blk_x;
+        aom_inter::build_inter_predictor(
+            &last.y,
+            last.stride,
+            last.width,
+            last.height,
+            &mut self.recon,
+            dst_off,
+            self.stride,
+            blk_x,
+            blk_y,
+            bw,
+            bh,
+            cmv_row,
+            cmv_col,
+            0,
+            0,
+            filter_x,
+            filter_y,
+        );
+        // Chroma (subsampled block + plane, luma-domain MV).
+        if !cfg.monochrome {
+            let bw_uv = bw >> ss_x;
+            let bh_uv = bh >> ss_y;
+            let blk_x_uv = blk_x >> ss_x;
+            let blk_y_uv = blk_y >> ss_y;
+            let dst_off_uv = blk_y_uv * self.stride_uv + blk_x_uv;
+            for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
+                aom_inter::build_inter_predictor(
+                    src,
+                    last.stride_uv,
+                    last.width_uv,
+                    last.height_uv,
+                    dst,
+                    dst_off_uv,
+                    self.stride_uv,
+                    blk_x_uv,
+                    blk_y_uv,
+                    bw_uv,
+                    bh_uv,
+                    cmv_row,
+                    cmv_col,
+                    ss_x,
+                    ss_y,
+                    filter_x,
+                    filter_y,
+                );
+            }
+        }
+
+        // Stamp the neighbour grids (inert for a single block; needed for the
+        // ratchet's spatial scan + skip/interp contexts).
+        self.stamp_mi(
+            mi_row,
+            mi_col,
+            bsize,
+            MiNbrKf {
+                y_mode: 0,
+                skip_txfm: skip,
+            },
+        );
+        self.stamp_dv(
+            mi_row,
+            mi_col,
+            bsize,
+            DvNbr {
+                bsize,
+                ref_frame0: ref0,
+                ref_frame1: ref1,
+                use_intrabc: false,
+                mode,
+                mv0_row: mv_row,
+                mv0_col: mv_col,
+                mv1_row: 0,
+                mv1_col: 0,
+            },
+        );
+        // Minimal per-block record for the post-filter / output structures. The
+        // inter block carries no intra fields; `skip`/`current_qindex` are what
+        // the deblock reads (the mode-info's inter-ness lives in the DV grid).
+        let info = MbModeInfoKf {
+            segment_id: 0,
+            skip,
+            cdef_strength: 0,
+            current_qindex: cfg.base_qindex,
+            delta_lf: [0; 4],
+            delta_lf_from_base: 0,
+            use_intrabc: 0,
+            dv_row: 0,
+            dv_col: 0,
+            y_mode: 0,
+            angle_delta_y: 0,
+            uv_mode: 0,
+            cfl_alpha_idx: 0,
+            cfl_joint_sign: 0,
+            angle_delta_uv: 0,
+            palette_size: [0, 0],
+            palette_colors: [0; 24],
+            use_filter_intra: 0,
+            filter_intra_mode: 0,
+        };
+        self.tree.push(partition as i8);
+        self.blocks.push(DecodedBlockKf {
+            mi_row,
+            mi_col,
+            bsize,
+            partition,
+            info,
+            tx_size,
+            txbs: Vec::new(),
+            txbs_uv: Vec::new(),
+        });
+    }
+
     fn decode_block(
         &mut self,
         dec: &mut OdEcDec,
@@ -1631,6 +2098,12 @@ impl<'c> TileKf<'c> {
         bsize: usize,
         partition: usize,
     ) {
+        // INTER frame: take the motion-compensation mode-info path. `inter` is
+        // `Copy`, so copying it out releases the borrow on `self`.
+        if let Some(inter) = self.inter {
+            self.decode_block_inter(dec, cdfs, mi_row, mi_col, bsize, partition, &inter);
+            return;
+        }
         let cfg = self.cfg;
         // set_mi_row_col (av1_common_int.h): TILE-relative, not frame-relative
         // — `xd->up_available = (mi_row > tile->mi_row_start)`. A block at a
@@ -3142,4 +3615,67 @@ pub fn decode_frame_tiles_kf(
         t.decode_one_tile(&mut dec, &mut cdfs);
     }
     t.into_decode()
+}
+
+/// Decode the tiles of an INTER frame (single reference, the walking-skeleton
+/// envelope — see [`TileKf::decode_block_inter`]). Mirrors
+/// [`decode_frame_tiles_kf`] but drives the inter mode-info + motion-
+/// compensation path via `t.inter`. `primary_ref = NONE`, so the shared
+/// [`KfFrameContext`] (partition/skip CDFs) loads defaults exactly like a KEY
+/// frame; the inter-specific CDFs are built inline per block from the default
+/// tables.
+pub fn decode_frame_tiles_inter(
+    tiles: &[TileBytesKf],
+    cfg: &KfTileConfig,
+    inter: &InterFrameCfg,
+    recon_init: u16,
+) -> KfTileDecode {
+    assert!(!tiles.is_empty(), "at least one tile");
+    let mut t = TileKf::new(cfg, recon_init);
+    t.inter = Some(*inter);
+    for tb in tiles {
+        let mut dec = OdEcDec::new(tb.bytes);
+        dec.allow_update_cdf = !cfg.disable_cdf_update;
+        let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
+        t.start_tile(tb.bounds);
+        t.decode_one_tile(&mut dec, &mut cdfs);
+    }
+    t.into_decode()
+}
+
+/// `clamp_mv_to_umv_border_sb` (reconinter.h:343) in the LUMA (`ss = 0`) domain,
+/// returning a 1/8-pel MV. C clamps per plane in q4 (`mv * 2`); the q4 limits
+/// are always even, so the luma clamp is exact in 1/8-pel and
+/// [`aom_inter::build_inter_predictor`] rescales it per plane. This is exact
+/// whenever the clamp does NOT fire (every `01-size-*` target, whose MVs stay
+/// well within the frame + interp border); an MV large enough to clamp
+/// *differently* per plane (chroma uses `ss = 1` limits) is later-chunk work.
+fn clamp_mv_to_umv_border(
+    mv_row: i32,
+    mv_col: i32,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    cfg: &KfTileConfig,
+) -> (i32, i32) {
+    const AOM_INTERP_EXTEND: i32 = 4;
+    const SUBPEL_BITS: i32 = 4;
+    const SUBPEL_SHIFTS: i32 = 16;
+    let bw = MI_SIZE_WIDE[bsize] * 4;
+    let bh = MI_SIZE_HIGH[bsize] * 4;
+    let mb_to_left = -(mi_col * 4 * 8);
+    let mb_to_right = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 4 * 8;
+    let mb_to_top = -(mi_row * 4 * 8);
+    let mb_to_bottom = (cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 4 * 8;
+    let spel_left = (AOM_INTERP_EXTEND + bw) << SUBPEL_BITS;
+    let spel_right = spel_left - SUBPEL_SHIFTS;
+    let spel_top = (AOM_INTERP_EXTEND + bh) << SUBPEL_BITS;
+    let spel_bottom = spel_top - SUBPEL_SHIFTS;
+    let col_min = mb_to_left * 2 - spel_left;
+    let col_max = mb_to_right * 2 + spel_right;
+    let row_min = mb_to_top * 2 - spel_top;
+    let row_max = mb_to_bottom * 2 + spel_bottom;
+    let cq4 = (mv_col * 2).clamp(col_min, col_max);
+    let rq4 = (mv_row * 2).clamp(row_min, row_max);
+    (rq4 / 2, cq4 / 2)
 }

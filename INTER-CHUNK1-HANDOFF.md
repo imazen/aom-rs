@@ -1,6 +1,11 @@
 # Inter-decode Chunk 1 (walking skeleton) — HANDOFF
 
-Status as of this landing. Read this + `INTER-ROADMAP.md` before continuing Chunk 1.
+**STATUS: ✅ COMPLETE — the frame-1 byte-exact gate is MET** (`av1-1-b8-01-size-64x64` frame 1
+decodes to golden md5 `0c189b10dfe6b033c548901ab82dedef`; frame 0 KEY unchanged). See
+"Honest fraction" at the bottom for exactly what landed + ratchet limitations. The sections
+below are the original de-risk/architecture notes (still accurate).
+
+Read this + `INTER-ROADMAP.md` before continuing Chunk 1.
 
 ## TL;DR — the target changed (de-risk finding)
 
@@ -184,25 +189,42 @@ oracle (`aom-sys-ref` `ref_decode_av1_stream(tus, n)`) helps pixel-diff debuggin
 frame 0 then N via the public codec API, return frame N's planes) — append to aom-sys-ref
 AFTER the 1d agent lands to avoid a shim collision.
 
-## Honest fraction
-DONE (verified, on main): STEP-0 de-risk (+ corrected target with full evidence); Chunk 1c
-CDF tables (`b1fe0a3`); **Chunk 1d MC crate `aom-inter` (`9b6a061`, 80k-iter differentials
-byte-identical vs C)**. NOT STARTED: 1a (multi-frame loop + RefFrame — aom-decode has zero
-multi-frame state), 1b (inter header state wiring), the 1c inter mode-info DRIVER +
-generalized `dv_ref` scan (mode_context/newmv_count), 1e (reconstruct), 1f (gate). **The
-frame-1 byte-exact gate is NOT met — the skeleton is NOT done.**
+## Honest fraction — ✅ WALKING SKELETON COMPLETE (frame-1 byte-exact gate MET)
 
-### Recommended continuation order (MC + CDFs are now ready)
-1. **1c generalized scan first** (self-contained, cleanly differential-verifiable now that
-   aom-sys-ref is free): extend `dv_ref.rs` `find_dv_ref_mvs` → an inter `find_inter_mv_refs`
-   emitting `mode_context`/`newmv_count` (restore the dropped `av1_mode_context_analyzer`
-   arm + `process_single_ref_mv_candidate` sign-bias + gm_mv). Differential: extend
-   `shim_find_dv_ref_mvs` (dec_shim.c) to a real LAST_FRAME ref + extract `mode_context`.
-   For the 64x64 target this returns EMPTY + the isolated-block mode_context.
-2. **1a multi-frame loop + RefFrame** (aom-decode): stateful decoder; frame 0 via the
-   existing path (verify frame-0 md5 unchanged as a regression), store filtered recon as a
-   RefFrame; parse frame 1's header.
-3. **1c driver** wiring the dormant readers (+ the scan) for the single inter block, then
-   **1e** (`build_inter_predictor` → `reconstruct_txb`), then **1f** (`scope_for` + md5 gate).
-Verify the PARSE against the `/tmp/inspect_frame` census (mode=NEWMV, ref=LAST, the mv)
-before chasing pixels.
+**The frame-1 byte-exact gate is MET.** `av1-1-b8-01-size-64x64` frame 1 decodes to the golden
+md5 `0c189b10dfe6b033c548901ab82dedef` AND frame 0 (KEY) stays byte-identical, via the new
+multi-frame `aom_decode::frame::decode_frames`. Gate: `aom-decode/tests/inter_walking_skeleton.rs`
+(`inter_walking_skeleton_frame1_byte_identical`, a true `md5_helper.h::Add` byte-identity assert).
+
+STEP-0 census (`/tmp/inspect_frame.c`, throwaway) proved frame 1 is the simplest possible inter
+frame: ONE `BLOCK_64X64` `PARTITION_NONE` `NEWMV` block, `skip=1` (**pure MC, NO residual — no
+coeff read / no `reconstruct_txb`**), single `LAST` ref, `SIMPLE_TRANSLATION` (no overlappable
+neighbours → `motion_mode_allowed` early-outs, NO motion_mode symbol), `interintra=0` (64×64 not
+allowed → no read), `interp=[SHARP,SHARP]`, `mv=(-1,-7)`, `tx=TX_64X64`, `primary_ref=NONE`,
+`allow_high_precision_mv=1`, `tx_mode=LARGEST`, `allow_ref_frame_mvs=1` but tpl empty (0 valid).
+
+### What landed (this continuation)
+1. **Generalized MV scan** (`38890de`/`cdba774`, pushed): `find_inter_mv_refs` in `dv_ref.rs` +
+   `shim_find_inter_mv_refs`/`ref_find_inter_mv_refs` + `find_inter_mv_refs_matches_c` (3000×200
+   grids, value-identical vs real C `av1_find_mv_refs`). mode_context/newmv_count/gm-fill/sign-
+   bias/integer-mv restored. Intrabc `find_dv_ref_mvs` regression unchanged. Fixed latent
+   `GLOBAL_GLOBALMV` 21→23.
+2. **1a/1b/1c/1e/1f** (this commit): `RefFrame` + `decode_frames` multi-frame OBU walk +
+   `run_post_filters`/`finish_and_grain`/`build_tile_cfg` extractions (KEY path behaviour-
+   preserved); `InterFrameCfg` + inline `InterCdfs` (from the chunk-1c DEFAULT_* tables) +
+   `TileKf::decode_block_inter` (the faithful inter mode-info reads: skip → is_inter →
+   ref_frames → find_inter_mv_refs → inter_mode → drl → mv → interp_filter) + `build_inter_
+   predictor` luma+chroma MC + `clamp_mv_to_umv_border` + `decode_frame_tiles_inter`. Header fix:
+   `read_uncompressed_header` now gates `allow_high_precision_mv` on the STREAM-read
+   `cur_frame_force_integer_mv` (the `force_integer_mv==SELECT` bit), not the caller cfg input —
+   the desync that first blocked the gate (seq `force_integer_mv==2`).
+
+### Known limitations (documented, NOT blocking the skeleton; ratchet work)
+- Inter CDFs are built **inline per block** (correct for ONE block — no CDF is re-read within it);
+  the multi-inter-block ratchet (`01-size-16x16`, 4 blocks incl. NEARESTMV) needs them threaded +
+  `update_cdf` like `KfFrameContext`, plus the interp-filter neighbour context (a filter grid) and
+  the deblock inter mode-delta.
+- `clamp_mv_to_umv_border` is a faithful LUMA-domain clamp — exact when it doesn't fire (every
+  `01-size-*` target); an MV that clamps *differently* per plane needs the per-plane chroma clamp.
+- `decode_block_inter` asserts the envelope (seg/skip_mode/delta-q off, single LAST, skip=1); the
+  ratchet must generalize (non-skip residual via `reconstruct_txb`, NEAREST/NEAR/GLOBAL modes).

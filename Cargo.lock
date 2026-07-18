@@ -92,6 +92,7 @@ dependencies = [
  "aom-cdef",
  "aom-encode",
  "aom-entropy",
+ "aom-inter",
  "aom-intra",
  "aom-loopfilter",
  "aom-quant",

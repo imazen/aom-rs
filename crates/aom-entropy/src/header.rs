@@ -2953,6 +2953,10 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
     let mut p = cfg.clone();
     let (prefix, override_flag, early) = read_frame_header_prefix(rb, &cfg.prefix);
     p.prefix = prefix;
+    // Surface the stream-read `cur_frame_force_integer_mv` (the prefix's
+    // `force_integer_mv == SELECT` bit) on the top-level header so consumers
+    // (inter mode-info MV precision) read the true value.
+    p.cur_frame_force_integer_mv = p.prefix.cur_frame_force_integer_mv;
     // Sync the OUTER allow_screen_content_tools from the just-parsed prefix. The
     // read path below reads `p.prefix.allow_screen_content_tools` directly, but
     // the writer (`write_frame_header_obu`) gates the `allow_intrabc` bit on this
@@ -3021,7 +3025,11 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
                 fs_in.superres_upscaled_height,
             );
         }
-        if !cfg.cur_frame_force_integer_mv {
+        // `cur_frame_force_integer_mv` is read FROM THE STREAM by the prefix
+        // reader (the `force_integer_mv == SELECT` bit); use that, not the
+        // caller's `cfg` input (which cannot know the SELECT bit). Decode-only
+        // path — the intra branch above never reaches here.
+        if !p.prefix.cur_frame_force_integer_mv {
             p.allow_high_precision_mv = rb.read_bit() != 0;
         }
         p.interp_filter = read_frame_interp_filter(rb);

@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 aom-cdef = { path = "../aom-cdef" }
 aom-entropy = { path = "../aom-entropy" }
+aom-inter = { path = "../aom-inter" }
 aom-intra = { path = "../aom-intra" }
 aom-loopfilter = { path = "../aom-loopfilter" }
 aom-quant = { path = "../aom-quant" }
