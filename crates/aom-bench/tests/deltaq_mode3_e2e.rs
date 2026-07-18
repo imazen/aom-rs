@@ -31,6 +31,34 @@ fn cell(w: usize, h: usize, cq: i32) -> EncodeCell {
     )
 }
 
+/// bd10 real-content cell cropped from the 640x360 b10 conformance vector
+/// (4:2:0, genuine 10-bit image statistics that modulate the wiener map).
+fn cell_b10(w: usize, h: usize, cq: i32) -> EncodeCell {
+    EncodeCell::real_content(
+        &format!("deltaq3_b10_{w}x{h}_cq{cq}"),
+        "av1-1-b10-00-quantizer-00",
+        Some((w, h, 0, 0)),
+        cq,
+        0,
+    )
+}
+
+/// bd12 cell built by promoting the bd10 real content into the 12-bit range
+/// (`pix << 2`) — there is no b12 conformance vector, but the highbd FP-quantize
+/// arm (`av1_highbd_quantize_fp`) and the bd12 quant tables are the only bd>8
+/// difference, so shifted-but-real spatial structure exercises them faithfully.
+fn cell_b12(w: usize, h: usize, cq: i32) -> EncodeCell {
+    let mut c = cell_b10(w, h, cq);
+    c.label = format!("deltaq3_b12_{w}x{h}_cq{cq}");
+    c.bd = 12;
+    for p in [&mut c.y, &mut c.u, &mut c.v] {
+        for v in p.iter_mut() {
+            *v <<= 2;
+        }
+    }
+    c
+}
+
 /// Per-cell match check. `port_encode_with` returns the assembled frame OBU
 /// PAYLOAD (compare directly to the reference payload — the assert_byte_exact
 /// convention). Returns `Ok(len)` on byte-match, else the first differing byte.
@@ -58,11 +86,24 @@ fn run_cell(cell: &EncodeCell) -> Result<usize, String> {
 /// shape (192x128 = 3x2 SBs). Any divergence is a regression.
 #[test]
 fn deltaq_mode3_perceptual_ai_e2e() {
-    let mut cells: Vec<EncodeCell> = [12, 20, 32, 48, 63].into_iter().map(|cq| cell(192, 192, cq)).collect();
+    let mut cells: Vec<EncodeCell> = [12, 20, 32, 48, 63]
+        .into_iter()
+        .map(|cq| cell(192, 192, cq))
+        .collect();
     // Non-square shape (3x2 SBs) — exercises the running-base delta chain across
     // a different SB raster.
     cells.push(cell(192, 128, 32));
     cells.push(cell(128, 192, 32));
+    // Highbd (bd10 + bd12) — the FP-quantize arm now dispatches
+    // av1_highbd_quantize_fp for bd>8. Same 192x192 / 192x128 shapes on real
+    // 10-bit content across the web quality range.
+    for cq in [12, 20, 32, 48, 63] {
+        cells.push(cell_b10(192, 192, cq));
+    }
+    cells.push(cell_b10(192, 128, 32));
+    for cq in [12, 32, 63] {
+        cells.push(cell_b12(192, 192, cq));
+    }
 
     let mut matched = 0usize;
     let mut report = String::new();

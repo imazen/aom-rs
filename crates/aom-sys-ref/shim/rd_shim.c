@@ -637,6 +637,11 @@ int shim_prune_odd_delta(int mode, int luma_delta_angle,
  *     calloc'd MACROBLOCK (pure marshalling: src_diff pointer, frame-edge
  *     fields, plane subsampling). aom_sum_squares_2d_i16 is RTCD-dispatched:
  *     call ref_init() first. */
+/* default_tx_type_probs[FRAME_UPDATE_TYPES][TX_SIZES_ALL][TX_TYPES]
+ * (encoder_utils.c:44) — the REAL exported frame-probability defaults used by
+ * the prune_tx_type_using_stats sf (seeded via copy_frame_prob_info). */
+extern const int default_tx_type_probs[][19][16];
+
 int shim_get_tx_mask_intra(int tx_size, int mode, int use_filter_intra,
                            int filter_intra_mode, int lossless,
                            int reduced_tx_set_used,
@@ -645,6 +650,7 @@ int shim_get_tx_mask_intra(int tx_size, int mode, int use_filter_intra,
                            int enable_flip_idtx, int use_intra_dct_only,
                            int use_default_intra_tx_type,
                            int use_screen_content_tools,
+                           int prune_tx_type_using_stats,
                            int *out_txk_allowed) {
   TX_TYPE txk_allowed = TX_TYPES;
   /* use_default_intra_tx_type override (get_tx_mask, tx_search.c:1807), applied
@@ -690,7 +696,27 @@ int shim_get_tx_mask_intra(int tx_size, int mode, int use_filter_intra,
     allowed_tx_mask = av1_derived_intra_tx_used_flag[intra_dir];
     allowed_tx_mask &= ext_tx_used_flag;
   } else {
+    /* assert(plane == 0) — the LUMA multi-type arm (tx_search.c:1881). */
     allowed_tx_mask = ext_tx_used_flag;
+    /* prune_tx_type_using_stats (tx_search.c:1887): the REAL default_tx_type_probs
+     * KF_UPDATE row (a lone KEY still: update_type = KF_UPDATE = 0). */
+    if (prune_tx_type_using_stats) {
+      static const int thresh_arr[2][7] = { { 10, 15, 15, 10, 15, 15, 15 },
+                                            { 10, 17, 17, 10, 17, 17, 17 } };
+      const int *tx_type_probs = default_tx_type_probs[0][tx_size];
+      const int thresh = thresh_arr[prune_tx_type_using_stats - 1][0];
+      uint16_t prune = 0;
+      int max_prob = -1, max_idx = 0;
+      for (int i = 0; i < TX_TYPES; i++) {
+        if (tx_type_probs[i] > max_prob && (allowed_tx_mask & (1 << i))) {
+          max_prob = tx_type_probs[i];
+          max_idx = i;
+        }
+        if (tx_type_probs[i] < thresh) prune |= (1 << i);
+      }
+      if ((prune >> max_idx) & 0x01) prune &= ~(1 << max_idx);
+      allowed_tx_mask &= (~prune);
+    }
   }
 
   if (allowed_tx_mask == 0) {

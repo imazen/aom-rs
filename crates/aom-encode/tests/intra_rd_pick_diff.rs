@@ -272,6 +272,7 @@ fn pick_intra_mode_rd_matches_c_chain() {
                 bd,
                 lossless: false,
                 qm_ctx: None,
+                adaptive: false,
             };
             let bctx = BlockContext {
                 above: &above,

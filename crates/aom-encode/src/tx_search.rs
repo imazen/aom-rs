@@ -86,6 +86,13 @@ pub struct TxMaskParams {
     pub enable_flip_idtx: bool,
     /// `oxcf.txfm_cfg.use_intra_dct_only` (CLI default off).
     pub use_intra_dct_only: bool,
+    /// sf `tx_sf.tx_type_search.prune_tx_type_using_stats` (0/1/2, default 0).
+    /// ALLINTRA sets 1 at speed>=2 / 2 at speed>=4, but ONLY when
+    /// `is_480p_or_larger` (speed_features.c:262/300). Reached only in the LUMA
+    /// multi-type arm ([`get_tx_mask_intra`]); prunes tx types whose KF frame
+    /// probability falls below the threshold (see the impl). 0 = off (all
+    /// sub-480p gates + speed<2), byte-identical to the pre-stats path.
+    pub prune_tx_type_using_stats: u8,
     /// `cpi->use_screen_content_tools` — an input to [`get_default_tx_type_y`]
     /// (screen content forces DCT_DCT). Only read when
     /// `use_default_intra_tx_type` is set; false on the non-screen textured
@@ -103,9 +110,45 @@ impl TxMaskParams {
             enable_flip_idtx: true,
             use_intra_dct_only: false,
             use_screen_content_tools: false,
+            prune_tx_type_using_stats: 0,
         }
     }
 }
+
+/// `default_tx_type_probs[KF_UPDATE]` (encoder_utils.c:44, the `FRAME_UPDATE_TYPE
+/// == KF_UPDATE` slab): the per-`TX_SIZE_ALL` (0..18) frame-probability row a lone
+/// KEY still uses (`copy_frame_prob_info` seeds `frame_probs.tx_type_probs` from
+/// these defaults when `prune_tx_type_using_stats` is on, encoder_utils.h:820).
+/// The `1024, 0…` rows are the tx sizes forced to DCT_DCT before the multi-type
+/// arm (sqr_up > TX_32X32), so the prune never reads them.
+pub const DEFAULT_TX_TYPE_PROBS_KF: [[i32; 16]; 19] = [
+    [221, 189, 214, 292, 0, 0, 0, 0, 0, 2, 38, 68, 0, 0, 0, 0],
+    [262, 203, 216, 239, 0, 0, 0, 0, 0, 1, 37, 66, 0, 0, 0, 0],
+    [315, 231, 239, 226, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [222, 188, 214, 287, 0, 0, 0, 0, 0, 2, 50, 61, 0, 0, 0, 0],
+    [256, 182, 205, 282, 0, 0, 0, 0, 0, 2, 21, 76, 0, 0, 0, 0],
+    [281, 214, 217, 222, 0, 0, 0, 0, 0, 1, 48, 41, 0, 0, 0, 0],
+    [263, 194, 225, 225, 0, 0, 0, 0, 0, 2, 15, 100, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [170, 192, 242, 293, 0, 0, 0, 0, 0, 1, 68, 58, 0, 0, 0, 0],
+    [199, 210, 213, 291, 0, 0, 0, 0, 0, 1, 14, 96, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+];
+
+/// `thresh_arr[2][7]` (tx_search.c:1888) — indexed `[prune_tx_type_using_stats -
+/// 1][update_type]`. For a lone KEY still `update_type = KF_UPDATE = 0`, so the
+/// effective threshold is 10 for BOTH levels (the columns differ only for the
+/// inter update types).
+pub const TX_TYPE_STATS_THRESH: [[i32; 7]; 2] =
+    [[10, 15, 15, 10, 15, 15, 15], [10, 17, 17, 10, 17, 17, 17]];
 
 /// `get_default_tx_type(PLANE_TYPE_Y, xd, tx_size, use_screen_content_tools)`
 /// (blockd.h:1175): the single luma tx type used when
@@ -193,9 +236,35 @@ pub fn get_tx_mask_intra(
     } else if p.use_derived_intra_tx_type_set {
         allowed_tx_mask = AV1_DERIVED_INTRA_TX_USED_FLAG[intra_dir] & ext_tx_used_flag;
     } else {
+        // `assert(plane == 0)` — the LUMA multi-type arm (tx_search.c:1881).
         allowed_tx_mask = ext_tx_used_flag;
-        // Stats prune / est-rd prune / prune_tx_2D: all structurally off for
-        // the speed-0 intra path (see module docs).
+        // prune_tx_type_using_stats (tx_search.c:1887): drop tx types whose KF
+        // frame probability is below the threshold, but never drop the max-prob
+        // allowed type. For a lone KEY still `update_type = KF_UPDATE = 0`, so
+        // `tx_type_probs = default_tx_type_probs[KF_UPDATE][tx_size]` (seeded by
+        // copy_frame_prob_info) and `thresh = thresh_arr[level-1][0]`.
+        if p.prune_tx_type_using_stats != 0 {
+            let probs = &DEFAULT_TX_TYPE_PROBS_KF[tx_size];
+            let thresh = TX_TYPE_STATS_THRESH[(p.prune_tx_type_using_stats - 1) as usize][0];
+            let mut prune: u16 = 0;
+            let mut max_prob: i32 = -1;
+            let mut max_idx: usize = 0;
+            for i in 0..TX_TYPES {
+                if probs[i] > max_prob && (allowed_tx_mask & (1 << i)) != 0 {
+                    max_prob = probs[i];
+                    max_idx = i;
+                }
+                if probs[i] < thresh {
+                    prune |= 1 << i;
+                }
+            }
+            if (prune >> max_idx) & 1 != 0 {
+                prune &= !(1 << max_idx);
+            }
+            allowed_tx_mask &= !prune;
+        }
+        // est-rd prune / prune_tx_2D: handled by the caller's est-rd stage
+        // (prune_txk_type_intra), not here.
     }
 
     if allowed_tx_mask == 0 {
@@ -825,6 +894,12 @@ pub struct TxTypeSearchPolicy {
     /// intra in the WINNER_MODE_EVAL pass). Also REORDERS the tx-type search
     /// order (`txk_map` sorted by est-rd). False for speed 0..=3.
     pub prune_tx_type_est_rd: bool,
+    /// sf `tx_sf.tx_type_search.prune_tx_type_using_stats` (0/1/2) — the
+    /// KF-frame-probability luma tx-type prune (see
+    /// [`TxMaskParams::prune_tx_type_using_stats`]). Framesize+speed dependent:
+    /// ALLINTRA sets 1 at speed>=2 / 2 at speed>=4, is_480p_or_larger only. 0
+    /// on every sub-480p gate and speed<2 (byte-identical to the pre-stats path).
+    pub prune_tx_type_using_stats: u8,
     /// `txfm_params->prune_2d_txfm_mode` — the STAGE-resolved tx-type prune
     /// level (`set_tx_type_prune`, rdopt_utils.h:498): the raw sf value when
     /// `winner_mode_tx_type_pruning == 0`, else
@@ -901,14 +976,15 @@ impl TxTypeSearchPolicy {
             use_screen_content_tools: false,
             use_rd_based_breakout_for_intra_tx_search: false,
             prune_tx_type_est_rd: false,
+            prune_tx_type_using_stats: 0,
             prune_2d_txfm_mode: 1, // TX_TYPE_PRUNE_1 (init_tx_sf:2457); inert while est_rd off
             predict_dc_level: 0,   // predict_dc_levels[0][*] (dc_blk_pred_level 0 through speed 5)
             prune_intra_tx_depths_using_nn: false, // default off (speed>=6 only)
-            enable_flip_idtx: true,    // --enable-flip-idtx CLI default
+            enable_flip_idtx: true, // --enable-flip-idtx CLI default
             use_intra_dct_only: false, // --use-intra-dct-only CLI default
             enable_tx_size_search: true, // --enable-tx-size-search CLI default
             use_qm_dist_metric: false, // AOM_DIST_METRIC_PSNR (default)
-            iq_tuning: false,          // AOM_TUNE_PSNR-family (default)
+            iq_tuning: false,      // AOM_TUNE_PSNR-family (default)
         }
     }
 
@@ -1162,6 +1238,9 @@ pub fn search_tx_type_intra(
         // constructor, so pre-toggle behavior is byte-identical.
         enable_flip_idtx: pol.enable_flip_idtx,
         use_intra_dct_only: pol.use_intra_dct_only,
+        // sf tx_type_search.prune_tx_type_using_stats (framesize+speed dependent;
+        // 0 outside the >=480p speed>=2 allintra envelope, so byte-inert there).
+        prune_tx_type_using_stats: pol.prune_tx_type_using_stats,
         ..TxMaskParams::speed0_allintra()
     };
     let (allowed_tx_mask, txk_allowed) = if inp.plane == 0 {

@@ -103,6 +103,7 @@ fn xform_quant_end_to_end_identical() {
                     bd,
                     lossless: false,
                     qm_ctx: None,
+                    adaptive: false,
                 };
                 let got = xform_quant(&residual, tx_size, tx_type, kind, &qp, use_optimize_b);
 

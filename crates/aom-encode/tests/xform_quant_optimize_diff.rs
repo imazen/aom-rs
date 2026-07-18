@@ -147,6 +147,7 @@ fn xform_quant_optimize_end_to_end_identical() {
                     bd: 8,
                     lossless: false,
                     qm_ctx: None,
+                    adaptive: false,
                 };
                 let bctx = BlockContext {
                     above: &above,

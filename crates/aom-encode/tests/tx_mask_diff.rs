@@ -47,45 +47,52 @@ fn tx_mask_intra_matches_c() {
                     // get_default_tx_type (KB-8 chunk 2c).
                     for use_default in [false, true] {
                         for use_screen in [false, true] {
-                            let p = TxMaskParams {
-                                use_reduced_intra_txset: use_reduced_txset as u8,
-                                use_derived_intra_tx_type_set: derived,
-                                use_default_intra_tx_type: use_default,
-                                enable_flip_idtx: flip_idtx,
-                                use_intra_dct_only: false,
-                                use_screen_content_tools: use_screen,
-                            };
-                            let (mask, txk) = get_tx_mask_intra(
-                                tx_size, mode, use_fi, fi_mode, lossless, reduced, &p,
-                            );
-                            let (mask_c, txk_c) = c::ref_get_tx_mask_intra(
-                                tx_size as i32,
-                                mode as i32,
-                                use_fi,
-                                fi_mode as i32,
-                                lossless,
-                                reduced,
-                                use_reduced_txset as i32,
-                                derived,
-                                flip_idtx,
-                                false,
-                                use_default,
-                                use_screen,
-                            );
-                            let txk_rust = txk.unwrap_or(TX_TYPES) as i32;
-                            assert_eq!(
-                                (mask, txk_rust),
-                                (mask_c, txk_c),
-                                "ts={tx_size} mode={mode} fi={use_fi}/{fi_mode} cfg={cfg} \
-                                 use_default={use_default} screen={use_screen}",
-                            );
-                            if txk.is_none() {
-                                multi += 1;
-                            } else {
-                                single += 1;
-                            }
-                            if use_reduced_txset > 0 && mask != 0 {
-                                reduced_hits += 1;
+                            // Sweep prune_tx_type_using_stats {0,1,2} — the KF
+                            // stats prune fires only in the LUMA multi-type arm
+                            // (inert where txk_allowed is single).
+                            for prune_stats in 0..3u8 {
+                                let p = TxMaskParams {
+                                    use_reduced_intra_txset: use_reduced_txset as u8,
+                                    use_derived_intra_tx_type_set: derived,
+                                    use_default_intra_tx_type: use_default,
+                                    enable_flip_idtx: flip_idtx,
+                                    use_intra_dct_only: false,
+                                    use_screen_content_tools: use_screen,
+                                    prune_tx_type_using_stats: prune_stats,
+                                };
+                                let (mask, txk) = get_tx_mask_intra(
+                                    tx_size, mode, use_fi, fi_mode, lossless, reduced, &p,
+                                );
+                                let (mask_c, txk_c) = c::ref_get_tx_mask_intra(
+                                    tx_size as i32,
+                                    mode as i32,
+                                    use_fi,
+                                    fi_mode as i32,
+                                    lossless,
+                                    reduced,
+                                    use_reduced_txset as i32,
+                                    derived,
+                                    flip_idtx,
+                                    false,
+                                    use_default,
+                                    use_screen,
+                                    prune_stats as i32,
+                                );
+                                let txk_rust = txk.unwrap_or(TX_TYPES) as i32;
+                                assert_eq!(
+                                    (mask, txk_rust),
+                                    (mask_c, txk_c),
+                                    "ts={tx_size} mode={mode} fi={use_fi}/{fi_mode} cfg={cfg} \
+                                 use_default={use_default} screen={use_screen} prune={prune_stats}",
+                                );
+                                if txk.is_none() {
+                                    multi += 1;
+                                } else {
+                                    single += 1;
+                                }
+                                if use_reduced_txset > 0 && mask != 0 {
+                                    reduced_hits += 1;
+                                }
                             }
                         }
                     }
@@ -100,7 +107,7 @@ fn tx_mask_intra_matches_c() {
     };
     let (mask, txk) = get_tx_mask_intra(2, 4, false, 0, false, false, &p);
     let (mask_c, txk_c) = c::ref_get_tx_mask_intra(
-        2, 4, false, 0, false, false, 1, false, true, true, false, false,
+        2, 4, false, 0, false, false, 1, false, true, true, false, false, 0,
     );
     assert_eq!((mask, txk.unwrap_or(TX_TYPES) as i32), (mask_c, txk_c));
     assert_eq!(mask, 1);
@@ -110,6 +117,88 @@ fn tx_mask_intra_matches_c() {
         "multi={multi} single={single}"
     );
     assert!(reduced_hits > 10_000);
+}
+
+/// The port's `DEFAULT_TX_TYPE_PROBS_KF` must byte-match the REAL exported
+/// `default_tx_type_probs[KF_UPDATE]` (encoder_utils.c:44) — the table the stats
+/// prune reads for a lone KEY still. Real-data evidence (not a transcription).
+#[test]
+fn default_tx_type_probs_kf_matches_c() {
+    use aom_encode::tx_search::DEFAULT_TX_TYPE_PROBS_KF;
+    let real = c::ref_default_tx_type_probs_kf();
+    assert_eq!(
+        DEFAULT_TX_TYPE_PROBS_KF, real,
+        "port KF tx_type_probs table diverges from the real default_tx_type_probs[0]"
+    );
+}
+
+/// Anti-vacuity for the stats prune: it must genuinely SHRINK the LUMA
+/// multi-type mask for some `(tx_size, mode, tx-set config)` — proving it is not
+/// a no-op in the speed-2..=4 allintra envelope (the low-probability tx types it
+/// drops survive the reduced-set masking). Every case is also cross-checked
+/// against the C oracle (which reads the real `default_tx_type_probs`).
+#[test]
+fn stats_prune_shrinks_the_mask() {
+    let mut bites = 0usize;
+    let mut example = String::new();
+    // Scan the reachable multi-type combos (the full-set + reduced-set arms).
+    for tx_size in 0..19usize {
+        for mode in 0..13usize {
+            for use_reduced_txset in 0..3u8 {
+                for &flip in &[true, false] {
+                    let mut off = TxMaskParams::speed0_allintra();
+                    off.use_reduced_intra_txset = use_reduced_txset;
+                    off.enable_flip_idtx = flip;
+                    off.prune_tx_type_using_stats = 0;
+                    let mut on = off;
+                    on.prune_tx_type_using_stats = 1;
+                    let (m_off, _) = get_tx_mask_intra(tx_size, mode, false, 0, false, false, &off);
+                    let (m_on, _) = get_tx_mask_intra(tx_size, mode, false, 0, false, false, &on);
+                    // Cross-check both against the C oracle.
+                    for (p, m) in [(0i32, m_off), (1, m_on)] {
+                        let (mc, _tc) = c::ref_get_tx_mask_intra(
+                            tx_size as i32,
+                            mode as i32,
+                            false,
+                            0,
+                            false,
+                            false,
+                            use_reduced_txset as i32,
+                            false,
+                            flip,
+                            false,
+                            false,
+                            false,
+                            p,
+                        );
+                        assert_eq!(
+                            m, mc,
+                            "ts={tx_size} mode={mode} reduced={use_reduced_txset} flip={flip} prune={p}"
+                        );
+                    }
+                    if m_on != m_off {
+                        // The prune must only REMOVE bits (a subset).
+                        assert_eq!(
+                            m_on & m_off,
+                            m_on,
+                            "prune must be a subset of the unpruned mask"
+                        );
+                        bites += 1;
+                        if example.is_empty() {
+                            example = format!(
+                                "ts={tx_size} mode={mode} reduced={use_reduced_txset} flip={flip}: 0x{m_off:04x} -> 0x{m_on:04x}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("stats prune shrinks the mask in {bites} (tx_size,mode,cfg) cases; e.g. {example}");
+    assert!(
+        bites > 0,
+        "the stats prune never changed the mask — it would be a no-op in the whole envelope"
+    );
 }
 
 #[test]

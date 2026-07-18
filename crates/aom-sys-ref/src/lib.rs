@@ -6461,6 +6461,112 @@ pub fn ref_highbd_quantize_b_qm(
     (qcoeff, dqcoeff, eob)
 }
 
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    pub fn aom_quantize_b_adaptive_helper_c(
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
+        qm: *const u8,
+        iqm: *const u8,
+        log_scale: i32,
+    );
+    #[allow(clippy::too_many_arguments)]
+    pub fn aom_highbd_quantize_b_adaptive_helper_c(
+        coeff: *const i32,
+        n: isize,
+        zbin: *const i16,
+        round: *const i16,
+        quant: *const i16,
+        quant_shift: *const i16,
+        qcoeff: *mut i32,
+        dqcoeff: *mut i32,
+        dequant: *const i16,
+        eob: *mut u16,
+        scan: *const i16,
+        iscan: *const i16,
+        qm: *const u8,
+        iqm: *const u8,
+        log_scale: i32,
+    );
+}
+
+/// Reference `aom_quantize_b_adaptive_helper_c` / `aom_highbd_..._c` (the
+/// `--quant-b-adapt` dead-zone quantizer). `hbd` selects the 64-bit highbd
+/// helper. `qm`/`iqm` = `None` is the no-matrix case (the funnel passes NULL).
+/// Returns (qcoeff, dqcoeff, eob).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_quantize_b_adaptive(
+    hbd: bool,
+    log_scale: i32,
+    coeff: &[i32],
+    zbin: &[i16; 2],
+    round: &[i16; 2],
+    quant: &[i16; 2],
+    quant_shift: &[i16; 2],
+    dequant: &[i16; 2],
+    qm: Option<&[u8]>,
+    iqm: Option<&[u8]>,
+    scan: &[i16],
+) -> (Vec<i32>, Vec<i32>, u16) {
+    let n = coeff.len();
+    let mut qcoeff = vec![0i32; n];
+    let mut dqcoeff = vec![0i32; n];
+    let mut eob: u16 = 0;
+    let dummy = vec![0i16; n.max(2)];
+    let qm_ptr = qm.map_or(std::ptr::null(), |m| m.as_ptr());
+    let iqm_ptr = iqm.map_or(std::ptr::null(), |m| m.as_ptr());
+    let f = if hbd {
+        aom_highbd_quantize_b_adaptive_helper_c
+    } else {
+        aom_quantize_b_adaptive_helper_c
+    };
+    unsafe {
+        f(
+            coeff.as_ptr(),
+            n as isize,
+            zbin.as_ptr(),
+            round.as_ptr(),
+            quant.as_ptr(),
+            quant_shift.as_ptr(),
+            qcoeff.as_mut_ptr(),
+            dqcoeff.as_mut_ptr(),
+            dequant.as_ptr(),
+            &mut eob,
+            scan.as_ptr(),
+            dummy.as_ptr(),
+            qm_ptr,
+            iqm_ptr,
+            log_scale,
+        )
+    }
+    (qcoeff, dqcoeff, eob)
+}
+
+extern "C" {
+    /// `default_tx_type_probs[FRAME_UPDATE_TYPES=7][TX_SIZES_ALL=19][TX_TYPES=16]`
+    /// (encoder_utils.c:44) — the frame-probability defaults `copy_frame_prob_info`
+    /// seeds `frame_probs.tx_type_probs` from for the `prune_tx_type_using_stats`
+    /// sf. Exported `extern const int` (encoder_utils.h:29).
+    static default_tx_type_probs: [[[i32; 16]; 19]; 7];
+}
+
+/// The `KF_UPDATE` (== 0) slab of the real exported `default_tx_type_probs` — the
+/// per-`TX_SIZE_ALL` prob row a lone KEY still uses for the stats prune.
+#[must_use]
+pub fn ref_default_tx_type_probs_kf() -> [[i32; 16]; 19] {
+    unsafe { default_tx_type_probs[0] }
+}
+
 /// Reference inverse 2-D transform+add for `tx_size` (0..19). `dest` is the
 /// bd-bit pixel buffer to reconstruct onto (modified in place).
 pub fn ref_inv_txfm2d_add(
@@ -8034,6 +8140,29 @@ extern "C" {
         out: *mut u8,
         out_cap: usize,
     ) -> i64;
+    /// min-q/max-q variant of `shim_encode_av1_kf` (append-only): base config
+    /// identical to `shim_encode_av1_kf` (single pass, aq 0, cdef/restoration
+    /// off, sb64, single tile, palette/intrabc off, QM off), plus the qindex
+    /// clamp bounds `--min-q = min_q` / `--max-q = max_q` (both 0..63).
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_av1_kf_minmaxq(
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        usage: i32,
+        min_q: i32,
+        max_q: i32,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
     /// Generic-controls variant of `shim_encode_av1_kf` (the C8-C11
     /// toggle-sweep infrastructure, append-only): base config identical to
     /// `shim_encode_av1_kf` (single pass, aq 0, cdef/restoration off, sb64,
@@ -8640,6 +8769,61 @@ pub fn ref_encode_av1_kf(
         )
     };
     assert!(n > 0, "shim_encode_av1_kf failed ({n})");
+    out.truncate(n as usize);
+    out
+}
+
+/// Encode one KEY frame through the REAL `aom_codec_av1_cx` API exactly like
+/// [`ref_encode_av1_kf`] (single pass, cdef/restoration off, aq 0, sb64, single
+/// tile, QM off) but with the `--min-q = min_q` / `--max-q = max_q` qindex clamp
+/// bounds (both 0..63 quantizer levels). Used to validate the port's
+/// `base_qindex_from_cq_clamped` derivation against the real encoder's header.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_av1_kf_minmaxq(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    usage: u32,
+    min_q: i32,
+    max_q: i32,
+) -> Vec<u8> {
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+    };
+    assert_eq!(y.len(), w * h);
+    assert!(mono || (u.len() == cw * ch && v.len() == cw * ch));
+    let mut out = vec![0u8; w * h * 8 + 65536];
+    let n = unsafe {
+        shim_encode_av1_kf_minmaxq(
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            usage as i32,
+            min_q,
+            max_q,
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    };
+    assert!(n > 0, "shim_encode_av1_kf_minmaxq failed ({n})");
     out.truncate(n as usize);
     out
 }
@@ -10198,6 +10382,7 @@ unsafe extern "C" {
         use_intra_dct_only: i32,
         use_default_intra_tx_type: i32,
         use_screen_content_tools: i32,
+        prune_tx_type_using_stats: i32,
         out_txk_allowed: *mut i32,
     ) -> i32;
     fn shim_pixel_diff_dist(
@@ -10233,6 +10418,7 @@ pub fn ref_get_tx_mask_intra(
     use_intra_dct_only: bool,
     use_default_intra_tx_type: bool,
     use_screen_content_tools: bool,
+    prune_tx_type_using_stats: i32,
 ) -> (u16, i32) {
     let mut txk = 0i32;
     let mask = unsafe {
@@ -10249,6 +10435,7 @@ pub fn ref_get_tx_mask_intra(
             use_intra_dct_only as i32,
             use_default_intra_tx_type as i32,
             use_screen_content_tools as i32,
+            prune_tx_type_using_stats,
             &mut txk,
         )
     };

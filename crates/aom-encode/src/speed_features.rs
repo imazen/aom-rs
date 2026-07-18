@@ -353,6 +353,14 @@ pub struct SpeedFeatures {
     /// arm (LIVE on intra in the WINNER pass — no inter gate). Not yet SET in
     /// `set_allintra` (KB-8 chunk 2d-iv).
     pub prune_tx_type_est_rd: bool,
+    /// `tx_sf.tx_type_search.prune_tx_type_using_stats` (0/1/2) — the KF-frame-
+    /// probability luma tx-type prune. It is framesize-DEPENDENT (needs
+    /// `is_480p_or_larger`, speed_features.c:262/300), so [`Self::set_allintra`]
+    /// leaves it 0; `port_encode_full` sets it from `(speed, min(w,h))` after the
+    /// speed derivation (the analog of the KB-3 `use_square_partition_only_
+    /// threshold_allintra` framesize wiring). See
+    /// [`crate::tx_search::TxTypeSearchPolicy::prune_tx_type_using_stats`].
+    pub prune_tx_type_using_stats: u8,
 
     // ---- winner_mode_sf --------------------------------------------------
     /// `winner_mode_sf.enable_winner_mode_for_coeff_opt` — default 0
@@ -492,6 +500,7 @@ impl SpeedFeatures {
             fast_intra_tx_type_search: 0,          // init_tx_sf:2461
             winner_mode_tx_type_pruning: 0,        // init_tx_sf:2466
             prune_tx_type_est_rd: false,           // init_tx_sf:2465
+            prune_tx_type_using_stats: 0,          // init_tx_sf:2464 (framesize sets it)
             prune_intra_tx_depths_using_nn: false, // init_tx_sf default (off)
             // winner_mode_sf (all off until speed>=4 — KB-8 chunk 2d wires these)
             enable_winner_mode_for_coeff_opt: false, // init:2511
@@ -989,6 +998,7 @@ impl SpeedFeatures {
             use_rd_based_breakout_for_intra_tx_search: self
                 .use_rd_based_breakout_for_intra_tx_search,
             prune_tx_type_est_rd: self.prune_tx_type_est_rd,
+            prune_tx_type_using_stats: self.prune_tx_type_using_stats,
             prune_2d_txfm_mode: {
                 // set_tx_type_prune (rdopt_utils.h:498): the raw sf value,
                 // overridden per stage when winner_mode_tx_type_pruning != 0.

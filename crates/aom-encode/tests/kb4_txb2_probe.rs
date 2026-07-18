@@ -156,6 +156,7 @@ fn kb4_txb2_real_c_leaf_probe() {
         false, // use_intra_dct_only
         false, // use_default_intra_tx_type (speed-0: OFF — winner-mode/speed>=1)
         false, // use_screen_content_tools (mono synthetic HF cell: not screen)
+        0,     // prune_tx_type_using_stats (speed-0 sub-480p: off)
     );
     let (bsse_raw, mut mse_c) = c::ref_pixel_diff_dist(
         &RESIDUAL,

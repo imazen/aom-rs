@@ -50,7 +50,8 @@ pub mod var_part;
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;
 use aom_quant::{
-    aom_highbd_quantize_b_no_qmatrix, aom_highbd_quantize_b_qm, aom_quantize_b_no_qmatrix,
+    aom_highbd_quantize_b_adaptive_helper, aom_highbd_quantize_b_no_qmatrix,
+    aom_highbd_quantize_b_qm, aom_quantize_b_adaptive_helper, aom_quantize_b_no_qmatrix,
     aom_quantize_b_qm, av1_highbd_quantize_dc, av1_highbd_quantize_fp_no_qmatrix,
     av1_highbd_quantize_fp_qm, av1_quantize_dc, av1_quantize_fp_qm,
 };
@@ -167,6 +168,14 @@ pub struct QuantParams<'a> {
     /// (`hybrid_fwd_txfm.c:83`) makes the same branch. Lossless forces
     /// `tx_size == TX_4X4` and `tx_type == DCT_DCT` upstream.
     pub lossless: bool,
+    /// `oxcf.q_cfg.quant_b_adapt` (`--quant-b-adapt`, default false). Read ONLY
+    /// by [`QuantKind::B`]: when set, the dead-zone quantizer routes through the
+    /// adaptive helper ([`aom_quant::aom_quantize_b_adaptive_helper`] / highbd)
+    /// instead of the plain one — the prescan-widened dead-zone + the
+    /// SKIP_EOB_FACTOR_ADJUST tail. Inert for [`QuantKind::Fp`]/[`QuantKind::Dc`]
+    /// (C only threads `quant_b_adapt` into `av1_quantize_b_facade`). Set via
+    /// [`QuantParams::with_adaptive`].
+    pub adaptive: bool,
 }
 
 impl<'a> QuantParams<'a> {
@@ -209,7 +218,17 @@ impl<'a> QuantParams<'a> {
             qm_ctx: None,
             bd,
             lossless,
+            adaptive: false,
         }
+    }
+
+    /// Set `oxcf.q_cfg.quant_b_adapt` (`--quant-b-adapt`) — routes the
+    /// [`QuantKind::B`] dead-zone quantizer through the adaptive helper. No-op
+    /// for FP/DC kinds (C threads the flag only into `av1_quantize_b_facade`).
+    #[must_use]
+    pub fn with_adaptive(mut self, adaptive: bool) -> Self {
+        self.adaptive = adaptive;
+        self
     }
 
     /// Attach the frame QM context (`av1_setup_qmatrix` inputs) for this plane —
@@ -311,6 +330,17 @@ pub fn xform_quant(
     // slices pass through unchanged — byte-identical to the pre-QM path).
     let (qm_sel, iqm_sel) = resolve_qm(qp, tx_size, tx_type);
     let eob = match (kind, qm_sel, iqm_sel, hbd) {
+        // --quant-b-adapt: the dead-zone "b" quantizer routes through the
+        // adaptive helper (av1_quantize_b_facade's use_quant_b_adapt arm); qm_sel
+        // /iqm_sel carry the per-transform QM (None = flat). FP/DC unaffected.
+        (QuantKind::B, _, _, true) if qp.adaptive => aom_highbd_quantize_b_adaptive_helper(
+            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, qm_sel, iqm_sel, sc,
+            src, &mut qcoeff, &mut dqcoeff,
+        ),
+        (QuantKind::B, _, _, false) if qp.adaptive => aom_quantize_b_adaptive_helper(
+            qp.zbin, qp.round, qp.quant, qp.quant_shift, qp.dequant, log_scale, qm_sel, iqm_sel, sc,
+            src, &mut qcoeff, &mut dqcoeff,
+        ),
         (QuantKind::Fp, Some(qm), Some(iqm), false) => av1_quantize_fp_qm(
             qp.round,
             qp.quant,

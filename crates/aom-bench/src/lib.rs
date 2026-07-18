@@ -48,10 +48,10 @@ use aom_entropy::header::{
     LoopfilterHeader, RestorationHeader, TileInfoHeader, read_sequence_header_obu,
     read_uncompressed_header,
 };
+use aom_entropy::lr::{LrFrameConfig, RESTORE_NONE as LR_RESTORE_NONE};
 use aom_entropy::obu::read_obu_header;
 use aom_entropy::partition::KfFrameContext;
 use aom_entropy::rb::ReadBitBuffer;
-use aom_entropy::lr::{LrFrameConfig, RESTORE_NONE as LR_RESTORE_NONE};
 use aom_loopfilter::frame::{LfFrameBuf, LfMiGrid, LfParams, loop_filter_frame};
 use aom_quant::{Dequants, Quants, av1_build_quantizer, av1_dc_quant_qtx, set_q_index};
 use aom_restore::pick::{LrPlanePixels, LrSearchInput, LrSearchSf, pick_filter_restoration};
@@ -411,6 +411,14 @@ pub struct ToggleKnobs {
     /// into the pack. The C side must be driven with `AV1E_SET_DELTAQ_MODE = 2`.
     /// PORT-side only — not emitted by [`ToggleKnobs::c_ctrls`].
     pub deltaq_mode2: bool,
+    /// Anti-vacuity witness ONLY (PORT-side): force
+    /// `sf.prune_tx_type_using_stats = 0` even on a >=480p speed>=2 frame where
+    /// the framesize derivation would enable it. `--quant-b-adapt`-style speed
+    /// features have no CLI control, so the C side is driven by `--cpu-used`
+    /// alone; this flag lets a witness prove the ported stats-prune is
+    /// LOAD-BEARING (port-without-prune must diverge from real aomenc, port-with
+    /// must match). Default false — not emitted by [`ToggleKnobs::c_ctrls`].
+    pub disable_tx_stats_prune: bool,
 }
 
 impl Default for ToggleKnobs {
@@ -443,6 +451,7 @@ impl Default for ToggleKnobs {
             mode_cost_upd_freq: 0,
             deltaq_mode3: false,
             deltaq_mode2: false,
+            disable_tx_stats_prune: false,
         }
     }
 }
@@ -651,10 +660,20 @@ impl EncodeCell {
             None => (fw, fh, 0, 0),
             Some((cw, ch, ox, oy)) => (cw, ch, ox, oy),
         };
-        assert!(off_x + w <= fw && off_y + h <= fh, "{label}: crop exceeds frame");
-        assert!(off_x % 2 == 0 && off_y % 2 == 0, "{label}: crop offset must be even");
+        assert!(
+            off_x + w <= fw && off_y + h <= fh,
+            "{label}: crop exceeds frame"
+        );
+        assert!(
+            off_x % 2 == 0 && off_y % 2 == 0,
+            "{label}: crop offset must be even"
+        );
         let (cox, coy) = (off_x >> ss_x, off_y >> ss_y);
-        let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y) };
+        let (cw, ch) = if mono {
+            (0, 0)
+        } else {
+            ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
+        };
         let mut y = vec![0u16; w * h];
         for r in 0..h {
             for col in 0..w {
@@ -894,7 +913,8 @@ impl EncodeCell {
         lr_stage: bool,
         film_grain: Option<&FilmGrainParams>,
     ) -> Vec<u8> {
-        let (w, h, mono, ss_x, ss_y, bd) = (self.w, self.h, self.mono, self.ss_x, self.ss_y, self.bd);
+        let (w, h, mono, ss_x, ss_y, bd) =
+            (self.w, self.h, self.mono, self.ss_x, self.ss_y, self.bd);
         let obus = walk_obus(bootstrap);
         let seq_payload = obus
             .iter()
@@ -932,7 +952,8 @@ impl EncodeCell {
                 equal_picture_interval: seq.timing_info.equal_picture_interval,
                 frame_presentation_time_length: seq
                     .decoder_model_info
-                    .frame_presentation_time_length as u32,
+                    .frame_presentation_time_length
+                    as u32,
                 frame_id_numbers_present_flag: s.frame_id_numbers_present_flag,
                 frame_id_length: s.frame_id_length as u32,
                 force_screen_content_tools: s.force_screen_content_tools,
@@ -1084,7 +1105,11 @@ impl EncodeCell {
             FrameUpdateType::Kf,
             qindex,
             TuneMetric::Psnr,
-            if allintra { EncMode::Allintra } else { EncMode::Good },
+            if allintra {
+                EncMode::Allintra
+            } else {
+                EncMode::Good
+            },
         );
 
         // Partial-SB support: CEIL the SB walk and replicate-extend the
@@ -1241,7 +1266,24 @@ impl EncodeCell {
         }
 
         let speed = self.speed;
-        let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
+        let mut sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
+        // Framesize-dependent tx-type stats prune (set_allintra_speed_feature_
+        // framesize_dependent, speed_features.c:261/299): ALLINTRA sets
+        // prune_tx_type_using_stats = 1 at speed>=2 / 2 at speed>=4, but ONLY
+        // when is_480p_or_larger (min(w,h) >= 480). 0 on every sub-480p gate ->
+        // byte-inert there (the SpeedFeatures setter itself is framesize-blind).
+        sf.prune_tx_type_using_stats =
+            if allintra && w.min(h) >= 480 && !knobs.disable_tx_stats_prune {
+                if speed >= 4 {
+                    2
+                } else if speed >= 2 {
+                    1
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
         let env = SbEncodeEnv {
             sb_size: sb_block,
             mi_rows,
@@ -1475,7 +1517,10 @@ impl EncodeCell {
                 s.enable_restoration,
                 "port_encode_lr needs an enable_restoration=1 bootstrap stream"
             );
-            assert!(!p.coded_lossless, "is_restoration_used excludes all-lossless");
+            assert!(
+                !p.coded_lossless,
+                "is_restoration_used excludes all-lossless"
+            );
 
             // (1) The deblocked reconstruction: the derived levels applied to
             //     a copy (`loop_filter_frame` gates itself on the Y levels,
@@ -1920,6 +1965,12 @@ pub fn encode_cells() -> Vec<EncodeCell> {
             ));
         }
     }
-    cells.push(EncodeCell::synthetic_diag("enc_s4_128_cq32", 128, 128, 32, 4));
+    cells.push(EncodeCell::synthetic_diag(
+        "enc_s4_128_cq32",
+        128,
+        128,
+        32,
+        4,
+    ));
     cells
 }

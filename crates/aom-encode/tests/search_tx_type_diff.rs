@@ -252,6 +252,7 @@ fn search_tx_type_intra_matches_c_chain() {
                 false,       // use_intra_dct_only
                 use_default, // use_default_intra_tx_type (KB-8 MODE_EVAL pass)
                 false,       // use_screen_content_tools
+                0,           // prune_tx_type_using_stats (speed-0 sub-480p: off)
             );
             let _ = txk_c;
             let (bsse_raw, mut mse_c) =

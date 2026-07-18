@@ -186,6 +186,7 @@ fn encode_block_coeffs_end_to_end_identical() {
                     bd,
                     lossless: false,
                     qm_ctx: None,
+                    adaptive: false,
                 };
                 let bctx = BlockContext {
                     above: &above,

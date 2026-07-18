@@ -912,6 +912,7 @@ impl<'a> Mirror<'a> {
             qm_ctx: None,
             bd: cfg.bd as u8,
             lossless: false,
+            adaptive: false,
         };
 
         let mut blk_row = 0usize;
@@ -1163,6 +1164,7 @@ impl<'a> Mirror<'a> {
                     qm_ctx: None,
                     bd: cfg.bd as u8,
                     lossless: false,
+                    adaptive: false,
                 };
                 let src_uv = if plane == 1 { self.src_u } else { self.src_v };
                 let mut blk_row = 0usize;

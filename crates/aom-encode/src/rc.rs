@@ -63,6 +63,49 @@ pub fn base_qindex_from_cq(cq: i32) -> i32 {
     quantizer_to_qindex(cq)
 }
 
+/// The `base_qindex` libaom assigns to a single KEY frame under `AOM_Q` with
+/// `--cq-level = cq` AND the qindex clamp bounds `--min-q = min_q` /
+/// `--max-q = max_q` (all three are 0..=63 quantizer levels). Extends
+/// [`base_qindex_from_cq`] with the `[best_quality, worst_quality]` clamp that
+/// `rc_pick_q_and_bounds_q_mode` applies (`ratectrl.c:2158-2161`,
+/// `q = *bottom_index = clamp(active_best_quality, rc->best_quality,
+/// rc->worst_quality)`): `rc->best_quality = av1_quantizer_to_qindex(min_q)` and
+/// `rc->worst_quality = av1_quantizer_to_qindex(max_q)` (from
+/// `rc_cfg->best/worst_allowed_q`, `encoder.c:1003-1004`; the `--min-q`/`--max-q`
+/// CLI values are mapped through the same `quantizer_to_qindex` table in
+/// `av1_cx_iface`). For the lone-KEY `AOM_Q` branch `active_best = active_worst
+/// = cq_level` (`ratectrl.c:1832`), then `if (cq_level > 0) active_best =
+/// AOMMAX(1, active_best)` (`ratectrl.c:2156`), and `av1_set_quantizer` stores
+/// `base_qindex = q` (delta-q off). The default `min_q=0`/`max_q=63` map to
+/// `[0, 255]`, making the clamp inert — so `base_qindex_from_cq_clamped(cq, 0,
+/// 63) == base_qindex_from_cq(cq)`. Verified byte-identical against the real
+/// encoder across a `(cq, min_q, max_q)` sweep in `min_max_q_diff.rs`.
+///
+/// # Panics
+/// Panics if any of `cq`, `min_q`, `max_q` is outside `0..=63`.
+#[must_use]
+pub fn base_qindex_from_cq_clamped(cq: i32, min_q: i32, max_q: i32) -> i32 {
+    let cq_level = quantizer_to_qindex(cq);
+    let best_quality = quantizer_to_qindex(min_q);
+    let worst_quality = quantizer_to_qindex(max_q);
+    let active_best = if cq_level > 0 {
+        cq_level.max(1)
+    } else {
+        cq_level
+    };
+    // libaom's `clamp` macro (`value < low ? low : value > high ? high : value`)
+    // — NOT Rust's `clamp`, which panics when `low > high` (an out-of-order
+    // min_q/max_q config; aomenc validates min_q <= max_q, but mirror C's macro
+    // rather than panic).
+    if active_best < best_quality {
+        best_quality
+    } else if active_best > worst_quality {
+        worst_quality
+    } else {
+        active_best
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

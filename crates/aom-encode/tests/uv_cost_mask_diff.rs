@@ -103,6 +103,7 @@ fn tx_mask_uv_intra_matches_c() {
                             enable_flip_idtx: flip_idtx,
                             use_intra_dct_only: false,
                             use_screen_content_tools: false,
+                            prune_tx_type_using_stats: 0, // chroma arm: luma-only sf, inert
                         };
                         let (mask, txk) = get_tx_mask_uv_intra(
                             tx_size, uv_mode, luma_mode, use_fi, fi_mode, lossless, reduced, &p,

@@ -170,8 +170,7 @@ pub fn av1_get_sbq_variance_boost(
     let target_q = base_q / qstep_ratio;
     let target_qindex = av1_convert_q_to_qindex(target_q, bit_depth);
     // boost = round((base_qindex + 544) * (base_qindex - target_qindex) / 1279)
-    let boost = ((f64::from(base_qindex) + 544.0) * f64::from(base_qindex - target_qindex)
-        / 1279.0)
+    let boost = ((f64::from(base_qindex) + 544.0) * f64::from(base_qindex - target_qindex) / 1279.0)
         .round() as i32;
     let boost = boost.min(VAR_BOOST_MAX_DELTAQ_RANGE);
     (base_qindex - boost).max(MINQ + 1)
@@ -241,8 +240,15 @@ pub fn setup_delta_q_perceptual_ai(
     mi_col: i32,
     current_base_qindex: i32,
 ) -> i32 {
-    let current =
-        map.av1_get_sbq_perceptual_ai(base_qindex, bit_depth, delta_q_res, sb_mi, sb_mi, mi_row, mi_col);
+    let current = map.av1_get_sbq_perceptual_ai(
+        base_qindex,
+        bit_depth,
+        delta_q_res,
+        sb_mi,
+        sb_mi,
+        mi_row,
+        mi_col,
+    );
     av1_adjust_q_from_delta_q_res(delta_q_res, current_base_qindex, current)
 }
 
@@ -699,14 +705,16 @@ impl WeberVarMap {
                     base_den += (f64::from(w.rec_pix_max) * (w.src_variance as f64).sqrt()
                         - f64::from(w.src_pix_max) * (w.rec_variance as f64).sqrt())
                     .abs();
-                    base_reg += (w.distortion as f64).sqrt() * f64::from(w.src_pix_max).sqrt() * 0.1;
+                    base_reg +=
+                        (w.distortion as f64).sqrt() * f64::from(w.src_pix_max).sqrt() * 0.1;
                     mb_count += 1;
                 }
                 col += WEBER_MI_STEP;
             }
             row += WEBER_MI_STEP;
         }
-        let sb_wiener_var = (((base_num + base_reg) / (base_den + base_reg)) / mb_count as f64) as i32;
+        let sb_wiener_var =
+            (((base_num + base_reg) / (base_den + base_reg)) / mb_count as f64) as i32;
         sb_wiener_var.max(1)
     }
 
@@ -749,7 +757,9 @@ impl WeberVarMap {
     ) -> i32 {
         let sb_wiener_var = self.get_var_perceptual_ai(mi_wide, mi_high, mi_row, mi_col);
         let mut beta = self.norm_wiener_variance as f64 / f64::from(sb_wiener_var);
-        let min_max_scale = self.get_max_scale(mi_wide, mi_high, mi_row, mi_col).max(1.0);
+        let min_max_scale = self
+            .get_max_scale(mi_wide, mi_high, mi_row, mi_col)
+            .max(1.0);
         beta = 1.0 / (1.0 / beta).min(min_max_scale);
         // Cap so the delta q stays near the base q.
         beta = beta.min(4.0);
@@ -852,9 +862,12 @@ impl WeberVarMap {
 /// residual (`AV1_XFORM_QUANT_FP`), reconstruct, and record the Weber stats.
 /// Finally derive `norm_wiener_variance`.
 ///
-/// **Scope (this landing): bd8, single tile, frame dims a multiple of 8px.**
-/// The highbd FP-quantize arm and the partial-edge source-border extension
-/// (the KB-6 partial-SB analogue) are follow-ups. `base_qindex` is the frame
+/// **Scope: bd8/10/12, single tile, frame dims a multiple of 8px.** The highbd
+/// (bd>8) FP-quantize arm dispatches `av1_highbd_quantize_fp` (the best-mode
+/// requant below); every other step (predict/subtract/DCT/inverse/Weber) is
+/// bd-parameterized already. The partial-edge source-border extension (frames
+/// whose dims aren't a multiple of 8px — the KB-6 partial-SB analogue) is a
+/// follow-up. `base_qindex` is the frame
 /// qindex (`rc_cfg.cq_level`, :612); `sb_size` is the seq SB BLOCK enum and
 /// `sb_mi` its mi extent (the norm grid step). `disable_edge_filter` is
 /// `!seq_params->enable_intra_edge_filter`; the per-block edge `filter_type`
@@ -887,8 +900,27 @@ fn wiener_block_residual_dct(
     const PARTITION_NONE: usize = 0;
     const BS: usize = 8;
     let (n_top, n_topright, n_left, n_bottomleft) = aom_entropy::partition::intra_avail(
-        sb_size, BLOCK_8X8, row, col, row > 0, col > 0, mi_cols, mi_rows, PARTITION_NONE, TX_8X8, 0,
-        0, 0, 0, BS as i32, BS as i32, mi_cols, mi_rows, mode, 0, false,
+        sb_size,
+        BLOCK_8X8,
+        row,
+        col,
+        row > 0,
+        col > 0,
+        mi_cols,
+        mi_rows,
+        PARTITION_NONE,
+        TX_8X8,
+        0,
+        0,
+        0,
+        0,
+        BS as i32,
+        BS as i32,
+        mi_cols,
+        mi_rows,
+        mode,
+        0,
+        false,
     );
     aom_intra::predict_intra_high(
         src_y,
@@ -959,8 +991,20 @@ pub fn av1_set_mb_wiener_variance(
             let mut best_intra_cost = i32::MAX;
             for mode in 0..INTRA_MODE_END {
                 wiener_block_residual_dct(
-                    src_y, src_off, stride, sb_size, row, col, mi_rows, mi_cols, mode,
-                    disable_edge_filter, bd, &mut pred, &mut residual, &mut coeff,
+                    src_y,
+                    src_off,
+                    stride,
+                    sb_size,
+                    row,
+                    col,
+                    mi_rows,
+                    mi_cols,
+                    mode,
+                    disable_edge_filter,
+                    bd,
+                    &mut pred,
+                    &mut residual,
+                    &mut coeff,
                 );
                 let intra_cost = aom_dist::hadamard::satd(&coeff);
                 if intra_cost < best_intra_cost {
@@ -971,17 +1015,60 @@ pub fn av1_set_mb_wiener_variance(
 
             // --- best mode: predict, DCT, FP-quantize, reconstruct (:362-396) ---
             wiener_block_residual_dct(
-                src_y, src_off, stride, sb_size, row, col, mi_rows, mi_cols, best_mode,
-                disable_edge_filter, bd, &mut pred, &mut residual, &mut coeff,
+                src_y,
+                src_off,
+                stride,
+                sb_size,
+                row,
+                col,
+                mi_rows,
+                mi_cols,
+                best_mode,
+                disable_edge_filter,
+                bd,
+                &mut pred,
+                &mut residual,
+                &mut coeff,
             );
             qcoeff.fill(0);
             dqcoeff.fill(0);
-            let eob = aom_quant::av1_quantize_fp(
-                &coeff, &round, &quant, &dequant, &mut qcoeff, &mut dqcoeff, scan,
-            );
+            // av1_calc_mb_wiener_var_row (allintra_vis.c:377-388): bd8 goes
+            // through av1_quantize_fp_facade, bd>8 through
+            // av1_highbd_quantize_fp_facade (the 64-bit FP quantizer). Both read
+            // the same y_quant_fp / y_round_fp / y_dequant tables (built per
+            // bit_depth). log_scale = av1_get_tx_scale(TX_8X8) = 0 (64 pels).
+            let eob = if bd > 8 {
+                aom_quant::av1_highbd_quantize_fp_no_qmatrix(
+                    &quant,
+                    &dequant,
+                    &round,
+                    0,
+                    scan,
+                    &coeff,
+                    &mut qcoeff,
+                    &mut dqcoeff,
+                )
+            } else {
+                aom_quant::av1_quantize_fp(
+                    &coeff,
+                    &round,
+                    &quant,
+                    &dequant,
+                    &mut qcoeff,
+                    &mut dqcoeff,
+                    scan,
+                )
+            };
             // pred += inv(dqcoeff): pred now holds the reconstruction.
             aom_transform::inv_txfm2d::av1_inverse_transform_add(
-                &dqcoeff, &mut pred, BS, DCT_DCT, TX_8X8, i32::from(bd), eob as usize, false,
+                &dqcoeff,
+                &mut pred,
+                BS,
+                DCT_DCT,
+                TX_8X8,
+                i32::from(bd),
+                eob as usize,
+                false,
             );
 
             // --- Weber statistics (:397-460) ---

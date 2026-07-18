@@ -224,6 +224,7 @@ fn encode_coding_block_plane_identical() {
                     bd,
                     lossless: false,
                     qm_ctx: None,
+                    adaptive: false,
                 };
                 let opt = OptimizeInputs {
                     cost: &cost,

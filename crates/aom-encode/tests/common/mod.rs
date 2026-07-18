@@ -682,6 +682,7 @@ pub fn c_search_tx_type_p(
             use_intra_dct_only,
             false, // use_default_intra_tx_type
             false, // use_screen_content_tools
+            0,     // prune_tx_type_using_stats (speed-0 sub-480p: off)
         )
     } else {
         let (m, t) = c::ref_get_tx_mask_uv_intra(
@@ -721,7 +722,8 @@ pub fn c_search_tx_type_p(
     let qstep_c = (i32::from(dequant[1]) >> dequant_shift) as u64;
     let skip_trellis_c = !((mse_c as u64) <= 3200u64 * qstep_c * qstep_c);
     let kind_c = if skip_trellis_c { 1 } else { 0 };
-    let trellis_rdmult = trellis_rdmult_intra(rdmult, 0, bd, plane, use_chroma_trellis_rd_mult, false);
+    let trellis_rdmult =
+        trellis_rdmult_intra(rdmult, 0, bd, plane, use_chroma_trellis_rd_mult, false);
     let (txb_skip_ctx_c, dc_sign_ctx_c) =
         c::ref_get_txb_ctx(plane_bsize, tx_size, plane, t_above, t_left);
 

@@ -480,7 +480,8 @@ static long encode_av1_kf_impl(const uint16_t *y, const uint16_t *u,
                                int tile_columns_log2, int tile_rows_log2,
                                int enable_palette, int enable_intrabc,
                                int lossless, int enable_qm, int qm_min,
-                               int qm_max, const int *extra_ctrl_ids,
+                               int qm_max, int min_q, int max_q,
+                               const int *extra_ctrl_ids,
                                const int *extra_ctrl_vals, int n_extra_ctrls,
                                uint8_t *out, size_t out_cap) {
   aom_codec_iface_t *iface = aom_codec_av1_cx();
@@ -497,6 +498,11 @@ static long encode_av1_kf_impl(const uint16_t *y, const uint16_t *u,
   cfg.g_threads = 1;
   cfg.g_pass = AOM_RC_ONE_PASS;
   cfg.rc_end_usage = AOM_Q;
+  /* --min-q / --max-q (0..63 quantizer levels): the rc_min/max_quantizer clamp
+   * bounds. -1 leaves the usage default (existing callers pass -1/-1 -> inert,
+   * behaviour unchanged). Set BEFORE encode_kf_pass, which encodes with &cfg. */
+  if (min_q >= 0) cfg.rc_min_quantizer = min_q;
+  if (max_q >= 0) cfg.rc_max_quantizer = max_q;
   cfg.monochrome = mono;
   cfg.g_input_bit_depth = bd;
   if (bd == 8) {
@@ -605,7 +611,7 @@ long shim_encode_av1_kf(const uint16_t *y, const uint16_t *u,
                             /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
                             /*enable_palette=*/0, /*enable_intrabc=*/0,
                             /*lossless=*/0, /*enable_qm=*/0, /*qm_min=*/0,
-                            /*qm_max=*/0, /*extra_ctrl_ids=*/NULL,
+                            /*qm_max=*/0, /*min_q=*/-1, /*max_q=*/-1, /*extra_ctrl_ids=*/NULL,
                             /*extra_ctrl_vals=*/NULL, /*n_extra_ctrls=*/0, out,
                             out_cap);
 }
@@ -628,7 +634,7 @@ long shim_encode_av1_kf_sb128(const uint16_t *y, const uint16_t *u,
                             /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
                             /*enable_palette=*/0, /*enable_intrabc=*/0,
                             /*lossless=*/0, /*enable_qm=*/0, /*qm_min=*/0,
-                            /*qm_max=*/0, /*extra_ctrl_ids=*/NULL,
+                            /*qm_max=*/0, /*min_q=*/-1, /*max_q=*/-1, /*extra_ctrl_ids=*/NULL,
                             /*extra_ctrl_vals=*/NULL, /*n_extra_ctrls=*/0, out,
                             out_cap);
 }
@@ -653,7 +659,7 @@ long shim_encode_av1_kf_tiles(const uint16_t *y, const uint16_t *u,
                             aq_mode, two_pass, sb_size_128, tile_columns_log2,
                             tile_rows_log2, /*enable_palette=*/0,
                             /*enable_intrabc=*/0, /*lossless=*/0,
-                            /*enable_qm=*/0, /*qm_min=*/0, /*qm_max=*/0, /*extra_ctrl_ids=*/NULL,
+                            /*enable_qm=*/0, /*qm_min=*/0, /*qm_max=*/0, /*min_q=*/-1, /*max_q=*/-1, /*extra_ctrl_ids=*/NULL,
                             /*extra_ctrl_vals=*/NULL, /*n_extra_ctrls=*/0, out,
                             out_cap);
 }
@@ -679,7 +685,7 @@ long shim_encode_av1_kf_screen_content(const uint16_t *y, const uint16_t *u,
                             aq_mode, two_pass, /*sb_size_128=*/0,
                             /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
                             enable_palette, enable_intrabc, /*lossless=*/0,
-                            /*enable_qm=*/0, /*qm_min=*/0, /*qm_max=*/0, /*extra_ctrl_ids=*/NULL,
+                            /*enable_qm=*/0, /*qm_min=*/0, /*qm_max=*/0, /*min_q=*/-1, /*max_q=*/-1, /*extra_ctrl_ids=*/NULL,
                             /*extra_ctrl_vals=*/NULL, /*n_extra_ctrls=*/0, out,
                             out_cap);
 }
@@ -702,7 +708,7 @@ long shim_encode_av1_kf_lossless(const uint16_t *y, const uint16_t *u,
                             /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
                             /*enable_palette=*/0, /*enable_intrabc=*/0,
                             /*lossless=*/1, /*enable_qm=*/0, /*qm_min=*/0,
-                            /*qm_max=*/0, /*extra_ctrl_ids=*/NULL,
+                            /*qm_max=*/0, /*min_q=*/-1, /*max_q=*/-1, /*extra_ctrl_ids=*/NULL,
                             /*extra_ctrl_vals=*/NULL, /*n_extra_ctrls=*/0, out,
                             out_cap);
 }
@@ -728,8 +734,33 @@ long shim_encode_av1_kf_qm(const uint16_t *y, const uint16_t *u,
                             /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
                             /*enable_palette=*/0, /*enable_intrabc=*/0,
                             /*lossless=*/0, /*enable_qm=*/1, qm_min, qm_max,
+                            /*min_q=*/-1, /*max_q=*/-1,
                             /*extra_ctrl_ids=*/NULL, /*extra_ctrl_vals=*/NULL,
                             /*n_extra_ctrls=*/0, out, out_cap);
+}
+
+/* min-q/max-q variant of shim_encode_av1_kf: same controls as shim_encode_av1_kf
+ * (--sb-size=64, single tile, no palette/intrabc, non-lossless, QM off) plus the
+ * qindex clamp bounds --min-q = min_q / --max-q = max_q (both 0..63 quantizer
+ * levels -> cfg.rc_min_quantizer / rc_max_quantizer). For a lone KEY frame under
+ * AOM_Q, base_qindex = clamp(quantizer_to_qindex(cq_level), quantizer_to_qindex
+ * (min_q), quantizer_to_qindex(max_q)). Append-only; every wrapper above is
+ * untouched. See encode_av1_kf_impl's doc comment for the full control list. */
+long shim_encode_av1_kf_minmaxq(const uint16_t *y, const uint16_t *u,
+                                const uint16_t *v, int w, int h, int bd,
+                                int mono, int ss_x, int ss_y, int cq_level,
+                                int cpu_used, int usage, int min_q, int max_q,
+                                uint8_t *out, size_t out_cap) {
+  return encode_av1_kf_impl(y, u, v, w, h, bd, mono, ss_x, ss_y, cq_level,
+                            cpu_used, /*enable_cdef=*/0,
+                            /*enable_restoration=*/0, usage, /*aq_mode=*/0,
+                            /*two_pass=*/0, /*sb_size_128=*/0,
+                            /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
+                            /*enable_palette=*/0, /*enable_intrabc=*/0,
+                            /*lossless=*/0, /*enable_qm=*/0, /*qm_min=*/0,
+                            /*qm_max=*/0, min_q, max_q, /*extra_ctrl_ids=*/NULL,
+                            /*extra_ctrl_vals=*/NULL, /*n_extra_ctrls=*/0, out,
+                            out_cap);
 }
 
 /* Generic-controls variant of shim_encode_av1_kf (the C8-C11 toggle-sweep
@@ -754,8 +785,8 @@ long shim_encode_av1_kf_ctrls(const uint16_t *y, const uint16_t *u,
                             /*tile_columns_log2=*/0, /*tile_rows_log2=*/0,
                             /*enable_palette=*/0, /*enable_intrabc=*/0,
                             /*lossless=*/0, /*enable_qm=*/0, /*qm_min=*/0,
-                            /*qm_max=*/0, ctrl_ids, ctrl_vals, n_ctrls, out,
-                            out_cap);
+                            /*qm_max=*/0, /*min_q=*/-1, /*max_q=*/-1, ctrl_ids,
+                            ctrl_vals, n_ctrls, out, out_cap);
 }
 
 /* Ctrl-id cross-check for the Rust constants (aom_sys_ref::cx_ctrl): returns
