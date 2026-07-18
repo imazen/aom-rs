@@ -54,12 +54,25 @@
 //! segmentation-driven per-block qindex, delta-q/delta-lf signaling,
 //! palette, intrabc, SB128, multi-tile.
 
-use crate::encode_intra::EncodeIntraPlaneOutcome;
+use crate::encode_intra::TxbEncode;
 use crate::encode_sb::{LeafWinner, SbEncodeEnv, SbTree, TileCtxState, encode_b_intra_dry};
 use crate::intra_uv_rd::{av1_get_tx_size_uv, is_chroma_reference};
 use crate::partition::{PartRdStats, split_subsize};
 use crate::partition_pick::{ModeGrid, PickFrameCfg, rd_pick_partition_real};
-use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
+use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W};
+
+/// `ROUND_POWER_OF_TWO(value, n)` for the chroma-subsampling scale (n = ss ∈
+/// {0, 1}): `n == 0` is the identity (4:4:4 / the luma plane), `n == 1` is
+/// `(value + 1) >> 1` (the 2:1 chroma bound). Matches the C macro on the only
+/// values the mu-64 chroma bounds pass it.
+#[inline]
+fn round_pow2(value: usize, n: usize) -> usize {
+    if n == 0 {
+        value
+    } else {
+        (value + (1 << (n - 1))) >> n
+    }
+}
 use aom_entropy::enc::OdEcEnc;
 use aom_entropy::lr::{
     LrFrameConfig, LrRefState, LrUnitInfo, RESTORE_NONE as LR_RESTORE_NONE, lr_corners_in_sb,
@@ -516,15 +529,82 @@ pub fn pack_leaf(
     // ---- 4. write_tokens_b: coefficient bytes, gated on !skip_txfm (always
     //     true in the KEY intra envelope, asserted by encode_b_intra_dry). ----
     if !winner.skip_txfm {
-        pack_plane_coeffs(enc, kf, cfg, env, winner, &out.y, winner.tx_size, 0);
-        if let Some(u) = &out.u {
-            let uv_tx = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
-            pack_plane_coeffs(enc, kf, cfg, env, winner, u, uv_tx, 1);
+        let uv_tx = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
+        // av1_write_intra_coeffs_mb (encodetxb.c:431-472): the 64x64-chunk
+        // outer walk, planes INTERLEAVED per chunk (L, then U, then V) — the
+        // decoder's read order for coding blocks > 64x64 (KB-1 encoder
+        // cross-check). The recon walk produced each plane's txbs in this same
+        // chunk-major order, so per-plane cursors consume them in lockstep.
+        // Luma mu = mi_size_wide[BLOCK_64X64] = 16; degenerates to
+        // plane-sequential (a single chunk) for bsize <= 64x64 — byte-identical
+        // to the former three plane loops.
+        let max_bw = mi_w.min((env.mi_cols - mi_col).max(0) as usize);
+        let max_bh = mi_h.min((env.mi_rows - mi_row).max(0) as usize);
+        let mu_w = MI_SIZE_WIDE_B[12].min(max_bw); // BLOCK_64X64
+        let mu_h = MI_SIZE_HIGH_B[12].min(max_bh);
+        let (ytxw_u, ytxh_u) = (TXS_W[winner.tx_size] >> 2, TXS_H[winner.tx_size] >> 2);
+        let (utxw_u, utxh_u) = (TXS_W[uv_tx] >> 2, TXS_H[uv_tx] >> 2);
+        let (mut yc, mut uc, mut vc) = (0usize, 0usize, 0usize);
+        let mut row = 0usize;
+        while row < max_bh {
+            let mut col = 0usize;
+            while col < max_bw {
+                // plane 0 (Y): raster over this chunk's luma tx blocks.
+                let uh = (row + mu_h).min(max_bh);
+                let uw = (col + mu_w).min(max_bw);
+                let mut br = row;
+                while br < uh {
+                    let mut bc = col;
+                    while bc < uw {
+                        write_one_txb(enc, kf, cfg, env, winner, &out.y.txbs[yc], winner.tx_size, 0);
+                        yc += 1;
+                        bc += ytxw_u;
+                    }
+                    br += ytxh_u;
+                }
+                // planes 1/2 (U, then V): ss-scaled chunk bounds (C breaks the
+                // plane loop when !is_chroma_ref — mono / sub-8x8 luma-only).
+                if is_chroma_ref {
+                    let cuh = round_pow2((row + mu_h).min(max_bh), env.ss_y);
+                    let cuw = round_pow2((col + mu_w).min(max_bw), env.ss_x);
+                    if let Some(u) = &out.u {
+                        let mut br = row >> env.ss_y;
+                        while br < cuh {
+                            let mut bc = col >> env.ss_x;
+                            while bc < cuw {
+                                write_one_txb(enc, kf, cfg, env, winner, &u.txbs[uc], uv_tx, 1);
+                                uc += 1;
+                                bc += utxw_u;
+                            }
+                            br += utxh_u;
+                        }
+                    }
+                    if let Some(v) = &out.v {
+                        let mut br = row >> env.ss_y;
+                        while br < cuh {
+                            let mut bc = col >> env.ss_x;
+                            while bc < cuw {
+                                write_one_txb(enc, kf, cfg, env, winner, &v.txbs[vc], uv_tx, 2);
+                                vc += 1;
+                                bc += utxw_u;
+                            }
+                            br += utxh_u;
+                        }
+                    }
+                }
+                col += mu_w;
+            }
+            row += mu_h;
         }
-        if let Some(v) = &out.v {
-            let uv_tx = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
-            pack_plane_coeffs(enc, kf, cfg, env, winner, v, uv_tx, 2);
-        }
+        debug_assert_eq!(yc, out.y.txbs.len(), "mu-64 pack consumed all Y txbs");
+        debug_assert!(
+            out.u.as_ref().is_none_or(|u| uc == u.txbs.len()),
+            "mu-64 pack consumed all U txbs"
+        );
+        debug_assert!(
+            out.v.as_ref().is_none_or(|v| vc == v.txbs.len()),
+            "mu-64 pack consumed all V txbs"
+        );
     }
 
     // ---- 5. neighbour-grid stamp for the next block's Y-mode/skip ctx. ----
@@ -549,63 +629,61 @@ pub fn pack_leaf(
     );
 }
 
-/// Pack-stage per-plane coefficient loop: walk `out.txbs` (already in raster
-/// order — see [`crate::encode_intra::encode_intra_block_plane_y`]/`_uv`'s
-/// doc) and emit each txb's bytes via `write_coeffs_txb_full`, reusing the
-/// `txb_skip_ctx`/`dc_sign_ctx` the residual recompute already derived (the
-/// SAME pair the trellis used to select its rate tables).
+/// Pack-stage single-txb coefficient write: emit one txb's bytes via
+/// `write_coeffs_txb_full`, reusing the `txb_skip_ctx`/`dc_sign_ctx` the
+/// residual recompute already derived (the SAME pair the trellis used to
+/// select its rate tables). Called from [`pack_leaf`]'s mu-64 interleaved walk
+/// (`av1_write_intra_coeffs_mb`, encodetxb.c:431-472).
 #[allow(clippy::too_many_arguments)]
-fn pack_plane_coeffs(
+fn write_one_txb(
     enc: &mut OdEcEnc,
     kf: &mut KfFrameContext,
     cfg: &PackCfg,
     env: &SbEncodeEnv,
     winner: &LeafWinner,
-    out: &EncodeIntraPlaneOutcome,
+    txb: &TxbEncode,
     tx_size: usize,
     plane: usize,
 ) {
     let plane_type = usize::from(plane > 0);
-    for txb in &out.txbs {
-        let mut dummy = [0u16; 8];
-        let ext_tx_cdf: &mut [u16] = if plane_type == 0 {
-            let d = ext_tx_derive(
-                tx_size,
-                false, // is_inter
-                env.reduced_tx_set_used,
-                txb.tx_type,
-                winner.use_filter_intra,
-                winner.filter_intra_mode,
-                winner.mode,
-            );
-            match d.eset {
-                1 => &mut kf.ext_tx_1ddct[d.square as usize][d.intra_dir as usize],
-                2 => &mut kf.ext_tx_dtt4[d.square as usize][d.intra_dir as usize],
-                _ => &mut dummy[..],
-            }
-        } else {
-            &mut dummy[..]
-        };
-        write_coeffs_txb_full(
-            enc,
-            &mut kf.coeff,
-            ext_tx_cdf,
-            &txb.qcoeff,
-            txb.eob as usize,
+    let mut dummy = [0u16; 8];
+    let ext_tx_cdf: &mut [u16] = if plane_type == 0 {
+        let d = ext_tx_derive(
             tx_size,
-            txb.tx_type,
-            plane_type,
-            txb.txb_skip_ctx,
-            txb.dc_sign_ctx,
-            cfg.allow_update_cdf,
             false, // is_inter
             env.reduced_tx_set_used,
+            txb.tx_type,
             winner.use_filter_intra,
             winner.filter_intra_mode,
             winner.mode,
-            cfg.signal_gate,
         );
-    }
+        match d.eset {
+            1 => &mut kf.ext_tx_1ddct[d.square as usize][d.intra_dir as usize],
+            2 => &mut kf.ext_tx_dtt4[d.square as usize][d.intra_dir as usize],
+            _ => &mut dummy[..],
+        }
+    } else {
+        &mut dummy[..]
+    };
+    write_coeffs_txb_full(
+        enc,
+        &mut kf.coeff,
+        ext_tx_cdf,
+        &txb.qcoeff,
+        txb.eob as usize,
+        tx_size,
+        txb.tx_type,
+        plane_type,
+        txb.txb_skip_ctx,
+        txb.dc_sign_ctx,
+        cfg.allow_update_cdf,
+        false, // is_inter
+        env.reduced_tx_set_used,
+        winner.use_filter_intra,
+        winner.filter_intra_mode,
+        winner.mode,
+        cfg.signal_gate,
+    );
 }
 
 /// Pack (`OUTPUT_ENABLED`) walk over a picked [`SbTree`]: write the

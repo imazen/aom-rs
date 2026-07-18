@@ -289,10 +289,6 @@ pub fn encode_intra_block_plane_y(
 ) -> EncodeIntraPlaneOutcome {
     let bsize = env.bsize;
     let (bw, bh) = (BLK_W_B[bsize], BLK_H_B[bsize]);
-    debug_assert!(
-        bw <= 64 && bh <= 64,
-        "mu-64 outer walk degenerates to raster only for bsize <= 64x64"
-    );
     let tx_size = env.tx_size;
     let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
     let (txw_unit, txh_unit) = (txw >> 2, txh >> 2);
@@ -329,10 +325,27 @@ pub fn encode_intra_block_plane_y(
     let use_trellis = is_trellis_used(env.enable_optimize_b, env.dry_run_output_enabled);
 
     let mut txbs: Vec<TxbEncode> = Vec::new();
-    let mut blk_row = 0usize;
-    while blk_row < blocks_high_visible {
-        let mut blk_col = 0usize;
-        while blk_col < blocks_wide_visible {
+    // `av1_foreach_transformed_block_in_plane` mu-64 chunk walk (encodemb.c:
+    // 560-582): a coding block > 64x64 is split into 64x64 units so prediction
+    // + reconstruction happen in the SAME chunk order the decoder uses. Above
+    // 64x64 the per-txb neighbour pixels AND the has_top_right/has_bottom_left
+    // availability are chunk-order-dependent (a txb's top-right may live in a
+    // 64-chunk that is coded LATER), so a plain raster walk would read
+    // different pixels than C. Luma mu = mi_size_wide[BLOCK_64X64] = 16; for
+    // bsize <= 64x64 the outer loop runs once and this is byte-identical to the
+    // former plain raster walk.
+    let mu_w = MI_SIZE_WIDE_B[12].min(blocks_wide_visible); // BLOCK_64X64
+    let mu_h = MI_SIZE_HIGH_B[12].min(blocks_high_visible);
+    let mut chunk_r = 0usize;
+    while chunk_r < blocks_high_visible {
+        let unit_h = (chunk_r + mu_h).min(blocks_high_visible);
+        let mut chunk_c = 0usize;
+        while chunk_c < blocks_wide_visible {
+            let unit_w = (chunk_c + mu_w).min(blocks_wide_visible);
+            let mut blk_row = chunk_r;
+            while blk_row < unit_h {
+                let mut blk_col = chunk_c;
+                while blk_col < unit_w {
             // --- encode_block_intra ---
             // av1_predict_intra_block_facade: predict INTO the recon plane.
             let txb_off = env.ref_off + (blk_row * env.ref_stride + blk_col) * 4;
@@ -545,8 +558,12 @@ pub fn encode_intra_block_plane_y(
                 dc_sign_ctx,
             });
             blk_col += txw_unit;
+                }
+                blk_row += txh_unit;
+            }
+            chunk_c += mu_w;
         }
-        blk_row += txh_unit;
+        chunk_r += mu_h;
     }
 
     EncodeIntraPlaneOutcome { txbs, ta, tl }
@@ -654,10 +671,24 @@ pub fn encode_intra_block_plane_uv(
     let mut dc_cache = CflDcCache::cleared();
 
     let mut txbs: Vec<TxbEncode> = Vec::new();
-    let mut blk_row = 0usize;
-    while blk_row < blocks_high_visible {
-        let mut blk_col = 0usize;
-        while blk_col < blocks_wide_visible {
+    // mu-64 chunk walk (see `encode_intra_block_plane_y`). The chroma unit is
+    // `get_plane_block_size(BLOCK_64X64, ss_x, ss_y)` (encodemb.c:560-561) — at
+    // 4:2:0 that is BLOCK_32X32 (mu = 8 chroma-mi = 64 luma-px), so both planes
+    // chunk at the same 64-luma-px granularity. Degenerates to one chunk (plain
+    // raster) for a plane block <= 64x64.
+    let uv_unit_bsize = get_plane_block_size(12, env.ss_x, env.ss_y); // BLOCK_64X64
+    let mu_w = MI_SIZE_WIDE_B[uv_unit_bsize].min(blocks_wide_visible);
+    let mu_h = MI_SIZE_HIGH_B[uv_unit_bsize].min(blocks_high_visible);
+    let mut chunk_r = 0usize;
+    while chunk_r < blocks_high_visible {
+        let unit_h = (chunk_r + mu_h).min(blocks_high_visible);
+        let mut chunk_c = 0usize;
+        while chunk_c < blocks_wide_visible {
+            let unit_w = (chunk_c + mu_w).min(blocks_wide_visible);
+            let mut blk_row = chunk_r;
+            while blk_row < unit_h {
+                let mut blk_col = chunk_c;
+                while blk_col < unit_w {
             // --- encode_block_intra ---
             // av1_predict_intra_block_facade: predict INTO the recon plane
             // (CfL arm applies the WINNER's signalled alphas).
@@ -842,8 +873,12 @@ pub fn encode_intra_block_plane_uv(
                 dc_sign_ctx,
             });
             blk_col += txw_unit;
+                }
+                blk_row += txh_unit;
+            }
+            chunk_c += mu_w;
         }
-        blk_row += txh_unit;
+        chunk_r += mu_h;
     }
 
     EncodeIntraPlaneOutcome { txbs, ta, tl }

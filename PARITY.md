@@ -374,7 +374,7 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   `get_grain_parameters` quantize), (5) `wiener_denoise_2d` + FFT, (6) `denoise_and_model_run`
   orchestrator + encoder wiring — all still ABSENT.)
 
-### C8 — Partition controls — disable arms DONE (byte-exact); SB128 remains
+### C8 — Partition controls — disable arms DONE (byte-exact); SB128 encode DONE (byte-exact)
 - **DONE (this landing, → section A):** `--enable-rect-partitions=0`, `--enable-ab-partitions=0`,
   `--enable-1to4-partitions=0`, `--min-partition-size`, `--max-partition-size` + the
   square-only 8..32 interaction arm — all BYTE-IDENTICAL vs real aomenc (same ctrl) on the
@@ -383,8 +383,33 @@ deltaq_mode=6 (VARIANCE_BOOST)`; IQ adds `enable_adaptive_sharpness=1`.
   header-cross-checked (`cx_ctrl_ids_match_reference_headers`). C mapping verified:
   `set_max_min_partition_size` (partition_strategy.h:214) `min(sf_default, dim_to_size(px),
   sb)` / `min(max(BLOCK_4X4, dim), sb)`; the auto-max ML arm is inter-only.
-- `--sb-size=128` ENCODE side — ABSENT: decoder + entropy layers are SB-size-generic
-  (798ec25), but the encoder walk/harnesses are SB-64-only. (M)
+- **`--sb-size=128` ENCODE side — DONE ✅ (byte-exact, this landing):** the encoder search+pack
+  now walk the frame in 128×128 superblocks and byte-match real `aomenc --sb-size=128` on
+  real-image content ≥128px. Three gates in `sb128_e2e.rs` (aom-bench), each with a
+  sb128-vs-sb64 anti-vacuity witness: (1) `sb128_forced_split_e2e`
+  (`--sb-size=128 --max-partition-size=64`, forced SPLIT at the 128 root, all ≤64 leaves —
+  isolates the 128-SB geometry + the 8-way BLOCK_128X128 partition symbol/context/cost + the
+  pack walk over 128-SBs); (2) `sb128_natural_e2e` (plain `--sb-size=128` on real `quantizer-00`
+  crops — the RD search EVALUATES the 128×128 NONE candidate, exercising the mu-64 SEARCH tx
+  walks, then resolves to SPLIT/≤64 on this textured content); (3) `sb128_coded_128_leaf_e2e` (a
+  smooth diagonal ramp at 256² cq55/cq63 — the content real aomenc actually resolves to a coded
+  128-level partition [anti-vacuity-checked natural≠forced-split], so THIS gate exercises the pack
+  `av1_write_intra_coeffs_mb` L/U/V 64-chunk interleave + the >64 re-encode; the photographic
+  `quantizer-00` crops split to ≤64 even at cq63 and never reach it). Real-image cells:
+  128² (1 SB) + 256² (2×2 SBs) × cq{12,32,63}.
+  Harness threads the live SB geometry off the bootstrap seq header's `use_128x128_superblock`
+  bit (aom-bench `port_encode_full`: `sb_block`/`sb_mi`/`sb_px`); the 4-way stage gets the C
+  `bsize != BLOCK_128X128` gate (partition_search.c:4166). The `av1_foreach_transformed_block
+  _in_plane` mu-64 chunk walk (encodemb.c:560-582) is ported into every >64 predict/reconstruct
+  site — the two search tx walks (`txfm_rd_in_plane_intra`, `intra_model_rd_y`), the chroma RD
+  walk, the two re-encode plane walks (`encode_intra_block_plane_y`/`_uv`) + `encode_b_intra_dry`
+  Step 4 — and the pack coeff write is the `av1_write_intra_coeffs_mb` 64-chunk **L/U/V
+  interleave** (encodetxb.c:431-472). This closes the **KB-1 encoder cross-check** (the >64-block
+  txb order had never actually been exercised — the cited "256² cq63" evidence is an SB64 frame
+  with no >64 blocks). `AV1E_SET_SUPERBLOCK_SIZE`(56)/`AOM_SUPERBLOCK_SIZE_128X128`(1) added to
+  `cx_ctrl` (header-verified). Deferred: partial-SB-at-128 (frames not a multiple of 128px — the
+  interior 128-leaf case is always in-frame, so the mu-64 edge clip is inert here); non-default
+  knob × sb128 combos.
 - External partition / `--partition-info-path` / `--sb-qp-sweep`: diagnostic, lowest
   priority. (M, defer)
 

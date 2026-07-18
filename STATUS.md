@@ -16,6 +16,23 @@ See CLAUDE.md KB-15 + PARITY C3.
 
 ## Done (bit-exact vs C oracle, differential-fuzz verified)
 
+- **C8 SB128 encode** (`--sb-size=128`, encoder side) — the encoder search+pack now walk the
+  frame in 128×128 superblocks, byte-identical to real `aomenc --sb-size=128` on real-image
+  content ≥128px (128²/256² × cq{12,32,63}). The decoder + entropy layers were already
+  SB-size-generic (`798ec25`); this brings the ENCODER up to the same envelope. The harness
+  (`aom-bench::port_encode_full`) threads the live SB geometry off the bootstrap seq header's
+  `use_128x128_superblock` bit; the `av1_foreach_transformed_block_in_plane` mu-64 chunk walk
+  (encodemb.c:560-582) is ported into every >64-block predict/reconstruct site (the two search
+  tx walks + the chroma RD walk + both re-encode plane walks + `encode_b_intra_dry` Step 4), and
+  the pack coeff write is the `av1_write_intra_coeffs_mb` 64-chunk L/U/V interleave
+  (encodetxb.c:431-472). Gates: `aom-bench/tests/sb128_e2e.rs` — `sb128_forced_split_e2e`
+  (forced SPLIT, ≤64 leaves), `sb128_natural_e2e` (real `quantizer-00` crops — exercises the
+  128-NONE search eval), `sb128_coded_128_leaf_e2e` (a smooth diag ramp 256² cq55/cq63 that
+  actually codes a 128-level leaf — the one that exercises the pack interleave + >64 re-encode),
+  each with a sb128-vs-sb64 anti-vacuity witness. Closes the KB-1 encoder cross-check (the
+  >64-block txb order had never been exercised — the SB64 gates have no >64 blocks). Deferred:
+  partial-SB-at-128 (non-128-multiple frame dims); non-default-knob × sb128.
+  See PARITY.md C8.
 - **C7 film-grain table-inject** (`--film-grain-table`, encoder side) — the port's own
   grain-table reader/lookup (`aom-encode/src/grain_table.rs`, port of `aom_dsp/grain_table.c`)
   feeds the already-bit-exact `write_film_grain_params` header writer. E2E byte-identical vs real

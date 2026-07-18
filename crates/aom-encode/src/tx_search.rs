@@ -1846,10 +1846,24 @@ pub fn txfm_rd_in_plane_intra(
     let mut current_rd = current_rd_in;
     let mut exit_early = false;
 
-    let mut blk_row = 0usize;
-    while blk_row < blocks_high_visible {
-        let mut blk_col = 0usize;
-        while blk_col < blocks_wide_visible {
+    // `av1_foreach_transformed_block_in_plane` mu-64 chunk walk (encodemb.c:
+    // 560-582): a coding block > 64x64 is searched/reconstructed in 64x64-unit
+    // chunk order — above 64x64 the per-txb prediction pixels AND the
+    // has_top_right/has_bottom_left availability are chunk-order-dependent, so
+    // a raster walk would compute a different tx RD than C and flip the winner.
+    // Luma mu = 16; one chunk (byte-identical raster) for bsize <= 64x64.
+    let mu_w = MI_SIZE_WIDE_B[12].min(blocks_wide_visible); // BLOCK_64X64
+    let mu_h = MI_SIZE_HIGH_B[12].min(blocks_high_visible);
+    let mut chunk_r = 0usize;
+    while chunk_r < blocks_high_visible {
+        let unit_h = (chunk_r + mu_h).min(blocks_high_visible);
+        let mut chunk_c = 0usize;
+        while chunk_c < blocks_wide_visible {
+            let unit_w = (chunk_c + mu_w).min(blocks_wide_visible);
+            let mut blk_row = chunk_r;
+            while blk_row < unit_h {
+                let mut blk_col = chunk_c;
+                while blk_col < unit_w {
             if exit_early {
                 // C: the next block_rd_txfm call marks incomplete_exit; for
                 // intra exit_early alone already invalidates.
@@ -2111,8 +2125,12 @@ pub fn txfm_rd_in_plane_intra(
             }
 
             blk_col += txw_unit;
+                }
+                blk_row += txh_unit;
+            }
+            chunk_c += mu_w;
         }
-        blk_row += txh_unit;
+        chunk_r += mu_h;
     }
 
     if exit_early {
@@ -2647,10 +2665,21 @@ pub fn intra_model_rd_y(env: &TxfmYrdEnv, recon: &mut [u16], tx_size: usize) -> 
     let blocks_high_visible = max_blocks_high.min((env.mi_rows - env.mi_row).max(0) as usize);
 
     let mut satd_cost: i64 = 0;
-    let mut blk_row = 0usize;
-    while blk_row < blocks_high_visible {
-        let mut blk_col = 0usize;
-        while blk_col < blocks_wide_visible {
+    // mu-64 chunk walk (see `txfm_rd_in_plane_intra`): the model predicts INTO
+    // the recon plane and later txbs predict from earlier predictions, so > 64
+    // blocks must walk in chunk order. Luma mu = 16; one chunk for bsize <= 64.
+    let mu_w = MI_SIZE_WIDE_B[12].min(blocks_wide_visible); // BLOCK_64X64
+    let mu_h = MI_SIZE_HIGH_B[12].min(blocks_high_visible);
+    let mut chunk_r = 0usize;
+    while chunk_r < blocks_high_visible {
+        let unit_h = (chunk_r + mu_h).min(blocks_high_visible);
+        let mut chunk_c = 0usize;
+        while chunk_c < blocks_wide_visible {
+            let unit_w = (chunk_c + mu_w).min(blocks_wide_visible);
+            let mut blk_row = chunk_r;
+            while blk_row < unit_h {
+                let mut blk_col = chunk_c;
+                while blk_col < unit_w {
             // av1_predict_intra_block_facade: predict INTO the recon plane.
             let (n_top, n_topright, n_left, n_bottomleft) = intra_avail(
                 env.sb_size,
@@ -2719,8 +2748,12 @@ pub fn intra_model_rd_y(env: &TxfmYrdEnv, recon: &mut [u16], tx_size: usize) -> 
 
             satd_cost += i64::from(wht_satd(&residual, txw, tx_size, env.bd));
             blk_col += txw_unit;
+                }
+                blk_row += txh_unit;
+            }
+            chunk_c += mu_w;
         }
-        blk_row += txh_unit;
+        chunk_r += mu_h;
     }
     satd_cost
 }

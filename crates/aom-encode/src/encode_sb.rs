@@ -850,11 +850,24 @@ pub fn encode_b_intra_dry(
         // edge-clipped `av1_set_entropy_contexts`. Map stride stays full.
         let bwv = mi_w.min((env.mi_cols - mi_col).max(0) as usize);
         let bhv = mi_h.min((env.mi_rows - mi_row).max(0) as usize);
+        // mu-64 chunk walk (the tokenize `av1_tokenize_sb_vartx` is plane-outer
+        // but 64-chunked within each plane): `k` must advance in the SAME
+        // chunk-major order `encode_intra_block_plane_y` produced the txbs, so
+        // the persistent-context stamp + the cached-ctx overwrite land on the
+        // right txb. Luma mu = 16; one chunk (byte-identical) for bsize <= 64.
+        let mu_w = MI_SIZE_WIDE_B[12].min(bwv); // BLOCK_64X64
+        let mu_h = MI_SIZE_HIGH_B[12].min(bhv);
         let mut k = 0usize;
-        let mut blk_row = 0usize;
-        while blk_row < bhv {
-            let mut blk_col = 0usize;
-            while blk_col < bwv {
+        let mut chunk_r = 0usize;
+        while chunk_r < bhv {
+            let unit_h = (chunk_r + mu_h).min(bhv);
+            let mut chunk_c = 0usize;
+            while chunk_c < bwv {
+                let unit_w = (chunk_c + mu_w).min(bwv);
+                let mut blk_row = chunk_r;
+                while blk_row < unit_h {
+                    let mut blk_col = chunk_c;
+                    while blk_col < unit_w {
                 let tt = crate::encode_intra::get_tx_type_y(
                     env.lossless,
                     winner.tx_size,
@@ -936,8 +949,12 @@ pub fn encode_b_intra_dry(
                 }
                 k += 1;
                 blk_col += txw_u;
+                    }
+                    blk_row += txh_u;
+                }
+                chunk_c += mu_w;
             }
-            blk_row += txh_u;
+            chunk_r += mu_h;
         }
         debug_assert_eq!(k, y_out.txbs.len());
         // Planes 1/2 (the C loop breaks when !is_chroma_ref).
@@ -970,13 +987,25 @@ pub fn encode_b_intra_dry(
                 uv_tx,
                 env.reduced_tx_set_used,
             );
+            // Chroma mu-64 chunk unit (get_plane_block_size(BLOCK_64X64, ss),
+            // encodemb.c:560-561): chunk-major to match the chunk-major chroma
+            // txb arrays. One chunk (byte-identical) for a chroma block <= 64.
+            let uv_unit_bsize = get_plane_block_size(12, env.ss_x, env.ss_y);
+            let cmu_w = MI_SIZE_WIDE_B[uv_unit_bsize].min(pmw);
+            let cmu_h = MI_SIZE_HIGH_B[uv_unit_bsize].min(pmh);
             for (plane, out) in [(1usize, u_out.as_mut()), (2usize, v_out.as_mut())] {
                 let out = out.expect("chroma-ref leaf has uv outcomes");
                 let mut k = 0usize;
-                let mut blk_row = 0usize;
-                while blk_row < pmh {
-                    let mut blk_col = 0usize;
-                    while blk_col < pmw {
+                let mut chunk_r = 0usize;
+                while chunk_r < pmh {
+                    let unit_h = (chunk_r + cmu_h).min(pmh);
+                    let mut chunk_c = 0usize;
+                    while chunk_c < pmw {
+                        let unit_w = (chunk_c + cmu_w).min(pmw);
+                        let mut blk_row = chunk_r;
+                        while blk_row < unit_h {
+                        let mut blk_col = chunk_c;
+                        while blk_col < unit_w {
                         // Tokenize-derived WRITE ctx from the persistent
                         // (clipped-stamp) arrays — see the plane-0 stamp
                         // above for the C mapping + KB-6 mechanism.
@@ -1018,8 +1047,12 @@ pub fn encode_b_intra_dry(
                         }
                         k += 1;
                         blk_col += ptxw_u;
+                        }
+                        blk_row += ptxh_u;
+                        }
+                        chunk_c += cmu_w;
                     }
-                    blk_row += ptxh_u;
+                    chunk_r += cmu_h;
                 }
                 debug_assert_eq!(k, out.txbs.len());
             }

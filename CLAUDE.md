@@ -63,10 +63,18 @@ an entry by relaxing/excluding a test — only by a landed fix verified on `orig
   landing commit reverts the ci.yml q62/q63 rm, adds an explicit q62/q63 × bd8/bd10 regression test,
   and deletes the throwaway scratch. #21 closes only after: on origin, CI green WITH q62/63 restored,
   `merge-base --is-ancestor` confirmed.
-- **Encoder cross-check (low priority):** the encoder pack must write txbs in the SAME
-  64×64-chunk plane-interleaved order for >64 blocks. The encoder already byte-matches
-  `diag+vbars16 256×256 cq63` (strong-LF gate 5/5), which is empirical evidence its order is
-  correct — but confirm pack.rs's >64-block txb order once the decode-order fix lands.
+- **Encoder cross-check — RESOLVED ✅ 2026-07-18 (SB128 encode landing, PARITY C8).** The encoder
+  pack now writes txbs in the C 64×64-chunk **L/U/V-interleaved** order for >64 blocks
+  (`av1_write_intra_coeffs_mb`, encodetxb.c:431-472) and the search/re-encode predict+reconstruct
+  in the matching `av1_foreach_transformed_block_in_plane` mu-64 chunk order (encodemb.c:560-582).
+  Byte-exact vs real `aomenc --sb-size=128` (`aom-bench/tests/sb128_e2e.rs::sb128_coded_128_leaf
+  _e2e` — a smooth diag ramp at 256² cq55/cq63, anti-vacuity-checked to actually code a 128-level
+  partition; the photographic `quantizer-00` crops in `sb128_natural_e2e` split to ≤64 even at
+  cq63, so they exercise only the SEARCH's 128-NONE evaluation, not the pack interleave). NOTE the
+  earlier "256×256 cq63 is evidence the
+  order is correct" claim was **vacuous** — a 256² SB64 frame has no >64 coding blocks, so the
+  >64-block order was never exercised until this landing (the plane-sequential pack was
+  coincidentally correct only because ≤64 leaves are a single chunk).
 - **CI status (TEMPORARY quarantine):** `.github/workflows/ci.yml:63-64` `rm`s the q62/q63
   vectors after fetch so Gate-1 goes green on the rest. This is a **must-fix corruption bug**
   under the zero-tolerance rule (wrong pixels are a shipping bug, never a known limitation),

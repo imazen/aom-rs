@@ -589,10 +589,23 @@ pub fn txfm_rd_in_plane_uv_p(
     let mut current_rd = current_rd_in;
     let mut exit_early = false;
 
-    let mut blk_row = 0usize;
-    while blk_row < blocks_high_visible {
-        let mut blk_col = 0usize;
-        while blk_col < blocks_wide_visible {
+    // mu-64 chunk walk (see `txfm_rd_in_plane_intra`): chroma unit =
+    // get_plane_block_size(BLOCK_64X64, ss) (encodemb.c:560-561); above 64x64
+    // (luma) the chroma RD must reconstruct in chunk order. One chunk
+    // (byte-identical) for a chroma plane block <= 64.
+    let uv_unit_bsize = get_plane_block_size(12, env.ss_x, env.ss_y); // BLOCK_64X64
+    let mu_w = MI_W[uv_unit_bsize].min(blocks_wide_visible);
+    let mu_h = MI_H[uv_unit_bsize].min(blocks_high_visible);
+    let mut chunk_r = 0usize;
+    while chunk_r < blocks_high_visible {
+        let unit_h = (chunk_r + mu_h).min(blocks_high_visible);
+        let mut chunk_c = 0usize;
+        while chunk_c < blocks_wide_visible {
+            let unit_w = (chunk_c + mu_w).min(blocks_wide_visible);
+            let mut blk_row = chunk_r;
+            while blk_row < unit_h {
+                let mut blk_col = chunk_c;
+                while blk_col < unit_w {
             if exit_early {
                 return None; // intra: exit_early alone invalidates
             }
@@ -749,8 +762,12 @@ pub fn txfm_rd_in_plane_uv_p(
             }
 
             blk_col += txw_unit;
+                }
+                blk_row += txh_unit;
+            }
+            chunk_c += mu_w;
         }
-        blk_row += txh_unit;
+        chunk_r += mu_h;
     }
 
     if exit_early {
