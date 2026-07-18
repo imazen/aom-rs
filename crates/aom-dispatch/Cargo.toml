@@ -2,7 +2,7 @@
 name = "aom-dispatch"
 version = "0.0.1"
 edition = "2024"
-license = "BSD-2-Clause"
+license.workspace = true
 description = "SIMD dispatch policy for aom-rs: the AOM_FORCE_SCALAR process-wide scalar pin (archmage token disablement) shared by every kernel crate's dispatch entry points."
 publish = false
 

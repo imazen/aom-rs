@@ -23,8 +23,8 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-license = "BSD-2-Clause-Patent"
-repository = "local"
+license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
+repository = "https://github.com/imazen/aom-rs"
 
 # Release + debug symbols, for callgrind/perf profiling of the Gate-3 harness
 # (`cargo build --profile profiling -p aom-bench --bin gate3_profile`).

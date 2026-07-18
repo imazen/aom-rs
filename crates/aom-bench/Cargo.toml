@@ -2,7 +2,7 @@
 name = "aom-bench"
 version = "0.0.1"
 edition = "2024"
-license = "BSD-2-Clause"
+license.workspace = true
 description = "Gate-3 performance harness for aom-rs: zenbench paired benchmarks of the pure-Rust port vs the real libaom C oracle (in-process via aom-sys-ref), plus a callgrind profile driver. Bench-only crate, never published."
 publish = false
 

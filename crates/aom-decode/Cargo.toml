@@ -2,7 +2,7 @@
 name = "aom-decode"
 version = "0.0.1"
 edition = "2024"
-license = "BSD-2-Clause"
+license.workspace = true
 description = "Decoder composition layer for aom-rs: KEY-frame luma tile reconstruction driver (partition walk + per-leaf mode-info/coeff decode + intra predict + inverse transform), roundtrip-pinned to the byte-identical-to-C writers."
 publish = false
 

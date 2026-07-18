@@ -2,7 +2,7 @@
 name = "aom-encode"
 version = "0.0.1"
 edition = "2024"
-license = "BSD-2-Clause"
+license.workspace = true
 description = "Encoder composition layer for aom-rs: av1_xform_quant (forward transform + quantize + entropy context), bit-exact vs libaom."
 publish = false
 

@@ -9,3 +9,7 @@ conformance/vectors.json
 __pycache__/
 .claude/
 .jj/
+
+# local C-oracle checkout + build (never commit)
+/c-ref/
+/differential/shims/bin/
