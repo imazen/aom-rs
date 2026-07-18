@@ -152,6 +152,17 @@ points are libaom v3.14.1 (`reference/libaom`). Defaults verified in
   two-pass pack instead of the re-search repack) queued as an optimization.
 - Decoder-side LR (apply path) was already complete + gated pre-pivot (section A decoder
   rows).
+- **DEFAULT-PATH WIRING (2026-07-18): default-config parity closed.** The byte-exact search is
+  now wired into the port's DEFAULT allintra path — `aom-bench::EncodeCell::port_encode` derives
+  the LR stage from the frame's `enable_restoration && !coded_lossless` (C's `is_restoration_used`,
+  encoder.h:4431; the parsed seq bit already encodes C's speed>=5 clear). New gate
+  `lr_default_parity.rs` asserts the port's default `port_encode` frame-OBU is **BYTE-IDENTICAL to
+  a plain `aomenc --allintra`** (no tool flags) on 8/8 real-content cells, where the reference is
+  the new `shim_encode_av1_kf_defaults` (every coding-tool control at its allintra default:
+  cdef OFF, restoration ON, qm OFF). It also asserts `c_encode_defaults() == c_encode_lr()`
+  (restoration's default IS on; palette/intrabc/deltaq inert on non-screen stills) and that the
+  default stream differs from `--enable-restoration=0` even on the all-RU-NONE cell (header bits).
+  The explicit-off `encoder_gate_e2e_*` gates stay valid as `--enable-restoration=0` config tests.
 
 ### C3 — Screen-content tools — ABSENT (L, decompose) — bulk agent live (#29)
 - Palette search: `--enable-palette` (default ON, gated on `allow_screen_content_tools`).

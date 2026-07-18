@@ -187,7 +187,7 @@ ALL16).
 | Deblocking (loop filter) | 4/6/8/14-tap, vert+horz, luma+chroma, level derivation | BYTE-EXACT (enc+dec) | decoder real-bitstream deblock + 4:2:2 chroma deblock (STATUS `441`); enc LF-level RD search `av1_pick_filter_level` byte-exact (STATUS `1553`); loopfilter header write/read |
 | LF params / mode-ref deltas | `mode_ref_delta_enabled`, delta update | BYTE-EXACT (enc+dec) | `encode_loopfilter`/`read_loopfilter` (decoder-faithful gate) |
 | CDEF | `cdef_bits`, per-64×64 strength (pri/sec luma+chroma), find_dir | BYTE-EXACT (enc+dec) | decoder real-bitstream CDEF; enc `--enable-cdef=1` `av1_cdef_search` 14/14 byte gate (PARITY A C1); OFF by default in allintra |
-| Loop restoration | RESTORE_NONE/WIENER/SGRPROJ/SWITCHABLE, RU sizes 64/128/256 | BYTE-EXACT (enc+dec) | decoder real-bitstream LR; enc `--enable-restoration` search 8/8 byte gate (PARITY A C2, `write_lr_unit`); OFF by default in allintra |
+| Loop restoration | RESTORE_NONE/WIENER/SGRPROJ/SWITCHABLE, RU sizes 64/128/256 | BYTE-EXACT (enc+dec) | decoder real-bitstream LR; enc search 8/8 byte gate (PARITY A C2, `write_lr_unit`); **ON by default in allintra** (speeds 0-4; OFF at speed>=5) — wired into the port default path + gated by `lr_default_parity` (port default == plain no-flags `aomenc --allintra`), 2026-07-18 |
 | CDEF FAST search levels | LVL1..5, PICK_FROM_Q, ADAPTIVE | PARTIAL (enc) | FULL search e2e-gated; FAST levels table-tested not e2e; PICK_FROM_Q/ADAPTIVE not ported (PARITY C1) |
 
 ## J. Superres

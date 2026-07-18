@@ -1026,7 +1026,20 @@ is what "single-frame exact" means:
 
 - **CDEF: OFF** by default in allintra ("CDEF has been found to blur images, so it's disabled
   in all-intra mode"). Only `--enable-cdef` turns it on.
-- **Loop-restoration: OFF** by default in allintra.
+- **Loop-restoration: ON** by default in allintra (speeds 0-4). CORRECTED 2026-07-18 (the prior
+  "OFF by default" claim was WRONG — verified first-hand against reference/libaom):
+  `default_extra_cfg.enable_restoration = 1` (`av1_cx_iface.c:286`, the `!CONFIG_REALTIME_ONLY`
+  build), NOT cleared by the `:3065` allintra override (which only touches CDEF / screen-mode /
+  qm_min/max), and kept for non-realtime at `:1273-74` (`usage != REALTIME` → stays 1). So a
+  plain `aomenc --allintra` runs `av1_pick_filter_restoration` and emits the seq/frame
+  restoration syntax (even when every unit resolves RESTORE_NONE → different header bits from
+  `--enable-restoration=0`). At **speed >= 5** C disables both Wiener+SGR
+  (`speed_features.c:519-520`) → `enable_restoration &= 0` (`:2754`) → restoration OFF (the seq
+  bit is 0). PARITY C2 was correct all along. The port's byte-exact LR search is now wired into
+  the DEFAULT path (`aom-bench::EncodeCell::port_encode` derives the LR stage from the frame's
+  `enable_restoration` = C's `is_restoration_used`); default parity is gated by
+  `lr_default_parity::port_default_matches_plain_aomenc_allintra` (port default byte-matches a
+  no-flags `aomenc --allintra`).
 - **QM: OFF** by default in allintra. CORRECTED 2026-07-15 (the prior "QM: ON" claim was WRONG —
   it conflated the qm_min/max override with `enable_qm`). The allintra override at
   `av1_cx_iface.c:3065` sets `qm_min=4`/`qm_max=10` but does NOT assign `enable_qm`, which stays
@@ -1039,9 +1052,14 @@ is what "single-frame exact" means:
 **What the encoder track has byte-matched (`encoder_gate_e2e_*`):** own-search partition / mode /
 tx / coefficients + LF-level derivation, in a **CDEF-off + restoration-off + QM-off** reference
 encode (`shim encode_av1_kf`, cdef/restoration/qm passed as explicit params). This envelope
-MATCHES the allintra defaults for CDEF, restoration, AND QM (all off). The frame HEADER is still
-bootstrapped from the real parse (qindex, tile info, cdf-update, ...) — only LF-level is
-port-derived.
+matches the allintra defaults for CDEF and QM (both off) but codes restoration **off** — a
+NON-default config for **speeds 0-4** (the true default is restoration ON; see the corrected note
+above). Those `encoder_gate_e2e_*` gates stay valid as `--enable-restoration=0` config tests
+(and at speed >= 5 restoration-off IS the true default). The DEFAULT (restoration-on) path is
+now separately wired + gated: `lr_restoration_gate` (the LR search, 8/8 byte-exact) +
+`lr_default_parity` (port default == plain no-flags `aomenc --allintra`, restoration on). The
+frame HEADER is still bootstrapped from the real parse (qindex, tile info, cdf-update, ...) —
+only LF-level (and, on the default path, the restoration decision) is port-derived.
 
 **Remaining for single-frame-PRIMARY exactness (blocks "all single frame exactly"):**
 - **KB-2 (#22) cq62 speed-0 — FIXED ✅ (74fb582)**: per-block `get_intra_edge_filter_type`
@@ -1094,8 +1112,18 @@ to be done before "the rest"=inter-frame, but lower priority than the primary de
   (aom-bench, via the rd_close harness + full byte-identity asserts). CDEF stays off by
   default — the default envelope is untouched. FAST search levels 1..5 ported (table-level
   unit tests); only FULL (speed 0) is e2e-gated so far. See STATUS.md 2026-07-17.
-- **Loop-restoration (Wiener/SGR) search** — off by default in allintra; only for explicit
-  `--enable-restoration`.
+- **Loop-restoration (Wiener/SGR) search — DONE ✅ (2026-07-18), BIT-IDENTICAL + DEFAULT-WIRED**:
+  loop-restoration is **ON by default** in allintra (speeds 0-4; NOT a non-default knob — the
+  prior "off by default" note here was WRONG, see the corrected primary-envelope note above). The
+  byte-exact `av1_pick_filter_restoration` search (`aom-restore/src/pick.rs`; PARITY C2) is now
+  wired into the port's DEFAULT path (`aom-bench::EncodeCell::port_encode` derives the LR stage
+  from the frame's `enable_restoration` = C's `is_restoration_used`). Gates: `lr_restoration_gate`
+  (the search, 8/8 real content + 3/3 mono/444/bd12 format axis) + **`lr_default_parity`** (the
+  port's default encode byte-matches a genuinely no-flags `aomenc --allintra` — the reference is
+  the new `shim_encode_av1_kf_defaults`, tools at allintra defaults). Restoration-off remains a
+  valid non-default config tested by the `encoder_gate_e2e_*` gates. Speeds 1-4 LR search arms +
+  GOOD-mode arms are source-verified but PINNED (real-content base encode not yet byte-exact at
+  speed >= 1, KB-13); speed >= 5 is structurally LR-off in C. See STATUS.md 2026-07-18.
 
 ## Coordination (parallel tracks)
 

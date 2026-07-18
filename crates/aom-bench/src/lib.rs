@@ -859,6 +859,28 @@ impl EncodeCell {
         )
     }
 
+    /// A plain `aomenc --allintra` encode with NO coding-tool flags — every
+    /// tool sits at its ALLINTRA default (cdef OFF, **loop-restoration ON**, qm
+    /// OFF). This is the true-default stream a drop-in replacement must match;
+    /// the reference for the default-parity gate. (Contrast [`Self::c_encode`],
+    /// which forces `--enable-restoration=0` — a NON-default config.)
+    pub fn c_encode_defaults(&self) -> Vec<u8> {
+        c::ref_encode_av1_kf_defaults(
+            &self.y,
+            &self.u,
+            &self.v,
+            self.w,
+            self.h,
+            i32::from(self.bd),
+            self.mono,
+            self.ss_x as i32,
+            self.ss_y as i32,
+            self.cq_level,
+            self.speed,
+            self.usage,
+        )
+    }
+
     /// Extract the frame OBU payload from a reference stream (the byte-match
     /// target for [`Self::port_encode`]).
     pub fn frame_obu_payload(stream: &[u8]) -> Vec<u8> {
@@ -880,6 +902,14 @@ impl EncodeCell {
     /// `encoder_gate_e2e_byte_match.rs::attempt_case_content_uv` speed
     /// threading); cells at cq >= 1 only (the lossless two-pass probe is out
     /// of scope here).
+    ///
+    /// The DEFAULT path is restoration-aware: when the bootstrap's sequence
+    /// header has `enable_restoration = 1` (the allintra default — see
+    /// [`Self::c_encode_defaults`]), this additionally runs the byte-exact
+    /// loop-restoration search + emits the restoration syntax, matching C's
+    /// `is_restoration_used`. A restoration-off bootstrap (e.g. [`Self::c_encode`],
+    /// `--enable-restoration=0`) skips it — unchanged from the historical
+    /// behaviour.
     pub fn port_encode(&self, bootstrap: &[u8]) -> Vec<u8> {
         self.port_encode_with(bootstrap, &ToggleKnobs::default())
     }
@@ -1663,11 +1693,26 @@ impl EncodeCell {
         // the tile with the per-RU params interleaved at each SB root. The
         // restoration DECISIONS (frame types, unit size, per-RU params) are
         // derived by the port's own search — never copied from the bootstrap.
+        // The port's DEFAULT allintra path runs the (byte-exact) LR search
+        // whenever the frame's restoration is on — C's `is_restoration_used`
+        // (encoder.h:4431: `enable_restoration && !all_lossless && !large_scale`).
+        // Allintra's default is `enable_restoration = 1` (av1_cx_iface.c:286, NOT
+        // cleared by the :3065 allintra override, kept non-realtime at :1273); at
+        // speed >= 5 C clears the seq bit (speed_features.c:2754), so the parsed
+        // bootstrap seq header's `enable_restoration` already encodes the speed
+        // gate — reading it here IS the faithful `is_restoration_used`. The
+        // explicit `lr_stage` (a `port_encode_lr` request, the C2 knob gate)
+        // forces it on; the default path (`port_encode`) DERIVES it, so a plain
+        // default (restoration-on) bootstrap runs the search + emits the
+        // restoration syntax, matching a plain `aomenc --allintra`. Restoration-
+        // off bootstraps (every `--enable-restoration=0` gate) derive `false` —
+        // unchanged.
+        let lr_stage = lr_stage || (s.enable_restoration && !p.coded_lossless);
         let mut our_tile_bytes = our_tile_bytes;
         if lr_stage {
             assert!(
                 s.enable_restoration,
-                "port_encode_lr needs an enable_restoration=1 bootstrap stream"
+                "the LR stage needs an enable_restoration=1 stream"
             );
             assert!(
                 !p.coded_lossless,

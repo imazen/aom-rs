@@ -2679,6 +2679,125 @@ long shim_encode_av1_kf_film_grain_table(const uint16_t *y, const uint16_t *u,
   return rc ? rc : total;
 }
 
+/* A genuinely FLAGLESS allintra KEY encode: aom_codec_enc_config_default(usage)
+ * + the still-image operating point (fixed-Q, one FORCE_KF frame, sb64, single
+ * tile) and NOTHING else — every coding-TOOL control (cdef / restoration /
+ * palette / intrabc / deltaq / aq / lossless / qm) is left at its ALLINTRA
+ * DEFAULT. For usage=AOM_USAGE_ALL_INTRA that means cdef OFF
+ * (av1_cx_iface.c:3067 override), loop-restoration ON (:286 default, NOT
+ * touched by the :3065 override, kept non-realtime at :1273), qm OFF, palette
+ * / intrabc at their config defaults (inert on non-screen content). This is
+ * the exact stream a plain `aomenc --allintra --end-usage=q --cq-level=N
+ * --cpu-used=M` produces — the reference for the DEFAULT-parity gate (the port
+ * default must match it). The sb64 + single-tile are the port's SB64 envelope
+ * (and the effective allintra default for these small frames), NOT tool flags.
+ * Append-only; every other shim above is untouched. */
+long shim_encode_av1_kf_defaults(const uint16_t *y, const uint16_t *u,
+                                 const uint16_t *v, int w, int h, int bd,
+                                 int mono, int ss_x, int ss_y, int cq_level,
+                                 int cpu_used, int usage, uint8_t *out,
+                                 size_t out_cap) {
+  aom_codec_iface_t *iface = aom_codec_av1_cx();
+  aom_codec_enc_cfg_t cfg;
+  if (aom_codec_enc_config_default(iface, &cfg, (unsigned int)usage)) return -1;
+  cfg.g_w = w;
+  cfg.g_h = h;
+  cfg.g_limit = 1;
+  cfg.g_lag_in_frames = 0;
+  cfg.g_threads = 1;
+  cfg.g_pass = AOM_RC_ONE_PASS;
+  cfg.rc_end_usage = AOM_Q;
+  cfg.monochrome = mono;
+  cfg.g_input_bit_depth = bd;
+  if (bd == 8) {
+    cfg.g_bit_depth = AOM_BITS_8;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else if (bd == 10) {
+    cfg.g_bit_depth = AOM_BITS_10;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else {
+    cfg.g_bit_depth = AOM_BITS_12;
+    cfg.g_profile = 2;
+  }
+  if (!mono && ss_x == 1 && ss_y == 0) cfg.g_profile = 2; /* 4:2:2 */
+
+  aom_img_fmt_t fmt;
+  if (mono || (ss_x == 1 && ss_y == 1))
+    fmt = AOM_IMG_FMT_I420;
+  else if (ss_x == 1)
+    fmt = AOM_IMG_FMT_I422;
+  else
+    fmt = AOM_IMG_FMT_I444;
+  if (bd > 8) fmt |= AOM_IMG_FMT_HIGHBITDEPTH;
+  aom_image_t *img = aom_img_alloc(NULL, fmt, w, h, 32);
+  if (!img) return -4;
+  img->monochrome = mono;
+  img->bit_depth = bd;
+  const int cw = mono ? 0 : (w + ss_x) >> ss_x;
+  const int ch = mono ? 0 : (h + ss_y) >> ss_y;
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    const uint16_t *src = plane == 0 ? y : (plane == 1 ? u : v);
+    const int pw = plane == 0 ? w : cw;
+    const int ph = plane == 0 ? h : ch;
+    for (int r = 0; r < ph; r++) {
+      if (bd > 8) {
+        uint16_t *row =
+            (uint16_t *)(img->planes[plane] + (size_t)r * img->stride[plane]);
+        for (int c = 0; c < pw; c++) row[c] = src[(size_t)r * pw + c];
+      } else {
+        uint8_t *row = img->planes[plane] + (size_t)r * img->stride[plane];
+        for (int c = 0; c < pw; c++) row[c] = (uint8_t)src[(size_t)r * pw + c];
+      }
+    }
+  }
+
+  aom_codec_ctx_t ctx;
+  aom_codec_flags_t flags = bd > 8 ? AOM_CODEC_USE_HIGHBITDEPTH : 0;
+  if (aom_codec_enc_init(&ctx, iface, &cfg, flags)) {
+    aom_img_free(img);
+    return -2;
+  }
+#define DFLTCTRL(id, val)                        \
+  do {                                           \
+    if (aom_codec_control(&ctx, (id), (val))) {  \
+      aom_codec_destroy(&ctx);                   \
+      aom_img_free(img);                         \
+      return -3;                                 \
+    }                                            \
+  } while (0)
+  /* ONLY the operating point + the SB64 envelope — no coding-tool controls. */
+  DFLTCTRL(AOME_SET_CPUUSED, cpu_used);
+  DFLTCTRL(AOME_SET_CQ_LEVEL, cq_level);
+  DFLTCTRL(AV1E_SET_SUPERBLOCK_SIZE, AOM_SUPERBLOCK_SIZE_64X64);
+  DFLTCTRL(AV1E_SET_TILE_COLUMNS, 0);
+  DFLTCTRL(AV1E_SET_TILE_ROWS, 0);
+#undef DFLTCTRL
+
+  long total = 0;
+  int rc = 0;
+  for (int pass = 0; pass < 2 && rc == 0; pass++) {
+    if (aom_codec_encode(&ctx, pass == 0 ? img : NULL, 0, 1,
+                         pass == 0 ? AOM_EFLAG_FORCE_KF : 0)) {
+      rc = -5;
+      break;
+    }
+    aom_codec_iter_t iter = NULL;
+    const aom_codec_cx_pkt_t *pkt;
+    while ((pkt = aom_codec_get_cx_data(&ctx, &iter)) != NULL) {
+      if (pkt->kind != AOM_CODEC_CX_FRAME_PKT) continue;
+      if ((size_t)total + pkt->data.frame.sz > out_cap) {
+        rc = -6;
+        break;
+      }
+      memcpy(out + total, pkt->data.frame.buf, pkt->data.frame.sz);
+      total += (long)pkt->data.frame.sz;
+    }
+  }
+  aom_codec_destroy(&ctx);
+  aom_img_free(img);
+  return rc ? rc : total;
+}
+
 #include "aom_dsp/noise_model.h"
 
 /* Noise-strength solver differential oracle (C7 grain-estimator chunk 2): run

@@ -12373,6 +12373,85 @@ pub fn ref_encode_av1_kf_film_grain_table(
 }
 
 // ---------------------------------------------------------------------------
+// dec_shim.c (append-only): shim_encode_av1_kf_defaults — a genuinely FLAGLESS
+// allintra KEY encode (config_default(usage) + the fixed-Q / sb64 / single-tile
+// operating point, NO coding-tool controls). For usage=ALL_INTRA the tools sit
+// at their true defaults — cdef OFF, loop-restoration ON, qm OFF — i.e. exactly
+// what a plain `aomenc --allintra` produces. The DEFAULT-parity reference.
+// ---------------------------------------------------------------------------
+unsafe extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_av1_kf_defaults(
+        y: *const u16,
+        u: *const u16,
+        v: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        usage: i32,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
+}
+
+/// A plain `aomenc --allintra --end-usage=q --cq-level=N --cpu-used=M` encode of
+/// one KEY frame via the REAL `aom_codec_av1_cx` (dec_shim.c
+/// `shim_encode_av1_kf_defaults`): every coding-TOOL control is left at its
+/// ALLINTRA default (cdef OFF, **loop-restoration ON**, qm OFF, palette/intrabc
+/// at config defaults), so this is the true-default stream the port's default
+/// path must byte-match. Only the fixed-Q operating point + the SB64 / single-
+/// tile envelope are set. Panics on error.
+pub fn ref_encode_av1_kf_defaults(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    usage: u32,
+) -> Vec<u8> {
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+    };
+    assert_eq!(y.len(), w * h);
+    assert!(mono || (u.len() == cw * ch && v.len() == cw * ch));
+    let mut out = vec![0u8; w * h * 8 + 65536];
+    let n = unsafe {
+        shim_encode_av1_kf_defaults(
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            usage as i32,
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    };
+    assert!(n > 0, "shim_encode_av1_kf_defaults failed ({n})");
+    out.truncate(n as usize);
+    out
+}
+
+// ---------------------------------------------------------------------------
 // dec_shim.c (append-only): noise-strength solver differential oracle (C7
 // grain-estimator chunk 2). Drives the REAL exported aom_noise_strength_solver_*
 // over (mean,std) observations; the Rust port must reproduce the solved curve /

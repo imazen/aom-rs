@@ -93,7 +93,7 @@ exact" means matching the **allintra** defaults, not the base defaults:
 | flag / control | C ref | class | evidence / gap |
 |---|---|---|---|
 | `--enable-cdef=1` | AV1E_SET_ENABLE_CDEF | **BYTE-EXACT-GATED** | C1, `av1_cdef_search` `pickcdef.rs`; `encoder_gate_cdef_{real_content,synthetic_axes}_rd_close` 14/14 (016d4dd+9850da6+c9ebf83). OFF by default in allintra. *Gap:* FAST_LVL1..5 ported but not e2e-gated; `=2`(non-ref) inert on KEY; `=3` CDEF_ADAPTIVE not ported |
-| `--enable-restoration=1` | AV1E_SET_ENABLE_RESTORATION | **BYTE-EXACT-GATED** | C2, Wiener/SGR search; `lr_restoration_gate` 8/8 + format-axis 3/3 (e24cf09+96d3464+dfd757e+96534c4). **ON by default in allintra.** *Gap:* speed-1..4 LR arms pinned (base encode not byte-exact at speed≥1) |
+| `--enable-restoration=1` | AV1E_SET_ENABLE_RESTORATION | **BYTE-EXACT-GATED** | C2, Wiener/SGR search; `lr_restoration_gate` 8/8 + format-axis 3/3 (e24cf09+96d3464+dfd757e+96534c4). **ON by default in allintra** — the DEFAULT path (no flag) now runs the search too, gated by `lr_default_parity` (port default == plain no-flags `aomenc --allintra`, 8/8, 2026-07-18). *Gap:* speed-1..4 LR arms pinned (base encode not byte-exact at speed≥1) |
 | `--loopfilter-control` | AV1E_SET_LOOPFILTER_CONTROL | **PARTIAL** | default `=1`(ALL) byte-exact (LF-level derivation in every e2e gate); `=0`(disable) not gated; `=2/3`(non-ref/low-motion) inter → inert on lone KEY |
 
 ### 3 — Tune / quality-metric family (C4)

@@ -3657,6 +3657,50 @@ verdict on a cell the knob never reaches proves nothing).
   every existing gate (the flag is dead outside FINAL_PASS). Both trellis arms
   drive both sides through the real `pack_tile`.
 
+## Loop-restoration wired into the DEFAULT allintra path — default-config parity closed (2026-07-18)
+
+**The port's DEFAULT allintra encode now byte-matches a plain `aomenc --allintra` (restoration
+ON).** This closes the biggest default-config parity gap flagged by the encoder coverage audit
+(`coverage-audit/encoder_modules_2026-07-18.md`): the byte-exact LR search (C2, below) existed but
+was reachable only behind an explicit `--enable-restoration=1`, while C's allintra DEFAULT is
+restoration ON.
+
+- **Finding verified first-hand** against reference/libaom (not the audit's word):
+  `default_extra_cfg.enable_restoration = 1` (`av1_cx_iface.c:286`, `!CONFIG_REALTIME_ONLY` build);
+  the `:3065` allintra override sets CDEF=0 / screen-mode / qm_min/max but does **NOT** touch
+  restoration; `:1273-74` keeps it on for non-realtime (`usage != REALTIME`). So `seq->enable_
+  restoration = 1` (`encoder.c:642`) → `encode_restoration_mode` emits frame-header restoration
+  bits + the seq bit (`bitstream.c:1777/2707`). At **speed >= 5** C clears both Wiener+SGR
+  (`speed_features.c:519-520`) → `enable_restoration &= 0` (`:2754`), so restoration is OFF for
+  speeds 5-9 (the port's existing speed-5..9 gates, which pass restoration off, already match C's
+  true default there). The non-restoration allintra tool defaults (palette=1 / intrabc=1 /
+  deltaq=OBJECTIVE) are byte-inert on a lone non-screen KEY still (deltaq OBJECTIVE →
+  `delta_q_present_flag = 0` via `allow_deltaq_mode` without TPL; palette/intrabc gated on
+  `allow_screen_content_tools`).
+
+- **Wiring:** `aom-bench::EncodeCell::port_encode` (the canonical default path) now DERIVES the LR
+  stage from the frame's `enable_restoration && !coded_lossless` — a faithful `is_restoration_used`
+  (encoder.h:4431), the parsed bootstrap seq bit already encoding C's speed>=5 clear. A default
+  (restoration-on) bootstrap runs the search + emits the syntax; a `--enable-restoration=0`
+  bootstrap derives `false` (every existing e2e/palette/deltaq/film-grain gate is unchanged —
+  they all bootstrap from restoration-off streams).
+
+- **New "no flags" reference:** `shim_encode_av1_kf_defaults` (dec_shim.c) does a genuinely
+  flagless `aomenc --allintra` encode — only the fixed-Q operating point + SB64/single-tile, every
+  coding-TOOL control left at its allintra default (cdef OFF, restoration ON, qm OFF). Rust:
+  `ref_encode_av1_kf_defaults` / `EncodeCell::c_encode_defaults`. Append-only; no existing shim or
+  signature touched.
+
+- **GATE (`lr_default_parity.rs`, aom-bench): 8/8 real-content cells BYTE-IDENTICAL** — the port's
+  default `port_encode` frame-OBU equals the plain `aomenc --allintra` frame-OBU. Per cell it also
+  asserts `c_encode_defaults() == c_encode_lr()` (proving restoration's default IS on + the other
+  tool defaults inert) and records `default != --enable-restoration=0`. Anti-vacuous: the reference
+  restores a plane on 6/8 cells (WIENER/SGRPROJ), and every cell's default stream differs from the
+  restoration-off stream — INCLUDING the all-NONE `cq12` cell, which differs from `off` purely in
+  the seq/frame restoration header bits (the exact "even all-RU-NONE → different header" point).
+  The explicit-off `encoder_gate_e2e_*` gates stay as-is (valid `--enable-restoration=0` config
+  tests). CLAUDE.md's "Loop-restoration: OFF by default" note corrected.
+
 ## C2 loop-restoration ENCODER search — BIT-IDENTICAL, second bulk-port family straight to PARITY section A (2026-07-17, LR bulk track)
 
 **`--enable-restoration=1` allintra speed-0 is BYTE-IDENTICAL to real aomenc — 8/8 gate
