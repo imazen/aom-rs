@@ -1448,11 +1448,9 @@ impl EncodeCell {
             }
             sr.min(9)
         };
-        if p.allow_intrabc && !knobs.enable_intrabc {
-            // Witness path: the header codes allow_intrabc but the search is off;
-            // the pack still writes use_intrabc=0 flags. (No assert — this is the
-            // intentional PORT(off) anti-vacuous case.)
-        }
+        // Witness note: when the header codes allow_intrabc but the knob is off
+        // (PORT-off anti-vacuous case), the search doesn't run yet the pack still
+        // writes use_intrabc=0 flags (via `PackCfg::allow_intrabc`).
         let ibc_hash = (p.allow_intrabc && knobs.enable_intrabc).then(|| {
             aom_encode::intrabc_search::build_intrabc_hash_table(
                 &src_y_strided,
