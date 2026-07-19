@@ -27,13 +27,13 @@
 
 use aom_bench::rd_close::{self, RdBands};
 use aom_bench::{EncodeCell, ToggleKnobs};
-use aom_entropy::header::{
+use aom_dsp::entropy::header::{
     CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
     RestorationHeader,
 };
-use aom_entropy::obu::read_obu_header;
-use aom_entropy::partition::get_partition_subsize;
-use aom_entropy::rb::ReadBitBuffer;
+use aom_dsp::entropy::obu::read_obu_header;
+use aom_dsp::entropy::partition::get_partition_subsize;
+use aom_dsp::entropy::rb::ReadBitBuffer;
 use aom_sys_ref as c;
 
 const OBU_SEQUENCE_HEADER: u32 = 1;
@@ -50,7 +50,7 @@ fn stream_allow_screen_content(stream: &[u8]) -> bool {
         let hdr = read_obu_header(&stream[pos..]).expect("valid OBU header");
         let after_header = pos + hdr.header_len;
         let (size, size_bytes) =
-            aom_entropy::leb128::uleb_decode(&stream[after_header..]).expect("leb128");
+            aom_dsp::entropy::leb128::uleb_decode(&stream[after_header..]).expect("leb128");
         let start = after_header + size_bytes;
         let end = start + size as usize;
         match hdr.obu_type {
@@ -63,7 +63,7 @@ fn stream_allow_screen_content(stream: &[u8]) -> bool {
     let seq_payload = seq_payload.expect("no sequence header OBU");
     let frame_payload = frame_payload.expect("no frame OBU");
     let mut rb = ReadBitBuffer::new(seq_payload);
-    let seq = aom_entropy::header::read_sequence_header_obu(&mut rb);
+    let seq = aom_dsp::entropy::header::read_sequence_header_obu(&mut rb);
     let s = &seq.seq_header;
     let cfg = FrameHeaderObu {
         prefix: FrameHeaderPrefix {
@@ -114,7 +114,7 @@ fn stream_allow_screen_content(stream: &[u8]) -> bool {
         ..Default::default()
     };
     let mut rb = ReadBitBuffer::new(frame_payload);
-    let p = aom_entropy::header::read_uncompressed_header(&mut rb, &cfg);
+    let p = aom_dsp::entropy::header::read_uncompressed_header(&mut rb, &cfg);
     p.prefix.allow_screen_content_tools
 }
 

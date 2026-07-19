@@ -10,15 +10,13 @@ publish = false
 # The port under measurement.
 aom-encode = { path = "../aom-encode" }
 aom-decode = { path = "../aom-decode" }
-aom-entropy = { path = "../aom-entropy" }
-aom-quant = { path = "../aom-quant" }
-# Stills-parity post-filter stages: the loop-restoration search
-# (aom-restore::pick), the deblock APPLY that feeds both the LR and CDEF
-# gates (aom-loopfilter loop_filter_frame), and the LR mode-cost derivation
-# (aom-txb cost_tokens_from_cdf).
-aom-restore = { path = "../aom-restore" }
-aom-loopfilter = { path = "../aom-loopfilter" }
-aom-txb = { path = "../aom-txb" }
+# Consolidated DSP/entropy kernels (was: aom-entropy/quant/restore/loopfilter/
+# txb — folded into aom-dsp per GitHub #2). Stills-parity post-filter stages
+# still ride these: the loop-restoration search (aom_dsp::restore::pick), the
+# deblock APPLY feeding the LR and CDEF gates (aom_dsp::loopfilter::
+# loop_filter_frame), and the LR mode-cost derivation (aom_dsp::txb::
+# cost_tokens_from_cdf).
+aom-dsp = { path = "../aom-dsp" }
 # The REAL C oracle (reference libaom v3.14.1, Release + SIMD). This crate is
 # bench-only (publish = false), so depending on the FFI oracle here mirrors the
 # dev-dependency isolation the shipping crates use: all unsafe stays inside

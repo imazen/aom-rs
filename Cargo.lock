@@ -57,13 +57,9 @@ name = "aom-bench"
 version = "0.0.1"
 dependencies = [
  "aom-decode",
+ "aom-dsp",
  "aom-encode",
- "aom-entropy",
- "aom-loopfilter",
- "aom-quant",
- "aom-restore",
  "aom-sys-ref",
- "aom-txb",
  "zenbench",
  "zensim",
 ]

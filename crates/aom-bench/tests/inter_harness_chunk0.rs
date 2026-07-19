@@ -24,7 +24,7 @@ use aom_bench::inter_localize::{
     try_decode_frames,
 };
 use aom_bench::{EncodeCell, MultiFrameEncodeCell};
-use aom_entropy::obu::read_obu_header;
+use aom_dsp::entropy::obu::read_obu_header;
 
 // ---------------------------------------------------------------------------
 // Content + stream helpers
@@ -86,7 +86,7 @@ fn tu_frame_types(stream: &[u8]) -> Vec<u8> {
     while pos < stream.len() {
         let h = read_obu_header(&stream[pos..]).expect("valid OBU header");
         let after = pos + h.header_len;
-        let (size, sb) = aom_entropy::leb128::uleb_decode(&stream[after..]).expect("leb128");
+        let (size, sb) = aom_dsp::entropy::leb128::uleb_decode(&stream[after..]).expect("leb128");
         if h.obu_type == OBU_TEMPORAL_DELIMITER
             && let Some(t) = cur.take()
         {

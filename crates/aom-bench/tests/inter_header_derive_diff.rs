@@ -21,14 +21,14 @@ use aom_encode::inter_frame::{
     derive_lowdelay_p_frame_header,
 };
 use aom_encode::rc::base_qindex_lowdelay_p_from_cq;
-use aom_entropy::header::{
+use aom_dsp::entropy::header::{
     CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
     RestorationHeader, TileInfoHeader, read_sequence_header_obu, read_uncompressed_header,
     write_frame_header_obu,
 };
-use aom_entropy::obu::read_obu_header;
-use aom_entropy::rb::ReadBitBuffer;
-use aom_entropy::wb::WriteBitBuffer;
+use aom_dsp::entropy::obu::read_obu_header;
+use aom_dsp::entropy::rb::ReadBitBuffer;
+use aom_dsp::entropy::wb::WriteBitBuffer;
 
 const KF_REF_DELTAS: [i8; 8] = [1, 0, 0, 0, -1, 0, -1, -1];
 const KF_MODE_DELTAS: [i8; 2] = [0, 0];
@@ -108,7 +108,7 @@ fn walk(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
     while pos < bytes.len() {
         let hdr = read_obu_header(&bytes[pos..]).expect("obu");
         let after = pos + hdr.header_len;
-        let (size, sb) = aom_entropy::leb128::uleb_decode(&bytes[after..]).expect("leb");
+        let (size, sb) = aom_dsp::entropy::leb128::uleb_decode(&bytes[after..]).expect("leb");
         let ps = after + sb;
         let pe = ps + size as usize;
         out.push((hdr.obu_type, bytes[ps..pe].to_vec()));

@@ -59,8 +59,8 @@
 //! ```
 
 use aom_decode::frame::FrameDecode;
-use aom_entropy::leb128;
-use aom_entropy::obu::read_obu_header;
+use aom_dsp::entropy::leb128;
+use aom_dsp::entropy::obu::read_obu_header;
 use zensim::{RgbSlice, Zensim, ZensimProfile};
 
 use crate::EncodeCell;

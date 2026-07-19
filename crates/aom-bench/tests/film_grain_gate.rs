@@ -6,7 +6,7 @@
 //! denoise or otherwise alter the coded picture, so the ONLY bitstream effect vs
 //! a plain encode is the seq-header `film_grain_params_present` bit plus the
 //! per-frame grain-params block. The header WRITER
-//! (`aom_entropy::header::write_film_grain_params`) is already bit-exact; this
+//! (`aom_dsp::entropy::header::write_film_grain_params`) is already bit-exact; this
 //! gate proves the missing param-plumbing —
 //! [`aom_encode::grain_table::read_film_grain_table`] + [`lookup`] — end to end.
 //!
@@ -27,7 +27,7 @@
 
 use aom_bench::EncodeCell;
 use aom_encode::grain_table::{lookup, read_film_grain_table};
-use aom_entropy::header::FilmGrainParams;
+use aom_dsp::entropy::header::FilmGrainParams;
 use aom_sys_ref as c;
 
 /// Test-vector indices exercising the writer's branches: TV1 rich full-chroma
