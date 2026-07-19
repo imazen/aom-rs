@@ -74,7 +74,7 @@ jobs:
         run: cargo test --workspace --no-fail-fast
 
   # SCALAR-PIN mode (Gate-3 parity rule 3): AOM_FORCE_SCALAR disables every
-  # archmage SIMD token process-wide (crates/aom-dispatch), so every kernel
+  # archmage SIMD token process-wide (aom_dsp::dispatch), so every kernel
   # dispatch falls through to `_scalar` = the transcribed C port, verbatim.
   # The FULL suite passing here proves SIMD work left the scalar path
   # untouched. Locally: `just test-scalar`.
@@ -110,8 +110,66 @@ jobs:
       - name: Test workspace under the scalar pin
         run: cargo test --workspace --no-fail-fast
 
-# TODO (next CI chunk): the mandated platform matrix — windows-11-arm,
-# macos-15-intel, and i686-unknown-linux-gnu (via cross). Each is gated on
-# building the libaom oracle for that target (32-bit nasm/cmake for i686,
-# MSVC + AV1 assembly for windows-arm), which is a dedicated sub-project since
-# all 13 crates depend on aom-sys-ref. This linux job is the first slice.
+  # ORG-BAR PLATFORM MATRIX — pure-Rust portability (no C oracle).
+  #
+  # Invariant A (issue #3): a downstream consumer of any published crate builds
+  # with NO C toolchain, NO cmake, NO build.rs — the C libaom oracle is a
+  # dev-dependency of the differential harness only, never a normal dependency
+  # of a shipping crate. These jobs exercise exactly that surface on the mandated
+  # org-bar platforms: build the four published crates (facade + dsp + decode +
+  # encode) and the decode-only stack, then run the oracle-free facade tests.
+  # This is what catches pointer-width bugs (i686), Windows-aarch64, and macOS-x86
+  # regressions in the pure-Rust port. `cargo build`/`test` of these crates pulls
+  # in neither aom-sys-ref nor its build.rs, so no cmake/nasm is needed here.
+  #
+  # The full C-oracle DIFFERENTIAL gate runs on the two linux jobs above. Building
+  # libaom for these targets in CI (32-bit nasm/cmake for i686; MSVC + AV1 assembly
+  # for windows-arm) is a dedicated sub-project, so the differential is gated OFF
+  # here — NOT silently skipped: it is simply not invoked on these runners, and
+  # this comment says why. macos-15-intel is the most likely next candidate to
+  # gain the full differential (brew nasm/cmake + the portable aom-sys-ref build.rs).
+  # These runners are unverified-pending-CI at landing (labels + toolchains match
+  # the org runner set; the first CI run confirms the pure-Rust build is green).
+  portability:
+    name: portability ${{ matrix.name }} (pure-Rust, no C oracle)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-11-arm
+            os: windows-11-arm
+          - name: macos-15-intel
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      # No submodules: the pure-Rust consumer surface never touches upstream/.
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the published crates (no C toolchain)
+        run: cargo build -p zenav1-aom -p zenav1-aom-dsp -p zenav1-aom-decode -p zenav1-aom-encode
+      - name: Build the decode-only stack (wasm / size-sensitive consumers)
+        run: cargo build -p zenav1-aom --no-default-features --features decode
+      - name: Test the oracle-free facade
+        run: cargo test -p zenav1-aom
+
+  # i686 is a primary target (32-bit correctness for WASM compatibility + catching
+  # pointer-width bugs, per CLAUDE.md). Built via `cross` (Docker) — same pure-Rust,
+  # no-C-oracle surface as the native runners above.
+  portability-i686:
+    name: portability i686-unknown-linux-gnu (pure-Rust, no C oracle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Build the published crates for i686 (32-bit pointer-width)
+        run: cross build --target i686-unknown-linux-gnu -p zenav1-aom -p zenav1-aom-dsp -p zenav1-aom-decode -p zenav1-aom-encode
+      - name: Build the decode-only stack for i686
+        run: cross build --target i686-unknown-linux-gnu -p zenav1-aom --no-default-features --features decode
+      - name: Test the oracle-free facade on i686 (under qemu)
+        run: cross test --target i686-unknown-linux-gnu -p zenav1-aom
