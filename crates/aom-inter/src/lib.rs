@@ -52,6 +52,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod warp;
+
 // --- constants (aom_dsp/aom_filter.h, aom_scale/yv12config.h) ---
 const FILTER_BITS: i32 = 7;
 const ROUND0_BITS: i32 = 3;

@@ -13902,3 +13902,175 @@ pub fn ref_build_mc_border(
     }
     dst
 }
+
+// warp_shim.c — decoder local-warped-motion core (crate aom-inter, warp module,
+// chunk 5): the real `av1_warp_affine_c` kernel + `av1_find_projection` /
+// `av1_get_shear_params` model derivation.
+extern "C" {
+    fn shim_warp_affine(
+        mat: *const i32,
+        reff: *const u8,
+        width: i32,
+        height: i32,
+        stride: i32,
+        pred: *mut u8,
+        p_col: i32,
+        p_row: i32,
+        p_width: i32,
+        p_height: i32,
+        p_stride: i32,
+        subsampling_x: i32,
+        subsampling_y: i32,
+        alpha: i16,
+        beta: i16,
+        gamma: i16,
+        delta: i16,
+    );
+    fn shim_find_projection(
+        np: i32,
+        pts1: *const i32,
+        pts2: *const i32,
+        bsize: i32,
+        mvy: i32,
+        mvx: i32,
+        mi_row: i32,
+        mi_col: i32,
+        wmmat_out: *mut i32,
+        alpha_out: *mut i16,
+        beta_out: *mut i16,
+        gamma_out: *mut i16,
+        delta_out: *mut i16,
+    ) -> i32;
+    fn shim_get_shear_params(
+        wmmat: *const i32,
+        alpha_out: *mut i16,
+        beta_out: *mut i16,
+        gamma_out: *mut i16,
+        delta_out: *mut i16,
+    ) -> i32;
+}
+
+/// The derived warp model returned by [`ref_find_projection`] /
+/// [`ref_get_shear_params`]: `av1_find_projection`'s return value + the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefWarpModel {
+    /// C return value: 1 = invalid (unusable warp), 0 = valid.
+    pub ret: i32,
+    pub wmmat: [i32; 6],
+    pub alpha: i16,
+    pub beta: i16,
+    pub gamma: i16,
+    pub delta: i16,
+}
+
+/// Reference libaom `av1_warp_affine_c` (warped_motion.c:518) — the bd8
+/// non-compound affine warp filter, with the decoder's single-ref
+/// `ConvolveParams` (round_0 = 3). `reff` is the reference plane
+/// (`width`×`height`, stride `stride`); returns the `p_width`×`p_height`
+/// predictor (stride `p_width`). `mat` is the 6-param model; `alpha`/`beta`/
+/// `gamma`/`delta` the shear params.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_warp_affine(
+    mat: &[i32; 6],
+    reff: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    p_col: i32,
+    p_row: i32,
+    p_width: usize,
+    p_height: usize,
+    subsampling_x: usize,
+    subsampling_y: usize,
+    alpha: i16,
+    beta: i16,
+    gamma: i16,
+    delta: i16,
+) -> Vec<u8> {
+    ref_init();
+    let mut pred = vec![0u8; p_width * p_height];
+    unsafe {
+        shim_warp_affine(
+            mat.as_ptr(),
+            reff.as_ptr(),
+            width as i32,
+            height as i32,
+            stride as i32,
+            pred.as_mut_ptr(),
+            p_col,
+            p_row,
+            p_width as i32,
+            p_height as i32,
+            p_width as i32,
+            subsampling_x as i32,
+            subsampling_y as i32,
+            alpha,
+            beta,
+            gamma,
+            delta,
+        )
+    }
+    pred
+}
+
+/// Reference libaom `av1_find_projection` (warped_motion.c:906): least-squares
+/// AFFINE model derivation from `np` sample points (`pts1` source, `pts2`
+/// in-reference, interleaved x,y). `bsize` is the `BLOCK_SIZE` enum value.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_find_projection(
+    np: usize,
+    pts1: &[i32],
+    pts2: &[i32],
+    bsize: i32,
+    mvy: i32,
+    mvx: i32,
+    mi_row: i32,
+    mi_col: i32,
+) -> RefWarpModel {
+    ref_init();
+    let mut wmmat = [0i32; 6];
+    let (mut a, mut b, mut g, mut d) = (0i16, 0i16, 0i16, 0i16);
+    let ret = unsafe {
+        shim_find_projection(
+            np as i32,
+            pts1.as_ptr(),
+            pts2.as_ptr(),
+            bsize,
+            mvy,
+            mvx,
+            mi_row,
+            mi_col,
+            wmmat.as_mut_ptr(),
+            &mut a,
+            &mut b,
+            &mut g,
+            &mut d,
+        )
+    };
+    RefWarpModel {
+        ret,
+        wmmat,
+        alpha: a,
+        beta: b,
+        gamma: g,
+        delta: d,
+    }
+}
+
+/// Reference libaom `av1_get_shear_params` (warped_motion.c:243): derive the
+/// shear params from `wmmat`. `ret` is 1 for a usable model, 0 otherwise.
+pub fn ref_get_shear_params(wmmat: &[i32; 6]) -> RefWarpModel {
+    ref_init();
+    let (mut a, mut b, mut g, mut d) = (0i16, 0i16, 0i16, 0i16);
+    let ret = unsafe {
+        shim_get_shear_params(wmmat.as_ptr(), &mut a, &mut b, &mut g, &mut d)
+    };
+    RefWarpModel {
+        ret,
+        wmmat: *wmmat,
+        alpha: a,
+        beta: b,
+        gamma: g,
+        delta: d,
+    }
+}

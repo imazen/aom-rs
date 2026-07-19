@@ -41,6 +41,7 @@ fn main() {
         "pickrst_shim",
         "superres_shim",
         "inter_shim",
+        "warp_shim",
     ] {
         let shim_c = shim_dir.join(format!("{name}.c"));
         let obj = out_dir.join(format!("{name}.o"));
