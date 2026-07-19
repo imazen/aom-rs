@@ -3837,3 +3837,311 @@ int shim_denoise_and_model_run(const uint16_t *y, const uint16_t *u,
   aom_free_frame_buffer(&sd);
   return ok && fg.apply_grain;
 }
+
+/* ================================================================== */
+/* 6. INTER-ENCODE Chunk 0 — multi-frame [KEY, P] encode + full-stream */
+/*    N-th-frame decode oracles (INTER-ENCODE-ROADMAP.md chunk 0).     */
+/*                                                                     */
+/* Append-only additions for the inter-encode harness. The single-     */
+/* frame encode_av1_kf_impl / shim_encode_av1_kf* and the single-frame */
+/* shim_decode_av1_kf above are untouched. All aom encoder/decoder     */
+/* headers are already included at the top of section 3.               */
+/* ================================================================== */
+
+/* Fill an allocated aom_image_t's planes from tight u16 source planes (bd==8
+ * downshifts into the 8-bit image; bd>8 stores u16). Mirrors the per-plane copy
+ * in encode_av1_kf_impl, factored so the two-frame path can fill both images. */
+static void fill_aom_image_planes(aom_image_t *img, const uint16_t *y,
+                                  const uint16_t *u, const uint16_t *v, int w,
+                                  int h, int bd, int mono, int ss_x, int ss_y) {
+  const int cw = mono ? 0 : (w + ss_x) >> ss_x;
+  const int ch = mono ? 0 : (h + ss_y) >> ss_y;
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    const uint16_t *src = plane == 0 ? y : (plane == 1 ? u : v);
+    const int pw = plane == 0 ? w : cw;
+    const int ph = plane == 0 ? h : ch;
+    for (int r = 0; r < ph; r++) {
+      if (bd > 8) {
+        uint16_t *row =
+            (uint16_t *)(img->planes[plane] + (size_t)r * img->stride[plane]);
+        for (int c = 0; c < pw; c++) row[c] = src[(size_t)r * pw + c];
+      } else {
+        uint8_t *row = img->planes[plane] + (size_t)r * img->stride[plane];
+        for (int c = 0; c < pw; c++) row[c] = (uint8_t)src[(size_t)r * pw + c];
+      }
+    }
+  }
+}
+
+/* Encode a 2-frame low-delay [KEY, P] clip through the REAL aom_codec_av1_cx
+ * public API — the same encoder + path aomenc drives — at the "simplest inter
+ * config" of INTER-ENCODE-ROADMAP.md §3:
+ *   --end-usage=q --cq-level=<cq_level> --lag-in-frames=0 --cpu-used=<cpu_used>
+ *   --enable-obmc=0 --enable-warped-motion=0 --enable-global-motion=0
+ *   --enable-interintra-comp=0 --enable-masked-comp=0 --enable-diff-wtd-comp=0
+ *   --enable-dual-filter=0 --enable-ref-frame-mvs=0 --limit=2
+ * usage = AOM_USAGE_GOOD_QUALITY (NOT all-intra — all-intra forces every frame
+ * KEY, so no P frame exists). Frame 0 forced KEY (AOM_EFLAG_FORCE_KF); frame 1
+ * codes as a single-reference (only frame 0 is decoded) translational P —
+ * compound / masked / skip_mode are structurally impossible with one decoded
+ * reference. enable_cdef / enable_restoration are exposed so the caller can run
+ * the faithful GOOD-quality defaults (pass 1/1) OR probe a smaller decoder
+ * envelope (0/0). Two frames of the same geometry: (y0,u0,v0) and (y1,u1,v1),
+ * each tight w*h luma / cw*ch chroma, u16 at every depth. Returns the
+ * CONCATENATED bitstream length of both temporal units, or a negative error. */
+long shim_encode_av1_inter_2frame(
+    const uint16_t *y0, const uint16_t *u0, const uint16_t *v0,
+    const uint16_t *y1, const uint16_t *u1, const uint16_t *v1, int w, int h,
+    int bd, int mono, int ss_x, int ss_y, int cq_level, int cpu_used,
+    int enable_cdef, int enable_restoration, uint8_t *out, size_t out_cap) {
+  aom_codec_iface_t *iface = aom_codec_av1_cx();
+  aom_codec_enc_cfg_t cfg;
+  if (aom_codec_enc_config_default(iface, &cfg, AOM_USAGE_GOOD_QUALITY))
+    return -1;
+  cfg.g_w = w;
+  cfg.g_h = h;
+  cfg.g_limit = 2;
+  cfg.g_lag_in_frames = 0; /* low-delay one-pass: no alt-ref/TPL/2-pass/tf */
+  cfg.g_threads = 1;
+  cfg.g_pass = AOM_RC_ONE_PASS;
+  cfg.g_timebase.num = 1;  /* mirror aomenc's default 30fps timebase */
+  cfg.g_timebase.den = 30;
+  cfg.rc_end_usage = AOM_Q;
+  cfg.monochrome = mono;
+  cfg.g_input_bit_depth = bd;
+  if (bd == 8) {
+    cfg.g_bit_depth = AOM_BITS_8;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else if (bd == 10) {
+    cfg.g_bit_depth = AOM_BITS_10;
+    cfg.g_profile = (ss_x == 0 && ss_y == 0) ? 1 : 0;
+  } else {
+    cfg.g_bit_depth = AOM_BITS_12;
+    cfg.g_profile = 2;
+  }
+  if (!mono && ss_x == 1 && ss_y == 0) cfg.g_profile = 2; /* 4:2:2 */
+
+  aom_img_fmt_t fmt;
+  if (mono || (ss_x == 1 && ss_y == 1))
+    fmt = AOM_IMG_FMT_I420;
+  else if (ss_x == 1)
+    fmt = AOM_IMG_FMT_I422;
+  else
+    fmt = AOM_IMG_FMT_I444;
+  if (bd > 8) fmt |= AOM_IMG_FMT_HIGHBITDEPTH;
+
+  aom_image_t *img0 = aom_img_alloc(NULL, fmt, w, h, 32);
+  aom_image_t *img1 = aom_img_alloc(NULL, fmt, w, h, 32);
+  if (!img0 || !img1) {
+    if (img0) aom_img_free(img0);
+    if (img1) aom_img_free(img1);
+    return -4;
+  }
+  img0->monochrome = img1->monochrome = mono;
+  img0->bit_depth = img1->bit_depth = bd;
+  fill_aom_image_planes(img0, y0, u0, v0, w, h, bd, mono, ss_x, ss_y);
+  fill_aom_image_planes(img1, y1, u1, v1, w, h, bd, mono, ss_x, ss_y);
+
+  aom_codec_ctx_t ctx;
+  aom_codec_flags_t flags = bd > 8 ? AOM_CODEC_USE_HIGHBITDEPTH : 0;
+  if (aom_codec_enc_init(&ctx, iface, &cfg, flags)) {
+    aom_img_free(img0);
+    aom_img_free(img1);
+    return -2;
+  }
+
+#define TRYCTRL(id, val)                        \
+  do {                                          \
+    if (aom_codec_control(&ctx, (id), (val))) { \
+      aom_codec_destroy(&ctx);                  \
+      aom_img_free(img0);                       \
+      aom_img_free(img1);                       \
+      return -3;                                \
+    }                                           \
+  } while (0)
+  TRYCTRL(AOME_SET_CPUUSED, cpu_used);
+  TRYCTRL(AOME_SET_CQ_LEVEL, cq_level);
+  TRYCTRL(AV1E_SET_ENABLE_CDEF, enable_cdef);
+  TRYCTRL(AV1E_SET_ENABLE_RESTORATION, enable_restoration);
+  /* The §3 inter-tool disables: collapse the P-frame search to single-ref
+   * translational (SIMPLE_TRANSLATION only, identity GLOBALMV, spatial-only
+   * ref-mv list, 1-D interp filter). */
+  TRYCTRL(AV1E_SET_ENABLE_OBMC, 0);
+  TRYCTRL(AV1E_SET_ENABLE_WARPED_MOTION, 0);
+  TRYCTRL(AV1E_SET_ENABLE_GLOBAL_MOTION, 0);
+  TRYCTRL(AV1E_SET_ENABLE_INTERINTRA_COMP, 0);
+  TRYCTRL(AV1E_SET_ENABLE_MASKED_COMP, 0);
+  TRYCTRL(AV1E_SET_ENABLE_DIFF_WTD_COMP, 0);
+  TRYCTRL(AV1E_SET_ENABLE_DUAL_FILTER, 0);
+  TRYCTRL(AV1E_SET_ENABLE_REF_FRAME_MVS, 0);
+#undef TRYCTRL
+
+  long total = 0;
+  int rc = 0;
+  aom_image_t *imgs[2] = {img0, img1};
+  /* Push frame 0 (auto-KEY: the encoder always codes the first frame KEY — no
+   * FORCE_KF, matching the aomenc CLI, which relies on auto-key and whose
+   * frames_to_key bookkeeping then codes frame 1 as INTER) then frame 1, then
+   * flush (NULL). With g_lag_in_frames == 0 each encode call emits its frame's
+   * packet promptly; the final NULL flushes any residual. */
+  for (int f = 0; f < 3 && rc == 0; f++) {
+    aom_image_t *in = f < 2 ? imgs[f] : NULL;
+    if (aom_codec_encode(&ctx, in, f, 1, 0)) {
+      rc = -5;
+      break;
+    }
+    aom_codec_iter_t iter = NULL;
+    const aom_codec_cx_pkt_t *pkt;
+    while ((pkt = aom_codec_get_cx_data(&ctx, &iter)) != NULL) {
+      if (pkt->kind != AOM_CODEC_CX_FRAME_PKT) continue;
+      const void *buf = pkt->data.frame.buf;
+      size_t sz = pkt->data.frame.sz;
+      if ((size_t)total + sz > out_cap) {
+        rc = -6;
+        break;
+      }
+      memcpy(out + total, buf, sz);
+      total += (long)sz;
+    }
+  }
+  aom_codec_destroy(&ctx);
+  aom_img_free(img0);
+  aom_img_free(img1);
+  return rc ? rc : total;
+}
+
+/* Decode a full AV1 stream and return the frame_index-th SHOWN frame's planes
+ * (0-based, decode order). Unlike shim_decode_av1_kf (which asserts exactly one
+ * output frame), this drains every output frame, so a 2-frame [KEY, P] stream
+ * can be cross-checked frame-by-frame against the port decoder. info_out[0..6]
+ * = {bit_depth, monochrome, ss_x, ss_y, d_w, d_h} of the returned frame.
+ * Returns 0 on success, or a positive error: 1 init, 2 decode, 3 fewer frames
+ * than requested, 4 geometry mismatch. */
+/* Copy a decoded aom_image_t's cropped planes into y/u/v (mono skips chroma)
+ * and fill info_out[0..6] = {bit_depth, mono, ss_x, ss_y, d_w, d_h}. Returns 0,
+ * or 4 on a geometry mismatch vs expect_w/expect_h. */
+static int copy_decoded_image(const aom_image_t *img, int expect_w,
+                              int expect_h, uint16_t *y, uint16_t *u,
+                              uint16_t *v, int32_t *info_out) {
+  if ((int)img->d_w != expect_w || (int)img->d_h != expect_h) return 4;
+  const int mono = img->monochrome;
+  const int ss_x = img->x_chroma_shift, ss_y = img->y_chroma_shift;
+  const int highbd = (img->fmt & AOM_IMG_FMT_HIGHBITDEPTH) != 0;
+  info_out[0] = (int32_t)img->bit_depth;
+  info_out[1] = mono;
+  info_out[2] = ss_x;
+  info_out[3] = ss_y;
+  info_out[4] = (int32_t)img->d_w;
+  info_out[5] = (int32_t)img->d_h;
+  const int cw = mono ? 0 : ((int)img->d_w + ss_x) >> ss_x;
+  const int ch = mono ? 0 : ((int)img->d_h + ss_y) >> ss_y;
+  for (int plane = 0; plane < (mono ? 1 : 3); plane++) {
+    uint16_t *dst = plane == 0 ? y : (plane == 1 ? u : v);
+    const int pw = plane == 0 ? (int)img->d_w : cw;
+    const int ph = plane == 0 ? (int)img->d_h : ch;
+    for (int r = 0; r < ph; r++) {
+      const uint8_t *row = img->planes[plane] + (size_t)r * img->stride[plane];
+      if (highbd) {
+        const uint16_t *row16 = (const uint16_t *)row;
+        for (int c = 0; c < pw; c++) dst[(size_t)r * pw + c] = row16[c];
+      } else {
+        for (int c = 0; c < pw; c++) dst[(size_t)r * pw + c] = row[c];
+      }
+    }
+  }
+  return 0;
+}
+
+int shim_decode_av1_stream_frame(const uint8_t *data, size_t len,
+                                 int frame_index, int expect_w, int expect_h,
+                                 uint16_t *y, uint16_t *u, uint16_t *v,
+                                 int32_t *info_out) {
+  aom_codec_ctx_t ctx;
+  if (aom_codec_dec_init(&ctx, aom_codec_av1_dx(), NULL, 0)) return 1;
+
+  /* The player model: split the stream into temporal units at each
+   * OBU_TEMPORAL_DELIMITER (type 2) and call aom_codec_decode once per TU on
+   * the persistent context (one decode call per multi-frame buffer only
+   * surfaces the FIRST TU's frame). Reference state carries across calls.
+   * Drain shown frames after each TU; copy-on-match (a get_frame pointer is
+   * invalidated by the next decode call, so we must copy the moment we find the
+   * requested index). */
+  int idx = 0;
+  size_t tu_start = 0;
+  int have_tu = 0;
+  size_t p = 0;
+  while (p <= len) {
+    int is_td = 0;
+    int at_end = (p == len);
+    if (!at_end) {
+      uint8_t b = data[p];
+      int type = (b >> 3) & 0xf;
+      int ext = (b >> 2) & 1;
+      int has_size = (b >> 1) & 1;
+      size_t q = p + 1 + (ext ? 1 : 0);
+      size_t sz = 0;
+      if (has_size) {
+        int shift = 0;
+        while (q < len) {
+          uint8_t bb = data[q++];
+          sz |= (size_t)(bb & 0x7f) << shift;
+          shift += 7;
+          if (!(bb & 0x80)) break;
+        }
+      } else {
+        sz = len - q;
+      }
+      is_td = (type == 2);
+      /* advance p to the next OBU (done below after boundary handling) */
+      if (is_td && have_tu) {
+        /* close the previous TU at [tu_start, p) and decode it */
+      }
+      /* compute next position now; used after the boundary block */
+      size_t next = q + sz;
+      if (is_td && have_tu) {
+        if (aom_codec_decode(&ctx, data + tu_start, p - tu_start, NULL)) {
+          aom_codec_destroy(&ctx);
+          return 2;
+        }
+        aom_codec_iter_t it = NULL;
+        const aom_image_t *img;
+        while ((img = aom_codec_get_frame(&ctx, &it)) != NULL) {
+          if (idx == frame_index) {
+            int rc = copy_decoded_image(img, expect_w, expect_h, y, u, v,
+                                        info_out);
+            aom_codec_destroy(&ctx);
+            return rc;
+          }
+          idx++;
+        }
+      }
+      if (is_td) {
+        tu_start = p;
+        have_tu = 1;
+      }
+      p = next;
+      continue;
+    }
+    /* at_end: flush the final TU [tu_start, len) */
+    if (have_tu) {
+      if (aom_codec_decode(&ctx, data + tu_start, len - tu_start, NULL)) {
+        aom_codec_destroy(&ctx);
+        return 2;
+      }
+      aom_codec_iter_t it = NULL;
+      const aom_image_t *img;
+      while ((img = aom_codec_get_frame(&ctx, &it)) != NULL) {
+        if (idx == frame_index) {
+          int rc =
+              copy_decoded_image(img, expect_w, expect_h, y, u, v, info_out);
+          aom_codec_destroy(&ctx);
+          return rc;
+        }
+        idx++;
+      }
+    }
+    break;
+  }
+  aom_codec_destroy(&ctx);
+  return 3; /* fewer shown frames than requested */
+}

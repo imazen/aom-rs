@@ -318,7 +318,7 @@ Every kernel lands with a differential vs the REAL exported C. **Cross-track dep
 end-to-end byte-exact gate for chunk 2 needs the inter DECODER (inter-decode chunks 1a-1e) green —
 see §6. Kernels can be built in parallel against C differentials before the decoder lands.
 
-### Chunk 0 — Infra: multi-frame encode harness + decode-both localizer
+### Chunk 0 — Infra: multi-frame encode harness + decode-both localizer — LANDED ✅
 - **C funcs:** n/a (port infra).
 - **Port:** the current encode harness is single-frame (`aom-bench/src/rd_close.rs:164` asserts one
   frame OBU). Add a 2-frame `[KEY, P]` driver that (a) runs `aomenc` at a controlled inter config,
@@ -328,6 +328,43 @@ see §6. Kernels can be built in parallel against C differentials before the dec
 - **Test:** frame-0 KEY still byte-exact through the 2-frame harness (regression control).
 - **Deps:** inter-decode chunk 1 (for the decode-both leg). **Size:** M. Prereq for verifying any
   inter encode.
+- **STATUS (LANDED):** the 2-frame `[KEY, P]` harness + decode-both localizer are in tree, gated by
+  `aom-bench/tests/inter_harness_chunk0.rs` (6 tests, all green). Pieces:
+  - **Multi-frame C-encode reference** — `shim_encode_av1_inter_2frame` (aom-sys-ref `dec_shim.c`,
+    append-only) drives the REAL `aom_codec_av1_cx` API at the §3 simplest inter config
+    (`--end-usage=q --lag-in-frames=0 --cpu-used=<N> --limit=2` with obmc/warp/global-motion/
+    interintra/masked/diff-wtd/dual-filter/ref-frame-mvs disabled, GOOD usage). Rust:
+    `aom_sys_ref::ref_encode_av1_inter_2frame`. **GOTCHA (root-caused):** forcing `AOM_EFLAG_FORCE_KF`
+    on frame 0 makes `aomenc` code frame 1 as a KEY too (KEY+KEY, seq-header-per-TU) — the CLI relies
+    on AUTO-key of the first frame; dropping FORCE_KF (+ a 1/30 timebase) yields the correct KEY+INTER.
+    Verified against the real `aomenc` CLI with the identical flags.
+  - **Full-stream N-th-frame C decode oracle** — `shim_decode_av1_stream_frame` /
+    `aom_sys_ref::ref_decode_av1_stream_frame` (append-only): splits the stream into TUs and decodes
+    per-TU on a persistent ctx (one `aom_codec_decode` on a multi-TU buffer only surfaces the first
+    TU), so any frame index cross-checks the port frame-by-frame.
+  - **Decode-both localizer** — `aom-bench/src/inter_localize.rs`: `first_frameset_divergence`
+    (pure comparator over decoded frame-sets → first `(frame, tile, SB, sample)`), `decode_both`
+    (drives `aom_decode::frame::decode_frames`, panic-safe, maps an asymmetric decode failure to a
+    `DecodeError` divergence), `FrameView` (works over both a port `FrameDecode` and a C
+    `RefDecodedFrame`). Validated: 0-divergence on decode-both of one stream; exact-offset on a
+    hand-corrupted luma AND chroma sample (SB label maps chroma → luma via subsampling); pins a real
+    port-vs-C divergence.
+  - **`MultiFrameEncodeCell`** (aom-bench `lib.rs`) — carries the 2-frame `[KEY, P]` source + config;
+    `translational(&EncodeCell, dx, dy)` builds frame 1 as a shifted frame 0 (clean single-ref P);
+    `c_encode_inter(cdef, lr)` produces the aomenc stream; `frame0_cell()` reuses `EncodeCell`. Ready
+    for chunk 2 to plug the port's inter encoder into.
+- **KEY FINDING — the port INTER DECODER's envelope on `aomenc`'s simplest-config P (bounds chunk 2):**
+  measured port-decode vs C-decode of the same stream, 4:2:0 64×64 dx=3 cq60 (cdef/lr off), per cpu:
+  frame 0 (KEY) is **byte-exact at every cpu**; frame 1 (P) is **byte-exact in LUMA at every cpu
+  except 1**, and **fully byte-exact at cpu 2 and 5**; at cpu 0/3/4/6 **CHROMA inter reconstruction
+  diverges** by small ± (≤5, 2–6 samples) and at cpu 1 luma diverges (±1). Mono (luma-only) and
+  zero-MV 4:2:0 are fully byte-exact; the faithful cdef/lr-ON config also decodes byte-exact at cpu 2.
+  ⇒ The port inter decoder (validated only on the minimal skip-P `av1-1-b8-01-size-64x64`) does **not
+  yet** reconstruct arbitrary-content CHROMA inter (subpel MC / inter residual) byte-exact — a
+  **decoder-track gap (aom-decode/aom-inter)**, NOT a harness bug. **Implication for chunk 2:** the
+  first byte-exact encode target must stay where the decoder is byte-exact — luma-inter / mono, or the
+  in-envelope 4:2:0 cases (zero-MV; cpu 2/5) — OR the decoder chroma-inter path is completed first.
+  The localizer is the tool that pins each such divergence to `(frame, SB, sample)` for the drill-down.
 
 ### Chunk 1 — Inter var-tx coeff arm (SHARED with KB-15 intrabc)
 - **C funcs:** `av1_txfm_search` inter dispatch (tx_search.c:3795),

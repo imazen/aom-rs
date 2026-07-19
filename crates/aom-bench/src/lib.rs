@@ -30,6 +30,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod inter_localize;
 pub mod rd_close;
 
 use aom_encode::encode_intra::TrellisOptType;
@@ -1162,7 +1163,11 @@ impl EncodeCell {
 
         // Partial-SB support: CEIL the SB walk and replicate-extend the
         // source into the SB-aligned overhang (the chroma_ss_e2e recipe).
-        let (cw, ch) = if mono { (0, 0) } else { ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y) };
+        let (cw, ch) = if mono {
+            (0, 0)
+        } else {
+            ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
+        };
         let n_sb_x = ((mi_cols + sb_mi - 1) / sb_mi).max(1);
         let n_sb_y = ((mi_rows + sb_mi - 1) / sb_mi).max(1);
         let sb_px_w = n_sb_x as usize * sb_px;
@@ -1228,7 +1233,14 @@ impl EncodeCell {
             for r in 0..n_sb_y {
                 for c in 0..n_sb_x {
                     let adj = aom_encode::allintra_vis::setup_delta_q_perceptual_ai(
-                        map, qindex, bd, res, sb_mi, r * sb_mi, c * sb_mi, running,
+                        map,
+                        qindex,
+                        bd,
+                        res,
+                        sb_mi,
+                        r * sb_mi,
+                        c * sb_mi,
+                        running,
                     );
                     used |= adj != qindex;
                     running = adj;
@@ -1273,8 +1285,7 @@ impl EncodeCell {
             let mut used = false;
             for r in 0..n_sb_y {
                 for c in 0..n_sb_x {
-                    let sb_off =
-                        (r * sb_mi) as usize * 4 * stride + (c * sb_mi) as usize * 4;
+                    let sb_off = (r * sb_mi) as usize * 4 * stride + (c * sb_mi) as usize * 4;
                     let adj = aom_encode::allintra_vis::setup_delta_q_perceptual(
                         &src_y_strided,
                         sb_off,
@@ -1636,8 +1647,17 @@ impl EncodeCell {
                     } else {
                         let sb_off = (r * sb_mi) as usize * 4 * stride + (c * sb_mi) as usize * 4;
                         aom_encode::allintra_vis::setup_delta_q_perceptual(
-                            &src_y_strided, sb_off, stride, bd, qindex, dq2_screen, sb_px, sb_px,
-                            npl, dq2_res, running,
+                            &src_y_strided,
+                            sb_off,
+                            stride,
+                            bd,
+                            qindex,
+                            dq2_screen,
+                            sb_px,
+                            sb_px,
+                            npl,
+                            dq2_res,
+                            running,
                         )
                     };
                     running = adj;
@@ -1649,7 +1669,12 @@ impl EncodeCell {
                 }
             }
             aom_encode::lf_search::stamp_lf_delta_lf(
-                &mut mi_grid, &dlf_per_sb, mi_rows, mi_cols, n_sb_x, sb_mi,
+                &mut mi_grid,
+                &dlf_per_sb,
+                mi_rows,
+                mi_cols,
+                n_sb_x,
+                sb_mi,
             );
         }
         let lf_frame = LfSearchFrame {
@@ -1898,6 +1923,143 @@ impl EncodeCell {
             self.label
         );
         bootstrap
+    }
+}
+
+/// One frame's tight, row-major u16 planes (empty `u`/`v` when monochrome).
+#[derive(Clone, Debug)]
+pub struct FramePlanes {
+    pub y: Vec<u16>,
+    pub u: Vec<u16>,
+    pub v: Vec<u16>,
+}
+
+/// INTER-ENCODE Chunk 0: a multi-frame encode cell — the 2-frame `[KEY, P]`
+/// source + config that the inter-encode skeleton (chunk 2) plugs the port's
+/// inter encoder into, and that produces the `aomenc` reference stream today.
+///
+/// `frames[0]` is the KEY source, `frames[1]` the P source; the "simplest inter
+/// config" ([`Self::c_encode_inter`]) codes frame 1 as a single-reference
+/// translational P against frame 0. Same geometry across frames.
+#[derive(Clone, Debug)]
+pub struct MultiFrameEncodeCell {
+    pub label: String,
+    pub w: usize,
+    pub h: usize,
+    pub mono: bool,
+    pub ss_x: usize,
+    pub ss_y: usize,
+    pub bd: u8,
+    pub cq_level: i32,
+    /// `--cpu-used` for the C side AND the port's `SpeedFeatures` level.
+    pub speed: i32,
+    /// Exactly 2 frames for chunk 0: `[KEY source, P source]`.
+    pub frames: Vec<FramePlanes>,
+}
+
+impl MultiFrameEncodeCell {
+    /// Build a 2-frame `[KEY, P]` cell whose P source is `base` (frame 0)
+    /// translated by `(dx, dy)` LUMA pixels (chroma shifts by the subsampled
+    /// amount), edge-clamped — a clean single-reference translational P that
+    /// `aomenc` codes as NEWMV / NEAR* / GLOBALMV motion-compensated against
+    /// frame 0. `dx == dy == 0` gives the degenerate zero-MV (near-skip) P.
+    /// Reuses [`EncodeCell`]'s content for frame 0.
+    pub fn translational(base: &EncodeCell, dx: i32, dy: i32) -> Self {
+        let (w, h, mono, ss_x, ss_y) = (base.w, base.h, base.mono, base.ss_x, base.ss_y);
+        let translate = |src: &[u16], pw: usize, ph: usize, sx: i32, sy: i32| -> Vec<u16> {
+            if pw == 0 || ph == 0 {
+                return Vec::new();
+            }
+            let mut out = vec![0u16; pw * ph];
+            for r in 0..ph {
+                let sr = (r as i32 - sy).clamp(0, ph as i32 - 1) as usize;
+                for c in 0..pw {
+                    let sc = (c as i32 - sx).clamp(0, pw as i32 - 1) as usize;
+                    out[r * pw + c] = src[sr * pw + sc];
+                }
+            }
+            out
+        };
+        let (cw, ch) = if mono {
+            (0, 0)
+        } else {
+            ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
+        };
+        let f0 = FramePlanes {
+            y: base.y.clone(),
+            u: base.u.clone(),
+            v: base.v.clone(),
+        };
+        let f1 = FramePlanes {
+            y: translate(&base.y, w, h, dx, dy),
+            u: translate(&base.u, cw, ch, dx >> ss_x, dy >> ss_y),
+            v: translate(&base.v, cw, ch, dx >> ss_x, dy >> ss_y),
+        };
+        MultiFrameEncodeCell {
+            label: format!("{}+p(dx={dx},dy={dy})", base.label),
+            w,
+            h,
+            mono,
+            ss_x,
+            ss_y,
+            bd: base.bd,
+            cq_level: base.cq_level,
+            speed: base.speed,
+            frames: vec![f0, f1],
+        }
+    }
+
+    /// Encode the 2-frame `[KEY, P]` clip with real `aomenc` at the "simplest
+    /// inter config" (INTER-ENCODE-ROADMAP.md §3): `--end-usage=q
+    /// --lag-in-frames=0 --cpu-used=<speed> --limit=2` with obmc / warp /
+    /// global-motion / interintra / masked / diff-wtd / dual-filter /
+    /// ref-frame-mvs all disabled. `enable_cdef` / `enable_restoration` select
+    /// the faithful GOOD-quality defaults (`true`/`true`) or a smaller decoder
+    /// envelope (`false`/`false`). Returns the concatenated 2-frame stream.
+    pub fn c_encode_inter(&self, enable_cdef: bool, enable_restoration: bool) -> Vec<u8> {
+        assert_eq!(
+            self.frames.len(),
+            2,
+            "chunk-0 cell carries exactly 2 frames"
+        );
+        let f0 = &self.frames[0];
+        let f1 = &self.frames[1];
+        c::ref_encode_av1_inter_2frame(
+            (&f0.y, &f0.u, &f0.v),
+            (&f1.y, &f1.u, &f1.v),
+            self.w,
+            self.h,
+            i32::from(self.bd),
+            self.mono,
+            self.ss_x as i32,
+            self.ss_y as i32,
+            self.cq_level,
+            self.speed,
+            enable_cdef,
+            enable_restoration,
+        )
+    }
+
+    /// Frame 0 (the KEY source) as a single-frame [`EncodeCell`] (usage = GOOD,
+    /// the inter context) — for a KEY-only cross-check or, in chunk 2, the
+    /// port's KEY encode of frame 0. Reuses the whole `EncodeCell` machinery.
+    pub fn frame0_cell(&self) -> EncodeCell {
+        let f0 = &self.frames[0];
+        EncodeCell {
+            label: format!("{}#f0", self.label),
+            w: self.w,
+            h: self.h,
+            mono: self.mono,
+            ss_x: self.ss_x,
+            ss_y: self.ss_y,
+            usage: 0, // GOOD_QUALITY — the inter (non-all-intra) context
+            cq_level: self.cq_level,
+            speed: self.speed,
+            bd: self.bd,
+            y: f0.y.clone(),
+            u: f0.u.clone(),
+            v: f0.v.clone(),
+        }
     }
 }
 

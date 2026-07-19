@@ -339,7 +339,7 @@ pub fn ref_cdef_filter16(
 extern "C" {
     fn shim_sad(idx: i32, s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
     fn shim_variance(idx: i32, a: *const u8, as_: i32, b: *const u8, bs: i32, sse: *mut u32)
-    -> u32;
+        -> u32;
     fn shim_subpel_var(
         idx: i32,
         a: *const u8,
@@ -4900,7 +4900,11 @@ pub fn ref_uleb_decode(buffer: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut length = 0usize;
     let rc = unsafe { aom_uleb_decode(buffer.as_ptr(), buffer.len(), &mut value, &mut length) };
-    if rc == 0 { Some((value, length)) } else { None }
+    if rc == 0 {
+        Some((value, length))
+    } else {
+        None
+    }
 }
 
 /// Reference `aom_write_bit_buffer`: apply a sequence of literal ops (kind 0 =
@@ -8409,6 +8413,56 @@ extern "C" {
         units1: *const i32,
         units2: *const i32,
     ) -> i32;
+
+    /// INTER-ENCODE Chunk 0: encode a 2-frame low-delay [KEY, P] clip through
+    /// the REAL `aom_codec_av1_cx` API at the "simplest inter config"
+    /// (INTER-ENCODE-ROADMAP.md §3): `--end-usage=q --lag-in-frames=0
+    /// --cpu-used=<cpu_used>` with obmc/warp/global-motion/interintra/masked/
+    /// diff-wtd/dual-filter/ref-frame-mvs all disabled, `--limit=2`, usage =
+    /// GOOD_QUALITY. Frame 0 forced KEY, frame 1 single-ref translational P.
+    /// Two same-geometry frames (u16, tight). Returns the concatenated
+    /// bitstream length or a negative error. Append-only.
+    #[allow(clippy::too_many_arguments)]
+    fn shim_encode_av1_inter_2frame(
+        y0: *const u16,
+        u0: *const u16,
+        v0: *const u16,
+        y1: *const u16,
+        u1: *const u16,
+        v1: *const u16,
+        w: i32,
+        h: i32,
+        bd: i32,
+        mono: i32,
+        ss_x: i32,
+        ss_y: i32,
+        cq_level: i32,
+        cpu_used: i32,
+        enable_cdef: i32,
+        enable_restoration: i32,
+        out: *mut u8,
+        out_cap: usize,
+    ) -> i64;
+
+    /// INTER-ENCODE Chunk 0: decode a full AV1 stream and return the
+    /// `frame_index`-th shown frame (0-based, decode order) — unlike
+    /// `shim_decode_av1_kf` (single-frame only), this drains every output frame
+    /// so a 2-frame [KEY, P] stream cross-checks the port frame-by-frame.
+    /// `info_out[0..6]` = `[bit_depth, mono, ss_x, ss_y, d_w, d_h]`. Returns 0,
+    /// or a positive error (1 init, 2 decode, 3 too few frames, 4 geometry).
+    /// Append-only.
+    #[allow(clippy::too_many_arguments)]
+    fn shim_decode_av1_stream_frame(
+        data: *const u8,
+        len: usize,
+        frame_index: i32,
+        expect_w: i32,
+        expect_h: i32,
+        y: *mut u16,
+        u: *mut u16,
+        v: *mut u16,
+        info_out: *mut i32,
+    ) -> i32;
 }
 
 /// Words per unit in [`ref_lr_filter_frame`] packing:
@@ -9265,6 +9319,118 @@ pub fn ref_decode_av1_kf(data: &[u8], expect_w: usize, expect_h: usize) -> RefDe
         )
     };
     assert_eq!(rc, 0, "shim_decode_av1_kf failed ({rc})");
+    let (mono, ss_x, ss_y) = (info[1] != 0, info[2] as usize, info[3] as usize);
+    if mono {
+        u.clear();
+        v.clear();
+    } else {
+        let cw = (expect_w + ss_x) >> ss_x;
+        let ch = (expect_h + ss_y) >> ss_y;
+        u.truncate(cw * ch);
+        v.truncate(cw * ch);
+    }
+    RefDecodedFrame { y, u, v, info }
+}
+
+/// INTER-ENCODE Chunk 0: encode a 2-frame low-delay `[KEY, P]` clip through the
+/// REAL `aom_codec_av1_cx` API at the "simplest inter config"
+/// (INTER-ENCODE-ROADMAP.md §3). `f0` / `f1` are `(y, u, v)` tight u16 planes
+/// (empty u/v when `mono`) for frame 0 and frame 1, same geometry. Frame 0 is
+/// forced KEY; frame 1 codes as a single-reference translational P (obmc / warp
+/// / global-motion / interintra / masked / diff-wtd / dual-filter /
+/// ref-frame-mvs all disabled). `enable_cdef` / `enable_restoration` select the
+/// faithful GOOD-quality defaults (`true`/`true`) or a smaller decoder envelope
+/// (`false`/`false`). Returns the concatenated 2-frame bitstream. Panics on a
+/// shim error. Append-only (single-frame [`ref_encode_av1_kf`] untouched).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_encode_av1_inter_2frame(
+    f0: (&[u16], &[u16], &[u16]),
+    f1: (&[u16], &[u16], &[u16]),
+    w: usize,
+    h: usize,
+    bd: i32,
+    mono: bool,
+    ss_x: i32,
+    ss_y: i32,
+    cq_level: i32,
+    cpu_used: i32,
+    enable_cdef: bool,
+    enable_restoration: bool,
+) -> Vec<u8> {
+    let (cw, ch) = if mono {
+        (0, 0)
+    } else {
+        ((w + ss_x as usize) >> ss_x, (h + ss_y as usize) >> ss_y)
+    };
+    for (label, f) in [("frame 0", f0), ("frame 1", f1)] {
+        assert_eq!(f.0.len(), w * h, "{label} luma plane must be tight w*h");
+        assert!(
+            mono || (f.1.len() == cw * ch && f.2.len() == cw * ch),
+            "{label} chroma plane must be tight cw*ch"
+        );
+    }
+    let mut out = vec![0u8; w * h * 8 + 65536];
+    let n = unsafe {
+        shim_encode_av1_inter_2frame(
+            f0.0.as_ptr(),
+            f0.1.as_ptr(),
+            f0.2.as_ptr(),
+            f1.0.as_ptr(),
+            f1.1.as_ptr(),
+            f1.2.as_ptr(),
+            w as i32,
+            h as i32,
+            bd,
+            mono as i32,
+            ss_x,
+            ss_y,
+            cq_level,
+            cpu_used,
+            enable_cdef as i32,
+            enable_restoration as i32,
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    };
+    assert!(n > 0, "shim_encode_av1_inter_2frame failed ({n})");
+    out.truncate(n as usize);
+    out
+}
+
+/// INTER-ENCODE Chunk 0: decode a full AV1 stream through the REAL
+/// `aom_codec_av1_dx` API and return the `frame_index`-th shown frame (0-based,
+/// decode order). Unlike [`ref_decode_av1_kf`] (single-frame only), this drains
+/// every output frame, so a 2-frame `[KEY, P]` stream cross-checks the port
+/// decoder frame-by-frame. `expect_w/h` pin the returned frame's dims. Panics
+/// on a shim error (including too-few-frames or a geometry mismatch).
+/// Append-only.
+pub fn ref_decode_av1_stream_frame(
+    data: &[u8],
+    frame_index: usize,
+    expect_w: usize,
+    expect_h: usize,
+) -> RefDecodedFrame {
+    let mut y = vec![0u16; expect_w * expect_h];
+    let mut u = vec![0u16; expect_w * expect_h];
+    let mut v = vec![0u16; expect_w * expect_h];
+    let mut info = [0i32; 6];
+    let rc = unsafe {
+        shim_decode_av1_stream_frame(
+            data.as_ptr(),
+            data.len(),
+            frame_index as i32,
+            expect_w as i32,
+            expect_h as i32,
+            y.as_mut_ptr(),
+            u.as_mut_ptr(),
+            v.as_mut_ptr(),
+            info.as_mut_ptr(),
+        )
+    };
+    assert_eq!(
+        rc, 0,
+        "shim_decode_av1_stream_frame(frame {frame_index}) failed ({rc})"
+    );
     let (mono, ss_x, ss_y) = (info[1] != 0, info[2] as usize, info[3] as usize);
     if mono {
         u.clear();
