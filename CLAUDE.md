@@ -1253,20 +1253,41 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
     `a.src_y` (intrabc-only code — non-screen envelope structurally untouched). **Measured
     effect: port 1902B → 1895B (delta +11 → +4)**; dir=0 now finds C's exact mv and both sides
     reject intrabc at that node. `first_diff` unchanged at 1120 (the residual below).
-  - **REMAINING RESIDUAL (witness still PINNED) — a 3-rate-unit TX-SIZE-COST TABLE gap at
-    mi(42,22).** After root 5 the intra winner at mi(42,22) matches C on mode (H_PRED=2), tx
-    (TX_4X4), dist_y (87440), dist_uv (8464), rate_tokenonly (27009) and rate_uv (162) — but
-    **rate_y is 27763 vs C's 27766 (3 low)**. Term-by-term decomposition (dual dump):
-    y_mode_cost 495==495, angle_delta_cost 45==45, intrabc_cost[0] 35==35, filter-intra n/a
-    (H_PRED), tx_size_ctx 0==0, but **`tx_size_cost[cat0][ctx0][depth1]` = 179 (port) vs 182
-    (C)** — the `TxSizeCosts` TABLE CONTENT differs while the pack's tx-size CODING is
-    byte-exact everywhere (KB-6 30/30, all speed gates), so the port's cost fill reads a
-    different cdf source than its pack writes with. Also parked: the intrabc candidate's
-    same-dv RD rate differs by +45 (33136 vs 33091, both losing — decision-inert at this node,
-    plausibly the same table-family root). Next: compare the port's `tx_size_cdf` slice feeding
-    `fill_tx_size_costs` (mode_costs.rs:543) against C's `fc->tx_size_cdf[0][0]` at fill time;
-    fix, re-run the witness, and expect the mi(42,22) chain (and the downstream mi(44,20)
-    divergences) to collapse — then RAISE the floor past 1120 or promote the cell.
+  - **ROOT 6 — CLOSED ✅ 2026-07-19: `get_tx_size_context`'s INTER-neighbour override was
+    unwired on the ENCODER side (search + pack + CDEF repack).** C's ctx (blockd.h) substitutes
+    an `is_inter_block` neighbour's BLOCK dims for its txfm-context byte — intrabc qualifies on
+    KEY frames. The DECODER models it (aom-decode lib.rs read_tx_size, with a doc comment
+    describing this exact drift); the encoder passed `None, None` at both
+    `partition_pick.rs`'s leaf ctx and `pack.rs`'s `write_selected_tx_size` ctx. Mechanism of
+    the resulting silent drift: the DEFAULT `tx_size_cdf` rows ctx0/ctx1 are IDENTICAL
+    (AOM_CDF2(19968)), so a ctx-row flip next to a coeff-arm intrabc neighbour codes
+    byte-identical bits while the ROW STATES diverge; the per-SB cost refresh
+    (`derive_real_costs` = C's INTERNAL_COST_UPD_SB `av1_fill_mode_rates`) then reads the
+    drifted row — measured as the mi(42,22) "3-rate-unit tx-size-cost gap"
+    (`tx_size_cost[cat0][ctx0][depth1]` 179 vs 182 from row 25718-ish vs 25607). Fix: derive
+    `above/left_inter_bsize` from the DV grid (`ModeGrid::dv_at`, intra default on non-screen
+    frames ⇒ byte-inert there) at BOTH sites + rebuild the grid from the picked trees in
+    `pack_tile_from_trees` (the CDEF repack — above/left reads only target already-coded
+    positions, so the fully-stamped grid is read-equivalent). **Verified: the per-SB cost-fill
+    snapshots now match C at every SB (dual dump; SB(2,1) row 25607→182 both sides), and the
+    ENTIRE mi(42,22)+mi(44,20) chain matches C to the unit** (mi(42,22): rate 27934, rdcost
+    28155864 == C; the mi(44,20) HORZ_4 strips' tx-size adaptations all match). The witness
+    bytes are unchanged (1895B/+4/first-diff 1120) because the Δ3 was decision-INERT at
+    mi(42,22) — intra won there either way; byte 1120 was never that node.
+  - **REMAINING RESIDUAL (witness still PINNED) — a CHROMA/CfL divergence at the mi(40,28)
+    node family (BR 32×32 quadrant), flipping its partition.** C picks VERT (sub0 = coeff-arm
+    intrabc 4×8 `dv=(-816,-888)`, sub1 intra); the port picks HORZ (two intra 8×4s) — the
+    actual byte-1120 divergence. At every compared leaf of the node family the LUMA matches C
+    EXACTLY (16×16 NONE: rate_y 167400, ry_tok 164521, dist_y 525008 — identical) but the
+    CHROMA does not: 16×16 `rate_uv` 4921 (port) vs 8216 (C), `dist_uv` 54848 vs 39168; 8×8
+    NONE `rate_uv` 3057 vs 3042, `dist_uv` 37776 vs 46032 (uv_mode = CFL both sides). These
+    are the "7 remaining CfL distortion divergences" of the four-roots block, now the
+    first-order residual. With luma recon identical, the CfL divergence must come from the
+    chroma-side INPUT state (chroma recon neighbours feeding the CfL DC / uv modes, or the
+    CfL buffer contributions of the preceding TL-16×16 subtree's intrabc blocks —
+    `cfl_store_block` / intrabc chroma recon in the winner re-encode). Next: dump the CfL
+    buffer + chroma recon neighbourhood at the mi(40,28) 16×16 leaf on both sides (the same
+    dual-dump method), find the first differing chroma input pixel, and trace its producer.
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 

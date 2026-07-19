@@ -311,6 +311,7 @@ pub fn pack_leaf(
     kfs: &mut KfBlockState,
     tile: &mut TileCtxState,
     nbr: &mut MiNbrGrid,
+    grid: &crate::partition_pick::ModeGrid,
     recon_y: &mut [u16],
     recon_u: &mut [u16],
     recon_v: &mut [u16],
@@ -547,14 +548,28 @@ pub fn pack_leaf(
     if cfg.tx_mode_is_select && bsize > 0 && !env.lossless && !winner.use_intrabc {
         let a0 = mi_col as usize;
         let l0 = (mi_row & 31) as usize;
+        // get_tx_size_context's INTER-neighbour override (blockd.h): an
+        // `is_inter_block` neighbour (KEY frame: intrabc) substitutes its
+        // BLOCK dims for its txfm-context byte — same override as the
+        // search side (partition_pick.rs) and the decoder (read_tx_size).
+        // `dv_at` is the default (`use_intrabc=false`) on non-screen frames.
+        let is_inter_nbr = |d: &crate::intrabc_search::DvCell| d.use_intrabc || d.ref_frame0 > 0;
+        let above_inter_bsize = has_above
+            .then(|| grid.dv_at(mi_row - 1, mi_col))
+            .filter(is_inter_nbr)
+            .map(|d| d.bsize as usize);
+        let left_inter_bsize = has_left
+            .then(|| grid.dv_at(mi_row, mi_col - 1))
+            .filter(is_inter_nbr)
+            .map(|d| d.bsize as usize);
         let ctx = get_tx_size_context(
             bsize,
             tile.above_tctx[a0],
             tile.left_tctx[l0],
             has_above,
             has_left,
-            None,
-            None,
+            above_inter_bsize,
+            left_inter_bsize,
         );
         let cat = bsize_to_tx_size_cat(bsize) as usize;
         let depth = tx_size_to_depth(winner.tx_size, bsize);
@@ -855,6 +870,7 @@ pub fn pack_sb(
     kfs: &mut KfBlockState,
     tile: &mut TileCtxState,
     nbr: &mut MiNbrGrid,
+    grid: &crate::partition_pick::ModeGrid,
     recon_y: &mut [u16],
     recon_u: &mut [u16],
     recon_v: &mut [u16],
@@ -947,6 +963,7 @@ pub fn pack_sb(
                 kfs,
                 tile,
                 nbr,
+                grid,
                 recon_y,
                 recon_u,
                 recon_v,
@@ -963,7 +980,7 @@ pub fn pack_sb(
                 let y = mi_row + ((idx as i32) >> 1) * hbs;
                 let x = mi_col + ((idx as i32) & 1) * hbs;
                 pack_sb(
-                    enc, env, cfg, kf, kfs, tile, nbr, recon_y, recon_u, recon_v, cfl, child, y, x,
+                    enc, env, cfg, kf, kfs, tile, nbr, grid, recon_y, recon_u, recon_v, cfl, child, y, x,
                     subsize,
                     sb_current_qindex,
                 );
@@ -979,6 +996,7 @@ pub fn pack_sb(
                 kfs,
                 tile,
                 nbr,
+                grid,
                 recon_y,
                 recon_u,
                 recon_v,
@@ -998,6 +1016,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1020,6 +1039,7 @@ pub fn pack_sb(
                 kfs,
                 tile,
                 nbr,
+                grid,
                 recon_y,
                 recon_u,
                 recon_v,
@@ -1039,6 +1059,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1068,6 +1089,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1097,6 +1119,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1127,6 +1150,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1155,6 +1179,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1184,6 +1209,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1213,6 +1239,7 @@ pub fn pack_sb(
                     kfs,
                     tile,
                     nbr,
+                    grid,
                     recon_y,
                     recon_u,
                     recon_v,
@@ -1745,6 +1772,7 @@ pub fn pack_tile_lr(
                 &mut kfs,
                 &mut pack_tile_ctx,
                 &mut nbr,
+                &grid,
                 recon_y,
                 recon_u,
                 recon_v,
@@ -1822,6 +1850,30 @@ pub fn pack_tile_from_trees(
     if let Some(c) = cdef {
         kfs.cdef_bits = c.cdef_bits;
         nbr.cdef = Some(c);
+    }
+
+    // Rebuild the mode grid from the picked trees for pack_leaf's
+    // tx-size-context inter-neighbour override. The override reads only
+    // ABOVE/LEFT neighbours (already-coded positions), for which the
+    // fully-stamped grid is read-equivalent to phase 1's progressive one.
+    let mut grid = crate::partition_pick::ModeGrid::dc_screen(
+        env.mi_rows as usize,
+        mi_cols,
+        pick_cfg.palette_costs.is_some(),
+        pick_cfg.intrabc.is_some(),
+    );
+    for r in 0..n_sb_rows {
+        for c in 0..n_sb_cols {
+            crate::partition_pick::stamp_grid_from_tree(
+                &mut grid,
+                &trees[(r * n_sb_cols + c) as usize],
+                mi_row0 + r * sb_mi,
+                mi_col0 + c * sb_mi,
+                sb_size,
+                env.mi_rows,
+                env.mi_cols,
+            );
+        }
     }
 
     // Variance-Boost delta-q running base (mirrors pack_tile's tracker): reset
@@ -1962,6 +2014,7 @@ pub fn pack_tile_from_trees(
                 &mut kfs,
                 &mut pack_tile_ctx,
                 &mut nbr,
+                &grid,
                 recon_y,
                 recon_u,
                 recon_v,

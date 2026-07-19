@@ -431,7 +431,7 @@ impl ModeGrid {
     /// The above/left neighbour DV projection for `find_dv_ref_mvs` — the
     /// `DvNbr` at `(mi_row, mi_col)`. Returns the intra default (`use_intrabc =
     /// false`) when the grid carries no DV state or the cell is out of frame.
-    fn dv_at(&self, mi_row: i32, mi_col: i32) -> crate::intrabc_search::DvCell {
+    pub(crate) fn dv_at(&self, mi_row: i32, mi_col: i32) -> crate::intrabc_search::DvCell {
         if self.dvs.is_empty() || mi_row < 0 || mi_col < 0 {
             return crate::intrabc_search::DvCell::default();
         }
@@ -829,14 +829,32 @@ fn leaf_pick_sb_modes(
     } else {
         0
     });
+    // get_tx_size_context's INTER-neighbour override (blockd.h): an
+    // `is_inter_block` neighbour (on a KEY frame: intrabc, blockd.h:372)
+    // substitutes its BLOCK dims for its txfm-context byte. The decoder
+    // (aom-decode lib.rs read_tx_size) already models this; missing it on the
+    // encoder side adapts/costs the wrong `tx_size_cdf` ROW next to coeff-arm
+    // intrabc blocks (default ctx0/ctx1 rows are identical, so the coded bits
+    // coincide while the row STATES silently drift — the KB-15 3-rate-unit
+    // tx-size-cost residual). `dv_at` returns the `use_intrabc=false` default
+    // on non-screen frames (empty grid) — byte-inert there.
+    let is_inter_nbr = |d: &crate::intrabc_search::DvCell| d.use_intrabc || d.ref_frame0 > 0;
+    let above_inter_bsize = up_available
+        .then(|| grid.dv_at(mi_row - 1, mi_col))
+        .filter(is_inter_nbr)
+        .map(|d| d.bsize as usize);
+    let left_inter_bsize = left_available
+        .then(|| grid.dv_at(mi_row, mi_col - 1))
+        .filter(is_inter_nbr)
+        .map(|d| d.bsize as usize);
     let tx_size_ctx = get_tx_size_context(
         bsize,
         tile.above_tctx[a0],
         tile.left_tctx[l0],
         up_available,
         left_available,
-        None,
-        None,
+        above_inter_bsize,
+        left_inter_bsize,
     );
 
     let above_y: Vec<i8> = tile.above_ectx[0][a0..a0 + mi_w].to_vec();
@@ -3459,7 +3477,7 @@ pub fn rd_pick_partition_real(
     }
 }
 
-fn stamp_grid_from_tree(
+pub(crate) fn stamp_grid_from_tree(
     grid: &mut ModeGrid,
     tree: &SbTree,
     mi_row: i32,

@@ -1,3 +1,20 @@
+## KB-15 root 6: the encoder never applied get_tx_size_context's inter-neighbour override (2026-07-19, encoder track)
+
+C substitutes an `is_inter_block` neighbour's BLOCK dims for its txfm-context byte when
+selecting the tx-size cdf row (blockd.h; intrabc qualifies on KEY frames). The decoder models
+it; the encoder passed `None, None` at both the leaf-search ctx (partition_pick.rs) and the
+pack's `write_selected_tx_size` ctx. Because the DEFAULT tx_size_cdf ctx0/ctx1 rows are
+identical, a ctx-row flip next to a coeff-arm intrabc neighbour codes byte-identical bits
+while the row STATES silently drift; the per-SB cost refresh then reads the drifted row —
+measured as a 3-rate-unit tx_size_cost gap at the KB-15 witness's mi(42,22) (179 vs 182,
+row 25718-ish vs 25607). Fix: derive above/left inter bsize from the DV grid at both sites +
+rebuild the grid from the picked trees in the CDEF repack (`pack_tile_from_trees`).
+Verified: per-SB cost-fill snapshots now match C at every SB and the whole mi(42,22) +
+mi(44,20) chain matches C to the unit. Witness bytes unchanged (the gap was decision-inert
+at that node); the remaining first-order divergence is a CHROMA/CfL near-tie at the
+mi(40,28) node family (see CLAUDE.md KB-15). Non-screen envelope byte-inert (`dv_at`
+returns the intra default without a DV grid).
+
 ## KB-15 root 5: the intrabc DV search referenced the RECON buffer — C searches the SOURCE frame (2026-07-19, encoder track)
 
 `rd_pick_intrabc_mode_sb`'s search reference in C is the SOURCE frame (`xd->plane[i].pre[0]` ←
