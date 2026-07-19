@@ -14331,6 +14331,88 @@ pub fn ref_mv_bit_cost(
     }
 }
 
+// me_shim.c (cont.) — the REAL av1_full_pixel_search (mcomp.c:1768), inter
+// SIMPLE_TRANSLATION speed-0 NSTEP path with the mesh forced off.
+extern "C" {
+    fn shim_full_pixel_search(
+        src: *const u8,
+        src_stride: i32,
+        ref_at_origin: *const u8,
+        ref_stride: i32,
+        w: i32,
+        h: i32,
+        ref_mv_row: i32,
+        ref_mv_col: i32,
+        mvjcost: *const i32,
+        mvcost0: *const i32,
+        mvcost1: *const i32,
+        error_per_bit: i32,
+        sad_per_bit: i32,
+        step_param: i32,
+        row_min: i32,
+        row_max: i32,
+        col_min: i32,
+        col_max: i32,
+        out_best_row: *mut i32,
+        out_best_col: *mut i32,
+    ) -> i32;
+}
+
+/// Reference libaom `av1_full_pixel_search` (mcomp.c:1768) for the inter
+/// SIMPLE_TRANSLATION speed-0 NSTEP path (mesh disabled). `src`/`ref_at_origin`
+/// are u8 planes with `ref_at_origin` pointing at full-pel MV (0,0). The
+/// `mvcost{0,1}_full` are the FULL (`2*MV_MAX+1`) per-component cost tables.
+/// Returns `(var_cost, best_row, best_col)` — the diamond's variance cost +
+/// best full-pel MV.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_full_pixel_search(
+    src: &[u8],
+    src_stride: i32,
+    ref_at_origin: &[u8],
+    ref_origin_off: usize,
+    ref_stride: i32,
+    w: i32,
+    h: i32,
+    ref_mv: (i32, i32),
+    mvjcost: &[i32; 4],
+    mvcost0_full: &[i32],
+    mvcost1_full: &[i32],
+    error_per_bit: i32,
+    sad_per_bit: i32,
+    step_param: i32,
+    limits: (i32, i32, i32, i32), // (row_min, row_max, col_min, col_max)
+) -> (i32, i32, i32) {
+    ref_init();
+    const MV_MAX: usize = (1 << 14) - 1;
+    let mut br = 0i32;
+    let mut bc = 0i32;
+    let var = unsafe {
+        shim_full_pixel_search(
+            src.as_ptr(),
+            src_stride,
+            ref_at_origin.as_ptr().add(ref_origin_off),
+            ref_stride,
+            w,
+            h,
+            ref_mv.0,
+            ref_mv.1,
+            mvjcost.as_ptr(),
+            mvcost0_full.as_ptr().add(MV_MAX),
+            mvcost1_full.as_ptr().add(MV_MAX),
+            error_per_bit,
+            sad_per_bit,
+            step_param,
+            limits.0,
+            limits.1,
+            limits.2,
+            limits.3,
+            &mut br,
+            &mut bc,
+        )
+    };
+    (var, br, bc)
+}
+
 // me_shim.c (cont.) — the REAL av1_build_nmv_cost_table (encodemv.c:294).
 extern "C" {
     fn shim_build_nmv_cost_table(

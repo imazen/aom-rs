@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include "config/aom_dsp_rtcd.h"
 /* Canonical order (mirrors motion_search_facade.c): reconinter.h (MV, filter.h /
  * USE_8_TAPS) + encoder.h (the umbrella that resolves the mcomp.h <-> speed_
@@ -237,6 +238,152 @@ static void shim_fill_nmv_component(nmv_component *c, const uint16_t *b) {
   memcpy(c->fp_cdf, b + 58, 5 * sizeof(uint16_t));
   memcpy(c->class0_hp_cdf, b + 63, 3 * sizeof(uint16_t));
   memcpy(c->hp_cdf, b + 66, 3 * sizeof(uint16_t));
+}
+
+/* ---- shim_full_pixel_search — the REAL av1_full_pixel_search (mcomp.c:1768)
+ * for the inter SIMPLE_TRANSLATION speed-0 NSTEP path, mesh forced OFF.
+ * Builds a FULLPEL_MOTION_SEARCH_PARAMS field-by-field: the NSTEP
+ * search_site_config via the real av1_init_motion_compensation[NSTEP] (level 0,
+ * built at the ref stride), the per-size aom_*_c SAD/variance fn ptrs, and the
+ * caller's centred MV cost tables (MV_COST_ENTROPY). run_mesh/prune_mesh off;
+ * sdf == vfp->sdf (no downsampled-row redo); no second_pred; is_intra_mode=0.
+ * Returns the diamond's variance cost + best full-pel MV.
+ */
+extern unsigned int aom_sad4x4_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad4x8_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad8x4_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad8x8_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad8x16_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad16x8_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad16x16_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad16x32_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad16x64_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad32x16_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad32x32_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad64x16_c(const uint8_t *, int, const uint8_t *, int);
+extern unsigned int aom_sad64x64_c(const uint8_t *, int, const uint8_t *, int);
+extern void aom_sad4x4x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad4x8x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad8x4x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad8x8x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad8x16x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad16x8x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad16x16x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad16x32x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad16x64x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad32x16x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad32x32x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad64x16x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+extern void aom_sad64x64x4d_c(const uint8_t *, int, const uint8_t *const[], int, uint32_t *);
+
+static int shim_fill_fnptr(aom_variance_fn_ptr_t *f, int w, int h) {
+  memset(f, 0, sizeof(*f));
+#define SET_FP(W, H)                    \
+  if (w == W && h == H) {               \
+    f->vf = aom_variance##W##x##H##_c;  \
+    f->sdf = aom_sad##W##x##H##_c;      \
+    f->sdx4df = aom_sad##W##x##H##x4d_c;\
+    f->sdx3df = aom_sad##W##x##H##x4d_c;\
+    return 1;                           \
+  }
+  SET_FP(4, 4) SET_FP(4, 8) SET_FP(8, 4) SET_FP(8, 8) SET_FP(8, 16)
+  SET_FP(16, 8) SET_FP(16, 16) SET_FP(16, 32) SET_FP(16, 64) SET_FP(32, 16)
+  SET_FP(32, 32) SET_FP(64, 16) SET_FP(64, 64)
+#undef SET_FP
+  return 0;
+}
+
+static BLOCK_SIZE shim_pick_bsize(int w, int h) {
+  if (w == 4 && h == 4) return BLOCK_4X4;
+  if (w == 4 && h == 8) return BLOCK_4X8;
+  if (w == 8 && h == 4) return BLOCK_8X4;
+  if (w == 8 && h == 8) return BLOCK_8X8;
+  if (w == 8 && h == 16) return BLOCK_8X16;
+  if (w == 16 && h == 8) return BLOCK_16X8;
+  if (w == 16 && h == 16) return BLOCK_16X16;
+  if (w == 16 && h == 32) return BLOCK_16X32;
+  if (w == 16 && h == 64) return BLOCK_16X64;
+  if (w == 32 && h == 16) return BLOCK_32X16;
+  if (w == 32 && h == 32) return BLOCK_32X32;
+  if (w == 64 && h == 16) return BLOCK_64X16;
+  if (w == 64 && h == 64) return BLOCK_64X64;
+  return BLOCK_INVALID;
+}
+
+int shim_full_pixel_search(const uint8_t *src, int src_stride,
+                           const uint8_t *ref_at_origin, int ref_stride, int w,
+                           int h, int ref_mv_row, int ref_mv_col,
+                           const int *mvjcost, const int *mvcost0,
+                           const int *mvcost1, int error_per_bit,
+                           int sad_per_bit, int step_param, int row_min,
+                           int row_max, int col_min, int col_max,
+                           int *out_best_row, int *out_best_col) {
+  aom_variance_fn_ptr_t fnptr;
+  if (!shim_fill_fnptr(&fnptr, w, h)) return INT_MAX;
+  const BLOCK_SIZE bsize = shim_pick_bsize(w, h);
+  if (bsize == BLOCK_INVALID) return INT_MAX;
+
+  /* NSTEP search-site config, built at the ref stride (level 0 = NSTEP). */
+  search_site_config *ss = (search_site_config *)calloc(
+      NUM_DISTINCT_SEARCH_METHODS, sizeof(search_site_config));
+  if (!ss) return INT_MAX;
+  const int ssidx = search_method_lookup[NSTEP];
+  av1_init_motion_compensation[ssidx](&ss[ssidx], ref_stride, 0);
+
+  struct buf_2d src_buf;
+  memset(&src_buf, 0, sizeof(src_buf));
+  src_buf.buf = (uint8_t *)src;
+  src_buf.stride = src_stride;
+  struct buf_2d ref_buf;
+  memset(&ref_buf, 0, sizeof(ref_buf));
+  ref_buf.buf = (uint8_t *)ref_at_origin;
+  ref_buf.stride = ref_stride;
+
+  MV ref_mv = { (int16_t)ref_mv_row, (int16_t)ref_mv_col };
+
+  FULLPEL_MOTION_SEARCH_PARAMS ms;
+  memset(&ms, 0, sizeof(ms));
+  ms.bsize = bsize;
+  ms.vfp = &fnptr;
+  ms.ms_buffers.src = &src_buf;
+  ms.ms_buffers.ref = &ref_buf;
+  ms.ms_buffers.second_pred = NULL;
+  ms.ms_buffers.mask = NULL;
+  av1_set_mv_search_method(&ms, ss, NSTEP);
+  ms.mv_limits.row_min = row_min;
+  ms.mv_limits.row_max = row_max;
+  ms.mv_limits.col_min = col_min;
+  ms.mv_limits.col_max = col_max;
+  ms.run_mesh_search = 0;
+  ms.prune_mesh_search = 0;
+  ms.mesh_search_mv_diff_threshold = 4;
+  ms.force_mesh_thresh = INT_MAX; /* mesh never fires (var << thr) */
+  ms.fine_search_interval = 0;
+  ms.is_intra_mode = 0;
+  ms.fast_obmc_search = 0;
+  ms.mv_cost_params.ref_mv = &ref_mv;
+  ms.mv_cost_params.full_ref_mv = get_fullmv_from_mv(&ref_mv);
+  ms.mv_cost_params.mv_cost_type = MV_COST_ENTROPY;
+  ms.mv_cost_params.mvjcost = mvjcost;
+  ms.mv_cost_params.mvcost[0] = (int *)mvcost0;
+  ms.mv_cost_params.mvcost[1] = (int *)mvcost1;
+  ms.mv_cost_params.error_per_bit = error_per_bit;
+  ms.mv_cost_params.sad_per_bit = sad_per_bit;
+  ms.sdf = fnptr.sdf;
+  ms.sdx4df = fnptr.sdx4df;
+  ms.sdx3df = fnptr.sdx3df;
+
+  FULLPEL_MV start = get_fullmv_from_mv(&ref_mv);
+  FULLPEL_MV best;
+  FULLPEL_MV_STATS stats;
+  memset(&stats, 0, sizeof(stats));
+  int var = av1_full_pixel_search(start, &ms, step_param, NULL, &best, &stats,
+                                  NULL);
+
+  *out_best_row = best.row;
+  *out_best_col = best.col;
+  free(ss);
+  return var;
 }
 
 int shim_build_nmv_cost_table(const uint16_t *joints_cdf, const uint16_t *comp0,

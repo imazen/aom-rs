@@ -900,7 +900,8 @@ mod tests {
             src_off: off,
             refb: &recon,
             ref_off: off,
-            stride,
+            src_stride: stride,
+            ref_stride: stride,
             w: 8,
             h: 8,
             limits: FullMvLimits {
@@ -1213,7 +1214,11 @@ struct FullPelSearch<'a> {
     src_off: usize,
     refb: &'a [u16],
     ref_off: usize,
-    stride: usize,
+    /// Source-plane stride (current frame). Equal to `ref_stride` for intrabc
+    /// (src == ref == current frame); distinct for inter (ref = a reference
+    /// frame recon of possibly different stride).
+    src_stride: usize,
+    ref_stride: usize,
     w: usize,
     h: usize,
     limits: FullMvLimits,
@@ -1244,17 +1249,17 @@ impl FullPelSearch<'_> {
     }
     #[inline]
     fn ref_at(&self, r: i32, c: i32) -> usize {
-        (self.ref_off as i64 + i64::from(r) * self.stride as i64 + i64::from(c)) as usize
+        (self.ref_off as i64 + i64::from(r) * self.ref_stride as i64 + i64::from(c)) as usize
     }
     #[inline]
     fn sad(&self, r: i32, c: i32) -> u32 {
         sad_wxh(
             self.src,
             self.src_off,
-            self.stride,
+            self.src_stride,
             self.refb,
             self.ref_at(r, c),
-            self.stride,
+            self.ref_stride,
             self.w,
             self.h,
         )
@@ -1264,10 +1269,10 @@ impl FullPelSearch<'_> {
         variance_wxh(
             self.src,
             self.src_off,
-            self.stride,
+            self.src_stride,
             self.refb,
             self.ref_at(r, c),
-            self.stride,
+            self.ref_stride,
             self.w,
             self.h,
         )
@@ -1465,6 +1470,73 @@ fn full_pixel_exhaustive(s: &FullPelSearch, start_row: i32, start_col: i32) -> (
         i64::MAX
     };
     (bestsme, best_row, best_col)
+}
+
+/// `GET_MV_RAWPEL` / `get_fullmv_from_mv` (mv.h:28,79): round a 1/8-pel subpel
+/// component to the nearest full-pel — `((x) + 3 + (x >= 0)) >> 3` (arithmetic
+/// shift). Inter ref MVs carry subpel bits (unlike integer intrabc DVs), so the
+/// full-pel search start + the `mvsad_err_cost` full-pel ref must ROUND, not
+/// truncate.
+#[inline]
+pub fn get_fullmv_from_mv(subpel: i32) -> i32 {
+    (subpel + 3 + (subpel >= 0) as i32) >> 3
+}
+
+/// Inter single-ref full-pixel motion search — the intrabc NSTEP diamond
+/// retargeted to a reference frame: separate src/ref plane strides and the
+/// subpel-precision inter MV cost tables ([`fill_nmv_costs`]) in place of the
+/// integer-pel DV tables. Mirrors `av1_single_motion_search` →
+/// `av1_full_pixel_search` (mcomp.c:1768) for the SIMPLE_TRANSLATION speed-0
+/// path with the mesh disabled: `start_mv = get_fullmv_from_mv(ref_mv)`, run the
+/// NSTEP diamond, return its variance cost (`get_mvpred_var_cost` = variance +
+/// `mv_err_cost_`).
+///
+/// The follow-on exhaustive mesh (`av1_full_pixel_search` runs it when
+/// `var > force_mesh_thresh >> (10 - log2(w*h))`) is NOT run here — it needs the
+/// inter mesh pattern (`mv_sf->mesh_patterns`), distinct from the intrabc one
+/// the port's [`full_pixel_exhaustive`] hard-codes; a follow-up. `cost_list` /
+/// `second_best_mv` (subpel-handoff outputs) are likewise not produced yet.
+///
+/// Returns `(var_cost, best_row, best_col)` in full-pel units.
+#[allow(clippy::too_many_arguments)]
+pub fn full_pixel_search_inter(
+    src: &[u16],
+    src_off: usize,
+    src_stride: usize,
+    refb: &[u16],
+    ref_off: usize,
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+    ref_row_sub: i32,
+    ref_col_sub: i32,
+    dv: &DvCosts,
+    error_per_bit: i32,
+    sad_per_bit: i32,
+    limits: FullMvLimits,
+    step_param: usize,
+) -> (i64, i32, i32) {
+    let full_ref_row = get_fullmv_from_mv(ref_row_sub);
+    let full_ref_col = get_fullmv_from_mv(ref_col_sub);
+    let s = FullPelSearch {
+        src,
+        src_off,
+        refb,
+        ref_off,
+        src_stride,
+        ref_stride,
+        w,
+        h,
+        limits,
+        dv,
+        ref_row_sub,
+        ref_col_sub,
+        full_ref_row,
+        full_ref_col,
+        error_per_bit,
+        sad_per_bit,
+    };
+    full_pixel_diamond(&s, full_ref_row, full_ref_col, step_param)
 }
 
 // ---------------------------------------------------------------------------
@@ -1818,7 +1890,8 @@ pub fn rd_pick_intrabc_mode_sb(
             src_off: a.off_y,
             refb: recon_y,
             ref_off: a.off_y,
-            stride: a.stride,
+            src_stride: a.stride,
+            ref_stride: a.stride,
             w: bw,
             h: bh,
             limits: lim,
