@@ -1,0 +1,30 @@
+date:      2026-07-19
+commit:    6b80cc9 (parent of bf84554 "chore: point repository field at imazen/zenav1-aom")
+host:      dev-32gb
+nproc:     16
+rustc:     1.97.0 (2d8144b78 2026-07-07)
+cargo:     1.97.0 (c980f4866 2026-06-30)
+cache:     none (RUSTC_WRAPPER unset, RUSTC_WORKSPACE_WRAPPER unset, sccache not installed)
+
+Commands (each into a fresh, separate CARGO_TARGET_DIR, run sequentially so
+timings do not contend):
+
+  rm -rf $TD && /usr/bin/time -f "LABEL|%e|%U" env CARGO_TARGET_DIR=$TD \
+    cargo build --release -p zenav1-aom-dsp
+  rm -rf $TD && /usr/bin/time -f "LABEL|%e|%U" env CARGO_TARGET_DIR=$TD \
+    cargo build --release -p zenav1-aom --no-default-features --features decode
+  rm -rf $TD && /usr/bin/time -f "LABEL|%e|%U" env CARGO_TARGET_DIR=$TD \
+    cargo build --release -p zenav1-aom --no-default-features --features encode
+  rm -rf $TD && /usr/bin/time -f "LABEL|%e|%U" env CARGO_TARGET_DIR=$TD \
+    cargo build --release -p zenav1-aom
+  rm -rf $TD && /usr/bin/time -f "LABEL|%e|%U" env CARGO_TARGET_DIR=$TD \
+    cargo build --release -p archmage                      # dependency floor
+
+  # aom-dsp solo (deps warm): touch crates/aom-dsp/src/lib.rs, rebuild -p zenav1-aom-dsp
+
+%e = wall seconds, %U = user CPU seconds. Library-only builds: no dev-dependencies,
+so zenav1-aom-sys-ref (the sole build.rs, the C oracle) is never built and no C is
+compiled.
+
+LOC counts: find <crate>/src -name '*.rs' | xargs cat | wc -l
+Module cross-reference: grep -rhoE 'aom_dsp::[a-z_]+' crates/<consumer>/src/ | sort | uniq -c
