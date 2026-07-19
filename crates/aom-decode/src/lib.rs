@@ -1837,7 +1837,7 @@ impl<'c> TileKf<'c> {
         mi_col: i32,
         bsize: usize,
         nb_max: i32,
-    ) -> Vec<(i32, i32, DvNbr)> {
+    ) -> Vec<(i32, i32, DvNbr, (u8, u8))> {
         let cols = self.cfg.mi_cols;
         let mut out = Vec::new();
         if mi_row <= self.tile.mi_row_start {
@@ -1851,15 +1851,18 @@ impl<'c> TileKf<'c> {
         while amc < end_col && (out.len() as i32) < nb_max {
             let d0 = self.mi_dv[((mi_row - 1) * cols + amc) as usize];
             let mut mi_step = MI_SIZE_WIDE[d0.bsize].min(MI64);
-            let nb = if mi_step == 1 {
+            // The neighbour mbmi (and its coded interp filter, for the OBMC strip
+            // MC — C uses `above_mbmi->interp_filters`) come from the SAME grid cell.
+            let (nb, nb_if) = if mi_step == 1 {
                 amc &= !1;
                 mi_step = 2;
-                self.mi_dv[((mi_row - 1) * cols + amc + 1) as usize]
+                let idx = ((mi_row - 1) * cols + amc + 1) as usize;
+                (self.mi_dv[idx], self.mi_interp[idx])
             } else {
-                d0
+                (d0, self.mi_interp[((mi_row - 1) * cols + amc) as usize])
             };
             if nb.use_intrabc || nb.ref_frame0 > 0 {
-                out.push((amc - mi_col, width.min(mi_step), nb));
+                out.push((amc - mi_col, width.min(mi_step), nb, nb_if));
             }
             amc += mi_step;
         }
@@ -1874,7 +1877,7 @@ impl<'c> TileKf<'c> {
         mi_col: i32,
         bsize: usize,
         nb_max: i32,
-    ) -> Vec<(i32, i32, DvNbr)> {
+    ) -> Vec<(i32, i32, DvNbr, (u8, u8))> {
         let cols = self.cfg.mi_cols;
         let mut out = Vec::new();
         if mi_col <= self.tile.mi_col_start {
@@ -1887,15 +1890,16 @@ impl<'c> TileKf<'c> {
         while amr < end_row && (out.len() as i32) < nb_max {
             let d0 = self.mi_dv[(amr * cols + mi_col - 1) as usize];
             let mut mi_step = MI_SIZE_HIGH[d0.bsize].min(MI64);
-            let nb = if mi_step == 1 {
+            let (nb, nb_if) = if mi_step == 1 {
                 amr &= !1;
                 mi_step = 2;
-                self.mi_dv[((amr + 1) * cols + mi_col - 1) as usize]
+                let idx = ((amr + 1) * cols + mi_col - 1) as usize;
+                (self.mi_dv[idx], self.mi_interp[idx])
             } else {
-                d0
+                (d0, self.mi_interp[(amr * cols + mi_col - 1) as usize])
             };
             if nb.use_intrabc || nb.ref_frame0 > 0 {
-                out.push((amr - mi_row, height.min(mi_step), nb));
+                out.push((amr - mi_row, height.min(mi_step), nb, nb_if));
             }
             amr += mi_step;
         }
@@ -2057,23 +2061,12 @@ impl<'c> TileKf<'c> {
     /// chroma-plane block in the ABOVE direction — true for this target's
     /// BLOCK_16X8 -> BLOCK_8X4 chroma); a chroma-carrying above-OBMC block is a
     /// later target and is asserted-guarded.
-    fn obmc_above_blend(
-        &mut self,
-        mi_row: i32,
-        mi_col: i32,
-        bsize: usize,
-        inter: &InterFrameCfg,
-        nb_filter_x: usize,
-        nb_filter_y: usize,
-    ) {
+    fn obmc_above_blend(&mut self, mi_row: i32, mi_col: i32, bsize: usize, inter: &InterFrameCfg) {
         let (ss_x, ss_y) = (self.cfg.subsampling_x, self.cfg.subsampling_y);
-        // Chroma above-OBMC must be skipped for this envelope (hard-guarded so a
-        // block that WOULD blend chroma — e.g. BLOCK_16X16+ at 4:2:0, plane BLOCK_8X8
-        // — can never silently produce luma-only OBMC output). Chunk-4 luma-only.
-        assert!(
-            self.cfg.monochrome || skip_u4x4_pred_in_obmc(bsize, ss_x, ss_y, 0),
-            "chunk 4: chroma above-OBMC not yet handled (block {bsize})"
-        );
+        // Chroma above-OBMC fires unless `av1_skip_u4x4_pred_in_obmc(dir=0)` skips
+        // it (a `<= 8x8` chroma plane block: BLOCK_8X8/8X16/16X8 at 4:2:0). The
+        // chroma strips + blend are added per-plane after each neighbour's luma.
+        let do_chroma = !self.cfg.monochrome && !skip_u4x4_pred_in_obmc(bsize, ss_x, ss_y, 0);
         let nb_max = MAX_NEIGHBOR_OBMC[mi_size_wide_log2(bsize)];
         let neighbours = self.overlappable_above(mi_row, mi_col, bsize, nb_max);
         if neighbours.is_empty() {
@@ -2090,7 +2083,11 @@ impl<'c> TileKf<'c> {
         let nb_mb_to_bottom = block_mb_to_bottom + (this_height - pred_height) * 8;
         let nb_mb_to_top = -(mi_row * 32);
         let last = inter.last;
-        for (rel_mi_col, op_mi_size, nb) in neighbours {
+        for (rel_mi_col, op_mi_size, nb, nb_if) in neighbours {
+            // The OBMC strip is MC'd with the NEIGHBOUR's coded interp filter
+            // (av1_setup_build_prediction_by_above_pred keeps `above_mbmi->
+            // interp_filters`). (y_filter, x_filter) = (nb_if.0, nb_if.1).
+            let (nb_filter_y, nb_filter_x) = (nb_if.0 as usize, nb_if.1 as usize);
             let above_mi_col = mi_col + rel_mi_col;
             // Luma prediction dims (dec_build_prediction_by_above_pred, ss=0):
             // bw = op_mi_size*4; bh = clamp(bsize_high>>1, 4, 32).
@@ -2108,6 +2105,8 @@ impl<'c> TileKf<'c> {
                 nb_mb_to_right,
                 nb_mb_to_top,
                 nb_mb_to_bottom,
+                0,
+                0,
             );
             let mut scratch = vec![0u16; bw * bh];
             aom_inter::build_inter_predictor(
@@ -2145,6 +2144,58 @@ impl<'c> TileKf<'c> {
                 bw,
                 overlap as usize,
             );
+            // Chroma above-OBMC (build_obmc_inter_pred_above, U then V). Strip MC
+            // dims (decodeframe.c:726): bw_c = (op_mi_size*4)>>ss_x, bh_c =
+            // clamp(bsize_high>>(ss_y+1), 4, 64>>(ss_y+1)); blended over the top
+            // `overlap>>ss_y` rows with the subsampled mask. Position is the same
+            // chroma column as the strip's neighbour column.
+            if do_chroma {
+                let overlap_c = (overlap as usize) >> ss_y; // rows blended
+                let bw_c = ((op_mi_size * 4) >> ss_x) as usize;
+                let bh_c = ((bsize_high >> (ss_y + 1)).clamp(4, 64 >> (ss_y + 1))) as usize;
+                let (cr, cc) = clamp_mv_umv_border_px(
+                    nb.mv0_row,
+                    nb.mv0_col,
+                    bw_c as i32,
+                    bh_c as i32,
+                    nb_mb_to_left,
+                    nb_mb_to_right,
+                    nb_mb_to_top,
+                    nb_mb_to_bottom,
+                    ss_x,
+                    ss_y,
+                );
+                let uv_col = ((above_mi_col * 4) >> ss_x) as usize;
+                let uv_row = ((mi_row * 4) >> ss_y) as usize;
+                let dst_off_c = uv_row * self.stride_uv + uv_col;
+                let mask_c = aom_inter::get_obmc_mask(overlap_c);
+                for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
+                    let mut scratch_c = vec![0u16; bw_c * bh_c];
+                    aom_inter::build_inter_predictor(
+                        src,
+                        last.stride_uv,
+                        last.width_uv,
+                        last.height_uv,
+                        &mut scratch_c,
+                        0,
+                        bw_c,
+                        uv_col,
+                        uv_row,
+                        bw_c,
+                        bh_c,
+                        cr,
+                        cc,
+                        ss_x,
+                        ss_y,
+                        nb_filter_x,
+                        nb_filter_y,
+                    );
+                    aom_inter::blend_a64_vmask(
+                        dst, dst_off_c, self.stride_uv, &scratch_c, 0, bw_c, mask_c, bw_c,
+                        overlap_c,
+                    );
+                }
+            }
         }
     }
 
@@ -2153,28 +2204,16 @@ impl<'c> TileKf<'c> {
     /// feather-blending with the horizontal OBMC mask. INERT for the chunk-4
     /// target (the OBMC block is at the frame's left edge -> no left neighbour),
     /// but faithful for a future left-OBMC target.
-    fn obmc_left_blend(
-        &mut self,
-        mi_row: i32,
-        mi_col: i32,
-        bsize: usize,
-        inter: &InterFrameCfg,
-        nb_filter_x: usize,
-        nb_filter_y: usize,
-    ) {
+    fn obmc_left_blend(&mut self, mi_row: i32, mi_col: i32, bsize: usize, inter: &InterFrameCfg) {
         let (ss_x, ss_y) = (self.cfg.subsampling_x, self.cfg.subsampling_y);
         let nb_max = MAX_NEIGHBOR_OBMC[mi_size_high_log2(bsize)];
         let neighbours = self.overlappable_left(mi_row, mi_col, bsize, nb_max);
         if neighbours.is_empty() {
-            return; // inert for the chunk-4 target (OBMC block at the left frame edge)
+            return;
         }
-        // Hard-guard: chroma LEFT-OBMC always fires (av1_skip_u4x4_pred_in_obmc
-        // skips only the ABOVE direction), so any non-mono left-OBMC block needs
-        // chroma handling this luma-only path lacks — a later chunk.
-        assert!(
-            self.cfg.monochrome || skip_u4x4_pred_in_obmc(bsize, ss_x, ss_y, 1),
-            "chunk 4+: chroma left-OBMC not yet handled (block {bsize})"
-        );
+        // Chroma LEFT-OBMC always fires for a non-mono block (av1_skip_u4x4_pred_in
+        // _obmc skips only the ABOVE direction, dir==0). Added per-plane below.
+        let do_chroma = !self.cfg.monochrome;
         let bsize_wide = BLOCK_SIZE_WIDE[bsize];
         let overlap = bsize_wide.min(64) >> 1; // luma overlap cols
         let height = MI_SIZE_HIGH[bsize];
@@ -2185,7 +2224,9 @@ impl<'c> TileKf<'c> {
         let nb_mb_to_right = block_mb_to_right + (this_width - pred_width) * 8;
         let nb_mb_to_left = -(mi_col * 32);
         let last = inter.last;
-        for (rel_mi_row, op_mi_size, nb) in neighbours {
+        for (rel_mi_row, op_mi_size, nb, nb_if) in neighbours {
+            // Strip MC uses the NEIGHBOUR's coded interp filter.
+            let (nb_filter_y, nb_filter_x) = (nb_if.0 as usize, nb_if.1 as usize);
             let left_mi_row = mi_row + rel_mi_row;
             let bw = (bsize_wide >> 1).clamp(4, 32) as usize;
             let bh = (op_mi_size * 4) as usize;
@@ -2200,6 +2241,8 @@ impl<'c> TileKf<'c> {
                 nb_mb_to_right,
                 nb_mb_to_top,
                 nb_mb_to_bottom,
+                0,
+                0,
             );
             let mut scratch = vec![0u16; bw * bh];
             aom_inter::build_inter_predictor(
@@ -2235,6 +2278,58 @@ impl<'c> TileKf<'c> {
                 overlap as usize,
                 bh,
             );
+            // Chroma left-OBMC (build_obmc_inter_pred_left, U then V). Strip MC dims
+            // (decodeframe.c:781): bw_c = clamp(bsize_wide>>(ss_x+1), 4, 64>>(ss_x+1)),
+            // bh_c = (op_mi_size*4)>>ss_y; blended over the left `overlap>>ss_x` cols
+            // (a SUBSET of the >=4-wide strip for small chroma) with the subsampled
+            // mask. Never skipped (dir==1).
+            if do_chroma {
+                let overlap_c = (overlap as usize) >> ss_x; // cols blended
+                let bw_c = ((bsize_wide >> (ss_x + 1)).clamp(4, 64 >> (ss_x + 1))) as usize;
+                let bh_c = ((op_mi_size * 4) >> ss_y) as usize;
+                let (cr, cc) = clamp_mv_umv_border_px(
+                    nb.mv0_row,
+                    nb.mv0_col,
+                    bw_c as i32,
+                    bh_c as i32,
+                    nb_mb_to_left,
+                    nb_mb_to_right,
+                    nb_mb_to_top,
+                    nb_mb_to_bottom,
+                    ss_x,
+                    ss_y,
+                );
+                let uv_col = ((mi_col * 4) >> ss_x) as usize;
+                let uv_row = ((left_mi_row * 4) >> ss_y) as usize;
+                let dst_off_c = uv_row * self.stride_uv + uv_col;
+                let mask_c = aom_inter::get_obmc_mask(overlap_c);
+                for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
+                    let mut scratch_c = vec![0u16; bw_c * bh_c];
+                    aom_inter::build_inter_predictor(
+                        src,
+                        last.stride_uv,
+                        last.width_uv,
+                        last.height_uv,
+                        &mut scratch_c,
+                        0,
+                        bw_c,
+                        uv_col,
+                        uv_row,
+                        bw_c,
+                        bh_c,
+                        cr,
+                        cc,
+                        ss_x,
+                        ss_y,
+                        nb_filter_x,
+                        nb_filter_y,
+                    );
+                    aom_inter::blend_a64_hmask(
+                        dst, dst_off_c, self.stride_uv, &scratch_c, 0, bw_c, mask_c, overlap_c,
+                        bh_c,
+                    );
+                }
+            }
         }
     }
 
@@ -2953,8 +3048,8 @@ impl<'c> TileKf<'c> {
         // every neighbour shares the frame filter (filter_x == filter_y); a
         // switchable frame would feed each neighbour's own stored filter (chunk 6).
         if motion_mode == 1 {
-            self.obmc_above_blend(mi_row, mi_col, bsize, inter, filter_x, filter_y);
-            self.obmc_left_blend(mi_row, mi_col, bsize, inter, filter_x, filter_y);
+            self.obmc_above_blend(mi_row, mi_col, bsize, inter);
+            self.obmc_left_blend(mi_row, mi_col, bsize, inter);
         }
 
         // --- reconstruction: read residual coefficients + ADD onto the MC
@@ -4894,11 +4989,13 @@ fn skip_u4x4_pred_in_obmc(bsize: usize, ss_x: usize, ss_y: usize, dir: i32) -> b
 }
 
 /// `clamp_mv_to_umv_border_sb` (reconinter.h:343) with the caller's explicit
-/// `mb_to_*_edge` (1/8-pel) and the PREDICTION block dims `bw`/`bh` (px) — the
-/// OBMC-neighbour form (the edges are the OBMC-adjusted values, the dims are the
-/// narrow overlap strip, not the coding block). Luma (ss = 0). Returns the
-/// (possibly clamped) MV in 1/8-pel luma units (the doubling for the 1/16-pel
-/// clamp math is internal, matching [`clamp_mv_to_umv_border`]).
+/// `mb_to_*_edge` (1/8-pel LUMA) and the PREDICTION block dims `bw`/`bh` (px, in
+/// the target PLANE's resolution) — the OBMC-neighbour form (the edges are the
+/// OBMC-adjusted values, the dims are the narrow overlap strip, not the coding
+/// block). `ss_x`/`ss_y` select the plane: the luma edges are scaled by
+/// `1 << (1 - ss)` and the `spel_*` bounds use the subsampled `bw`/`bh`, exactly
+/// as C's `clamp_mv_to_umv_border_sb`. Returns the (possibly clamped) MV in
+/// 1/8-pel LUMA units ([`aom_inter::build_inter_predictor`] rescales per plane).
 #[allow(clippy::too_many_arguments)]
 fn clamp_mv_umv_border_px(
     mv_row: i32,
@@ -4909,19 +5006,23 @@ fn clamp_mv_umv_border_px(
     mb_to_right: i32,
     mb_to_top: i32,
     mb_to_bottom: i32,
+    ss_x: usize,
+    ss_y: usize,
 ) -> (i32, i32) {
     const AOM_INTERP_EXTEND: i32 = 4;
     const SUBPEL_BITS: i32 = 4;
     const SUBPEL_SHIFTS: i32 = 16;
+    let sx = 1i32 << (1 - ss_x as i32);
+    let sy = 1i32 << (1 - ss_y as i32);
     let spel_left = (AOM_INTERP_EXTEND + bw) << SUBPEL_BITS;
     let spel_right = spel_left - SUBPEL_SHIFTS;
     let spel_top = (AOM_INTERP_EXTEND + bh) << SUBPEL_BITS;
     let spel_bottom = spel_top - SUBPEL_SHIFTS;
-    let col_min = mb_to_left * 2 - spel_left;
-    let col_max = mb_to_right * 2 + spel_right;
-    let row_min = mb_to_top * 2 - spel_top;
-    let row_max = mb_to_bottom * 2 + spel_bottom;
-    let cq4 = (mv_col * 2).clamp(col_min, col_max);
-    let rq4 = (mv_row * 2).clamp(row_min, row_max);
-    (rq4 / 2, cq4 / 2)
+    let col_min = mb_to_left * sx - spel_left;
+    let col_max = mb_to_right * sx + spel_right;
+    let row_min = mb_to_top * sy - spel_top;
+    let row_max = mb_to_bottom * sy + spel_bottom;
+    let cq4 = (mv_col * sx).clamp(col_min, col_max);
+    let rq4 = (mv_row * sy).clamp(row_min, row_max);
+    (rq4 / sy, cq4 / sx)
 }
