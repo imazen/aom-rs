@@ -61,6 +61,52 @@ port. Two MEASURED findings bound what a byte-exact P can even be:
    residual → var-tx blocker). **Ratchet: zero-MV skip P first, then translational-skip, then (after
    KB-15 prunes) coeff blocks.**
 
+## SESSION 2026-07-19b — 2a LANDED + zero-MV target GROUNDED (read before 2f)
+
+**2a is DONE + on origin/main (`87630cb`).** `aom-encode::inter_frame`:
+`derive_lowdelay_p_frame_header` DERIVES the §3 low-delay P `FrameHeaderObu` byte-exact vs a real
+aomenc frame-1 header (gate `aom-bench/tests/inter_header_derive_diff.rs`: 16 cells cq{20,40,60,63}
+× {64,128}² × {mono,420}, compared against the ACTUAL stream bytes — NOT a reader→writer round-trip,
+which is LOSSY for inter). Also `RefFrame` (encode-side stored reference; decoder-RefFrame shape).
+
+**MEASURED corrections to this handoff's §"Next work" seam map (verify, don't trust):**
+- `interp_filter` is a PER-FRAME RD decision, NOT a constant: measured cq20→`MULTITAP_SHARP(2)`,
+  cq60→`EIGHTTAP_REGULAR(0)` on the same content. The old "interp_filter=SHARP/SWITCHABLE" note is
+  wrong. It is recon/RD-dependent (like LF levels) → a `LowDelayPHeaderParams` INPUT (bootstrapped
+  from the reference until the frame interp-filter search is ported; that search is a 2f follow-up).
+- `allow_high_precision_mv` IS derivable: `qindex < HIGH_PRECISION_MV_QTHRESH(128)` (mv_prec.c:411).
+  The old "allow_high_precision_mv=1" note is wrong (measured false at cq60/qindex240).
+- Exact real frame-1 header (cq60 64² 420, all VERIFIED-derived except the passed-in tail):
+  `frame_type=1 show_frame=1 error_resilient=0 disable_cdf_update=0 order_hint=1 primary_ref=7
+  refresh_frame_flags=0x02 ref_map_idx=[0;7] frame_refs_short_signaling=0 allow_hp=0 interp_filter=0
+  switchable_motion_mode=0 allow_ref_frame_mvs=0 tx_mode_select=0 reference_mode_select=0
+  skip_mode_allowed=0 reduced_tx_set=0 gm=identity`; recon-dependent tail `loopfilter.filter_level=
+  [6,6] u=9 v=9 mode_ref_delta_enabled=1`, `cdef off`. Header = 109 bits (14 B); frame1 payload 16 B
+  (⇒ tile ≈ 2 B). Non-obvious derivation gotchas the gate caught: set `prefix.superres_upscaled_
+  {w,h}=max_frame_{w,h}` (else `frame_size_override_flag` mis-codes 1) and resolve the single-tile
+  `tile_info` (`uniform_spacing=true,cols=rows=1,log2=0`) — the seq template carries only tile LIMITS.
+
+**ZERO-MV target CONFIRMED ACHIEVABLE (empirical, all configs):** aomenc's zero-MV P
+(`translational(base,0,0)`) decodes BYTE-IDENTICAL to frame 0's recon (`frame1==frame0`) at EVERY
+cq{20,40,60,63} × {64,128}² × {mono,420} — a pure reference-copy / all-skip P. So every block is
+inter GLOBALMV/NEARESTMV(0,0) + skip=1, zero residual (dodges the var-tx blocker). The tile is ~2 B.
+
+**KEY 2f SIMPLIFICATION (verified):** the P has `primary_ref_frame = NONE`, so the frame uses
+**DEFAULT inter CDFs** — the inter mode/ref/skip COST tables derive from `DEFAULT_*` inter CDFs
+directly (no `FrameContext` threading needed, contra the "needs a full FrameContext" seam note).
+All inter default CDFs already exist in `aom-entropy` default_cdfs.rs (intra_inter, single_ref,
+newmv, zeromv, refmv, drl, skip, nmv). **2e is DEFERRABLE for the zero-MV target** (mv=(0,0) →
+plain block copy of the co-located ref block; no `aom-inter` wiring needed for the skeleton).
+
+**2g gate mechanics (confirmed):** `inter_localize::decode_both` compares decoded PIXELS (not
+bitstream bytes) — `aom-bench/src/inter_localize.rs:258`. So `decode_both(port,c)==None` = the port's
+all-skip P decodes identically to aomenc's (pixel-match). Byte-identity is the stronger stretch
+(same partition+modes as aomenc). `MultiFrameEncodeCell` + `translational` + `c_encode_inter` +
+`frame0_cell().port_encode(bootstrap)` all exist; need a new `port_encode_inter` (frame 0 KEY via
+the existing byte-exact path → decode it to get the RefFrame → encode frame 1 P via 2f →
+`assemble_obu_frame_single_tile(derived_p_header, 0, tile_bytes)` → concat). `obu_assemble.rs`
+already has `assemble_obu_frame_single_tile`.
+
 ## Head-start inventory (REUSE — do not rebuild)
 
 - **Full-pel ME** (`aom-encode/src/intrabc_search.rs`): `FullPelSearch` now carries separate
