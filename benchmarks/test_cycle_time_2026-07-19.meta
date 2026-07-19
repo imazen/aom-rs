@@ -1,0 +1,36 @@
+date:      2026-07-19
+commit:    65b7b51 (main@origin at time of measurement)
+host:      dev-32gb
+nproc:     16
+rustc:     1.97.0 (2d8144b78 2026-07-07)
+cache:     none (RUSTC_WRAPPER unset, sccache not installed)
+caveat:    one encoder subagent was building/testing concurrently throughout, so absolute
+           wall times are pessimistic. Relative comparisons (bfd vs lld, sequential vs
+           pool) were run back-to-back under the same contention.
+
+Commands:
+
+  # test-build A/B, fresh target dirs, 95 binaries
+  rm -rf /tmp/tb-bfd && /usr/bin/time -f "BFD|%e|%U" env CARGO_TARGET_DIR=/tmp/tb-bfd \
+    nice -n5 cargo test --profile test-fast -p zenav1-aom-dsp --no-run
+  GCCLD=~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld
+  rm -rf /tmp/tb-lld && RUSTFLAGS="-Clink-arg=-B$GCCLD -Clink-arg=-fuse-ld=lld" \
+    /usr/bin/time -f "LLD|%e|%U" env CARGO_TARGET_DIR=/tmp/tb-lld \
+    nice -n5 cargo test --profile test-fast -p zenav1-aom-dsp --no-run
+
+  # per-binary run times
+  for b in $(find . -maxdepth 1 -type f -executable -not -name '*.so'); do
+    /usr/bin/time -f "%e" -o /tmp/_tt ./"$b" >/dev/null 2>/dev/null
+    echo "$(cat /tmp/_tt) ${b##*/}"
+  done | sort -rn
+
+  # sequential vs global pool over the same built binaries
+  /usr/bin/time -f "SEQ|%e" bash -c 'for b in $(find . -maxdepth 1 -type f -executable \
+    -not -name "*.so"); do ./"$b" >/dev/null 2>&1; done'
+  /usr/bin/time -f "PAR|%e" bash -c 'find . -maxdepth 1 -type f -executable \
+    -not -name "*.so" -print0 | xargs -0 -P 16 -n1 sh -c "exec \"\$1\" >/dev/null 2>&1" _'
+
+  # decode suite per-binary breakdown
+  cargo test --profile test-fast -p zenav1-aom-decode   # read "finished in" per binary
+
+Raw per-binary aom-dsp timings: benchmarks/test_cycle_time_2026-07-19.dsp-times.txt
