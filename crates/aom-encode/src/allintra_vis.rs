@@ -916,8 +916,19 @@ fn wiener_block_residual_dct(
         0,
         BS as i32,
         BS as i32,
-        mi_cols,
-        mi_rows,
+        // C's wiener preprocessing (`av1_calc_mb_wiener_var_row`) calls
+        // `set_mi_row_col` with `mi_cols/mi_rows = AOMMIN(mi_{col,row} + mi_size,
+        // cm->mi_{cols,rows})` — clamped to the 8x8 block's OWN extent. That makes
+        // `mb_to_right/bottom_edge == 0` (⇒ `xr == yd == 0`), so `n_topright_px` /
+        // `n_bottomleft_px` collapse to 0 and the directional predictor never reads
+        // the above-right / below-left neighbours (it extends the last own edge
+        // sample instead), regardless of frame position. `n_top_px` / `n_left_px`
+        // stay = txw/txh (the own row/col is always available). Passing the full
+        // frame `mi_cols/mi_rows` here (as the decode driver does for real blocks)
+        // would wrongly pull in above-right source pixels and diverge from C on
+        // every directional-mode SATD block. `mi_size_wide[BLOCK_8X8] == 2`.
+        (col + 2).min(mi_cols),
+        (row + 2).min(mi_rows),
         mode,
         0,
         false,
