@@ -26,10 +26,10 @@ use aom_encode::intra_uv_rd::{UvLoopPolicy, UvRdEnv, chroma_plane_offset, is_chr
 use aom_encode::mode_costs::{CflCosts, TxSizeCosts, fill_cfl_costs, fill_tx_size_costs};
 use aom_encode::rd_pick::{RdPickUvArgs, RdPickUvOutcome, ReencodeParams, rd_pick_intra_mode_sb};
 use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv};
-use aom_intra::cfl::{CFL_BUF_SQUARE, CflCtx};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::intra::cfl::{CFL_BUF_SQUARE, CflCtx};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs};
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
@@ -94,7 +94,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
     for (ci, &(bsize, ss_x, ss_y, mi_row, mi_col, mono)) in cases.iter().enumerate() {
         let (bw, bh) = (BLK_W_L[bsize], BLK_H_L[bsize]);
         let chroma_ref = is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
-        let cfl_allowed = aom_entropy::partition::is_cfl_allowed(bsize, false, ss_x, ss_y);
+        let cfl_allowed = aom_dsp::entropy::partition::is_cfl_allowed(bsize, false, ss_x, ss_y);
         for iter in 0..6 {
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
@@ -160,7 +160,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
             let mut src_u = recon_u0.clone();
             let mut src_v = recon_v0.clone();
             if !mono {
-                let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+                let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
                 let (pw, ph) = (BLK_W_L[plane_bsize], BLK_H_L[plane_bsize]);
                 let base_u = rng.range(64, maxv as i32 - 63);
                 let base_v = rng.range(64, maxv as i32 - 63);

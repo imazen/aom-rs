@@ -18,9 +18,9 @@ use aom_encode::intra_rd::{
 };
 use aom_encode::mode_costs::{IntraModeCosts, fill_intra_mode_costs, filter_intra_allowed_bsize};
 use aom_encode::{BlockContext, OptimizeInputs, QuantKind, QuantParams};
-use aom_entropy::partition::get_y_mode_ctx;
+use aom_dsp::entropy::partition::get_y_mode_ctx;
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs, scan, txb_high, txb_wide};
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs, scan, txb_high, txb_wide};
 
 const TX_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,

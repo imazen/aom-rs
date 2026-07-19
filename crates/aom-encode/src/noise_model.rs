@@ -573,7 +573,7 @@ impl NoiseStrengthLut {
 // against the REAL exported `aom_noise_model_init/update/get_grain_parameters`.
 // ===========================================================================
 
-use aom_entropy::header::FilmGrainParams;
+use aom_dsp::entropy::header::FilmGrainParams;
 
 /// `kMaxLag` (`aom_dsp/noise_model.c`).
 const K_MAX_LAG: i32 = 4;

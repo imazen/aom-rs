@@ -16,10 +16,10 @@ use aom_encode::rd::{
     init_plane_quantizers,
 };
 use aom_encode::{QuantKind, QuantParams, xform_quant};
-use aom_quant::{Dequants, Quants, SEG_LVL_ALT_Q, Segmentation, av1_build_quantizer, set_q_index};
+use aom_dsp::quant::{Dequants, Quants, SEG_LVL_ALT_Q, Segmentation, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_transform::txfm2d::fwd_txfm_valid;
-use aom_txb::{txb_high, txb_wide};
+use aom_dsp::transform::txfm2d::fwd_txfm_valid;
+use aom_dsp::txb::{txb_high, txb_wide};
 
 const TX_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
@@ -182,7 +182,7 @@ fn init_plane_quantizers_matches_c_chain() {
             c::ref_sad_per_bit(qindex_c, bd as i32),
             "sadperbit {m}"
         );
-        let skip_c = enabled && (mask[segment_id] & (1 << aom_quant::SEG_LVL_SKIP)) != 0;
+        let skip_c = enabled && (mask[segment_id] & (1 << aom_dsp::quant::SEG_LVL_SKIP)) != 0;
         assert_eq!(got.seg_skip_block, skip_c, "seg_skip_block {m}");
     }
 }
@@ -279,8 +279,8 @@ fn from_plane_rows_matches_real_facades() {
                     bd > 8,
                     &coeff_c[..n_coeffs],
                     plane_rows,
-                    aom_txb::scan(tx_size, tx_type),
-                    aom_txb::iscan(tx_size, tx_type),
+                    aom_dsp::txb::scan(tx_size, tx_type),
+                    aom_dsp::txb::iscan(tx_size, tx_type),
                     ls,
                     &mut qc,
                     &mut dqc,

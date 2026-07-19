@@ -5,9 +5,9 @@
 //! context threading mirrors av1_decode_coding_block, a clean roundtrip pins the loop.
 
 use aom_encode::{TxTypeContext, read_coding_block_plane};
-use aom_entropy::dec::OdEcDec;
-use aom_entropy::enc::OdEcEnc;
-use aom_txb::{
+use aom_dsp::entropy::dec::OdEcDec;
+use aom_dsp::entropy::enc::OdEcEnc;
+use aom_dsp::txb::{
     CDF_ARENA_LEN, get_txb_ctx, scan, txb_entropy_context, txb_high, txb_wide,
     write_coeffs_txb_full,
 };

@@ -18,9 +18,9 @@
 use aom_encode::BlockContext;
 use aom_encode::rd::rdcost;
 use aom_encode::var_tx::{InterLeafInputs, VarTxEnv, pick_recursive_tx_size_type_yrd, search_tx_type_inter};
-use aom_entropy::partition::{txfm_partition_context, txfm_partition_update};
-use aom_quant::{Dequants, PlaneQuantRows, Quants, av1_build_quantizer, set_q_index};
-use aom_txb::{CoeffCostSet, TxTypeCosts, fill_tx_type_costs, get_txb_ctx};
+use aom_dsp::entropy::partition::{txfm_partition_context, txfm_partition_update};
+use aom_dsp::quant::{Dequants, PlaneQuantRows, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::txb::{CoeffCostSet, TxTypeCosts, fill_tx_type_costs, get_txb_ctx};
 
 const TXS_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
 const TXS_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
@@ -572,7 +572,7 @@ fn pick_recursive_tx_size_type_matches_c_recursion() {
 /// Both port + facade share the same instance, so the recursion differential is
 /// unaffected by realism — only self-consistency matters.
 fn random_coeff_set(rng: &mut Rng) -> CoeffCostSet {
-    let mk = |rng: &mut Rng| aom_txb::LvMapCoeffCost {
+    let mk = |rng: &mut Rng| aom_dsp::txb::LvMapCoeffCost {
         txb_skip: tbl(rng, 13 * 2),
         base_eob: tbl(rng, 4 * 3),
         base: tbl(rng, 42 * 8),

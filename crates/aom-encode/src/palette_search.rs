@@ -14,7 +14,7 @@
 //!   the `_c` port is the correct reference behaviour.
 //! - `cost_and_tokenize_map`'s context derivation uses
 //!   `av1_fast_palette_color_index_context`, an optimized twin of
-//!   [`aom_entropy::partition::get_palette_color_index_context`] (the C
+//!   [`aom_dsp::entropy::partition::get_palette_color_index_context`] (the C
 //!   asserts they agree); this port reuses the entropy crate's exact-port
 //!   version.
 //! - `discount_color_cost` (`rt_sf`) is 0 on every non-realtime path this
@@ -32,7 +32,7 @@ use crate::tx_search::{
     BLK_H_B, BLK_W_B, MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, PaletteYrd, TxTypeSearchPolicy, TxfmYrdEnv,
     pick_uniform_tx_size_type_yrd_intra,
 };
-use aom_entropy::partition::{
+use aom_dsp::entropy::partition::{
     PaletteNbrKf, get_palette_cache, get_palette_color_index_context, index_color_cache,
 };
 

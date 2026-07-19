@@ -7,26 +7,12 @@ description = "Encoder composition layer for aom-rs: av1_xform_quant (forward tr
 publish = false
 
 [dependencies]
-aom-transform = { path = "../aom-transform" }
-aom-quant = { path = "../aom-quant" }
-aom-txb = { path = "../aom-txb" }
-aom-recon = { path = "../aom-recon" }
-aom-entropy = { path = "../aom-entropy" }
-aom-dist = { path = "../aom-dist" }
-aom-intra = { path = "../aom-intra" }
-# inter_me.rs (chunk 2d subpel motion search) reuses the byte-exact 8-tap
-# subpel filter tables (SUB_PEL_FILTERS_8*) for the aom_upsampled_pred
-# predictor -- the filter coefficients are never re-transcribed.
-aom-convolve = { path = "../aom-convolve" }
-# lf_search.rs reuses the already bit-exact deblock-filter APPLICATION
-# (aom_loopfilter::frame::loop_filter_frame) as the trial-filter primitive
-# for the loop-filter-level RD search (av1_pick_filter_level) -- never
-# reimplemented, per the mission's "reuse, don't re-port the kernel" rule.
-aom-loopfilter = { path = "../aom-loopfilter" }
-# pickcdef.rs reuses the already bit-exact CDEF kernels (cdef_find_dir /
-# cdef_filter_block_16) as the CDEF-strength-search filter primitives --
-# never reimplemented, same rule as aom-loopfilter above.
-aom-cdef = { path = "../aom-cdef" }
+# Consolidated DSP/entropy kernels (was: aom-transform/quant/txb/recon/entropy/
+# dist/intra/convolve/loopfilter/cdef — folded into aom-dsp per GitHub #2). The
+# reuse notes that lived here (subpel filter tables for aom_upsampled_pred;
+# loop_filter_frame as the LF-search trial primitive; the CDEF-search kernels)
+# still apply — those kernels are now aom_dsp::{convolve,loopfilter,cdef}.
+aom-dsp = { path = "../aom-dsp" }
 
 [dev-dependencies]
 aom-sys-ref = { path = "../aom-sys-ref" }

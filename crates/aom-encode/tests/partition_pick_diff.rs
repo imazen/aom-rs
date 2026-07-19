@@ -54,10 +54,10 @@ use aom_encode::partition_pick::{
 };
 use aom_encode::rd_pick::{RdPickUvArgs, RdPickUvOutcome, ReencodeParams, rd_pick_intra_mode_sb};
 use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv};
-use aom_intra::cfl::CflCtx;
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::intra::cfl::CflCtx;
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostSet, TxTypeCosts, fill_tx_type_costs};
+use aom_dsp::txb::{CoeffCostSet, TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
@@ -115,9 +115,9 @@ struct CPick<'a> {
     qindex_cfg: i32,
     // Rust-side quant rows (the leaf search consumes the Rust rows; the
     // encode oracle consumes the C rows inside `o`).
-    rows_y: &'a aom_quant::PlaneQuantRows<'a>,
-    rows_u: &'a aom_quant::PlaneQuantRows<'a>,
-    rows_v: &'a aom_quant::PlaneQuantRows<'a>,
+    rows_y: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    rows_u: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    rows_v: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     // Frame-level (multi-txs_ctx) sets, mirroring SbEncodeEnv::coeff_costs_y/
     // _uv -- the recursion visits many leaf bsizes/tx_sizes, so this cannot
     // be a single pre-selected CoeffCostTables (luma) the way EncodeIntraYEnv/
@@ -349,7 +349,7 @@ impl CPick<'_> {
         if ss_y != 0 && mi_h < 2 {
             c_up = (mi_row - 1) > 0;
         }
-        let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+        let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
         let (pmw, pmh) = (MI_WB[plane_bsize], MI_HB[plane_bsize]);
         let au = (mi_col >> ss_x) as usize;
         let lu = ((mi_row & 31) >> ss_y) as usize;
@@ -361,7 +361,7 @@ impl CPick<'_> {
         // (plane_bsize == BLOCK_4X4). The reference used to transcribe the
         // same `!lossless && w<=32 && h<=32` simplification as the port (a
         // shared bug this differential therefore couldn't catch — KB-5).
-        let cfl_allowed = aom_entropy::partition::is_cfl_allowed(bsize, self.lossless, ss_x, ss_y);
+        let cfl_allowed = aom_dsp::entropy::partition::is_cfl_allowed(bsize, self.lossless, ss_x, ss_y);
         // Chroma has no tx-size depth search -- pre-select the ONE real
         // per-txs_ctx table THIS leaf's uv_tx_size uses (mirrors
         // partition_pick.rs::leaf_pick_sb_modes's fix).

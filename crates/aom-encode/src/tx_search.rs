@@ -23,7 +23,7 @@
 //! CLI-default tool flags (`aomenc` defaults): `enable_flip_idtx = 1`,
 //! `use_intra_dct_only = 0`.
 
-use aom_txb::ext_tx_set_type;
+use aom_dsp::txb::ext_tx_set_type;
 
 /// `TX_TYPES` (enums.h).
 pub const TX_TYPES: usize = 16;
@@ -318,7 +318,7 @@ pub fn uv_intra_tx_type(
     if lossless || TXSIZE_SQR_UP_MAP[tx_size] > 3 {
         return 0; // DCT_DCT
     }
-    let mode = aom_entropy::partition::get_uv_mode(uv_mode) as usize;
+    let mode = aom_dsp::entropy::partition::get_uv_mode(uv_mode) as usize;
     let tx_type = INTRA_MODE_TO_TX_TYPE[mode];
     let tx_set_type = ext_tx_set_type(tx_size, false, reduced_tx_set_used);
     if AV1_EXT_TX_USED_FLAG[tx_set_type] & (1 << tx_type) == 0 {
@@ -477,7 +477,7 @@ pub fn av1_pixel_diff_dist(
     visible_rows: usize,
 ) -> (u64, u32) {
     let off = (blk_row * diff_stride + blk_col) << 2; // MI_SIZE_LOG2
-    let sse = aom_dist::sum_squares_2d_i16(&diff[off..], diff_stride, visible_cols, visible_rows);
+    let sse = aom_dsp::dist::sum_squares_2d_i16(&diff[off..], diff_stride, visible_cols, visible_rows);
     let mse_q8 = if visible_cols > 0 && visible_rows > 0 {
         ((256 * sse) / (visible_cols as u64 * visible_rows as u64)) as u32
     } else {
@@ -543,7 +543,7 @@ use crate::{
     BlockContext, OptimizeInputs, QuantKind, QuantParams, XformQuantOptResult, xform_quant,
     xform_quant_optimize,
 };
-use aom_txb::{
+use aom_dsp::txb::{
     CoeffCostSet, CoeffCostTables, TxTypeCosts, cost_coeffs_txb, cost_coeffs_txb_laplacian,
     get_tx_type_cost,
 };
@@ -610,11 +610,11 @@ fn skip_trellis_opt_based_on_satd(
     // TXS_W/TXS_H == the crate's TX_W/TX_H the quant path uses).
     let full = TXS_W[tx_size] * TXS_H[tx_size];
     let mut coeff = vec![0i32; full];
-    aom_transform::txfm2d::av1_fwd_txfm2d(residual, &mut coeff, TXS_W[tx_size], tx_type, tx_size);
+    aom_dsp::transform::txfm2d::av1_fwd_txfm2d(residual, &mut coeff, TXS_W[tx_size], tx_type, tx_size);
     let n_coeffs = av1_get_max_eob(tx_size);
-    // aom_satd: Σ|coeff| over the first n_coeffs (aom_dist::hadamard::satd is
+    // aom_satd: Σ|coeff| over the first n_coeffs (aom_dsp::dist::hadamard::satd is
     // proven byte-identical to aom_satd_c — aom-dist/tests/hadamard_diff.rs).
-    let mut satd = i64::from(aom_dist::hadamard::satd(&coeff[..n_coeffs]));
+    let mut satd = i64::from(aom_dsp::dist::hadamard::satd(&coeff[..n_coeffs]));
     // RIGHT_SIGNED_SHIFT(satd, MAX_TX_SCALE − tx_scale): MAX_TX_SCALE = 1, so the
     // shift is 1/0/−1 (a negative shift is a LEFT shift). Widened to i64 so the
     // 64-point left-shift can't overflow C's `int` domain on this path.
@@ -692,7 +692,7 @@ fn prune_txk_type_intra(
     if let Some(level) = inp.qm_level {
         qp_b = qp_b.with_qm(level, inp.plane);
     }
-    let (txb_skip_ctx, dc_sign_ctx) = aom_txb::get_txb_ctx(
+    let (txb_skip_ctx, dc_sign_ctx) = aom_dsp::txb::get_txb_ctx(
         inp.bctx.plane_bsize,
         tx_size,
         inp.bctx.plane,
@@ -742,7 +742,7 @@ fn prune_txk_type_intra(
             tx_size,
             inp.bd,
             crate::dist_qmatrix(&qp_b, tx_size, tx_type),
-            aom_txb::scan(tx_size, tx_type),
+            aom_dsp::txb::scan(tx_size, tx_type),
             use_qm_dist_metric,
         );
 
@@ -1052,7 +1052,7 @@ pub struct TxTypeSearchInputs<'a> {
     /// The per-qindex quantizer rows for this plane (both FP and B are
     /// reachable: FP with trellis, B when the trellis is skipped —
     /// `USE_B_QUANT_NO_TRELLIS = 1`).
-    pub rows: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     /// Neighbour entropy contexts (`get_txb_ctx` inputs).
     pub bctx: &'a BlockContext<'a>,
     /// The block RD multiplier `x->rdmult`.
@@ -1405,7 +1405,7 @@ pub fn search_tx_type_intra(
             // No-trellis arm: B quant, entropy ctx computed by av1_quant,
             // rate via av1_cost_coeffs_txb (+ tx_type inside its eob>0 body).
             let xq = xform_quant(inp.residual, tx_size, tx_type, kind, &qp, false);
-            let (txb_skip_ctx, dc_sign_ctx) = aom_txb::get_txb_ctx(
+            let (txb_skip_ctx, dc_sign_ctx) = aom_dsp::txb::get_txb_ctx(
                 inp.bctx.plane_bsize,
                 tx_size,
                 inp.bctx.plane,
@@ -1460,7 +1460,7 @@ pub fn search_tx_type_intra(
         // weighted under the QM-PSNR metric (`dist_block_tx_domain`'s
         // `qmatrix == NULL || !use_qm_dist_metric` gate, :1150/:1159).
         let dqm = crate::dist_qmatrix(&qp, tx_size, tx_type);
-        let dscan = aom_txb::scan(tx_size, tx_type);
+        let dscan = aom_dsp::txb::scan(tx_size, tx_type);
         let (dist, sse): (i64, i64) = if res.eob == 0 {
             (block_sse, block_sse)
         } else if use_transform_domain_distortion {
@@ -1609,7 +1609,7 @@ pub fn dist_block_px_domain(
 ) -> i64 {
     let (w, h) = (TXS_W[tx_size], TXS_H[tx_size]);
     let mut recon = pred[..w * h].to_vec();
-    aom_transform::inv_txfm2d::av1_inverse_transform_add(
+    aom_dsp::transform::inv_txfm2d::av1_inverse_transform_add(
         dqcoeff,
         &mut recon,
         w,
@@ -1619,7 +1619,7 @@ pub fn dist_block_px_domain(
         eob,
         lossless,
     );
-    let (_var, sse) = aom_dist::highbd_variance(
+    let (_var, sse) = aom_dsp::dist::highbd_variance(
         &src[src_off..],
         src_stride,
         &recon,
@@ -1639,9 +1639,9 @@ pub fn dist_block_px_domain(
 // ---------------------------------------------------------------------------
 
 use crate::mode_costs::{TxSizeCosts, block_signals_txsize, tx_size_cost};
-use aom_dist::highbd_subtract_block;
-use aom_entropy::partition::intra_avail;
-use aom_intra::predict_intra_high;
+use aom_dsp::dist::highbd_subtract_block;
+use aom_dsp::entropy::partition::intra_avail;
+use aom_dsp::intra::predict_intra_high;
 
 /// `RD_STATS` as this walk uses it (rate `i32::MAX` = invalid).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1692,7 +1692,7 @@ pub(crate) const BLK_H_B: [usize; 22] = [
 /// MACROBLOCK(D) state `block_rd_txfm` reads, expressed as plain data. The
 /// mode fields are the CURRENT `mbmi` candidate under evaluation.
 pub struct TxfmYrdEnv<'a> {
-    // intra_avail frame geometry (see aom_entropy::partition::intra_avail).
+    // intra_avail frame geometry (see aom_dsp::entropy::partition::intra_avail).
     pub sb_size: usize,
     pub bsize: usize,
     pub mi_row: i32,
@@ -1724,7 +1724,7 @@ pub struct TxfmYrdEnv<'a> {
     pub reduced_tx_set_used: bool,
     pub bd: u8,
     // Quantizer + RD.
-    pub rows: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     /// `x->qindex` (the frame base qindex on this fixed-q KEY envelope) —
     /// read by the speed>=6 intra-tx-depth NN's `log_dc_q_square` feature
     /// (`av1_dc_quant_QTX(x->qindex, 0, bd)`, tx_search.c:2867 — the RAW
@@ -1835,7 +1835,7 @@ pub fn txfm_rd_in_plane_intra(
     // `TxTypeSearchInputs::predict_skip_zero_blk_rate` docs). Computed here
     // BEFORE the walk stamps t_above/t_left.
     let predict_skip_zero_blk_rate = if pol.predict_dc_level >= 1 {
-        let (origin_skip_ctx, _) = aom_txb::get_txb_ctx(bsize, tx_size, 0, &t_above, &t_left);
+        let (origin_skip_ctx, _) = aom_dsp::txb::get_txb_ctx(bsize, tx_size, 0, &t_above, &t_left);
         env.coeff_costs.tables(tx_size).txb_skip[origin_skip_ctx as usize * 2 + 1]
     } else {
         0
@@ -2080,7 +2080,7 @@ pub fn txfm_rd_in_plane_intra(
                 blk_row + txh_unit < max_blocks_high || blk_col + txw_unit < max_blocks_wide;
             if win.best_eob > 0 && not_last_txb {
                 let mut tight = pred.clone();
-                aom_transform::inv_txfm2d::av1_inverse_transform_add(
+                aom_dsp::transform::inv_txfm2d::av1_inverse_transform_add(
                     &win.dqcoeff,
                     &mut tight,
                     txw,
@@ -2317,7 +2317,7 @@ pub fn ml_predict_intra_tx_depth_prune(
     let mut fi = get_mean_dev_features(diff, diff_stride, 8, 8, &mut features);
     features[fi] = (source_variance as f32).ln_1p();
     fi += 1;
-    let dc_q = i32::from(aom_quant::av1_dc_quant_qtx(qindex, 0, bd)) >> (bd - 8);
+    let dc_q = i32::from(aom_dsp::quant::av1_dc_quant_qtx(qindex, 0, bd)) >> (bd - 8);
     // log1pf((float)(dc_q * dc_q) / 256.0f).
     let log_dc_q_square = ((dc_q * dc_q) as f32 / 256.0f32).ln_1p();
     features[fi] = log_dc_q_square;
@@ -2616,7 +2616,7 @@ pub fn pick_uniform_tx_size_type_yrd_intra(
 /// for every size; highbd buffers (`bd > 8`) use lowbd `aom_hadamard_4x4` at
 /// TX_4X4 (its output fits 15 bits) and `aom_highbd_hadamard_NxN` above.
 fn wht_satd(residual: &[i16], stride: usize, tx_size: usize, bd: u8) -> i32 {
-    use aom_dist::hadamard::{
+    use aom_dsp::dist::hadamard::{
         hadamard_4x4, hadamard_8x8, hadamard_16x16, hadamard_32x32, highbd_hadamard_8x8,
         highbd_hadamard_16x16, highbd_hadamard_32x32, satd,
     };
@@ -2790,7 +2790,7 @@ mod satd_skip_tests {
     /// The full `skip_trellis_opt_based_on_satd` decision matches a REAL-C
     /// reference across tx sizes, residual magnitudes, and thresholds straddling
     /// the boundary. The satd anchor is `c::ref_satd` (= the exported
-    /// `aom_satd_c`); the test also asserts the port's `aom_dist::hadamard::satd`
+    /// `aom_satd_c`); the test also asserts the port's `aom_dsp::dist::hadamard::satd`
     /// equals it on the same coeffs, so the decision is validated end-to-end
     /// against real C (satd leaf) + the transcribed tx_search.c:1993-2000 scale
     /// / compare arithmetic.
@@ -2815,10 +2815,10 @@ mod satd_skip_tests {
                 }
                 // Real-C reference satd over the forward transform (DCT_DCT).
                 let mut coeff = vec![0i32; full];
-                aom_transform::txfm2d::av1_fwd_txfm2d(&residual, &mut coeff, TXS_W[ts], 0, ts);
+                aom_dsp::transform::txfm2d::av1_fwd_txfm2d(&residual, &mut coeff, TXS_W[ts], 0, ts);
                 let n = av1_get_max_eob(ts);
                 assert_eq!(
-                    aom_dist::hadamard::satd(&coeff[..n]),
+                    aom_dsp::dist::hadamard::satd(&coeff[..n]),
                     c::ref_satd(&coeff[..n]),
                     "port satd != aom_satd_c (ts={ts} mag={mag})"
                 );

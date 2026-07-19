@@ -25,12 +25,12 @@
 //! arm `assemble_frame_obu_payload_single_tile` implements; a future multi-
 //! tile case must extend that function first, not this test.
 
-use aom_entropy::header::{
+use aom_dsp::entropy::header::{
     CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
     RestorationHeader, TileInfoHeader, read_sequence_header_obu, read_uncompressed_header,
 };
-use aom_entropy::obu::read_obu_header;
-use aom_entropy::rb::ReadBitBuffer;
+use aom_dsp::entropy::obu::read_obu_header;
+use aom_dsp::entropy::rb::ReadBitBuffer;
 use aom_sys_ref as c;
 
 const OBU_SEQUENCE_HEADER: u32 = 1;
@@ -52,7 +52,7 @@ fn walk_obus(bytes: &[u8]) -> Vec<(u32, &[u8])> {
             "shim_encode_av1_kf always sets has_size_field"
         );
         let (size, size_bytes) =
-            aom_entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
+            aom_dsp::entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
         let payload_start = after_header + size_bytes;
         let payload_end = payload_start + size as usize;
         out.push((hdr.obu_type, &bytes[payload_start..payload_end]));

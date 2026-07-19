@@ -32,15 +32,15 @@ use aom_encode::mode_costs::{CflCosts, IntraModeCosts, TxSizeCosts, fill_cfl_cos
 use aom_encode::pack::{PackCfg, pack_tile};
 use aom_encode::partition_pick::PickFrameCfg;
 use aom_encode::tx_search::TxTypeSearchPolicy;
-use aom_entropy::dec::OdEcDec;
-use aom_entropy::enc::OdEcEnc;
-use aom_entropy::partition::{
+use aom_dsp::entropy::dec::OdEcDec;
+use aom_dsp::entropy::enc::OdEcEnc;
+use aom_dsp::entropy::partition::{
     KfBlockState, KfFrameContext, MiNbrKf, bsize_to_max_depth, bsize_to_tx_size_cat,
     get_partition_subsize, get_tx_size_context, read_mb_modes_kf_fc, read_partition,
     read_selected_tx_size, update_ext_partition_context,
 };
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
-use aom_txb::{TxTypeCosts, ext_tx_derive, read_coeffs_txb_full};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::txb::{TxTypeCosts, ext_tx_derive, read_coeffs_txb_full};
 
 mod common;
 use common::{Rng, TX_H, TX_W, coeff_cost_set_from_tables, tbl};
@@ -141,7 +141,7 @@ fn read_sb(
     let has_cols = mi_col + hbs < env.mi_cols;
 
     let p = if bsize >= 3 {
-        let ctx = aom_entropy::partition::partition_plane_context(
+        let ctx = aom_dsp::entropy::partition::partition_plane_context(
             above_pctx,
             left_pctx,
             mi_row as usize,
@@ -151,7 +151,7 @@ fn read_sb(
         read_partition(
             dec,
             &mut kf.partition[ctx],
-            aom_entropy::partition::partition_cdf_length(bsize),
+            aom_dsp::entropy::partition::partition_cdf_length(bsize),
             has_rows,
             has_cols,
             bsize,
@@ -265,7 +265,7 @@ fn read_leaf(
     let is_chroma_ref =
         aom_encode::intra_uv_rd::is_chroma_reference(mi_row, mi_col, bsize, env.ss_x, env.ss_y);
     let cfl_allowed =
-        aom_entropy::partition::is_cfl_allowed(bsize, env.lossless, env.ss_x, env.ss_y);
+        aom_dsp::entropy::partition::is_cfl_allowed(bsize, env.lossless, env.ss_x, env.ss_y);
 
     let above_nbr = nbr.above[mi_col as usize];
     let left_nbr = nbr.left[(mi_row & 31) as usize];
@@ -327,7 +327,7 @@ fn read_leaf(
         dec, kf, pack_cfg, env, &info, above_ectx, left_ectx, mi_row, mi_col, bsize, tx_size, 0,
     );
     if !env.monochrome && is_chroma_ref {
-        let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, env.ss_x, env.ss_y);
+        let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(bsize, env.ss_x, env.ss_y);
         let uv_tx =
             aom_encode::intra_uv_rd::av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
         let (au, lu) = ((mi_col >> env.ss_x), ((mi_row & 31) >> env.ss_y));
@@ -379,7 +379,7 @@ fn read_plane_coeffs(
     kf: &mut KfFrameContext,
     cfg: &PackCfg,
     env: &SbEncodeEnv,
-    info: &aom_entropy::partition::MbModeInfoKf,
+    info: &aom_dsp::entropy::partition::MbModeInfoKf,
     above_ectx: &mut [Vec<i8>; 3],
     left_ectx: &mut [[i8; 32]; 3],
     mi_row: i32,
@@ -400,7 +400,7 @@ fn read_plane_coeffs(
             let above = above_ectx[plane][a0 + blk_col..].to_vec();
             let left = left_ectx[plane][l0 + blk_row..].to_vec();
             let (txb_skip_ctx, dc_sign_ctx) =
-                aom_txb::get_txb_ctx(bsize, tx_size, plane, &above, &left);
+                aom_dsp::txb::get_txb_ctx(bsize, tx_size, plane, &above, &left);
             let d = ext_tx_derive(
                 tx_size,
                 false,
@@ -416,7 +416,7 @@ fn read_plane_coeffs(
                 2 => &mut kf.ext_tx_dtt4[d.square as usize][d.intra_dir as usize],
                 _ => &mut dummy[..],
             };
-            let mut tcoeff = vec![0i32; aom_txb::txb_wide(tx_size) * aom_txb::txb_high(tx_size)];
+            let mut tcoeff = vec![0i32; aom_dsp::txb::txb_wide(tx_size) * aom_dsp::txb::txb_high(tx_size)];
             let (eob, _tx_type) = read_coeffs_txb_full(
                 dec,
                 &mut kf.coeff,
@@ -432,7 +432,7 @@ fn read_plane_coeffs(
                 cfg.signal_gate,
                 0,
             );
-            let cul = aom_txb::txb_entropy_context(&tcoeff, tx_size, _tx_type, eob) as i8;
+            let cul = aom_dsp::txb::txb_entropy_context(&tcoeff, tx_size, _tx_type, eob) as i8;
             for x in above_ectx[plane][a0 + blk_col..a0 + blk_col + txw_u].iter_mut() {
                 *x = cul;
             }
@@ -451,7 +451,7 @@ fn read_plane_coeffs_uv(
     kf: &mut KfFrameContext,
     cfg: &PackCfg,
     env: &SbEncodeEnv,
-    info: &aom_entropy::partition::MbModeInfoKf,
+    info: &aom_dsp::entropy::partition::MbModeInfoKf,
     above_ectx: &mut [Vec<i8>; 3],
     left_ectx: &mut [[i8; 32]; 3],
     au: i32,
@@ -473,9 +473,9 @@ fn read_plane_coeffs_uv(
             let above = above_ectx[plane][a0 + blk_col..].to_vec();
             let left = left_ectx[plane][l0 + blk_row..].to_vec();
             let (txb_skip_ctx, dc_sign_ctx) =
-                aom_txb::get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
+                aom_dsp::txb::get_txb_ctx(plane_bsize, tx_size, plane, &above, &left);
             let mut dummy = [0u16; 8];
-            let mut tcoeff = vec![0i32; aom_txb::txb_wide(tx_size) * aom_txb::txb_high(tx_size)];
+            let mut tcoeff = vec![0i32; aom_dsp::txb::txb_wide(tx_size) * aom_dsp::txb::txb_high(tx_size)];
             let (eob, tx_type) = read_coeffs_txb_full(
                 dec,
                 &mut kf.coeff,
@@ -492,7 +492,7 @@ fn read_plane_coeffs_uv(
                 0, // tx_type_in unused for the plane_type==0 gate; chroma derives its own below
             );
             let _ = tx_type;
-            let cul = aom_txb::txb_entropy_context(&tcoeff, tx_size, tx_type, eob) as i8;
+            let cul = aom_dsp::txb::txb_entropy_context(&tcoeff, tx_size, tx_type, eob) as i8;
             for x in above_ectx[plane][a0 + blk_col..a0 + blk_col + txw_u].iter_mut() {
                 *x = cul;
             }
@@ -813,7 +813,7 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
         let mut dec = OdEcDec::new(&bytes);
         let mut kfs = aom_encode::pack::kf_block_state(&pack_cfg, &env, SB_MI);
         let mut above_pctx = vec![0i8; mi_cols as usize];
-        let mut above_tctx = vec![aom_entropy::partition::TXFM_CTX_INIT; mi_cols as usize];
+        let mut above_tctx = vec![aom_dsp::entropy::partition::TXFM_CTX_INIT; mi_cols as usize];
         let mut above_ectx: [Vec<i8>; 3] = [
             vec![0i8; mi_cols as usize],
             vec![0i8; mi_cols as usize],
@@ -824,7 +824,7 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
 
         for r in 0..n_sb {
             let mut left_pctx = [0i8; 32];
-            let mut left_tctx = [aom_entropy::partition::TXFM_CTX_INIT; 32];
+            let mut left_tctx = [aom_dsp::entropy::partition::TXFM_CTX_INIT; 32];
             let mut left_ectx = [[0i8; 32]; 3];
             nbr.zero_left();
             for c in 0..n_sb {
@@ -1034,7 +1034,7 @@ fn pack_tile_roundtrips_true_corner() {
 /// the encoder's own `mbmi->tx_type` still has to be right independently
 /// (real aomenc never gets this wrong because its tx-type search itself
 /// is lossless-gated). Meanwhile `read_coeffs_txb_full`, since nothing was
-/// signaled, defaults to DCT_DCT unconditionally (`aom_txb::read_tx_type`,
+/// signaled, defaults to DCT_DCT unconditionally (`aom_dsp::txb::read_tx_type`,
 /// matching `av1_read_tx_type`'s `*tx_type = DCT_DCT; ... if (qindex == 0)
 /// return;`). Whenever the search's real winner wasn't DCT_DCT, write and
 /// read disagreed on scan order for that txb -> garbage coefficients ->
@@ -1080,7 +1080,7 @@ fn pack_tile_roundtrips_qindex_zero() {
 /// costs, the intra tx-type costs (`ext_tx_1ddct`/`ext_tx_dtt4` repacked),
 /// AND NOW the coefficient-coding costs: `real.coeff_costs_y`/
 /// `coeff_costs_uv` are the FULL per-`(txs_ctx, eob_multi_size)`
-/// `aom_txb::CoeffCostSet` (5 tx-size categories x 7 eob-position categories,
+/// `aom_dsp::txb::CoeffCostSet` (5 tx-size categories x 7 eob-position categories,
 /// both plane types) -- `SbEncodeEnv::coeff_costs_y`/`coeff_costs_uv` (and
 /// every downstream `TxfmYrdEnv`/`UvRdEnv`/`rd_pick_intra_mode_sb` field/
 /// parameter threading them) select the REAL per-tx_size table at each txb
@@ -1286,7 +1286,7 @@ fn pack_tile_roundtrips_with_real_costs() {
         let mut dec = OdEcDec::new(&bytes);
         let mut kfs = aom_encode::pack::kf_block_state(&pack_cfg, &env, SB_MI);
         let mut above_pctx = vec![0i8; mi_cols as usize];
-        let mut above_tctx = vec![aom_entropy::partition::TXFM_CTX_INIT; mi_cols as usize];
+        let mut above_tctx = vec![aom_dsp::entropy::partition::TXFM_CTX_INIT; mi_cols as usize];
         let mut above_ectx: [Vec<i8>; 3] = [
             vec![0i8; mi_cols as usize],
             vec![0i8; mi_cols as usize],
@@ -1297,7 +1297,7 @@ fn pack_tile_roundtrips_with_real_costs() {
 
         for r in 0..n_sb {
             let mut left_pctx = [0i8; 32];
-            let mut left_tctx = [aom_entropy::partition::TXFM_CTX_INIT; 32];
+            let mut left_tctx = [aom_dsp::entropy::partition::TXFM_CTX_INIT; 32];
             let mut left_ectx = [[0i8; 32]; 3];
             nbr.zero_left();
             for c in 0..n_sb {

@@ -6,8 +6,8 @@
 //! preserve.
 
 use aom_encode::{QuantKind, QuantParams, xform_quant};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
-use aom_transform::inv_txfm2d::av1_highbd_iwht4x4_add;
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::transform::inv_txfm2d::av1_highbd_iwht4x4_add;
 
 struct Rng(u64);
 impl Rng {
@@ -59,7 +59,7 @@ fn lossless_block_roundtrips_through_quant() {
             let res = xform_quant(&r, 0, 0, kind, qp, false);
             // DECODER-faithful reconstruction: the coder only writes coeffs at
             // scan positions [0, eob); the decoder zeroes the rest. Mirror that.
-            // libaom `default_scan_4x4` (DCT_DCT 4x4), matching aom_txb::scan(0,0).
+            // libaom `default_scan_4x4` (DCT_DCT 4x4), matching aom_dsp::txb::scan(0,0).
             const DEFAULT_SCAN_4X4: [usize; 16] =
                 [0, 4, 1, 2, 5, 8, 12, 9, 6, 3, 7, 10, 13, 14, 11, 15];
             let mut dq_dec = vec![0i32; 16];

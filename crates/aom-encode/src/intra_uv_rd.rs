@@ -51,10 +51,10 @@ use crate::tx_search::{
     MAX_TXSIZE_RECT_LOOKUP, RdStats, TxTypeSearchInputs, TxTypeSearchPolicy, TxbWinner,
     get_txb_visible_dimensions, max_block_units, search_tx_type_intra,
 };
-use aom_entropy::partition::{get_plane_block_size, get_uv_mode, intra_avail};
-use aom_intra::cfl::{CFL_BUF_LINE, CflCtx, cfl_predict_block};
-use aom_intra::predict_intra_high;
-use aom_txb::{CoeffCostTables, TxTypeCosts};
+use aom_dsp::entropy::partition::{get_plane_block_size, get_uv_mode, intra_avail};
+use aom_dsp::intra::cfl::{CFL_BUF_LINE, CflCtx, cfl_predict_block};
+use aom_dsp::intra::predict_intra_high;
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts};
 
 const TXS_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
@@ -303,8 +303,8 @@ pub struct UvRdEnv<'a> {
     // Quantizer + RD (per-plane rows; shared UV coefficient cost tables —
     // one (uv_txs_ctx, PLANE_TYPE_UV) set covers both planes at the single
     // UV tx size).
-    pub rows_u: &'a aom_quant::PlaneQuantRows<'a>,
-    pub rows_v: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows_u: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    pub rows_v: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     pub rdmult: i32,
     /// The REAL per-(txs_ctx, eob_multi_size) chroma cost table, PRE-SELECTED
     /// by the caller for this block's (single, uniform) UV `tx_size`
@@ -325,7 +325,7 @@ impl UvRdEnv<'_> {
     fn src(&self, plane: usize) -> &[u16] {
         if plane == 1 { self.src_u } else { self.src_v }
     }
-    fn rows(&self, plane: usize) -> &aom_quant::PlaneQuantRows<'_> {
+    fn rows(&self, plane: usize) -> &aom_dsp::quant::PlaneQuantRows<'_> {
         if plane == 1 { self.rows_u } else { self.rows_v }
     }
 }
@@ -578,7 +578,7 @@ pub fn txfm_rd_in_plane_uv_p(
     // the walk stamps t_above/t_left.
     let predict_skip_zero_blk_rate = if pol.predict_dc_level >= 1 {
         let (origin_skip_ctx, _) =
-            aom_txb::get_txb_ctx(plane_bsize, tx_size, plane, &t_above, &t_left);
+            aom_dsp::txb::get_txb_ctx(plane_bsize, tx_size, plane, &t_above, &t_left);
         env.coeff_costs.txb_skip[origin_skip_ctx as usize * 2 + 1]
     } else {
         0
@@ -651,7 +651,7 @@ pub fn txfm_rd_in_plane_uv_p(
             let src = env.src(plane);
             let src_txb_off = env.src_off[pi] + (blk_row * env.src_stride + blk_col) * 4;
             let mut residual = vec![0i16; txw * txh];
-            aom_dist::highbd_subtract_block(
+            aom_dsp::dist::highbd_subtract_block(
                 txh,
                 txw,
                 &mut residual,
@@ -717,7 +717,7 @@ pub fn txfm_rd_in_plane_uv_p(
             // recon_intra: reconstruct the winner over the prediction.
             if win.best_eob > 0 {
                 let mut tight = pred.clone();
-                aom_transform::inv_txfm2d::av1_inverse_transform_add(
+                aom_dsp::transform::inv_txfm2d::av1_inverse_transform_add(
                     &win.dqcoeff,
                     &mut tight,
                     txw,
@@ -1033,7 +1033,7 @@ pub fn intra_model_rd_uv(
             }
             let src_txb_off = env.src_off[pi] + (blk_row * env.src_stride + blk_col) * 4;
             let mut residual = vec![0i16; n];
-            aom_dist::highbd_subtract_block(
+            aom_dsp::dist::highbd_subtract_block(
                 txh,
                 txw,
                 &mut residual,
@@ -1045,8 +1045,8 @@ pub fn intra_model_rd_uv(
             );
             // av1_quick_txfm(use_hadamard=0): DCT_DCT forward transform.
             let mut coeff = vec![0i32; n];
-            aom_transform::txfm2d::av1_fwd_txfm2d(&residual, &mut coeff, txw, 0, tx_size);
-            satd_cost += i64::from(aom_dist::hadamard::satd(&coeff[..n]));
+            aom_dsp::transform::txfm2d::av1_fwd_txfm2d(&residual, &mut coeff, txw, 0, tx_size);
+            satd_cost += i64::from(aom_dsp::dist::hadamard::satd(&coeff[..n]));
             blk_col += txw_unit;
         }
         blk_row += txh_unit;
@@ -1360,7 +1360,7 @@ pub fn cfl_rd_pick_alpha(
 // ---------------------------------------------------------------------------
 
 use crate::mode_costs::{CflCosts, IntraModeCosts, intra_mode_info_cost_uv};
-use aom_entropy::partition::{is_directional_mode, use_angle_delta};
+use aom_dsp::entropy::partition::{is_directional_mode, use_angle_delta};
 
 /// `uv_rd_search_mode_order[UV_INTRA_MODES]` (intra_mode_search.c:44).
 pub const UV_RD_SEARCH_MODE_ORDER: [usize; 14] = [0, 13, 2, 1, 9, 12, 10, 11, 4, 7, 6, 8, 5, 3];

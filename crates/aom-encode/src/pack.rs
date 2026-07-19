@@ -73,20 +73,20 @@ fn round_pow2(value: usize, n: usize) -> usize {
         (value + (1 << (n - 1))) >> n
     }
 }
-use aom_entropy::enc::OdEcEnc;
-use aom_entropy::lr::{
+use aom_dsp::entropy::enc::OdEcEnc;
+use aom_dsp::entropy::lr::{
     LrFrameConfig, LrRefState, LrUnitInfo, RESTORE_NONE as LR_RESTORE_NONE, lr_corners_in_sb,
     write_lr_unit,
 };
-use aom_entropy::partition::{
+use aom_dsp::entropy::partition::{
     KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, PaletteNbrKf, allow_palette,
     bsize_to_max_depth, bsize_to_tx_size_cat, encode_color_map_tokens, get_partition_subsize,
     get_tx_size_context, is_cfl_allowed, partition_cdf_length, partition_plane_context,
     tx_size_to_depth, update_ext_partition_context, write_mb_modes_kf_fc, write_partition,
     write_selected_tx_size,
 };
-use aom_intra::cfl::CflCtx;
-use aom_txb::{ext_tx_derive, write_coeffs_txb_full};
+use aom_dsp::intra::cfl::CflCtx;
+use aom_dsp::txb::{ext_tx_derive, write_coeffs_txb_full};
 
 /// `PARTITION_NONE`/`HORZ`/`VERT`/`SPLIT` C values (matches
 /// [`crate::encode_sb`]'s private copies — duplicated here since they're not
@@ -1240,10 +1240,10 @@ pub fn pack_tile_lr(
     for r in 0..n_sb_rows {
         search_tile.left_ectx = [[0; 32]; 3];
         search_tile.left_pctx = [0; 32];
-        search_tile.left_tctx = [aom_entropy::partition::TXFM_CTX_INIT; 32];
+        search_tile.left_tctx = [aom_dsp::entropy::partition::TXFM_CTX_INIT; 32];
         pack_tile_ctx.left_ectx = [[0; 32]; 3];
         pack_tile_ctx.left_pctx = [0; 32];
-        pack_tile_ctx.left_tctx = [aom_entropy::partition::TXFM_CTX_INIT; 32];
+        pack_tile_ctx.left_tctx = [aom_dsp::entropy::partition::TXFM_CTX_INIT; 32];
         nbr.zero_left();
         for c in 0..n_sb_cols {
             let mi_row = mi_row0 + r * sb_mi;
@@ -1315,9 +1315,9 @@ pub fn pack_tile_lr(
                 // comment for the always-true gate on this envelope).
                 search_base_qindex = adjusted;
                 let rows = (
-                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 0),
-                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 1),
-                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 2),
+                    aom_dsp::quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 0),
+                    aom_dsp::quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 1),
+                    aom_dsp::quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 2),
                 );
                 (adjusted, Some(rows))
             } else {
@@ -1685,7 +1685,7 @@ pub fn pack_tile_from_trees(
     for r in 0..n_sb_rows {
         pack_tile_ctx.left_ectx = [[0; 32]; 3];
         pack_tile_ctx.left_pctx = [0; 32];
-        pack_tile_ctx.left_tctx = [aom_entropy::partition::TXFM_CTX_INIT; 32];
+        pack_tile_ctx.left_tctx = [aom_dsp::entropy::partition::TXFM_CTX_INIT; 32];
         nbr.zero_left();
         for c in 0..n_sb_cols {
             let mi_row = mi_row0 + r * sb_mi;
@@ -1711,9 +1711,9 @@ pub fn pack_tile_from_trees(
                 );
                 search_base_qindex = adjusted;
                 let rows = (
-                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 0),
-                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 1),
-                    aom_quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 2),
+                    aom_dsp::quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 0),
+                    aom_dsp::quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 1),
+                    aom_dsp::quant::set_q_index(dq.quants, dq.deq, adjusted as usize, 2),
                 );
                 (adjusted, Some(rows))
             } else {

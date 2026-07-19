@@ -13,7 +13,7 @@
 //! (The AB chunk extends this to VERT_A/VERT_B, where the vert-alike order
 //! table genuinely changes the result.)
 
-use aom_entropy::partition::intra_avail;
+use aom_dsp::entropy::partition::intra_avail;
 use aom_sys_ref as c;
 
 const MI_W: [i32; 22] = [

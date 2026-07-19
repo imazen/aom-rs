@@ -83,12 +83,12 @@ use crate::tx_search::{
 use crate::{
     BlockContext, OptimizeInputs, QuantKind, QuantParams, xform_quant, xform_quant_optimize,
 };
-use aom_dist::highbd_subtract_block;
-use aom_entropy::partition::{get_plane_block_size, intra_avail};
-use aom_intra::cfl::{CflCtx, cfl_store_tx};
-use aom_intra::predict_intra_high;
-use aom_transform::inv_txfm2d::av1_inverse_transform_add;
-use aom_txb::{CoeffCostTables, get_txb_ctx};
+use aom_dsp::dist::highbd_subtract_block;
+use aom_dsp::entropy::partition::{get_plane_block_size, intra_avail};
+use aom_dsp::intra::cfl::{CflCtx, cfl_store_tx};
+use aom_dsp::intra::predict_intra_high;
+use aom_dsp::transform::inv_txfm2d::av1_inverse_transform_add;
+use aom_dsp::txb::{CoeffCostTables, get_txb_ctx};
 
 /// `TRELLIS_OPT_TYPE` (encodemb.h:43-48). C-valued discriminants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,7 +169,7 @@ pub fn update_txk_array(
 /// The MACROBLOCK(D) state `av1_encode_intra_block_plane` reads for the LUMA
 /// plane, as plain data (the [`crate::tx_search::TxfmYrdEnv`] convention).
 pub struct EncodeIntraYEnv<'a> {
-    // intra_avail frame geometry (aom_entropy::partition::intra_avail).
+    // intra_avail frame geometry (aom_dsp::entropy::partition::intra_avail).
     pub sb_size: usize,
     /// `mbmi->bsize` (luma block size; also the plane_bsize for plane 0).
     pub bsize: usize,
@@ -208,7 +208,7 @@ pub struct EncodeIntraYEnv<'a> {
     pub reduced_tx_set_used: bool,
     pub bd: u8,
     // Quantizer + trellis.
-    pub rows: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     /// `x->rdmult` (the trellis rdmult derives via [`trellis_rdmult_intra_y`]).
     pub rdmult: i32,
     /// `cpi->oxcf.algo_cfg.sharpness` (0 default).
@@ -256,7 +256,7 @@ pub struct TxbEncode {
     /// `get_txb_ctx`'s `(txb_skip_ctx, dc_sign_ctx)` derived for this txb from
     /// the *pre*-write neighbour contexts (the same pair the trellis used to
     /// select its rate tables, exposed here for the pack-stage coefficient
-    /// writer — `av1_write_coeffs_txb`/[`write_coeffs_txb_full`](aom_txb::write_coeffs_txb_full)
+    /// writer — `av1_write_coeffs_txb`/[`write_coeffs_txb_full`](aom_dsp::txb::write_coeffs_txb_full)
     /// need the identical values the RD search already computed). `0` on the
     /// `skip_txfm` arm (dead in the KEY intra envelope).
     pub txb_skip_ctx: usize,

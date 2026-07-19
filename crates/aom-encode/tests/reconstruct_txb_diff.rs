@@ -8,7 +8,7 @@
 
 use aom_encode::{QuantKind, QuantParams, reconstruct_txb, xform_quant};
 use aom_sys_ref as c;
-use aom_transform::inv_txfm2d::inv_txfm_valid;
+use aom_dsp::transform::inv_txfm2d::inv_txfm_valid;
 
 /// Full (un-repacked) transform dims — the residual/prediction buffer size.
 const TX_W: [usize; 19] = [

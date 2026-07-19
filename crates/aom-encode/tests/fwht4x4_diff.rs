@@ -15,7 +15,7 @@
 //!     16-point transform (`eob > 1`).
 
 use aom_sys_ref as c;
-use aom_transform::inv_txfm2d::{av1_fwht4x4, av1_highbd_iwht4x4_add};
+use aom_dsp::transform::inv_txfm2d::{av1_fwht4x4, av1_highbd_iwht4x4_add};
 
 struct Rng(u64);
 impl Rng {

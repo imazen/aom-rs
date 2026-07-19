@@ -1,4 +1,4 @@
-//! Byte-match [`aom_entropy::header::write_frame_header_obu`] against the
+//! Byte-match [`aom_dsp::entropy::header::write_frame_header_obu`] against the
 //! REAL frame-header bits produced by `shim_encode_av1_kf` (real aomenc, the
 //! same oracle [`seq_header_matches_real_encoder`] validates the
 //! sequence-header OBU against) -- the next slice of the encoder gate's
@@ -35,14 +35,14 @@
 //! follows in the same payload, tile-group header or the next OBU, owns the
 //! remaining bits of the last partial byte).
 
-use aom_entropy::header::{
+use aom_dsp::entropy::header::{
     CdefHeader, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader, LoopfilterHeader,
     RestorationHeader, TileInfoHeader, read_sequence_header_obu, read_uncompressed_header,
     write_frame_header_obu, write_sequence_header_obu,
 };
-use aom_entropy::obu::read_obu_header;
-use aom_entropy::rb::ReadBitBuffer;
-use aom_entropy::wb::WriteBitBuffer;
+use aom_dsp::entropy::obu::read_obu_header;
+use aom_dsp::entropy::rb::ReadBitBuffer;
+use aom_dsp::entropy::wb::WriteBitBuffer;
 use aom_sys_ref as c;
 
 const OBU_SEQUENCE_HEADER: u32 = 1;
@@ -64,7 +64,7 @@ fn walk_obus(bytes: &[u8]) -> Vec<(u32, &[u8])> {
             "shim_encode_av1_kf always sets has_size_field"
         );
         let (size, size_bytes) =
-            aom_entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
+            aom_dsp::entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
         let payload_start = after_header + size_bytes;
         let payload_end = payload_start + size as usize;
         out.push((hdr.obu_type, &bytes[payload_start..payload_end]));

@@ -1,4 +1,4 @@
-//! Byte-match [`aom_entropy::header::write_sequence_header_obu`] against the
+//! Byte-match [`aom_dsp::entropy::header::write_sequence_header_obu`] against the
 //! REAL sequence-header OBU produced by `shim_encode_av1_kf` (the real
 //! `aom_codec_av1_cx` public API — the same path `aomenc` drives). This is a
 //! first slice of the encoder gate's step 3 ("byte-match the smallest frame
@@ -23,10 +23,10 @@
 //! bug in the writer (the parsed values are real aomenc's own choices, not
 //! a guess).
 
-use aom_entropy::header::{read_sequence_header_obu, write_sequence_header_obu};
-use aom_entropy::obu::read_obu_header;
-use aom_entropy::rb::ReadBitBuffer;
-use aom_entropy::wb::WriteBitBuffer;
+use aom_dsp::entropy::header::{read_sequence_header_obu, write_sequence_header_obu};
+use aom_dsp::entropy::obu::read_obu_header;
+use aom_dsp::entropy::rb::ReadBitBuffer;
+use aom_dsp::entropy::wb::WriteBitBuffer;
 use aom_sys_ref as c;
 
 const OBU_SEQUENCE_HEADER: u32 = 1;
@@ -44,7 +44,7 @@ fn walk_obus(bytes: &[u8]) -> Vec<(u32, &[u8])> {
             "shim_encode_av1_kf always sets has_size_field"
         );
         let (size, size_bytes) =
-            aom_entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
+            aom_dsp::entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
         let payload_start = after_header + size_bytes;
         let payload_end = payload_start + size as usize;
         out.push((hdr.obu_type, &bytes[payload_start..payload_end]));

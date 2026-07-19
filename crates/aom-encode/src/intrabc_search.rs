@@ -427,7 +427,7 @@ pub struct DvCosts {
 
 /// `av1_cost_tokens_from_cdf` on a padded row (delegates to aom-txb's port).
 fn cost_tokens(out: &mut [i32], cdf: &[u16]) {
-    aom_txb::cost_tokens_from_cdf(out, cdf, None);
+    aom_dsp::txb::cost_tokens_from_cdf(out, cdf, None);
 }
 
 /// `av1_build_nmv_component_cost_table` (encodemv.c:124) at
@@ -599,7 +599,7 @@ pub fn fill_nmv_costs(
 /// tables.
 #[inline]
 pub fn mv_cost(diff_row: i32, diff_col: i32, dv: &DvCosts) -> i32 {
-    let joint = aom_entropy::partition::get_mv_joint(diff_row, diff_col) as usize;
+    let joint = aom_dsp::entropy::partition::get_mv_joint(diff_row, diff_col) as usize;
     dv.joint_mv[joint]
         + dv.dv_costs[0][(MV_MAX + diff_row) as usize]
         + dv.dv_costs[1][(MV_MAX + diff_col) as usize]
@@ -965,7 +965,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use crate::encode_intra::TrellisOptType;
-use aom_entropy::dv_ref::{DvNbr, DvTileBounds, find_dv_ref_mvs, find_ref_dv, is_dv_valid};
+use aom_dsp::entropy::dv_ref::{DvNbr, DvTileBounds, find_dv_ref_mvs, find_ref_dv, is_dv_valid};
 
 /// `default_txfm_partition_cdf` (entropymode.c) — the var-tx split-flag CDF
 /// defaults (relocated from the decoder's TileKf per its own FORK NOTE; the
@@ -1000,7 +1000,7 @@ pub const DEFAULT_TXFM_PARTITION_CDF: [[u16; 3]; 21] = [
 pub fn fill_txfm_partition_costs(cdf: &[[u16; 3]; 21]) -> [[i32; 2]; 21] {
     let mut out = [[0i32; 2]; 21];
     for (o, row) in out.iter_mut().zip(cdf.iter()) {
-        aom_txb::cost_tokens_from_cdf(o, row, None);
+        aom_dsp::txb::cost_tokens_from_cdf(o, row, None);
     }
     out
 }
@@ -1575,7 +1575,7 @@ fn predict_skip_txfm(
     bd: i32,
     reduced_tx_set: bool,
 ) -> bool {
-    let dc_q = i64::from(aom_quant::av1_dc_quant_qtx(qindex, 0, bd as u8));
+    let dc_q = i64::from(aom_dsp::quant::av1_dc_quant_qtx(qindex, 0, bd as u8));
     let mse = sse / (bw as i64) / (bh as i64);
     let normalized_dc_q = dc_q >> 3;
     let mse_thresh = normalized_dc_q * normalized_dc_q / 8;
@@ -1588,7 +1588,7 @@ fn predict_skip_txfm(
     let tx_h = crate::tx_search::TXS_H[max_tx];
     let bd_idx = if bd == 8 { 0 } else if bd == 10 { 1 } else { 2 };
     let max_qcoef_thresh = u64::from(SKIP_PRED_THRESHOLD[bd_idx][bsize]);
-    let ac_q = i64::from(aom_quant::av1_ac_quant_qtx(qindex, 0, bd as u8));
+    let ac_q = i64::from(aom_dsp::quant::av1_ac_quant_qtx(qindex, 0, bd as u8));
     let dc_thresh = max_qcoef_thresh * dc_q as u64;
     let ac_thresh = max_qcoef_thresh * ac_q as u64;
     let n_coeff = tx_w * tx_h;
@@ -1605,7 +1605,7 @@ fn predict_skip_txfm(
                     sub[r * tx_w + c] = residual[(row + r) * bw + (col + c)];
                 }
             }
-            aom_transform::txfm2d::av1_fwd_txfm2d(&sub, &mut coeff, tx_w, 0, max_tx);
+            aom_dsp::transform::txfm2d::av1_fwd_txfm2d(&sub, &mut coeff, tx_w, 0, max_tx);
             let dc_coef = (coeff[0].unsigned_abs() as u64) << 7;
             if dc_coef >= dc_thresh {
                 return false;
@@ -1685,15 +1685,15 @@ pub struct IntrabcLeafArgs<'a> {
     pub skip_ctx: usize,
     pub txfm_partition_costs: &'a [[i32; 2]; 21],
     // Coeff-arm inputs (HANDOFF: DCT_DCT-only; C searches the inter tx set)
-    pub rows_y: &'a aom_quant::PlaneQuantRows<'a>,
-    pub rows_u: &'a aom_quant::PlaneQuantRows<'a>,
-    pub rows_v: &'a aom_quant::PlaneQuantRows<'a>,
-    pub coeff_costs_y: &'a aom_txb::CoeffCostSet,
-    pub coeff_costs_uv: &'a aom_txb::CoeffCostSet,
+    pub rows_y: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    pub rows_u: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    pub rows_v: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    pub coeff_costs_y: &'a aom_dsp::txb::CoeffCostSet,
+    pub coeff_costs_uv: &'a aom_dsp::txb::CoeffCostSet,
     /// Inter tx-type costs (TxTypeCosts.inter — HANDOFF: derive_real_costs
     /// currently fills inter with a DUMMY zero cdf; fill from
     /// `kf.inter_ext_tx` (flatten [4][4][17]) before enabling this search).
-    pub tx_type_costs: &'a aom_txb::TxTypeCosts,
+    pub tx_type_costs: &'a aom_dsp::txb::TxTypeCosts,
     pub sharpness: i32,
     pub enable_optimize_b: TrellisOptType,
     pub qm_levels: Option<[usize; 3]>,

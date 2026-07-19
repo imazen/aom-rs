@@ -6,7 +6,7 @@
 
 use aom_encode::dist_block_tx_domain;
 use aom_sys_ref as c;
-use aom_txb::{txb_high, txb_wide};
+use aom_dsp::txb::{txb_high, txb_wide};
 
 struct Rng(u64);
 impl Rng {

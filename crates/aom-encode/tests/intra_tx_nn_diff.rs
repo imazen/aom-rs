@@ -89,7 +89,7 @@ fn c_features(diff: &[i16; 64], source_variance: u32, qindex: i32) -> [f32; 14] 
     fi += 2;
     features[fi] = (source_variance as f32).ln_1p();
     fi += 1;
-    let dc_q = i32::from(aom_quant::av1_dc_quant_qtx(qindex, 0, 8));
+    let dc_q = i32::from(aom_dsp::quant::av1_dc_quant_qtx(qindex, 0, 8));
     features[fi] = ((dc_q * dc_q) as f32 / 256.0f32).ln_1p();
     fi += 1;
     assert_eq!(fi, 14);

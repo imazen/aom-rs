@@ -6,17 +6,17 @@
 //!   `av1_qm_init` `giqmatrix[q][c][t]` across all 16 levels x 3 planes x 19 tx
 //!   sizes (symmetric to `aom-quant`'s forward `qm_fwd_select_diff`).
 //! - `forward_qm_block_realistic_matches_c`: the realistic path — qindex ->
-//!   `aom_get_qmlevel_allintra` -> select forward (`aom_quant::qmatrix`) + inverse
+//!   `aom_get_qmlevel_allintra` -> select forward (`aom_dsp::quant::qmatrix`) + inverse
 //!   (`aom_decode::qm::iqmatrix`) -> `xform_quant` -> byte-match C's forward
 //!   transform + `av1_quantize_fp` (+_qm). Ties the qmlevel derivation, both
 //!   selectors, and the quantizer kernel together for a real block, and asserts
 //!   the forward/inverse selectors agree on the QM-vs-flat (tx_type) gating.
 
 use aom_encode::{QuantKind, QuantParams, xform_quant};
-use aom_quant::{aom_get_qmlevel_allintra, qmatrix};
+use aom_dsp::quant::{aom_get_qmlevel_allintra, qmatrix};
 use aom_sys_ref as c;
-use aom_transform::txfm2d::fwd_txfm_valid;
-use aom_txb::{scan, txb_high, txb_wide};
+use aom_dsp::transform::txfm2d::fwd_txfm_valid;
+use aom_dsp::txb::{scan, txb_high, txb_wide};
 
 const TX_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,

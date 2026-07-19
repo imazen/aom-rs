@@ -16,10 +16,10 @@ use aom_encode::intra_uv_rd::{
 };
 use aom_encode::mode_costs::{CflCosts, IntraModeCosts, fill_cfl_costs};
 use aom_encode::tx_search::TxTypeSearchPolicy;
-use aom_intra::cfl::{CflCtx, cfl_store_tx};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::intra::cfl::{CflCtx, cfl_store_tx};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, TxTypeCosts};
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts};
 
 mod common;
 use common::*;
@@ -96,7 +96,7 @@ fn rd_pick_intra_sbuv_mode_matches_c() {
             let bd: u8 = [8, 10, 12][iter % 3];
             let maxv = (1i64 << bd) - 1;
             let qindex = [16, 64, 128, 200, 255][(ci + iter) % 5] as usize;
-            let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+            let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
             let (pw, ph) = (BLK_W_L[plane_bsize], BLK_H_L[plane_bsize]);
             let ref_off = chroma_plane_offset(0, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
 

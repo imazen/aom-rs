@@ -11,7 +11,7 @@
 //! `av1/encoder/partition_strategy.c` via `aom_sys_ref::ref_intra_cnn_partition_decision`.
 
 use super::{cnn, nn, weights as w};
-use aom_quant::av1_dc_quant_qtx;
+use aom_dsp::quant::av1_dc_quant_qtx;
 
 /// The four prune effects `intra_mode_cnn_partition` applies to the partition
 /// search state. `none_disallowed` = `partition_none_allowed = 0` (only when

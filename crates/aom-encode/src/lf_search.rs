@@ -67,13 +67,13 @@
 //!   `TuneMetric::Psnr` — `rd.rs`).
 //!
 //! Trial deblocking reuses the ALREADY bit-exact
-//! [`aom_loopfilter::frame::loop_filter_frame`] verbatim (never
+//! [`aom_dsp::loopfilter::frame::loop_filter_frame`] verbatim (never
 //! reimplemented) — a fresh clone of the plane under test is filtered at
 //! each candidate level and compared against the source via [`sse_plane`].
 
 use crate::encode_sb::{LeafWinner, SbTree};
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
-use aom_loopfilter::frame::{
+use aom_dsp::loopfilter::frame::{
     LfFrameBuf, LfMi, LfMiGrid, LfParams, MAX_LOOP_FILTER, loop_filter_frame,
 };
 
@@ -138,7 +138,7 @@ pub struct LfSearchFrame<'a> {
     pub ss_y: usize,
     pub bd: i32,
     pub monochrome: bool,
-    /// The mi grid (luma mi units; `aom_loopfilter::frame` derives chroma
+    /// The mi grid (luma mi units; `aom_dsp::loopfilter::frame` derives chroma
     /// positions from `ss_x`/`ss_y` internally — one grid serves all 3
     /// planes).
     pub mi: &'a [LfMi],
@@ -493,7 +493,7 @@ pub fn pick_filter_level_from_q(
     allintra: bool,
     sharpness_cfg: i32,
 ) -> LoopFilterLevels {
-    let q = i32::from(aom_quant::av1_ac_quant_qtx(base_qindex, 0, bit_depth));
+    let q = i32::from(aom_dsp::quant::av1_ac_quant_qtx(base_qindex, 0, bit_depth));
     // ROUND_POWER_OF_TWO(value, n) = ((value) + ((1 << (n)) >> 1)) >> (n),
     // arithmetic shift (aom_dsp/aom_dsp_common.h) — i32 `>>` matches.
     let rpot = |value: i32, n: i32| (value + ((1 << n) >> 1)) >> n;
@@ -618,7 +618,7 @@ fn stamp_lf(
 }
 
 /// PARTITION_HORZ/VERT/HORZ_4/VERT_4/SPLIT constants matching
-/// `aom_entropy::partition::get_partition_subsize`'s expected values
+/// `aom_dsp::entropy::partition::get_partition_subsize`'s expected values
 /// (duplicated per-file, matching this crate's established convention —
 /// see e.g. `pack.rs`'s own copies).
 const PARTITION_HORZ: i32 = 1;
@@ -667,7 +667,7 @@ fn stamp_lf_tree(
             }
         }
         SbTree::Horz(subs) => {
-            let sub = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ) as usize;
+            let sub = aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(mi, stride, mi_row, mi_col, sub, &subs[0], mi_rows, mi_cols);
             if mi_row + hbs < mi_rows {
@@ -684,7 +684,7 @@ fn stamp_lf_tree(
             }
         }
         SbTree::Vert(subs) => {
-            let sub = aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT) as usize;
+            let sub = aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(mi, stride, mi_row, mi_col, sub, &subs[0], mi_rows, mi_cols);
             if mi_col + hbs < mi_cols {
@@ -702,7 +702,7 @@ fn stamp_lf_tree(
         }
         SbTree::Horz4(subs) => {
             let sub =
-                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_4) as usize;
+                aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_4) as usize;
             let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
             for (i, w) in subs.iter().enumerate() {
                 let this_mi_row = mi_row + (i as i32) * quarter_step;
@@ -714,7 +714,7 @@ fn stamp_lf_tree(
         }
         SbTree::Vert4(subs) => {
             let sub =
-                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_4) as usize;
+                aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_4) as usize;
             let quarter_step = (MI_SIZE_WIDE_B[bsize] / 4) as i32;
             for (i, w) in subs.iter().enumerate() {
                 let this_mi_col = mi_col + (i as i32) * quarter_step;
@@ -729,7 +729,7 @@ fn stamp_lf_tree(
             // HorzA) -- no frame-bound gating on any of the 3 sub-blocks.
             let bsize2 = crate::partition::split_subsize(bsize);
             let subsize =
-                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_A) as usize;
+                aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_A) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(
                 mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols,
@@ -758,7 +758,7 @@ fn stamp_lf_tree(
         SbTree::HorzB(subs) => {
             let bsize2 = crate::partition::split_subsize(bsize);
             let subsize =
-                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_B) as usize;
+                aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_B) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(
                 mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols,
@@ -787,7 +787,7 @@ fn stamp_lf_tree(
         SbTree::VertA(subs) => {
             let bsize2 = crate::partition::split_subsize(bsize);
             let subsize =
-                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_A) as usize;
+                aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_A) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(
                 mi, stride, mi_row, mi_col, bsize2, &subs[0], mi_rows, mi_cols,
@@ -816,7 +816,7 @@ fn stamp_lf_tree(
         SbTree::VertB(subs) => {
             let bsize2 = crate::partition::split_subsize(bsize);
             let subsize =
-                aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B) as usize;
+                aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B) as usize;
             let hbs = (MI_SIZE_WIDE_B[bsize] / 2) as i32;
             stamp_lf(
                 mi, stride, mi_row, mi_col, subsize, &subs[0], mi_rows, mi_cols,

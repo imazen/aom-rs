@@ -43,9 +43,9 @@
 //! `does_level_match` into `crates/aom-encode/src/seq_level.rs` + one
 //! `pub mod seq_level;` line is the trivial follow-up once that lands.
 
-use aom_entropy::header::read_sequence_header_obu;
-use aom_entropy::obu::read_obu_header;
-use aom_entropy::rb::ReadBitBuffer;
+use aom_dsp::entropy::header::read_sequence_header_obu;
+use aom_dsp::entropy::obu::read_obu_header;
+use aom_dsp::entropy::rb::ReadBitBuffer;
 use aom_sys_ref as c;
 
 const OBU_SEQUENCE_HEADER: u32 = 1;
@@ -57,7 +57,7 @@ fn walk_obus(bytes: &[u8]) -> Vec<(u32, &[u8])> {
         let hdr = read_obu_header(&bytes[pos..]).expect("valid OBU header");
         let after_header = pos + hdr.header_len;
         let (size, size_bytes) =
-            aom_entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
+            aom_dsp::entropy::leb128::uleb_decode(&bytes[after_header..]).expect("valid leb128 size");
         let payload_start = after_header + size_bytes;
         let payload_end = payload_start + size as usize;
         out.push((hdr.obu_type, &bytes[payload_start..payload_end]));

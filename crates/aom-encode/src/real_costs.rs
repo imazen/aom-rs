@@ -15,7 +15,7 @@
 //! `av1_fill_coeff_costs` in rd.c), which real AV1 keeps PER-(`txs_ctx`,
 //! `plane`) -- 5 tx-size categories x 2 plane types for the coeff tables,
 //! plus a SEPARATE 7-way `eob_multi_size` x 2 plane axis for the eob-position
-//! table (`aom_txb::CoeffCostSet`, `crate::encode_sb::SbEncodeEnv::
+//! table (`aom_dsp::txb::CoeffCostSet`, `crate::encode_sb::SbEncodeEnv::
 //! coeff_costs_y`/`coeff_costs_uv` and every `TxfmYrdEnv`/`UvRdEnv`/
 //! `rd_pick_intra_mode_sb` field/parameter that threads them are now
 //! `&CoeffCostSet`, selecting the real per-tx_size table at each txb via
@@ -36,8 +36,8 @@ use crate::mode_costs::{
     TxSizeCosts, fill_cfl_costs, fill_intra_mode_costs, fill_palette_costs, fill_partition_costs,
     fill_skip_costs, fill_tx_size_costs,
 };
-use aom_entropy::partition::KfFrameContext;
-use aom_txb::{CoeffCostSet, TxTypeCosts, fill_coeff_cost_set_from_arena, fill_tx_type_costs};
+use aom_dsp::entropy::partition::KfFrameContext;
+use aom_dsp::txb::{CoeffCostSet, TxTypeCosts, fill_coeff_cost_set_from_arena, fill_tx_type_costs};
 
 /// `EXT_TX_SETS_INTRA` / `EXT_TX_SIZES` / `INTRA_MODES` / `TX_TYPES` (aom-txb
 /// `ext_tx` module) restated here since they're not re-exported by name.
@@ -88,7 +88,7 @@ fn zero_cdf_row(n: usize) -> Vec<u16> {
 /// Repack `KfFrameContext::ext_tx_1ddct` (eset 1, 7-symbol, 8-wide) and
 /// `ext_tx_dtt4` (eset 2, 5-symbol, 6-wide) into the uniform-stride
 /// `[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][TX_TYPES+1]` flat layout
-/// `aom_txb::fill_tx_type_costs` expects. eset 0 (DCT-only, codes nothing)
+/// `aom_dsp::txb::fill_tx_type_costs` expects. eset 0 (DCT-only, codes nothing)
 /// is filled with the same zero-row filler -- `fill_tx_type_costs`'s `for s
 /// in 1..EXT_TX_SETS_INTRA` loop never reads set index 0. The narrower rows'
 /// own terminators (`ext_tx_*_cdf[..][N-1] == 0`) land within the first 8/6

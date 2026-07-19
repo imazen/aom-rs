@@ -16,7 +16,7 @@
 
 use aom_encode::grain_table::{write_film_grain_table, GrainTableEntry};
 use aom_encode::noise_model::{NoiseModel, NoiseModelParams, NoiseShape, NoiseStatus};
-use aom_entropy::header::FilmGrainParams;
+use aom_dsp::entropy::header::FilmGrainParams;
 use aom_sys_ref as c;
 
 struct Rng(u64);

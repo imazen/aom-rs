@@ -5,9 +5,9 @@
 //! pick the minimum-RD candidate from a caller-supplied list.
 //!
 //! Every step composes an individually C-validated piece:
-//! [`aom_intra::predict_intra_high`], [`aom_dist::highbd_subtract_block`],
-//! [`crate::xform_quant_optimize`], [`aom_txb::cost_coeffs_txb`],
-//! [`aom_txb::get_tx_type_cost`], [`crate::mode_costs::intra_mode_info_cost_y`],
+//! [`aom_dsp::intra::predict_intra_high`], [`aom_dsp::dist::highbd_subtract_block`],
+//! [`crate::xform_quant_optimize`], [`aom_dsp::txb::cost_coeffs_txb`],
+//! [`aom_dsp::txb::get_tx_type_cost`], [`crate::mode_costs::intra_mode_info_cost_y`],
 //! [`crate::dist_block_tx_domain`], [`crate::rd::rdcost`] — and the
 //! *composition* is differentially validated against the identical chain of C
 //! reference steps (`intra_rd_pick_diff.rs`).
@@ -30,10 +30,10 @@ use crate::{
     BlockContext, OptimizeInputs, QuantKind, QuantParams, dist_block_tx_domain, rd,
     xform_quant_optimize,
 };
-use aom_dist::highbd_subtract_block;
-use aom_entropy::partition::get_y_mode_ctx;
-use aom_intra::predict_intra_high;
-use aom_txb::{CoeffCostTables, TxTypeCosts, cost_coeffs_txb, get_tx_type_cost};
+use aom_dsp::dist::highbd_subtract_block;
+use aom_dsp::entropy::partition::get_y_mode_ctx;
+use aom_dsp::intra::predict_intra_high;
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts, cost_coeffs_txb, get_tx_type_cost};
 
 /// `ANGLE_STEP` (enums.h): degrees per signaled angle-delta step.
 pub const ANGLE_STEP: i32 = 3;
@@ -391,7 +391,7 @@ impl IntraSbyGates {
     /// odd-delta RD prune (dynamic; see
     /// [`prune_luma_odd_delta_angles_using_rd_cost`]).
     pub fn visits(&self, mode: usize, luma_delta_angle: i32, bsize: usize) -> bool {
-        use aom_entropy::partition::{is_directional_mode, use_angle_delta};
+        use aom_dsp::entropy::partition::{is_directional_mode, use_angle_delta};
         let is_directional = is_directional_mode(mode as i32);
         if is_diagonal_mode(mode) && !self.enable_diagonal_intra {
             return false;
@@ -453,7 +453,7 @@ pub fn prune_luma_odd_delta_angles_using_rd_cost(
     prune_luma_odd_delta_angles_in_intra: bool,
 ) -> bool {
     if !prune_luma_odd_delta_angles_in_intra
-        || !aom_entropy::partition::is_directional_mode(mode as i32)
+        || !aom_dsp::entropy::partition::is_directional_mode(mode as i32)
         || (luma_delta_angle.abs() & 1) == 0
         || best_rd == i64::MAX
     {
@@ -601,7 +601,7 @@ impl Block4x4VarInfo {
 pub(crate) fn calc_normalized_variance_4x4(buf: &[u16], off: usize, stride: usize, bd: u8) -> i32 {
     if bd > 8 {
         const ZEROS16: [u16; 4] = [0; 4];
-        aom_dist::highbd_variance(&buf[off..], stride, &ZEROS16, 0, 4, 4, bd).0 as i32
+        aom_dsp::dist::highbd_variance(&buf[off..], stride, &ZEROS16, 0, 4, 4, bd).0 as i32
     } else {
         // The production 8-bit encoder reads u8 planes; the strided window
         // holds the same 16 values, so a tight copy is kernel-identical.
@@ -613,7 +613,7 @@ pub(crate) fn calc_normalized_variance_4x4(buf: &[u16], off: usize, stride: usiz
             }
         }
         const ZEROS8: [u8; 4] = [0; 4];
-        aom_dist::variance(&w8, 4, &ZEROS8, 0, 4, 4).0 as i32
+        aom_dsp::dist::variance(&w8, 4, &ZEROS8, 0, 4, 4).0 as i32
     }
 }
 
@@ -837,8 +837,8 @@ pub struct PaletteModeCfg<'a> {
     pub costs: &'a crate::mode_costs::PaletteCosts,
     /// Above/left neighbour palette state (`xd->above_mbmi`/`left_mbmi`
     /// palette projection) for `av1_get_palette_cache`.
-    pub above: Option<aom_entropy::partition::PaletteNbrKf>,
-    pub left: Option<aom_entropy::partition::PaletteNbrKf>,
+    pub above: Option<aom_dsp::entropy::partition::PaletteNbrKf>,
+    pub left: Option<aom_dsp::entropy::partition::PaletteNbrKf>,
     /// sf `intra_sf.prune_palette_search_level` (allintra: 0/1/2 at speeds
     /// 0/1+/3+).
     pub prune_palette_search_level: i32,

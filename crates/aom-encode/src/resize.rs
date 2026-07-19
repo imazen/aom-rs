@@ -1034,7 +1034,7 @@ pub(crate) static FILTER_1000: [[i16; 8]; 64] = [
 
 // ============================================================================
 // Optimized 8-bit source scaler — `av1_resize_and_extend_frame`
-// (`av1/common/resize.c`) + `aom_scaled_2d` (`aom_dsp/aom_convolve.c`).
+// (`av1/common/resize.c`) + `aom_scaled_2d` (`aom_dsp/aom_dsp::convolve.c`).
 //
 // libaom routes the ENCODER source downscale through this optimized separable
 // 8-tap convolution scaler (instead of the non-normative `resize_plane`) when
@@ -1077,7 +1077,7 @@ const SUBPEL_FILTERS_8SMOOTH: [[i16; SUBPEL_TAPS]; 16] = [
     [0,  0,  2,  34, 62, 28,  2, 0],
 ];
 
-/// `convolve_horiz` (`aom_dsp/aom_convolve.c`): horizontal 8-tap sub-pel filter
+/// `convolve_horiz` (`aom_dsp/aom_dsp::convolve.c`): horizontal 8-tap sub-pel filter
 /// from `src` (at `src0`, into a bordered buffer) to a tight `dst` of width
 /// `dst_stride`. Mirrors C's internal `src -= SUBPEL_TAPS/2 - 1` centering.
 #[allow(clippy::too_many_arguments)]
@@ -1110,7 +1110,7 @@ fn convolve_horiz_8(
     }
 }
 
-/// `convolve_vert` (`aom_dsp/aom_convolve.c`): vertical 8-tap sub-pel filter from
+/// `convolve_vert` (`aom_dsp/aom_dsp::convolve.c`): vertical 8-tap sub-pel filter from
 /// the intermediate buffer `src` (at `src0`) to `dst` (at `dst0`).
 #[allow(clippy::too_many_arguments)]
 fn convolve_vert_8(
@@ -1142,7 +1142,7 @@ fn convolve_vert_8(
     }
 }
 
-/// `aom_scaled_2d_c` (`aom_dsp/aom_convolve.c`): separable 2-D sub-pel scale of a
+/// `aom_scaled_2d_c` (`aom_dsp/aom_dsp::convolve.c`): separable 2-D sub-pel scale of a
 /// `w x h` (≤ 64) block — horizontal into a fixed 64-wide intermediate, then
 /// vertical into `dst`.
 #[allow(clippy::too_many_arguments)]

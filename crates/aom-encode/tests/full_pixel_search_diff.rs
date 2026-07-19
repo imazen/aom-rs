@@ -18,7 +18,7 @@
 //! search path as well.
 
 use aom_encode::intrabc_search::{fill_nmv_costs, full_pixel_search_inter, FullMvLimits, MV_SUBPEL_HIGH};
-use aom_entropy::default_cdfs::{DEFAULT_NMV_COMPS, DEFAULT_NMV_JOINTS};
+use aom_dsp::entropy::default_cdfs::{DEFAULT_NMV_COMPS, DEFAULT_NMV_JOINTS};
 use aom_sys_ref::ref_full_pixel_search;
 
 struct Rng(u64);

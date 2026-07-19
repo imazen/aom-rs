@@ -87,8 +87,8 @@ use crate::intra_uv_rd::{
 use crate::mode_costs::IntraModeCosts;
 use crate::rd::rdcost;
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TxfmYrdEnv};
-use aom_intra::cfl::CflCtx;
-use aom_txb::CoeffCostSet;
+use aom_dsp::intra::cfl::CflCtx;
+use aom_dsp::txb::CoeffCostSet;
 
 /// The chroma-side arguments of [`rd_pick_intra_mode_sb`] (present when
 /// `num_planes > 1`; `None` models monochrome, where the C never enters the
@@ -105,7 +105,7 @@ pub struct RdPickUvArgs<'a, 'b> {
     pub cfl: &'b mut CflCtx,
     /// `xd->is_chroma_ref`.
     pub is_chroma_ref: bool,
-    /// `is_cfl_allowed(xd)` (aom_entropy::partition::is_cfl_allowed).
+    /// `is_cfl_allowed(xd)` (aom_dsp::entropy::partition::is_cfl_allowed).
     pub cfl_allowed: bool,
     /// `mode_costs.intra_uv_mode_cost` — BOTH cfl rows (`[2][13][14]`); the
     /// composition selects `[cfl_allowed]` (intra_mode_search.c:915).

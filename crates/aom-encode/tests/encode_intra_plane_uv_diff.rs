@@ -29,10 +29,10 @@ use aom_encode::encode_intra::{
 use aom_encode::intra_uv_rd::{
     UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
-use aom_intra::cfl::{CflCtx, cfl_store_tx};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::intra::cfl::{CflCtx, cfl_store_tx};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, TxTypeCosts};
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts};
 
 mod common;
 use common::*;
@@ -97,7 +97,7 @@ fn encode_intra_block_plane_uv_matches_c_walk() {
         assert!(is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y));
         let (bw, bh) = (BLK_W_L[bsize], BLK_H_L[bsize]);
         let cfl_allowed = bw <= 32 && bh <= 32;
-        let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+        let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
         let (pw, ph) = (BLK_W_L[plane_bsize], BLK_H_L[plane_bsize]);
         let tx_size = av1_get_tx_size_uv(bsize, false, ss_x, ss_y);
         let n_txbs = (pw / TX_W[tx_size]) * (ph / TX_H[tx_size]);

@@ -12,8 +12,8 @@
 //! matching the rest of the codebase; the arithmetic is byte-identical to
 //! libaom's `u8` kernels since every value fits in a byte.
 
-use aom_convolve::SUB_PEL_FILTERS_8;
-use aom_entropy::partition::get_mv_joint;
+use aom_dsp::convolve::SUB_PEL_FILTERS_8;
+use aom_dsp::entropy::partition::get_mv_joint;
 
 const FILTER_BITS: i32 = 7;
 const SUBPEL_TAPS: usize = 8;
@@ -316,7 +316,7 @@ impl<'a> Search<'a> {
         );
         let pred8: Vec<u8> = pred.iter().map(|&v| v as u8).collect();
         // vfp->vf(pred, pred_stride=w, src, src_stride, &sse) -> (variance, sse).
-        aom_dist::variance(&pred8, self.p.w, &self.src8, self.p.w, self.p.w, self.p.h)
+        aom_dsp::dist::variance(&pred8, self.p.w, &self.src8, self.p.w, self.p.w, self.p.h)
     }
 
     fn in_range(&self, mv: (i32, i32)) -> bool {
@@ -476,7 +476,7 @@ pub fn get_mvpred_sse(
         }
     }
     // vfp->vf(src->buf, src->stride, pre_at, pre->stride, &sse) -> (var, sse).
-    let (_var, sse) = aom_dist::variance(&src8, w, &pre8, w, w, h);
+    let (_var, sse) = aom_dsp::dist::variance(&src8, w, &pre8, w, w, h);
     // get_mv_from_fullmv(best_mv) = best_mv * 8 (full-pel -> 1/8-pel).
     let mv = (best_full_mv.0 * 8, best_full_mv.1 * 8);
     let cost = mv_err_cost_entropy(mv, ref_mv, mvjcost, mvcost0, mvcost1, error_per_bit);

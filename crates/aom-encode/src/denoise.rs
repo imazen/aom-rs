@@ -16,7 +16,7 @@
 
 use crate::noise_fft::{noise_psd_get_default_value, NoiseTx};
 use crate::noise_model::{FlatBlockFinder, NoiseModel, NoiseModelParams, NoiseShape, NoiseStatus};
-use aom_entropy::header::FilmGrainParams;
+use aom_dsp::entropy::header::FilmGrainParams;
 use core::f64::consts::PI;
 
 /// `pointwise_multiply(a, b)` — `b[i] *= a[i]`.

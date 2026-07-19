@@ -11,9 +11,9 @@
 use aom_encode::{
     BlockContexts, OptimizeInputs, QuantKind, QuantParams, TxTypeContext, encode_coding_block_plane,
 };
-use aom_entropy::enc::OdEcEnc;
+use aom_dsp::entropy::enc::OdEcEnc;
 use aom_sys_ref as c;
-use aom_txb::{CDF_ARENA_LEN, CoeffCostTables, ext_tx_derive, scan, write_coeffs_txb_full};
+use aom_dsp::txb::{CDF_ARENA_LEN, CoeffCostTables, ext_tx_derive, scan, write_coeffs_txb_full};
 
 const BLK_W: [usize; 22] = [
     4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
@@ -126,7 +126,7 @@ fn encode_coding_block_plane_identical() {
         let (txw, txh) = (TXU_W[tx_size], TXU_H[tx_size]);
         let n_txb = (uw / txw) * (uh / txh);
         let full = TX_W[tx_size] * TX_H[tx_size];
-        let n_coeffs = aom_txb::txb_wide(tx_size) * aom_txb::txb_high(tx_size);
+        let n_coeffs = aom_dsp::txb::txb_wide(tx_size) * aom_dsp::txb::txb_high(tx_size);
         let ls = log_scale(tx_size);
         let tx_type = 0usize; // DCT_DCT: valid + in-set (tx_type write exercised)
         let sc = scan(tx_size, tx_type);

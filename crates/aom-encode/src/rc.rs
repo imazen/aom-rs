@@ -9,7 +9,7 @@
 //! `tests/qindex_from_cq_diff.rs`).
 //!
 //! This is deliberately isolated from the quantizer *kernels*
-//! (`aom_quant::{av1_build_quantizer, set_q_index, av1_quantize_*}`): those turn
+//! (`aom_dsp::quant::{av1_build_quantizer, set_q_index, av1_quantize_*}`): those turn
 //! a qindex into dequant tables, whereas this turns a cq level into a qindex.
 //! No kernel state is read or modified here.
 

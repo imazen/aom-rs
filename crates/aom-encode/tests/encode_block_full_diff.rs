@@ -7,10 +7,10 @@
 use aom_encode::{
     BlockContext, OptimizeInputs, QuantKind, QuantParams, TxTypeContext, encode_block_coeffs_full,
 };
-use aom_entropy::enc::OdEcEnc;
+use aom_dsp::entropy::enc::OdEcEnc;
 use aom_sys_ref as c;
-use aom_transform::txfm2d::fwd_txfm_valid;
-use aom_txb::{CDF_ARENA_LEN, CoeffCostTables, ext_tx_derive, scan, txb_high, txb_wide};
+use aom_dsp::transform::txfm2d::fwd_txfm_valid;
+use aom_dsp::txb::{CDF_ARENA_LEN, CoeffCostTables, ext_tx_derive, scan, txb_high, txb_wide};
 
 const TX_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,

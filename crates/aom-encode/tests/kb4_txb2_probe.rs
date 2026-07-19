@@ -16,10 +16,10 @@ use aom_encode::real_costs::derive_real_costs;
 use aom_encode::tx_search::{
     TxTypeSearchInputs, TxTypeSearchPolicy, search_tx_type_intra, trellis_rdmult_intra_y,
 };
-use aom_entropy::partition::KfFrameContext;
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::entropy::partition::KfFrameContext;
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{iscan, scan};
+use aom_dsp::txb::{iscan, scan};
 
 // ---- Captured txb2 inputs (from KB4_CAP instrumentation) ----
 const RESIDUAL: [i16; 16] = [1, -2, -5, -4, -2, -5, -4, -5, -5, -4, -5, -3, -4, -5, -3, 2];

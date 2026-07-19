@@ -25,7 +25,7 @@ use crate::{
     BlockContext, OptimizeInputs, QuantKind, QuantParams, XformQuantOptResult, dist_block_tx_domain_qm,
     dist_qmatrix, xform_quant, xform_quant_optimize,
 };
-use aom_txb::{
+use aom_dsp::txb::{
     CoeffCostTables, TxTypeCosts, cost_coeffs_txb, ext_tx_set_type, get_tx_type_cost, get_txb_ctx,
     scan,
 };
@@ -132,7 +132,7 @@ pub struct InterLeafInputs<'a> {
     pub enable_flip_idtx: bool,
     pub use_inter_dct_only: bool,
     pub bd: u8,
-    pub rows: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     /// Neighbour entropy contexts (`get_txb_ctx` inputs).
     pub bctx: &'a BlockContext<'a>,
     pub rdmult: i32,
@@ -427,8 +427,8 @@ pub fn search_tx_type_inter(
 
 use crate::tx_search::get_mean_dev_features;
 use crate::tx_split_nn_weights::TX_SPLIT_NN;
-use aom_entropy::partition::{txfm_partition_context, txfm_partition_update};
-use aom_txb::CoeffCostSet;
+use aom_dsp::entropy::partition::{txfm_partition_context, txfm_partition_update};
+use aom_dsp::txb::CoeffCostSet;
 
 /// `ml_predict_tx_split` (tx_search.c:1755) — the split-prediction NN. Returns
 /// `clamp((int)(score * 10000), -80000, 80000)`, or `-1` when no NN exists for
@@ -491,7 +491,7 @@ const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] =
 const MAX_VARTX_DEPTH: i32 = 2;
 
 /// `av1_get_txb_size_index` (blockd.h) — the `mbmi->inter_tx_size[]` index for
-/// a txb at (blk_row, blk_col). Copy of the private `aom_entropy` helper.
+/// a txb at (blk_row, blk_col). Copy of the private `aom_dsp::entropy` helper.
 fn get_txb_size_index(bsize: usize, blk_row: usize, blk_col: usize) -> usize {
     const TW_W_LOG2: [usize; 22] = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 0, 1, 1, 2, 2, 3];
     const TW_H_LOG2: [usize; 22] = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 1, 0, 2, 1, 3, 2];
@@ -574,7 +574,7 @@ pub struct VarTxEnv<'a> {
     pub enable_flip_idtx: bool,
     pub use_inter_dct_only: bool,
     pub bd: u8,
-    pub rows: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     pub rdmult: i32,
     pub coeff_costs: &'a CoeffCostSet,
     pub tx_type_costs: &'a TxTypeCosts,

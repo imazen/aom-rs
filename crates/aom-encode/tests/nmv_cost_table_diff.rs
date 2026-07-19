@@ -16,7 +16,7 @@
 use aom_encode::intrabc_search::{
     fill_dv_costs, fill_nmv_costs, MV_MAX, MV_SUBPEL_HIGH, MV_SUBPEL_LOW, MV_SUBPEL_NONE,
 };
-use aom_entropy::default_cdfs::{DEFAULT_NMV_COMPS, DEFAULT_NMV_JOINTS};
+use aom_dsp::entropy::default_cdfs::{DEFAULT_NMV_COMPS, DEFAULT_NMV_JOINTS};
 use aom_sys_ref::ref_build_nmv_cost_table;
 
 const MV_VALS: usize = (MV_MAX as usize) * 2 + 1;

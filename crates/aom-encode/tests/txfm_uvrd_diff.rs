@@ -18,10 +18,10 @@ use aom_encode::intra_uv_rd::{
     is_chroma_reference, txfm_rd_in_plane_uv, txfm_uvrd,
 };
 use aom_encode::tx_search::TxTypeSearchPolicy;
-use aom_intra::cfl::{CflCtx, cfl_store_tx};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::intra::cfl::{CflCtx, cfl_store_tx};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs};
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;
@@ -116,7 +116,7 @@ fn build_scenario(
         _ => 96,
     };
     let qindex = [16, 64, 128, 200, 255][iter % 5] as usize;
-    let plane_bsize = aom_entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
+    let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(bsize, ss_x, ss_y);
     let (pw, ph) = (BLK_W[plane_bsize], BLK_H[plane_bsize]);
     let ref_off_u = chroma_plane_offset(0, STRIDE, mi_row, mi_col, bsize, ss_x, ss_y);
     let recon_u0: Vec<u16> = (0..STRIDE * 128)
@@ -247,7 +247,7 @@ fn txfm_uvrd_matches_c_walk() {
 
             // Candidate: non-CfL UV mode (+ angle for directional).
             let uv_mode = (rng.next() % 13) as usize;
-            let im = aom_entropy::partition::get_uv_mode(uv_mode);
+            let im = aom_dsp::entropy::partition::get_uv_mode(uv_mode);
             let angle_delta_uv = if (1..=8).contains(&im) {
                 rng.range(-3, 4)
             } else {
@@ -478,7 +478,7 @@ fn txfm_uvrd_matches_c_walk_lossless_q0() {
             let dequant_v = [rows_v_c[48], rows_v_c[49]];
 
             let uv_mode = (rng.next() % 13) as usize;
-            let im = aom_entropy::partition::get_uv_mode(uv_mode);
+            let im = aom_dsp::entropy::partition::get_uv_mode(uv_mode);
             let angle_delta_uv = if (1..=8).contains(&im) {
                 rng.range(-3, 4)
             } else {

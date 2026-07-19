@@ -5,8 +5,8 @@
 //! search adds on top of the coefficient rate. Bit-exact ports of libaom
 //! v3.14.1.
 
-use aom_entropy::partition::{is_directional_mode, use_angle_delta};
-use aom_txb::cost_tokens_from_cdf;
+use aom_dsp::entropy::partition::{is_directional_mode, use_angle_delta};
+use aom_dsp::txb::cost_tokens_from_cdf;
 
 /// `KF_MODE_CONTEXTS` (entropymode.h): KEY-frame Y-mode neighbour contexts.
 pub const KF_MODE_CONTEXTS: usize = 5;
@@ -327,7 +327,7 @@ impl PaletteCosts {
 /// (`PALETTE_SIZES` symbols, rows `PALETTE_SIZES + 1` wide) and
 /// `palette_{y,uv}_color_index_cdf[size][ctx]` (`n = size + 2` symbols, rows
 /// `PALETTE_COLORS + 1` wide). CDF layouts match
-/// [`aom_entropy::partition::KfFrameContext`]'s `palette_y_size` /
+/// [`aom_dsp::entropy::partition::KfFrameContext`]'s `palette_y_size` /
 /// `palette_uv_size` / `palette_y_color_index` / `palette_uv_color_index`.
 pub fn fill_palette_costs(
     out: &mut PaletteCosts,
@@ -511,7 +511,7 @@ pub fn intra_mode_info_cost_uv(
             total_rate += palette_extra_rate;
         }
     }
-    let intra_mode = aom_entropy::partition::get_uv_mode(uv_mode);
+    let intra_mode = aom_dsp::entropy::partition::get_uv_mode(uv_mode);
     if is_directional_mode(intra_mode) && use_angle_delta(bsize) {
         total_rate += costs.angle_delta_cost[(intra_mode - 1) as usize]
             [(angle_delta_uv + MAX_ANGLE_DELTA as i32) as usize];
@@ -545,14 +545,14 @@ pub fn fill_tx_size_costs(out: &mut TxSizeCosts, tx_size_cdf: &[u16]) {
     for cat in 0..4 {
         for ctx in 0..3 {
             let row = &tx_size_cdf[(cat * 3 + ctx) * 4..(cat * 3 + ctx) * 4 + 4];
-            aom_txb::cost_tokens_from_cdf(&mut out.0[cat][ctx], row, None);
+            aom_dsp::txb::cost_tokens_from_cdf(&mut out.0[cat][ctx], row, None);
         }
     }
 }
 
 /// `PARTITION_CONTEXTS` (enums.h): `bsize_log2(4..128) x (left*2+above)` folds
 /// to 20 rows (4 block-size levels x 5 `bsl` steps... in practice indexed
-/// directly by [`aom_entropy::partition::partition_plane_context`]).
+/// directly by [`aom_dsp::entropy::partition::partition_plane_context`]).
 pub const PARTITION_CONTEXTS: usize = 20;
 /// `EXT_PARTITION_TYPES` (enums.h): the widest partition CDF alphabet (10-way
 /// at 8x8..64x64; 4-way at 128x128 has no VERT_4/HORZ_4, `cost_tokens_from_cdf`
@@ -567,7 +567,7 @@ pub const SKIP_CONTEXTS: usize = 3;
 /// `[PARTITION_CONTEXTS][EXT_PARTITION_TYPES + 1]` (11-wide row padding,
 /// matching `KfFrameContext::partition`); each row's actual symbol count
 /// (4/8/10) is read off the CDF's own terminator by
-/// [`aom_txb::cost_tokens_from_cdf`], so `out` must be zeroed first (a
+/// [`aom_dsp::txb::cost_tokens_from_cdf`], so `out` must be zeroed first (a
 /// narrower context leaves its higher-index cost entries at 0, which the
 /// caller never reads since `partition_cdf_length` gates the symbol range
 /// the same way on both the read and cost side).
@@ -583,7 +583,7 @@ pub fn fill_partition_costs(
         *row = [0; EXT_PARTITION_TYPES];
         let cdf_row =
             &partition_cdf[ctx * (EXT_PARTITION_TYPES + 1)..(ctx + 1) * (EXT_PARTITION_TYPES + 1)];
-        aom_txb::cost_tokens_from_cdf(row, cdf_row, None);
+        aom_dsp::txb::cost_tokens_from_cdf(row, cdf_row, None);
     }
 }
 
@@ -594,7 +594,7 @@ pub fn fill_partition_costs(
 pub fn fill_skip_costs(out: &mut [[i32; 2]; SKIP_CONTEXTS], skip_txfm_cdf: &[u16]) {
     assert_eq!(skip_txfm_cdf.len(), SKIP_CONTEXTS * 3);
     for (ctx, row) in out.iter_mut().enumerate() {
-        aom_txb::cost_tokens_from_cdf(row, &skip_txfm_cdf[ctx * 3..ctx * 3 + 3], None);
+        aom_dsp::txb::cost_tokens_from_cdf(row, &skip_txfm_cdf[ctx * 3..ctx * 3 + 3], None);
     }
 }
 
@@ -619,7 +619,7 @@ pub fn tx_size_cost(
     if !tx_mode_is_select || !block_signals_txsize(bsize) {
         return 0;
     }
-    let cat = aom_entropy::partition::bsize_to_tx_size_cat(bsize) as usize;
-    let depth = aom_entropy::partition::tx_size_to_depth(tx_size, bsize) as usize;
+    let cat = aom_dsp::entropy::partition::bsize_to_tx_size_cat(bsize) as usize;
+    let depth = aom_dsp::entropy::partition::tx_size_to_depth(tx_size, bsize) as usize;
     costs.0[cat][tx_size_ctx][depth]
 }

@@ -16,9 +16,9 @@
 use aom_encode::BlockContext;
 use aom_encode::tx_search::{AV1_EXT_TX_USED_FLAG, TX_SIZE_2D_TBL};
 use aom_encode::var_tx::{InterLeafInputs, search_tx_type_inter};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{TxTypeCosts, ext_tx_set_type, fill_tx_type_costs, scan, txb_high, txb_wide};
+use aom_dsp::txb::{TxTypeCosts, ext_tx_set_type, fill_tx_type_costs, scan, txb_high, txb_wide};
 
 const TX_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
 const TX_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
@@ -160,7 +160,7 @@ fn search_tx_type_inter_matches_c_chain() {
             let dc_sign = tbl(&mut rng, 3 * 2);
             let lps = tbl(&mut rng, 21 * 26);
             let eob_c_tbl = tbl(&mut rng, 2 * 11);
-            let coeff_costs = aom_txb::CoeffCostTables {
+            let coeff_costs = aom_dsp::txb::CoeffCostTables {
                 txb_skip: &txb_skip,
                 base_eob: &base_eob,
                 base: &base,
@@ -263,7 +263,7 @@ fn search_tx_type_inter_matches_c_chain() {
                     &tcoeff,
                     plane_rows_c,
                     scan(tx_size, tx_type),
-                    aom_txb::iscan(tx_size, tx_type),
+                    aom_dsp::txb::iscan(tx_size, tx_type),
                     aom_encode::tx_scale(tx_size),
                     &mut qc,
                     &mut dqc,

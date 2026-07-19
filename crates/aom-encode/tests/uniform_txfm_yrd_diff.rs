@@ -14,9 +14,9 @@
 
 use aom_encode::mode_costs::{TxSizeCosts, fill_tx_size_costs, tx_size_cost};
 use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv, uniform_txfm_yrd_intra};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{TxTypeCosts, fill_tx_type_costs};
+use aom_dsp::txb::{TxTypeCosts, fill_tx_type_costs};
 
 mod common;
 use common::*;

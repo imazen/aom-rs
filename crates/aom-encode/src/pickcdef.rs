@@ -59,8 +59,8 @@
 //! [`cdef_filter_block_16`] (the u16 store is value-identical to the C u8
 //! store for bd8 — see that crate's docs).
 
-use aom_cdef::{CDEF_BSTRIDE, CDEF_VERY_LARGE, cdef_filter_block_16, cdef_find_dir};
-use aom_loopfilter::frame::LfMi;
+use aom_dsp::cdef::{CDEF_BSTRIDE, CDEF_VERY_LARGE, cdef_filter_block_16, cdef_find_dir};
+use aom_dsp::loopfilter::frame::LfMi;
 
 /// `CDEF_SEC_STRENGTHS` (cdef.h).
 pub const CDEF_SEC_STRENGTHS: i32 = 4;

@@ -88,9 +88,9 @@ use crate::intra_uv_rd::{
 };
 use crate::partition::PartRdStats;
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W, max_block_units};
-use aom_entropy::partition::{get_plane_block_size, update_ext_partition_context};
-use aom_intra::cfl::CflCtx;
-use aom_txb::{CoeffCostSet, get_txb_ctx, txb_entropy_context};
+use aom_dsp::entropy::partition::{get_plane_block_size, update_ext_partition_context};
+use aom_dsp::intra::cfl::CflCtx;
+use aom_dsp::txb::{CoeffCostSet, get_txb_ctx, txb_entropy_context};
 
 /// `store_cfl_required` (cfl.h:38) — the NON-rdo `store_y` gate of
 /// `encode_superblock`, intra arm (`is_inter_block == 0`).
@@ -154,9 +154,9 @@ impl TileCtxState {
             // The C tile init memsets the txfm-context arrays to
             // tx_size_wide[TX_SIZES_LARGEST] == 64, NOT 0
             // (av1_zero_above_context / av1_zero_left_context;
-            // aom_entropy::partition::TXFM_CTX_INIT).
-            above_tctx: vec![aom_entropy::partition::TXFM_CTX_INIT; aligned],
-            left_tctx: [aom_entropy::partition::TXFM_CTX_INIT; 32],
+            // aom_dsp::entropy::partition::TXFM_CTX_INIT).
+            above_tctx: vec![aom_dsp::entropy::partition::TXFM_CTX_INIT; aligned],
+            left_tctx: [aom_dsp::entropy::partition::TXFM_CTX_INIT; 32],
         }
     }
 }
@@ -319,9 +319,9 @@ pub struct SbEncodeEnv<'a> {
     pub base_y: usize,
     pub base_uv: usize,
     // Quantizer rows per plane.
-    pub rows_y: &'a aom_quant::PlaneQuantRows<'a>,
-    pub rows_u: &'a aom_quant::PlaneQuantRows<'a>,
-    pub rows_v: &'a aom_quant::PlaneQuantRows<'a>,
+    pub rows_y: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    pub rows_u: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    pub rows_v: &'a aom_dsp::quant::PlaneQuantRows<'a>,
     /// `x->rdmult` as `setup_block_rdmult` leaves it — frame-constant at
     /// GOOD/KEY/NO_AQ; the per-SB ALLINTRA modifier fold is the SB-level
     /// caller's (constant across one SB's recursion either way).
@@ -339,7 +339,7 @@ pub struct SbEncodeEnv<'a> {
     /// UV tx-type cost tables — REQUIRED by [`UvRdEnv`] but never read by
     /// the encode arm (chroma codes no tx-type bits); zeroed tables are
     /// fine.
-    pub tx_type_costs: &'a aom_txb::TxTypeCosts,
+    pub tx_type_costs: &'a aom_dsp::txb::TxTypeCosts,
     /// Frame QM levels (`qmatrix_level_{y,u,v}`), `None` = QM off — threaded
     /// into every leaf re-encode (search context-prop AND pack output).
     pub qm_levels: Option<[usize; 3]>,
@@ -360,10 +360,10 @@ pub struct SbEncodeEnv<'a> {
 /// re-selects rows from at each SB's adjusted qindex).
 #[derive(Clone, Copy)]
 pub struct DeltaQFrameCtx<'a> {
-    /// The frame quantizer tables ([`aom_quant::av1_build_quantizer`] output)
+    /// The frame quantizer tables ([`aom_dsp::quant::av1_build_quantizer`] output)
     /// — per-SB rows are re-selected from these at the adjusted qindex.
-    pub quants: &'a aom_quant::Quants,
-    pub deq: &'a aom_quant::Dequants,
+    pub quants: &'a aom_dsp::quant::Quants,
+    pub deq: &'a aom_dsp::quant::Dequants,
     /// `quant_params->base_qindex`.
     pub base_qindex: i32,
     /// `delta_q_info.delta_q_res` ([`crate::allintra_vis::variance_boost_delta_q_res`]
@@ -1119,35 +1119,35 @@ pub fn encode_sb_dry(
         SbTree::Split(_) => (PARTITION_SPLIT, split_subsize(bsize)),
         SbTree::Horz(_) => (
             PARTITION_HORZ,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ) as usize,
         ),
         SbTree::Vert(_) => (
             PARTITION_VERT,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT) as usize,
         ),
         SbTree::Horz4(_) => (
             PARTITION_HORZ_4,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_4) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_4) as usize,
         ),
         SbTree::Vert4(_) => (
             PARTITION_VERT_4,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_4) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_4) as usize,
         ),
         SbTree::HorzA(_) => (
             PARTITION_HORZ_A,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_A) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_A) as usize,
         ),
         SbTree::HorzB(_) => (
             PARTITION_HORZ_B,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_B) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_HORZ_B) as usize,
         ),
         SbTree::VertA(_) => (
             PARTITION_VERT_A,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_A) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_A) as usize,
         ),
         SbTree::VertB(_) => (
             PARTITION_VERT_B,
-            aom_entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B) as usize,
+            aom_dsp::entropy::partition::get_partition_subsize(bsize, PARTITION_VERT_B) as usize,
         ),
         // Off-frame placeholder: unreachable here (the entry guard returned
         // for its off-frame origin), but the match must be exhaustive.

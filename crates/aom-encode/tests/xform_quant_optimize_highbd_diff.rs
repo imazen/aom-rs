@@ -13,8 +13,8 @@
 
 use aom_encode::{BlockContext, OptimizeInputs, QuantKind, QuantParams, xform_quant_optimize};
 use aom_sys_ref as c;
-use aom_transform::txfm2d::fwd_txfm_valid;
-use aom_txb::{CoeffCostTables, scan, txb_high, txb_wide};
+use aom_dsp::transform::txfm2d::fwd_txfm_valid;
+use aom_dsp::txb::{CoeffCostTables, scan, txb_high, txb_wide};
 
 const TX_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,

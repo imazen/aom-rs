@@ -24,10 +24,10 @@ use aom_encode::encode_intra::{
     EncodeIntraYEnv, TrellisOptType, encode_intra_block_plane_y, is_trellis_used,
 };
 use aom_encode::tx_search::AV1_EXT_TX_USED_FLAG;
-use aom_intra::cfl::{CFL_BUF_SQUARE, CflCtx};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::intra::cfl::{CFL_BUF_SQUARE, CflCtx};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, ext_tx_set_type};
+use aom_dsp::txb::{CoeffCostTables, ext_tx_set_type};
 
 mod common;
 use common::*;

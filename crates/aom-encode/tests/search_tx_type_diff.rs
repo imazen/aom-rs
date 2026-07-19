@@ -16,9 +16,9 @@ use aom_encode::tx_search::{
     TX_SIZE_2D_TBL, TxTypeSearchInputs, TxTypeSearchPolicy, search_tx_type_intra,
     trellis_rdmult_intra_y,
 };
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs, scan, txb_high, txb_wide};
+use aom_dsp::txb::{CoeffCostTables, TxTypeCosts, fill_tx_type_costs, scan, txb_high, txb_wide};
 
 const TX_W: [usize; 19] = [
     4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
@@ -298,7 +298,7 @@ fn search_tx_type_intra_matches_c_chain() {
                     &tcoeff,
                     plane_rows_c,
                     scan(tx_size, tx_type),
-                    aom_txb::iscan(tx_size, tx_type),
+                    aom_dsp::txb::iscan(tx_size, tx_type),
                     aom_encode::tx_scale(tx_size),
                     &mut qc,
                     &mut dqc,

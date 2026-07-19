@@ -21,7 +21,7 @@
 //! libm in both builds here (the same glibc), so the byte gates hold locally;
 //! `round` (half away from zero) == Rust `f64::round`.
 
-use aom_quant::{av1_ac_quant_qtx, av1_dc_quant_qtx};
+use aom_dsp::quant::{av1_ac_quant_qtx, av1_dc_quant_qtx};
 
 /// `MAXQ` / `MINQ` (av1/common/quant_common.h).
 const MAXQ: i32 = 255;
@@ -899,7 +899,7 @@ fn wiener_block_residual_dct(
     const DCT_DCT: usize = 0;
     const PARTITION_NONE: usize = 0;
     const BS: usize = 8;
-    let (n_top, n_topright, n_left, n_bottomleft) = aom_entropy::partition::intra_avail(
+    let (n_top, n_topright, n_left, n_bottomleft) = aom_dsp::entropy::partition::intra_avail(
         sb_size,
         BLOCK_8X8,
         row,
@@ -933,7 +933,7 @@ fn wiener_block_residual_dct(
         0,
         false,
     );
-    aom_intra::predict_intra_high(
+    aom_dsp::intra::predict_intra_high(
         src_y,
         src_off,
         stride,
@@ -952,8 +952,8 @@ fn wiener_block_residual_dct(
         n_bottomleft,
         i32::from(bd),
     );
-    aom_dist::highbd_subtract_block(BS, BS, residual, BS, &src_y[src_off..], stride, pred, BS);
-    aom_transform::txfm2d::av1_fwd_txfm2d(residual, coeff, BS, DCT_DCT, TX_8X8);
+    aom_dsp::dist::highbd_subtract_block(BS, BS, residual, BS, &src_y[src_off..], stride, pred, BS);
+    aom_dsp::transform::txfm2d::av1_fwd_txfm2d(residual, coeff, BS, DCT_DCT, TX_8X8);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -965,8 +965,8 @@ pub fn av1_set_mb_wiener_variance(
     mi_cols: i32,
     base_qindex: i32,
     bd: u8,
-    quants: &aom_quant::Quants,
-    deq: &aom_quant::Dequants,
+    quants: &aom_dsp::quant::Quants,
+    deq: &aom_dsp::quant::Dequants,
     sb_size: usize,
     sb_mi: i32,
     disable_edge_filter: bool,
@@ -981,7 +981,7 @@ pub fn av1_set_mb_wiener_variance(
     let round = [quants.y_round_fp[qi][0], quants.y_round_fp[qi][1]];
     let quant = [quants.y_quant_fp[qi][0], quants.y_quant_fp[qi][1]];
     let dequant = [deq.y_dequant_qtx[qi][0], deq.y_dequant_qtx[qi][1]];
-    let scan = aom_txb::scan(TX_8X8, DCT_DCT);
+    let scan = aom_dsp::txb::scan(TX_8X8, DCT_DCT);
 
     let mut stats = vec![WeberStats::default(); (mi_rows * mi_cols) as usize];
 
@@ -1017,7 +1017,7 @@ pub fn av1_set_mb_wiener_variance(
                     &mut residual,
                     &mut coeff,
                 );
-                let intra_cost = aom_dist::hadamard::satd(&coeff);
+                let intra_cost = aom_dsp::dist::hadamard::satd(&coeff);
                 if intra_cost < best_intra_cost {
                     best_intra_cost = intra_cost;
                     best_mode = mode;
@@ -1049,7 +1049,7 @@ pub fn av1_set_mb_wiener_variance(
             // the same y_quant_fp / y_round_fp / y_dequant tables (built per
             // bit_depth). log_scale = av1_get_tx_scale(TX_8X8) = 0 (64 pels).
             let eob = if bd > 8 {
-                aom_quant::av1_highbd_quantize_fp_no_qmatrix(
+                aom_dsp::quant::av1_highbd_quantize_fp_no_qmatrix(
                     &quant,
                     &dequant,
                     &round,
@@ -1060,7 +1060,7 @@ pub fn av1_set_mb_wiener_variance(
                     &mut dqcoeff,
                 )
             } else {
-                aom_quant::av1_quantize_fp(
+                aom_dsp::quant::av1_quantize_fp(
                     &coeff,
                     &round,
                     &quant,
@@ -1071,7 +1071,7 @@ pub fn av1_set_mb_wiener_variance(
                 )
             };
             // pred += inv(dqcoeff): pred now holds the reconstruction.
-            aom_transform::inv_txfm2d::av1_inverse_transform_add(
+            aom_dsp::transform::inv_txfm2d::av1_inverse_transform_add(
                 &dqcoeff,
                 &mut pred,
                 BS,

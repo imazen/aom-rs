@@ -9,9 +9,9 @@
 
 use aom_encode::mode_costs::TxSizeCosts;
 use aom_encode::tx_search::{TxTypeSearchPolicy, TxfmYrdEnv, intra_model_rd_y};
-use aom_quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
+use aom_dsp::quant::{Dequants, Quants, av1_build_quantizer, set_q_index};
 use aom_sys_ref as c;
-use aom_txb::{CoeffCostSet, LvMapCoeffCost, TxTypeCosts};
+use aom_dsp::txb::{CoeffCostSet, LvMapCoeffCost, TxTypeCosts};
 
 mod common;
 use common::*;

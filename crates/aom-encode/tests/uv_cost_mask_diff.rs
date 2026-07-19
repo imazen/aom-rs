@@ -15,7 +15,7 @@ use aom_encode::mode_costs::{
     CflCosts, IntraModeCosts, fill_cfl_costs, fill_palette_uv_mode_costs, intra_mode_info_cost_uv,
 };
 use aom_encode::tx_search::{TxMaskParams, get_tx_mask_uv_intra, uv_intra_tx_type};
-use aom_intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
+use aom_dsp::intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_sys_ref as c;
 
 struct Rng(u64);
@@ -62,7 +62,7 @@ fn uv_intra_tx_type_matches_real_c() {
                     non_dct += 1;
                 }
                 // Demotion coverage: default type nonzero but result DCT.
-                let mode = aom_entropy::partition::get_uv_mode(uv_mode) as usize;
+                let mode = aom_dsp::entropy::partition::get_uv_mode(uv_mode) as usize;
                 if !lossless && aom_encode::tx_search::INTRA_MODE_TO_TX_TYPE[mode] != 0 && t == 0 {
                     demoted += 1;
                 }
@@ -242,7 +242,7 @@ fn intra_mode_info_cost_uv_matches_c() {
             r, r_c,
             "it={it} uv={uv_mode} bsize={bsize} ad={angle_delta_uv}"
         );
-        let im = aom_entropy::partition::get_uv_mode(uv_mode);
+        let im = aom_dsp::entropy::partition::get_uv_mode(uv_mode);
         if (1..=8).contains(&im) && r != mode_cost {
             angle_hits += 1;
         }
@@ -287,7 +287,7 @@ fn cfl_store_predict_matches_real_c() {
         // 4:2:2 rejects tall sub-8x8 chroma shapes (ss_size_lookup invalid):
         // keep 4xN luma out of 4:2:2, and require a valid plane block.
         let plane_bsize =
-            aom_entropy::partition::get_plane_block_size(bsize, ss_x as usize, ss_y as usize);
+            aom_dsp::entropy::partition::get_plane_block_size(bsize, ss_x as usize, ss_y as usize);
         if plane_bsize >= 22 {
             continue;
         }

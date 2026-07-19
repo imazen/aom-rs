@@ -3,9 +3,9 @@
 //! The per-block encoder workhorse = `av1_xform` (forward 2-D transform) +
 //! `av1_quant` (quantize + entropy-context write). Every sub-step is already
 //! bit-exact against C in its own crate:
-//! - forward transform: [`aom_transform::txfm2d::av1_fwd_txfm2d`]
-//! - quantizers: [`aom_quant`] (fp/b, flat/QM — lowbd 8-bit here)
-//! - neighbour context: [`aom_txb::txb_entropy_context`]
+//! - forward transform: [`aom_dsp::transform::txfm2d::av1_fwd_txfm2d`]
+//! - quantizers: [`aom_dsp::quant`] (fp/b, flat/QM — lowbd 8-bit here)
+//! - neighbour context: [`aom_dsp::txb::txb_entropy_context`]
 //!
 //! This crate wires them in the exact order/params libaom uses, so a residual
 //! block maps to byte-identical (qcoeff, dqcoeff, eob, txb_entropy_ctx). The
@@ -55,17 +55,17 @@ pub mod tx_split_nn_weights;
 pub mod prune_tx_2d_nn_weights;
 pub mod prune_tx_2d;
 
-use aom_entropy::dec::OdEcDec;
-use aom_entropy::enc::OdEcEnc;
-use aom_quant::{
+use aom_dsp::entropy::dec::OdEcDec;
+use aom_dsp::entropy::enc::OdEcEnc;
+use aom_dsp::quant::{
     aom_highbd_quantize_b_adaptive_helper, aom_highbd_quantize_b_no_qmatrix,
     aom_highbd_quantize_b_qm, aom_quantize_b_adaptive_helper, aom_quantize_b_no_qmatrix,
     aom_quantize_b_qm, av1_highbd_quantize_dc, av1_highbd_quantize_fp_no_qmatrix,
     av1_highbd_quantize_fp_qm, av1_quantize_dc, av1_quantize_fp_qm,
 };
-use aom_transform::inv_txfm2d::av1_fwht4x4;
-use aom_transform::txfm2d::av1_fwd_txfm2d;
-use aom_txb::{
+use aom_dsp::transform::inv_txfm2d::av1_fwht4x4;
+use aom_dsp::transform::txfm2d::av1_fwd_txfm2d;
+use aom_dsp::txb::{
     CoeffCostTables, get_txb_ctx, iscan, optimize_txb, optimize_txb_qm, scan, txb_entropy_context,
     txb_high, txb_wide, write_coeffs_txb, write_coeffs_txb_full,
 };
@@ -112,7 +112,7 @@ pub struct TuneKnobs {
     /// also installed by `tune=IQ`/`tune=SSIMULACRA2` via `handle_tuning`).
     /// Weights the trellis distortion by the forward QM (`av1_optimize_txb`,
     /// txb_rdopt.c:346-351) and the tx-search transform-domain distortion by
-    /// [`aom_dist::block_error_qm`] (tx_search.c:1150/:1159), and forces
+    /// [`aom_dsp::dist::block_error_qm`] (tx_search.c:1150/:1159), and forces
     /// transform-domain distortion on (`set_tx_domain_dist_params`,
     /// rdopt_utils.h:516-522).
     pub use_qm_dist_metric: bool,
@@ -178,7 +178,7 @@ pub struct QuantParams<'a> {
     pub lossless: bool,
     /// `oxcf.q_cfg.quant_b_adapt` (`--quant-b-adapt`, default false). Read ONLY
     /// by [`QuantKind::B`]: when set, the dead-zone quantizer routes through the
-    /// adaptive helper ([`aom_quant::aom_quantize_b_adaptive_helper`] / highbd)
+    /// adaptive helper ([`aom_dsp::quant::aom_quantize_b_adaptive_helper`] / highbd)
     /// instead of the plain one — the prescan-widened dead-zone + the
     /// SKIP_EOB_FACTOR_ADJUST tail. Inert for [`QuantKind::Fp`]/[`QuantKind::Dc`]
     /// (C only threads `quant_b_adapt` into `av1_quantize_b_facade`). Set via
@@ -188,7 +188,7 @@ pub struct QuantParams<'a> {
 
 impl<'a> QuantParams<'a> {
     /// Build the quantizer parameters for one plane from the per-qindex rows
-    /// [`aom_quant::set_q_index`] selects — the bridge from `(qindex, deltas)`
+    /// [`aom_dsp::quant::set_q_index`] selects — the bridge from `(qindex, deltas)`
     /// to [`xform_quant`].
     ///
     /// Mirrors how libaom's quantize facades read `MACROBLOCK_PLANE`:
@@ -203,7 +203,7 @@ impl<'a> QuantParams<'a> {
     /// `lossless` is the block's segment `xd->lossless` bit (routes the forward
     /// transform to [`av1_fwht4x4`]); pass `false` for the normal path.
     pub fn from_plane_rows(
-        rows: &aom_quant::PlaneQuantRows<'a>,
+        rows: &aom_dsp::quant::PlaneQuantRows<'a>,
         kind: QuantKind,
         bd: u8,
         lossless: bool,
@@ -279,8 +279,8 @@ fn resolve_qm<'a>(
 ) -> (Option<&'a [u8]>, Option<&'a [u8]>) {
     match qp.qm_ctx {
         Some(cx) => (
-            aom_quant::qmatrix(cx.qm_level, cx.plane, tx_size, tx_type),
-            aom_quant::iqmatrix(cx.qm_level, cx.plane, tx_size, tx_type),
+            aom_dsp::quant::qmatrix(cx.qm_level, cx.plane, tx_size, tx_type),
+            aom_dsp::quant::iqmatrix(cx.qm_level, cx.plane, tx_size, tx_type),
         ),
         None => (qp.qm, qp.iqm),
     }
@@ -376,7 +376,7 @@ pub fn xform_quant(
         // The hottest quantizer (speed-0 search path): SIMD-dispatched, bit-
         // identical to the scalar port at every tier (quantize_fp_simd_diff);
         // AOM_FORCE_SCALAR pins it back to the transcription.
-        (QuantKind::Fp, _, _, false) => aom_quant::simd::av1_quantize_fp_no_qmatrix_dispatch(
+        (QuantKind::Fp, _, _, false) => aom_dsp::quant::simd::av1_quantize_fp_no_qmatrix_dispatch(
             qp.quant,
             qp.dequant,
             qp.round,
@@ -844,8 +844,8 @@ pub fn pixel_distortion(
     let w = TX_W[tx_size];
     let h = TX_H[tx_size];
     let mut recon = pred[..w * h].to_vec();
-    aom_transform::inv_txfm2d::av1_inv_txfm2d_add(dqcoeff, &mut recon, w, tx_type, tx_size, bd);
-    aom_dist::highbd_sse(&recon, w, source, w, w, h)
+    aom_dsp::transform::inv_txfm2d::av1_inv_txfm2d_add(dqcoeff, &mut recon, w, tx_type, tx_size, bd);
+    aom_dsp::dist::highbd_sse(&recon, w, source, w, w, h)
 }
 
 /// `RIGHT_SIGNED_SHIFT(value, n)` (`aom_ports/mem.h`): arithmetic right shift for
@@ -861,8 +861,8 @@ fn right_signed_shift_i64(value: i64, n: i32) -> i64 {
 /// term the per-txb intra RD cost feeds to [`rd::rdcost`], computed without an
 /// inverse transform (unlike [`pixel_distortion`]).
 ///
-/// Composes the validated [`aom_dist::block_error`] /
-/// [`aom_dist::highbd_block_error`] with the exact per-tx-size normalization
+/// Composes the validated [`aom_dsp::dist::block_error`] /
+/// [`aom_dsp::dist::highbd_block_error`] with the exact per-tx-size normalization
 /// shift `(MAX_TX_SCALE - av1_get_tx_scale(tx_size)) * 2` (with `MAX_TX_SCALE ==
 /// 1`); the shift is **negative** — a left shift — for 64-wide transforms
 /// (`tx_scale == 2`). `coeff` / `dqcoeff` must each hold at least
@@ -871,9 +871,9 @@ fn right_signed_shift_i64(value: i64, n: i32) -> i64 {
 pub fn dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, bd: u8) -> (i64, i64) {
     let n = txb_wide(tx_size) * txb_high(tx_size);
     let (dist, sse) = if bd > 8 {
-        aom_dist::highbd_block_error(&coeff[..n], &dqcoeff[..n], bd)
+        aom_dsp::dist::highbd_block_error(&coeff[..n], &dqcoeff[..n], bd)
     } else {
-        aom_dist::block_error(&coeff[..n], &dqcoeff[..n])
+        aom_dsp::dist::block_error(&coeff[..n], &dqcoeff[..n])
     };
     // shift = (MAX_TX_SCALE - av1_get_tx_scale(tx_size)) * 2, MAX_TX_SCALE = 1.
     let shift = (1 - tx_scale(tx_size)) * 2;
@@ -886,7 +886,7 @@ pub fn dist_block_tx_domain(coeff: &[i32], dqcoeff: &[i32], tx_size: usize, bd: 
 /// `dist_block_tx_domain` (av1/encoder/tx_search.c:1131) with the QM-PSNR
 /// distortion-metric arm: when a per-transform forward matrix resolves AND the
 /// QM-PSNR metric is active, the block error is QM-weighted
-/// ([`aom_dist::block_error_qm`], scan-indexed — C passes `xd->bd` for highbd
+/// ([`aom_dsp::dist::block_error_qm`], scan-indexed — C passes `xd->bd` for highbd
 /// and a literal 8 for lowbd, which `bd` covers directly); otherwise this is
 /// exactly [`dist_block_tx_domain`] (C's `qmatrix == NULL ||
 /// !use_qm_dist_metric` fallthrough at :1150/:1159). Same
@@ -905,7 +905,7 @@ pub fn dist_block_tx_domain_qm(
         _ => return dist_block_tx_domain(coeff, dqcoeff, tx_size, bd),
     };
     let n = txb_wide(tx_size) * txb_high(tx_size);
-    let (dist, sse) = aom_dist::block_error_qm(&coeff[..n], &dqcoeff[..n], qm, &scan[..n], bd);
+    let (dist, sse) = aom_dsp::dist::block_error_qm(&coeff[..n], &dqcoeff[..n], qm, &scan[..n], bd);
     let shift = (1 - tx_scale(tx_size)) * 2;
     (
         right_signed_shift_i64(dist, shift),
@@ -933,7 +933,7 @@ pub fn dist_qmatrix<'a>(
 /// contexts), compute
 /// `RDCOST(rdmult, cost_coeffs_txb(qcoeff, …), dist_block_tx_domain(coeff, dqcoeff, …))`.
 ///
-/// The rate here is the coefficient-coding bits only ([`aom_txb::cost_coeffs_txb`]);
+/// The rate here is the coefficient-coding bits only ([`aom_dsp::txb::cost_coeffs_txb`]);
 /// the block-level mode / tx-type signaling bits are added by the caller and are
 /// out of scope for this txb-level primitive. Distortion is transform-domain
 /// ([`dist_block_tx_domain`]). `cost_tables` are the derived
@@ -953,7 +953,7 @@ pub fn txb_rd_cost(
     rdmult: i32,
     bd: u8,
 ) -> i64 {
-    let rate = aom_txb::cost_coeffs_txb(
+    let rate = aom_dsp::txb::cost_coeffs_txb(
         qcoeff,
         eob,
         tx_size,
@@ -993,7 +993,7 @@ pub fn read_coding_block_plane(
         uw.is_multiple_of(txw) && uh.is_multiple_of(txh),
         "tx_size must tile plane_bsize evenly"
     );
-    let area = aom_txb::txb_wide(tx_size) * aom_txb::txb_high(tx_size);
+    let area = aom_dsp::txb::txb_wide(tx_size) * aom_dsp::txb::txb_high(tx_size);
     let mut above = vec![0i8; uw];
     let mut left = vec![0i8; uh];
     let mut coeffs = Vec::new();
@@ -1001,7 +1001,7 @@ pub fn read_coding_block_plane(
     while blk_row < uh {
         let mut blk_col = 0;
         while blk_col < uw {
-            let (txb_skip_ctx, dc_sign_ctx) = aom_txb::get_txb_ctx(
+            let (txb_skip_ctx, dc_sign_ctx) = aom_dsp::txb::get_txb_ctx(
                 plane_bsize,
                 tx_size,
                 plane,
@@ -1009,7 +1009,7 @@ pub fn read_coding_block_plane(
                 &left[blk_row..],
             );
             let mut tcoeff = vec![0i32; area];
-            let (eob, tx_type) = aom_txb::read_coeffs_txb_full(
+            let (eob, tx_type) = aom_dsp::txb::read_coeffs_txb_full(
                 dec,
                 cdfs,
                 ext_tx_cdf,
@@ -1024,7 +1024,7 @@ pub fn read_coding_block_plane(
                 ttx.signal_gate,
                 tx_type_chroma,
             );
-            let cul = aom_txb::txb_entropy_context(&tcoeff, tx_size, tx_type, eob) as i8;
+            let cul = aom_dsp::txb::txb_entropy_context(&tcoeff, tx_size, tx_type, eob) as i8;
             above[blk_col..blk_col + txw].fill(cul);
             left[blk_row..blk_row + txh].fill(cul);
             coeffs.push(tcoeff);
@@ -1036,6 +1036,6 @@ pub fn read_coding_block_plane(
 }
 
 /// Residual reconstruction (dequant + inverse transform + add) — moved to the
-/// shared [`aom_recon`] crate and re-exported here. See
-/// [`aom_recon::reconstruct_txb`].
-pub use aom_recon::reconstruct_txb;
+/// shared [`aom_dsp::recon`] crate and re-exported here. See
+/// [`aom_dsp::recon::reconstruct_txb`].
+pub use aom_dsp::recon::reconstruct_txb;

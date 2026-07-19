@@ -9,7 +9,7 @@
 
 use aom_encode::prune_tx_2d::prune_tx_2d;
 use aom_sys_ref as c;
-use aom_txb::ext_tx_set_type;
+use aom_dsp::txb::ext_tx_set_type;
 
 const TXS_W: [usize; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
 const TXS_H: [usize; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];

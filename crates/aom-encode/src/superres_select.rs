@@ -24,7 +24,7 @@
 //! (the denom the real encoder actually chose is embedded in the stream — the
 //! top-tier evidence).
 
-use aom_transform::txfm2d::av1_fwd_txfm2d;
+use aom_dsp::transform::txfm2d::av1_fwd_txfm2d;
 
 /// `SCALE_NUMERATOR` — superres denominators are relative to 8 (denom 8 == no
 /// superres; the coded width equals the upscaled width).
@@ -64,7 +64,7 @@ fn round_power_of_two_u64(value: u64, n: u32) -> u64 {
 /// hardcodes `AOM_BITS_8`).
 #[inline]
 fn av1_convert_qindex_to_q_bits8(qindex: i32) -> f64 {
-    f64::from(aom_quant::av1_ac_quant_qtx(qindex, 0, 8)) / 4.0
+    f64::from(aom_dsp::quant::av1_ac_quant_qtx(qindex, 0, 8)) / 4.0
 }
 
 /// `analyze_hor_freq` (superres_scale.c): the 16×4 horizontal DCT
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn convert_qindex_matches_ac_quant_over_4() {
         for q in [0, 32, 96, 128, 200, 255] {
-            let want = f64::from(aom_quant::av1_ac_quant_qtx(q, 0, 8)) / 4.0;
+            let want = f64::from(aom_dsp::quant::av1_ac_quant_qtx(q, 0, 8)) / 4.0;
             assert_eq!(av1_convert_qindex_to_q_bits8(q), want);
         }
     }

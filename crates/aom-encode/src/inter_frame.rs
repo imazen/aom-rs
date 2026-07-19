@@ -6,7 +6,7 @@
 //! 1. [`RefFrame`] — the encode-side stored reference (frame 0's reconstructed,
 //!    border-extended Y/U/V + order_hint). Shape mirrors the decoder's
 //!    `aom_decode::RefFrame` (planes + strides + crop dims + order_hint) so the
-//!    inter predictor ([`aom_inter::build_inter_predictor`], sub-step 2e) reads
+//!    inter predictor ([`aom_dsp::inter::build_inter_predictor`], sub-step 2e) reads
 //!    it exactly as the decoder does.
 //!
 //! 2. [`derive_lowdelay_p_frame_header`] — DERIVE (not parse) the
@@ -29,7 +29,7 @@
 //! handoff's "interp_filter=SHARP, allow_high_precision_mv=1" note was WRONG for
 //! this config (measured `0`/`false`).
 
-use aom_entropy::header::{
+use aom_dsp::entropy::header::{
     CdefHeader, FrameHeaderObu, InterRefSignaling, LoopfilterHeader, WarpedMotionParams,
 };
 
@@ -47,7 +47,7 @@ pub const HIGH_PRECISION_MV_QTHRESH: i32 = 128;
 
 /// The encode-side stored reference frame: frame 0's reconstructed, filtered,
 /// border-extended planes + its order_hint. Shape mirrors the decoder's
-/// `aom_decode::RefFrame` (lib.rs) so [`aom_inter::build_inter_predictor`] reads
+/// `aom_decode::RefFrame` (lib.rs) so [`aom_dsp::inter::build_inter_predictor`] reads
 /// it identically. The recon buffers/strides stay SB/mi-aligned; `width*` /
 /// `height*` carry the post-superres VISIBLE (crop) dims used for MC edge
 /// replication.
@@ -144,7 +144,7 @@ pub struct LowDelayPHeaderParams {
 /// The header is DERIVED, not parsed: every field is set from the config /
 /// sequence header / ref bookkeeping. The result feeds
 /// [`crate::obu_assemble::assemble_obu_frame_single_tile`] +
-/// [`aom_entropy::header::write_frame_header_obu`] to serialize a byte-exact P
+/// [`aom_dsp::entropy::header::write_frame_header_obu`] to serialize a byte-exact P
 /// frame header.
 pub fn derive_lowdelay_p_frame_header(
     seq_cfg: &FrameHeaderObu,

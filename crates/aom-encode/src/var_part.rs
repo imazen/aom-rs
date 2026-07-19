@@ -57,8 +57,8 @@
 //! [`avg_4x4`], is differentially locked against the REAL exported
 //! `aom_avg_4x4_c` (`avg_4x4_diff.rs`).
 
-use aom_entropy::partition::{get_partition_subsize, get_plane_block_size};
-use aom_quant::av1_ac_quant_qtx;
+use aom_dsp::entropy::partition::{get_partition_subsize, get_plane_block_size};
+use aom_dsp::quant::av1_ac_quant_qtx;
 
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B};
 

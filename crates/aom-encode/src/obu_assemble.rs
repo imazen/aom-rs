@@ -1,11 +1,11 @@
 //! Assemble a real AV1 `OBU_FRAME` (frame header + tile group, the
 //! `cpi->num_tg == 1` combined form real aomenc's default config always
 //! produces) from the already bit-exact pieces:
-//! [`aom_entropy::header::write_frame_header_obu`] +
-//! [`aom_entropy::header::write_tile_group_header`] (both aom-entropy,
+//! [`aom_dsp::entropy::header::write_frame_header_obu`] +
+//! [`aom_dsp::entropy::header::write_tile_group_header`] (both aom-entropy,
 //! decoder-owned but CALLED here, not modified) +
 //! [`crate::pack::pack_tile`]'s raw entropy-coded tile bytes +
-//! [`aom_entropy::obu::write_obu_header`] / [`aom_entropy::leb128::uleb_encode`]
+//! [`aom_dsp::entropy::obu::write_obu_header`] / [`aom_dsp::entropy::leb128::uleb_encode`]
 //! (OBU-level wrapping, also aom-entropy).
 //!
 //! # Bit layout (AV1 spec, `frame_obu( sz )`)
@@ -33,10 +33,10 @@
 //! tiles) is NOT implemented -- the natural next lift once the envelope
 //! needs more than one tile.
 
-use aom_entropy::header::{FrameHeaderObu, write_frame_header_obu, write_tile_group_header};
-use aom_entropy::leb128::uleb_encode;
-use aom_entropy::obu::write_obu_header;
-use aom_entropy::wb::WriteBitBuffer;
+use aom_dsp::entropy::header::{FrameHeaderObu, write_frame_header_obu, write_tile_group_header};
+use aom_dsp::entropy::leb128::uleb_encode;
+use aom_dsp::entropy::obu::write_obu_header;
+use aom_dsp::entropy::wb::WriteBitBuffer;
 
 /// `OBU_FRAME` (`av1/common/enums.h` `OBU_TYPE`).
 pub const OBU_FRAME: u32 = 6;

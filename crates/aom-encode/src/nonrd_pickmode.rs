@@ -111,8 +111,8 @@
 
 use crate::encode_sb::SbEncodeEnv;
 use crate::partition::PartRdStats;
-use aom_dist::highbd_subtract_block;
-use aom_intra::predict_intra_high;
+use aom_dsp::dist::highbd_subtract_block;
+use aom_dsp::intra::predict_intra_high;
 
 /// `MI_SIZE_WIDE`/`HIGH` for the square sizes used here (port-wide numbering:
 /// BLOCK_8X8=3, BLOCK_16X16=6, BLOCK_32X32=9, BLOCK_64X64=12).
@@ -671,7 +671,7 @@ pub fn nonrd_pick_intra_mode(
         // --- av1_estimate_block_intra, single txb == whole block ---
         // Predict with the leaf's SIGNALLED tx_size (prediction granularity
         // is mi->tx_size, NOT the clamped block_yrd loop size).
-        let (n_top, n_topright, n_left, n_bottomleft) = aom_entropy::partition::intra_avail(
+        let (n_top, n_topright, n_left, n_bottomleft) = aom_dsp::entropy::partition::intra_avail(
             env.sb_size,
             bsize,
             mi_row,

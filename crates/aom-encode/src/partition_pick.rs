@@ -192,14 +192,14 @@ use crate::partition::{PartRdStats, rd_cost_update, rd_stats_subtraction, split_
 use crate::rd_pick::{RdPickUvArgs, RdPickUvOutcome, ReencodeParams, rd_pick_intra_mode_sb};
 use crate::speed_features::{MODE_EVAL, SpeedFeatures, WINNER_MODE_EVAL};
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TxTypeSearchPolicy, TxfmYrdEnv};
-use aom_dist::highbd_variance;
-use aom_entropy::partition::{
+use aom_dsp::dist::highbd_variance;
+use aom_dsp::entropy::partition::{
     allow_palette, get_partition_subsize, get_plane_block_size, get_tx_size_context,
     is_cfl_allowed, palette_bsize_ctx, palette_mode_ctx, partition_gather_horz_alike,
     partition_gather_vert_alike, partition_plane_context,
 };
-use aom_intra::cfl::CflCtx;
-use aom_txb::{TxTypeCosts, cost_symbol, cost_tokens_from_cdf};
+use aom_dsp::intra::cfl::CflCtx;
+use aom_dsp::txb::{TxTypeCosts, cost_symbol, cost_tokens_from_cdf};
 
 /// `num_pels_log2_lookup[BLOCK_SIZES_ALL]` (common_data.h).
 const NUM_PELS_LOG2: [u32; 22] = [
@@ -209,7 +209,7 @@ const NUM_PELS_LOG2: [u32; 22] = [
 /// `av1_get_perpixel_variance(_facade)` for plane 0 (encodeframe.c:190):
 /// block variance against the flat `AV1_[HIGH_]VAR_OFFS` buffer (128 <<
 /// (bd-8)), `ROUND_POWER_OF_TWO`-normalized by the pel count. Composes the
-/// bit-exact [`aom_dist::highbd_variance`] (the `aom_highbd_<bd>_variance`
+/// bit-exact [`aom_dsp::dist::highbd_variance`] (the `aom_highbd_<bd>_variance`
 /// family; the bd-8 variant is numerically the lowbd kernel `aomenc` uses
 /// for 8-bit sources).
 pub fn perpixel_variance_y(src: &[u16], off: usize, stride: usize, bsize: usize, bd: u8) -> u32 {
@@ -444,13 +444,13 @@ impl ModeGrid {
         &self,
         mi_row: i32,
         mi_col: i32,
-    ) -> Option<aom_entropy::partition::PaletteNbrKf> {
+    ) -> Option<aom_dsp::entropy::partition::PaletteNbrKf> {
         if self.pal_sizes.is_empty() || mi_row < 0 || mi_col < 0 {
             return None;
         }
         let idx = mi_row as usize * self.stride + mi_col as usize;
         let sz = self.pal_sizes[idx];
-        Some(aom_entropy::partition::PaletteNbrKf {
+        Some(aom_dsp::entropy::partition::PaletteNbrKf {
             size: [i32::from(sz[0]), i32::from(sz[1])],
             colors: self.pal_colors[idx],
         })
@@ -1279,7 +1279,7 @@ fn leaf_pick_sb_modes(
             mi_col,
             mi_rows: env.mi_rows,
             mi_cols: env.mi_cols,
-            tile: aom_entropy::dv_ref::DvTileBounds {
+            tile: aom_dsp::entropy::dv_ref::DvTileBounds {
                 mi_row_start: env.tile_row_start,
                 mi_row_end: env.tile_row_end,
                 mi_col_start: env.tile_col_start,
@@ -4115,7 +4115,7 @@ mod edge_partition_cost_tests {
     /// Witness for `set_partition_cost_for_edge_blk` (the CHUNK-3 frame-edge
     /// partition-cost override). The gather + `cost_tokens_from_cdf` +
     /// `cost_symbol` primitives are each already proven byte-exact vs C
-    /// (`aom_entropy::partition` write tests, `aom_txb::prob_cost` diff tests);
+    /// (`aom_dsp::entropy::partition` write tests, `aom_dsp::txb::prob_cost` diff tests);
     /// this locks the COMPOSITION the C source dictates — the per-edge gather
     /// choice, the `[HORZ,SPLIT]`/`[VERT,SPLIT]` inverse maps, the
     /// `av1_cost_symbol(0)` fill, and the forced-SPLIT corner — which is where a

@@ -12,7 +12,7 @@
 //!
 //! For a still (single KEY frame at time 0) the entry covering time 0 supplies
 //! the params verbatim. The already-bit-exact
-//! [`aom_entropy::header::write_film_grain_params`] does the write; this module
+//! [`aom_dsp::entropy::header::write_film_grain_params`] does the write; this module
 //! is the missing param-plumbing (read + lookup).
 //!
 //! The context fields of [`FilmGrainParams`] (`monochrome` / `subsampling_x` /
@@ -20,7 +20,7 @@
 //! they come from the seq/frame header, not `aom_film_grain_t`. The caller sets
 //! them from the encode config after [`lookup`].
 
-use aom_entropy::header::FilmGrainParams;
+use aom_dsp::entropy::header::FilmGrainParams;
 
 /// The 8-byte file magic (`aom_dsp/grain_table.c` `kFileMagic`). C reads a 9th
 /// character (the whitespace after the magic); splitting the remainder on ascii
