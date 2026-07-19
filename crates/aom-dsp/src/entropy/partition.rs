@@ -1304,6 +1304,33 @@ pub fn write_skip_mode(
 const TX_4X4: usize = 0;
 const TX_8X8: usize = 1;
 const TX_SIZES: usize = 5; // number of square tx sizes
+/// `default_txfm_partition_cdf` (`av1/common/entropymode.c`): the fixed var-tx
+/// split-flag CDF, one `AOM_CDF2(x)` per context stored as `[x, 0, 0]`. Copied
+/// verbatim into the frame context at setup (NOT qindex-selected).
+pub const DEFAULT_TXFM_PARTITION_CDF: [[u16; 3]; TXFM_PARTITION_CONTEXTS] = [
+    [4187, 0, 0],
+    [8922, 0, 0],
+    [11921, 0, 0],
+    [8453, 0, 0],
+    [14572, 0, 0],
+    [20635, 0, 0],
+    [13977, 0, 0],
+    [21881, 0, 0],
+    [21763, 0, 0],
+    [5589, 0, 0],
+    [12764, 0, 0],
+    [21487, 0, 0],
+    [6219, 0, 0],
+    [13460, 0, 0],
+    [18544, 0, 0],
+    [4753, 0, 0],
+    [11222, 0, 0],
+    [18368, 0, 0],
+    [4603, 0, 0],
+    [10367, 0, 0],
+    [16680, 0, 0],
+];
+
 /// `TXFM_PARTITION_CONTEXTS` = `(TX_SIZES - TX_8X8) * 6 - 3` = 21 (`enums.h`).
 const TXFM_PARTITION_CONTEXTS: usize = (TX_SIZES - TX_8X8) * 6 - 3;
 
@@ -1517,6 +1544,107 @@ pub fn write_tx_size_vartx(
             }
             row += bsh;
         }
+    }
+}
+
+/// `set_txfm_context` (av1/encoder/partition_search.c:304) — the ctx-ONLY twin
+/// of [`write_tx_size_vartx`]: the same var-tx quadtree descent driven by
+/// `inter_tx_size`, updating the txfm-partition contexts without emitting
+/// symbols.
+///
+/// C also mutates `mbmi` here (`tx_size`, and `inter_tx_size[idx] = TX_4X4` on
+/// the TX_8X8 leaf). Those writes are dry-run-only — the OUTPUT path never
+/// calls this (bitstream.c's `write_tx_size_vartx` stamps the contexts instead,
+/// partition_search.c:559-562 gates it on `if (dry_run)`) — so the pack's
+/// `inter_tx_size` is unaffected and this port updates contexts only.
+#[allow(clippy::too_many_arguments)]
+pub fn set_txfm_context_vartx(
+    bsize: usize,
+    inter_tx_size: &[usize; 16],
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    above_ctx: &mut [u8],
+    left_ctx: &mut [u8],
+    tx_size: usize,
+    blk_row: i32,
+    blk_col: i32,
+) {
+    let max_blocks_high = max_block_high(bsize, mb_to_bottom_edge);
+    let max_blocks_wide = max_block_wide(bsize, mb_to_right_edge);
+    if blk_row >= max_blocks_high || blk_col >= max_blocks_wide {
+        return;
+    }
+    let (bc, br) = (blk_col as usize, blk_row as usize);
+    let txb_size_index = get_txb_size_index(bsize, blk_row, blk_col);
+    let plane_tx_size = inter_tx_size[txb_size_index];
+
+    if tx_size == plane_tx_size {
+        txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], tx_size, tx_size);
+        return;
+    }
+    if tx_size == TX_8X8 {
+        txfm_partition_update(&mut above_ctx[bc..], &mut left_ctx[br..], TX_4X4, tx_size);
+        return;
+    }
+    let sub_txs = SUB_TX_SIZE_MAP[tx_size];
+    let bsw = TX_SIZE_WIDE_UNIT[sub_txs];
+    let bsh = TX_SIZE_HIGH_UNIT[sub_txs];
+    let row_end = (TX_SIZE_HIGH_UNIT[tx_size] as i32).min((max_blocks_high - blk_row).max(0));
+    let col_end = (TX_SIZE_WIDE_UNIT[tx_size] as i32).min((max_blocks_wide - blk_col).max(0));
+    let mut row = 0i32;
+    while row < row_end {
+        let mut col = 0i32;
+        while col < col_end {
+            set_txfm_context_vartx(
+                bsize,
+                inter_tx_size,
+                mb_to_right_edge,
+                mb_to_bottom_edge,
+                above_ctx,
+                left_ctx,
+                sub_txs,
+                blk_row + row,
+                blk_col + col,
+            );
+            col += bsw as i32;
+        }
+        row += bsh as i32;
+    }
+}
+
+/// `tx_partition_set_contexts` (av1/encoder/partition_search.c:345): the
+/// max-tx-size raster driving [`set_txfm_context_vartx`] over the whole block.
+pub fn tx_partition_set_contexts(
+    bsize: usize,
+    inter_tx_size: &[usize; 16],
+    mb_to_right_edge: i32,
+    mb_to_bottom_edge: i32,
+    above_ctx: &mut [u8],
+    left_ctx: &mut [u8],
+) {
+    let mi_width = MI_SIZE_WIDE[bsize] as i32;
+    let mi_height = MI_SIZE_HIGH[bsize] as i32;
+    let max_tx_size = MAX_TXSIZE_RECT_LOOKUP[bsize];
+    let bh = TX_SIZE_HIGH_UNIT[max_tx_size] as i32;
+    let bw = TX_SIZE_WIDE_UNIT[max_tx_size] as i32;
+    let mut idy = 0i32;
+    while idy < mi_height {
+        let mut idx = 0i32;
+        while idx < mi_width {
+            set_txfm_context_vartx(
+                bsize,
+                inter_tx_size,
+                mb_to_right_edge,
+                mb_to_bottom_edge,
+                above_ctx,
+                left_ctx,
+                max_tx_size,
+                idy,
+                idx,
+            );
+            idx += bw;
+        }
+        idy += bh;
     }
 }
 
@@ -5908,6 +6036,12 @@ pub struct KfFrameContext {
     /// on/off gates in `RESTORE_WIENER` / `RESTORE_SGRPROJ` frames.
     pub wiener_restore: [u16; 3],
     pub sgrproj_restore: [u16; 3],
+    /// `txfm_partition_cdf[TXFM_PARTITION_CONTEXTS]` (21 contexts, 2 symbols) —
+    /// the inter/intrabc var-tx split flag ([`write_tx_size_vartx`]). Loaded
+    /// from the fixed `default_txfm_partition_cdf` (entropymode.c; NOT
+    /// qindex-selected), then adapted per write. Previously hosted on the
+    /// decoder's `TileKf` behind a FORK NOTE — this is its documented home.
+    pub txfm_partition: [[u16; 3]; TXFM_PARTITION_CONTEXTS],
     /// The coefficient-CDF region (`txb_skip`/`eob*`/`dc_sign`/`coeff_base*`/
     /// `coeff_br`) as aom-txb's flat arena; its per-symbol context selection
     /// happens inside the coefficient reader/writer.
@@ -5949,6 +6083,7 @@ impl KfFrameContext {
             ext_tx_dtt4: [[[0; 6]; INTRA_MODES]; EXT_TX_SIZES],
             inter_ext_tx: [[[0; 17]; EXT_TX_SIZES]; EXT_TX_SETS_INTER],
             switchable_restore: [0; 4],
+            txfm_partition: [[0; 3]; TXFM_PARTITION_CONTEXTS],
             wiener_restore: [0; 3],
             sgrproj_restore: [0; 3],
             coeff: vec![0; coeff_len],
@@ -5992,6 +6127,7 @@ impl KfFrameContext {
             ext_tx_dtt4: d::DEFAULT_EXT_TX_DTT4,
             inter_ext_tx: d::DEFAULT_INTER_EXT_TX,
             switchable_restore: d::DEFAULT_SWITCHABLE_RESTORE,
+            txfm_partition: DEFAULT_TXFM_PARTITION_CDF,
             wiener_restore: d::DEFAULT_WIENER_RESTORE,
             sgrproj_restore: d::DEFAULT_SGRPROJ_RESTORE,
             coeff: d::DEFAULT_COEFF_ARENA[coeff_cdf_q_ctx(base_qindex)].to_vec(),

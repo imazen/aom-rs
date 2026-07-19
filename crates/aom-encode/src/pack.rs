@@ -496,6 +496,54 @@ pub fn pack_leaf(
     // the fallback tx size from tx_mode, frame.rs:1933) — so the whole tx-size
     // symbol + coeff write below is skipped (guarded by `!winner.use_intrabc`
     // here and `!winner.skip_txfm` at the coeff write).
+    // Intrabc COEFF arm: `is_inter_tx` is true and `skip_txfm` false, so C
+    // takes the var-tx branch (bitstream.c:1542-1552) — the
+    // `write_tx_size_vartx` raster over max_tx_size units, which reads AND
+    // updates the txfm-partition contexts itself (no `set_txfm_ctxs` here, and
+    // the encode walk deliberately skipped its stamp on the OUTPUT path).
+    if cfg.tx_mode_is_select && bsize > 0 && !env.lossless && winner.use_intrabc && !winner.skip_txfm
+    {
+        let max_tx = crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[bsize];
+        let txbh = crate::var_tx::TX_SIZE_HIGH_UNIT[max_tx];
+        let txbw = crate::var_tx::TX_SIZE_WIDE_UNIT[max_tx];
+        let a0 = mi_col as usize;
+        let l0 = (mi_row & 31) as usize;
+        let (_, _, mb_to_right, mb_to_bottom) = crate::tx_search::max_block_units(
+            env.mi_cols,
+            env.mi_rows,
+            mi_col,
+            mi_row,
+            mi_w as i32,
+            mi_h as i32,
+            crate::tx_search::BLK_W_B[bsize],
+            crate::tx_search::BLK_H_B[bsize],
+            0,
+            0,
+        );
+        let mut idy = 0usize;
+        while idy < mi_h {
+            let mut idx = 0usize;
+            while idx < mi_w {
+                aom_dsp::entropy::partition::write_tx_size_vartx(
+                    enc,
+                    &mut kf.txfm_partition,
+                    bsize,
+                    &winner.inter_tx_size,
+                    mb_to_right,
+                    mb_to_bottom,
+                    &mut tile.above_tctx[a0..a0 + mi_w],
+                    &mut tile.left_tctx[l0..l0 + mi_h],
+                    max_tx,
+                    0,
+                    idy as i32,
+                    idx as i32,
+                );
+                idx += txbw;
+            }
+            idy += txbh;
+        }
+    }
+
     if cfg.tx_mode_is_select && bsize > 0 && !env.lossless && !winner.use_intrabc {
         let a0 = mi_col as usize;
         let l0 = (mi_row & 31) as usize;
@@ -528,7 +576,111 @@ pub fn pack_leaf(
 
     // ---- 4. write_tokens_b: coefficient bytes, gated on !skip_txfm (always
     //     true in the KEY intra envelope, asserted by encode_b_intra_dry). ----
-    if !winner.skip_txfm {
+    if !winner.skip_txfm && winner.use_intrabc {
+        // INTER (intrabc) coefficients: `write_tokens_b`'s inter arm
+        // (bitstream.c:1444-1471) — 64x64-chunk outer in LUMA mi units, planes
+        // INTERLEAVED per chunk, each plane's sub-walk being
+        // `write_inter_txb_coeff` (:1395) over `get_vartx_max_txsize` units.
+        // Luma descends the `inter_tx_size` quadtree (pack_txb_tokens); chroma
+        // is UNIFORM. The re-encode produced each plane's txbs in exactly this
+        // order, so per-plane cursors consume them in lockstep.
+        let uv_tx = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
+        let (max_bw, max_bh, mb_to_right, mb_to_bottom) = crate::tx_search::max_block_units(
+            env.mi_cols,
+            env.mi_rows,
+            mi_col,
+            mi_row,
+            mi_w as i32,
+            mi_h as i32,
+            TXS_W[0] * mi_w, // block_size_wide[bsize] = 4 * mi_w
+            TXS_H[0] * mi_h,
+            0,
+            0,
+        );
+        let mu_w = MI_SIZE_WIDE_B[12].min(mi_w);
+        let mu_h = MI_SIZE_HIGH_B[12].min(mi_h);
+        let max_tx = crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[bsize];
+        let (bkw, bkh) = (
+            crate::var_tx::TX_SIZE_WIDE_UNIT[max_tx],
+            crate::var_tx::TX_SIZE_HIGH_UNIT[max_tx],
+        );
+        let (utxw_u, utxh_u) = (TXS_W[uv_tx] >> 2, TXS_H[uv_tx] >> 2);
+        let (mut yc, mut uc, mut vc) = (0usize, 0usize, 0usize);
+        let has_uv = out.u.is_some();
+        let plane_bsize_pack =
+            aom_dsp::entropy::partition::get_plane_block_size(bsize, env.ss_x, env.ss_y);
+        let (cvis_w, cvis_h, _, _) = crate::tx_search::max_block_units(
+            env.mi_cols,
+            env.mi_rows,
+            mi_col,
+            mi_row,
+            mi_w as i32,
+            mi_h as i32,
+            crate::tx_search::BLK_W_B[plane_bsize_pack],
+            crate::tx_search::BLK_H_B[plane_bsize_pack],
+            env.ss_x,
+            env.ss_y,
+        );
+        let mut row = 0usize;
+        while row < mi_h {
+            let mut col = 0usize;
+            while col < mi_w {
+                // plane 0 (Y): the var-tx quadtree over this chunk's units.
+                let uh = (row + mu_h).min(mi_h);
+                let uw = (col + mu_w).min(mi_w);
+                let mut br = row;
+                while br < uh {
+                    let mut bc = col;
+                    while bc < uw {
+                        pack_vartx_txb(
+                            enc, kf, cfg, env, winner, &out.y.txbs, &mut yc, br, bc, max_tx,
+                            max_bw, max_bh,
+                        );
+                        bc += bkw;
+                    }
+                    br += bkh;
+                }
+                // planes 1/2: uniform uv tx over the subsampled chunk.
+                if has_uv {
+                    let cuh = ((row + mu_h) >> env.ss_y).min(cvis_h);
+                    let cuw = ((col + mu_w) >> env.ss_x).min(cvis_w);
+                    for (plane, cursor) in [(1usize, &mut uc), (2usize, &mut vc)] {
+                        let txbs = if plane == 1 {
+                            &out.u.as_ref().unwrap().txbs
+                        } else {
+                            &out.v.as_ref().unwrap().txbs
+                        };
+                        let mut cbr = row >> env.ss_y;
+                        while cbr < cuh {
+                            let mut cbc = col >> env.ss_x;
+                            while cbc < cuw {
+                                if *cursor < txbs.len() {
+                                    write_one_txb_inter(
+                                        enc,
+                                        kf,
+                                        cfg,
+                                        env,
+                                        &txbs[*cursor],
+                                        uv_tx,
+                                        plane,
+                                    );
+                                    *cursor += 1;
+                                }
+                                cbc += utxw_u;
+                            }
+                            cbr += utxh_u;
+                        }
+                    }
+                }
+                col += mu_w;
+            }
+            row += mu_h;
+        }
+    }
+
+    // The INTRA coefficient write (av1_write_intra_coeffs_mb). Excludes the
+    // intrabc COEFF arm handled above; step 5 below runs for BOTH.
+    if !winner.skip_txfm && !winner.use_intrabc {
         let uv_tx = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
         // av1_write_intra_coeffs_mb (encodetxb.c:431-472): the 64x64-chunk
         // outer walk, planes INTERLEAVED per chunk (L, then U, then V) — the
@@ -1822,4 +1974,119 @@ pub fn pack_tile_from_trees(
             );
         }
     }
+}
+
+/// `pack_txb_tokens` (bitstream.c) LUMA descent: recurse the `inter_tx_size`
+/// quadtree and write each leaf's coefficients, consuming `txbs` in the same
+/// depth-first order [`crate::encode_sb::encode_b_intra_dry`]'s intrabc COEFF
+/// arm produced them.
+#[allow(clippy::too_many_arguments)]
+fn pack_vartx_txb(
+    enc: &mut OdEcEnc,
+    kf: &mut KfFrameContext,
+    cfg: &PackCfg,
+    env: &SbEncodeEnv,
+    winner: &LeafWinner,
+    txbs: &[TxbEncode],
+    cursor: &mut usize,
+    blk_row: usize,
+    blk_col: usize,
+    tx_size: usize,
+    max_blocks_wide: usize,
+    max_blocks_high: usize,
+) {
+    if blk_row >= max_blocks_high || blk_col >= max_blocks_wide {
+        return;
+    }
+    let idx = crate::var_tx::get_txb_size_index(winner.bsize, blk_row, blk_col);
+    let plane_tx_size = winner.inter_tx_size[idx];
+    if tx_size == plane_tx_size {
+        if *cursor < txbs.len() {
+            write_one_txb_inter(enc, kf, cfg, env, &txbs[*cursor], tx_size, 0);
+            *cursor += 1;
+        }
+        return;
+    }
+    let sub_txs = crate::var_tx::SUB_TX_SIZE_MAP[tx_size];
+    let bsw = crate::var_tx::TX_SIZE_WIDE_UNIT[sub_txs];
+    let bsh = crate::var_tx::TX_SIZE_HIGH_UNIT[sub_txs];
+    let row_end = crate::var_tx::TX_SIZE_HIGH_UNIT[tx_size].min(max_blocks_high - blk_row);
+    let col_end = crate::var_tx::TX_SIZE_WIDE_UNIT[tx_size].min(max_blocks_wide - blk_col);
+    let mut row = 0usize;
+    while row < row_end {
+        let mut col = 0usize;
+        while col < col_end {
+            pack_vartx_txb(
+                enc,
+                kf,
+                cfg,
+                env,
+                winner,
+                txbs,
+                cursor,
+                blk_row + row,
+                blk_col + col,
+                sub_txs,
+                max_blocks_wide,
+                max_blocks_high,
+            );
+            col += bsw;
+        }
+        row += bsh;
+    }
+}
+
+/// [`write_one_txb`]'s INTER twin: the tx-type symbol rides the
+/// `inter_ext_tx_cdf[eset][square_tx_size]` region (bitstream.c:832-836) and
+/// `write_coeffs_txb_full` gets `is_inter = true` (which also selects the inter
+/// ext-tx SET). Chroma writes no tx-type symbol at all.
+#[allow(clippy::too_many_arguments)]
+fn write_one_txb_inter(
+    enc: &mut OdEcEnc,
+    kf: &mut KfFrameContext,
+    cfg: &PackCfg,
+    env: &SbEncodeEnv,
+    txb: &TxbEncode,
+    tx_size: usize,
+    plane: usize,
+) {
+    let plane_type = usize::from(plane > 0);
+    let mut dummy = [0u16; 8];
+    let ext_tx_cdf: &mut [u16] = if plane_type == 0 {
+        let d = aom_dsp::txb::ext_tx_derive(
+            tx_size,
+            true, // is_inter
+            env.reduced_tx_set_used,
+            txb.tx_type,
+            false,
+            0,
+            0,
+        );
+        if d.eset > 0 {
+            &mut kf.inter_ext_tx[d.eset as usize][d.square as usize]
+        } else {
+            &mut dummy[..]
+        }
+    } else {
+        &mut dummy[..]
+    };
+    write_coeffs_txb_full(
+        enc,
+        &mut kf.coeff,
+        ext_tx_cdf,
+        &txb.qcoeff,
+        txb.eob as usize,
+        tx_size,
+        txb.tx_type,
+        plane_type,
+        txb.txb_skip_ctx,
+        txb.dc_sign_ctx,
+        cfg.allow_update_cdf,
+        true, // is_inter
+        env.reduced_tx_set_used,
+        false,
+        0,
+        0,
+        cfg.signal_gate,
+    );
 }

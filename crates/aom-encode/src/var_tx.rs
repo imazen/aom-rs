@@ -566,10 +566,10 @@ pub fn ml_predict_tx_split(
 }
 
 /// `sub_tx_size_map[TX_SIZES_ALL]` (common_data.h): one var-tx split step.
-const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
+pub const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
 /// `tx_size_wide_unit` / `tx_size_high_unit` (4x4 units).
-const TX_SIZE_WIDE_UNIT: [usize; 19] = [1, 2, 4, 8, 16, 1, 2, 2, 4, 4, 8, 8, 16, 1, 4, 2, 8, 4, 16];
-const TX_SIZE_HIGH_UNIT: [usize; 19] = [1, 2, 4, 8, 16, 2, 1, 4, 2, 8, 4, 16, 8, 4, 1, 8, 2, 16, 4];
+pub const TX_SIZE_WIDE_UNIT: [usize; 19] = [1, 2, 4, 8, 16, 1, 2, 2, 4, 4, 8, 8, 16, 1, 4, 2, 8, 4, 16];
+pub const TX_SIZE_HIGH_UNIT: [usize; 19] = [1, 2, 4, 8, 16, 2, 1, 4, 2, 8, 4, 16, 8, 4, 1, 8, 2, 16, 4];
 /// `max_txsize_rect_lookup[BLOCK_SIZES_ALL]` (common_data.h) — the block's
 /// largest rectangular tx size (the var-tx quadtree root).
 const MAX_TXSIZE_RECT_LOOKUP: [usize; 22] =
@@ -579,7 +579,7 @@ const MAX_VARTX_DEPTH: i32 = 2;
 
 /// `av1_get_txb_size_index` (blockd.h) — the `mbmi->inter_tx_size[]` index for
 /// a txb at (blk_row, blk_col). Copy of the private `aom_dsp::entropy` helper.
-fn get_txb_size_index(bsize: usize, blk_row: usize, blk_col: usize) -> usize {
+pub fn get_txb_size_index(bsize: usize, blk_row: usize, blk_col: usize) -> usize {
     const TW_W_LOG2: [usize; 22] = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 0, 1, 1, 2, 2, 3];
     const TW_H_LOG2: [usize; 22] = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 1, 0, 2, 1, 3, 2];
     const STRIDE_LOG2: [usize; 22] = [0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 2, 2, 0, 1, 0, 1, 0, 1];
@@ -1121,10 +1121,18 @@ fn select_tx_size_and_type(env: &VarTxEnv, ref_best_rd: i64) -> (i64, VarTxResul
     let bh = TX_SIZE_HIGH_UNIT[max_tx_size];
     let bw = TX_SIZE_WIDE_UNIT[max_tx_size];
 
-    let mut ta: Vec<i8> = env.above_ctx[..env.max_blocks_wide].to_vec();
-    let mut tl: Vec<i8> = env.left_ctx[..env.max_blocks_high].to_vec();
-    let mut tx_above: Vec<u8> = env.tx_above[..env.max_blocks_wide].to_vec();
-    let mut tx_left: Vec<u8> = env.tx_left[..env.max_blocks_high].to_vec();
+    // `av1_get_entropy_contexts` fills the FULL plane-block extent; only the
+    // txb LOOP is frame-edge clipped (`max_block_wide/high`). Sizing these by
+    // the clipped extent under-runs `get_txb_ctx`'s `a[..w_unit]` read on an
+    // edge block whose max tx is wider than the visible remainder. Identical
+    // to the clipped form for interior blocks (full == clipped), so the
+    // recursion differential is unaffected.
+    let full_w = crate::tx_search::MI_SIZE_WIDE_B[env.bsize];
+    let full_h = crate::tx_search::MI_SIZE_HIGH_B[env.bsize];
+    let mut ta: Vec<i8> = env.above_ctx[..full_w].to_vec();
+    let mut tl: Vec<i8> = env.left_ctx[..full_h].to_vec();
+    let mut tx_above: Vec<u8> = env.tx_above[..full_w].to_vec();
+    let mut tx_left: Vec<u8> = env.tx_left[..full_h].to_vec();
 
     let no_skip_txfm_cost = env.skip_txfm_cost[0];
     let skip_txfm_cost = env.skip_txfm_cost[1];

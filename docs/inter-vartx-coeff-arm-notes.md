@@ -74,3 +74,53 @@ MAX_VARTX_DEPTH=2 (enums.h:56). init_depth=0 (sub-720p spd0).
 - ref_nn_predict exists in aom-sys-ref (KB-10 intra_tx_nn_diff uses it) — reuse for the NN diffs.
 - The recursion's try_split hook + get_tx_mask_inter multi-type arm are where the prunes wire in
   (both have "NOT yet ported"/"applied by the caller" comments marking the insertion points).
+
+## 2026-07-19 — integration findings (chunk 2/3: pack + intrabc)
+
+### `model_based_tx_search_prune` is PROVABLY INERT for intrabc (item 1 closed, no port needed)
+`rd_pick_intrabc_mode_sb` calls `av1_txfm_search(..., ref_best_rd = INT64_MAX)` — the constant is
+HARDCODED at rdopt.c:3611, NOT the incoming `best_rd` (which is only used for the post-hoc
+`rd_stats_yuv.rdcost < best_rd` compare at :3615). `av1_pick_recursive_tx_size_type_yrd` then gates
+the prune on `ref_best_rd != INT64_MAX` (tx_search.c:3562-3565), so it can never fire on the intrabc
+path. Same reasoning voids EVERY early-exit inside `av1_txfm_search` (:3811, :3844) and
+`av1_txfm_uvrd` (:3737) for intrabc. This is a source proof, not an empirical guess.
+
+### CHROMA for an inter/intrabc block
+- **UNIFORM tx, never var-tx.** `encode_block_inter` short-circuits `plane != 0` to
+  `av1_get_max_uv_txsize(bsize, ssx, ssy)` (encodemb.c:495-505); `mbmi->inter_tx_size[]` is luma-only.
+  There is no `mbmi->uv_tx_size` field in v3.14.1 — chroma's size is purely derived.
+- **NO tx-type search.** `get_tx_mask`'s `if (plane)` arm (tx_search.c:1841-1847) pins
+  `txk_allowed = av1_get_tx_type(...)`, collapsing `allowed_tx_mask` to one bit (:1872-1874). The
+  full-set branch literally asserts `plane == 0` (:1882). The type is INHERITED from the co-located
+  LUMA txb: `xd->tx_type_map[(blk_row << ssy) * stride + (blk_col << ssx)]` (blockd.h:1296-1301),
+  DCT_DCT if not in the chroma set.
+- **`rd_stats_uv->skip_txfm` is EOB-based**, not SSE-based: `this_rd_stats.skip_txfm &=
+  !x->plane[plane].eobs[block]` (tx_search.c:3126), AND-reduced by `av1_merge_rd_stats`. This is the
+  "chroma eob-0" check KB-15 called for; the old `chroma_sse == 0` gate was a strict SUBSET of it.
+- **Trellis rd-mult differs on chroma**: `plane_rd_mult_chroma[is_inter=1][PLANE_TYPE_UV] = 10`
+  (encodetxb.h:266-269) under the allintra `use_chroma_trellis_rd_mult = 1` (speed_features.c:370),
+  vs 20 without it. Inter LUMA is 16 either way — which is why the sf looked like a no-op.
+- `perform_best_rd_based_gating_for_chroma` is **0** at speed-0 ALLINTRA (init_inter_sf,
+  speed_features.c:2391; raised only at GOOD speed >= 3, :1311) so `chroma_ref_best_rd` never tightens.
+- The chroma PREDICTOR is the intrabc DV copy, built ONCE before the RD call by
+  `av1_enc_build_inter_predictor(..., 0, num_planes-1)` (rdopt.c:3601). `mbmi->uv_mode = UV_DC_PRED`
+  (:3596) is a bitstream placeholder only — it never drives a predictor because `block_rd_txfm`'s
+  intra-predict branch is `!is_inter`-gated (:3084).
+
+### Walk ORDERS (they differ between encode and write — both ported)
+- ENCODE (`av1_encode_sb`, encodemb.c:657-699): **plane-outer** (Y, U, V), each plane mu-64 chunked,
+  raster over `max_tx_size` units, luma recursing via `encode_block_inter`.
+- WRITE (`write_tokens_b` inter arm, bitstream.c:1444-1471): **64-chunk outer in LUMA mi units, planes
+  INTERLEAVED per chunk** (same shape as the intra `av1_write_intra_coeffs_mb`), each plane's sub-walk
+  being `write_inter_txb_coeff` (:1395). Identical to the encode order for blocks <= 64x64 (one chunk).
+- The tx-SIZE syntax (`write_tx_size_vartx`, bitstream.c:1542-1552) both READS and UPDATES the
+  txfm-partition contexts. The encode walk therefore stamps them ONLY on a dry run
+  (`if (dry_run) tx_partition_set_contexts`, partition_search.c:559-562) — double-stamping on the
+  OUTPUT path would corrupt the contexts.
+
+### `set_skip_txfm` has a NONZERO intermediate rate
+tx_search.c:245-281: besides `skip_txfm = 1` and `dist = sse = ROUND_POWER_OF_TWO(dist, 2*(bd-8)) << 4`,
+it sets `rd_stats->rate = zero_blk_rate * n_max_tx_blocks` (zero_blk_rate = `txb_skip_cost[ctx][1]` at
+the BLOCK-ORIGIN ctx). That rate is discarded when the final decision is skip, but it is an INPUT to
+the skip-vs-non-skip comparison (:3863-3868), so a luma-predict-skip block can still come out non-skip
+once chroma is costed.

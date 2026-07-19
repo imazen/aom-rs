@@ -1332,6 +1332,32 @@ fn leaf_pick_sb_modes(
                 &tile.left_ectx[1][..],
                 &tile.left_ectx[2][..],
             ],
+            tx_above: &tile.above_tctx[..],
+            tx_left: &tile.left_tctx[..],
+            vartx: crate::intrabc_search::IntrabcVarTxKnobs {
+                lossless: env.lossless,
+                // oxcf.txfm_cfg defaults (av1_cx_iface.c): enable_flip_idtx 1,
+                // use_inter_dct_only 0. The port has no CLI for either.
+                enable_flip_idtx: true,
+                use_inter_dct_only: false,
+                iq_tuning: env.tune.iq_tuning,
+                coeff_opt_dist_threshold: cfg.pol.coeff_opt_dist_threshold,
+                adaptive_txb_search_level: cfg.pol.adaptive_txb_search_level,
+                // init_tx_sf (speed_features.c:2456-2458): txb_split_cap 1,
+                // ml_tx_split_thresh 8500, prune_2d_txfm_mode TX_TYPE_PRUNE_1.
+                txb_split_cap: true,
+                ml_tx_split_thresh: 8500,
+                // `prune_2d_txfm_mode >= TX_TYPE_PRUNE_1` holds at EVERY speed
+                // (init_tx_sf sets PRUNE_1; allintra speed >= 4 raises it to
+                // PRUNE_3). NOTE the ported driver implements the PRUNE_1
+                // behaviour only (see crate::prune_tx_2d module docs) — intrabc
+                // is speed-0-scoped today, so the higher levels are unreached.
+                prune_2d: true,
+                // get_search_init_depth (tx_search.c:363-383) for INTER:
+                // inter_tx_size_search_init_depth_{rect,sqr} are 0 at speed 0
+                // (speed_features.c init_tx_sf; raised only at speed >= 1/2).
+                init_depth: 0,
+            },
         }
     });
 

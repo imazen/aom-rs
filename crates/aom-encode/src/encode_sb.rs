@@ -87,6 +87,7 @@ use crate::intra_uv_rd::{
     UV_CFL_PRED, UvRdEnv, av1_get_tx_size_uv, chroma_plane_offset, is_chroma_reference,
 };
 use crate::partition::PartRdStats;
+use crate::encode_intra::TxbEncode;
 use crate::tx_search::{MI_SIZE_HIGH_B, MI_SIZE_WIDE_B, TXS_H, TXS_W, max_block_units};
 use aom_dsp::entropy::partition::{get_plane_block_size, update_ext_partition_context};
 use aom_dsp::intra::cfl::CflCtx;
@@ -579,6 +580,24 @@ pub fn encode_b_intra_dry(
             recon_y[ref_off_y + r * env.stride..ref_off_y + r * env.stride + bw]
                 .copy_from_slice(&pred[r * bw..r * bw + bw]);
         }
+        // --- COEFF arm (`!skip_txfm`): av1_encode_sb's inter path. Luma
+        //     recurses on `inter_tx_size`, chroma is uniform; both reconstruct
+        //     into the recon planes and stamp the real entropy contexts.
+        if !winner.skip_txfm {
+            return encode_b_intrabc_coeff(
+                env,
+                state,
+                recon_y,
+                recon_u,
+                recon_v,
+                winner,
+                mi_row,
+                mi_col,
+                is_chroma_ref,
+                output_enabled,
+            );
+        }
+
         // Reset luma coeff entropy context (skip → cul 0).
         state.above_ectx[0][a0..a0 + mi_w].fill(0);
         state.left_ectx[0][l0..l0 + mi_h].fill(0);
@@ -1546,4 +1565,625 @@ pub fn encode_sb_dry(
         bsize,
         partition,
     );
+}
+
+// ===========================================================================
+// IntraBC COEFF arm re-encode — `av1_encode_sb`'s inter path (encodemb.c:636)
+// over `encode_block_inter` (:482).
+//
+// Plane-outer (Y, U, V), each plane mu-64 chunked, and within a chunk a raster
+// over `max_tx_size` units. LUMA recurses on `mbmi->inter_tx_size` until
+// `tx_size == plane_tx_size`; CHROMA is UNIFORM (`av1_get_max_uv_txsize`) and
+// takes `encode_block` directly (:505 `if (tx_size == plane_tx_size || plane)`).
+// ===========================================================================
+
+/// Shared per-txb state for the intrabc coeff-arm re-encode.
+struct IbcTxbCtx<'a> {
+    plane: usize,
+    plane_bsize: usize,
+    tx_size_uniform_uv: usize,
+    bd: u8,
+    lossless: bool,
+    stride: usize,
+    ref_off: usize,
+    src: &'a [u16],
+    src_off: usize,
+    rows: &'a aom_dsp::quant::PlaneQuantRows<'a>,
+    coeff_costs: &'a CoeffCostSet,
+    rdmult: i32,
+    sharpness: i32,
+    iq_tuning: bool,
+    qm_level: Option<usize>,
+    use_trellis: bool,
+    max_blocks_wide: usize,
+    max_blocks_high: usize,
+}
+
+/// One txb of the coeff-arm re-encode: transform + quantize (+ trellis),
+/// reconstruct into `recon`, and stamp the local entropy context.
+/// Mirrors `encode_block` (encodemb.c:390) on the inter path — no intra
+/// prediction (the DV copy already wrote `recon`), and the residual is taken
+/// against the CURRENT recon contents (the prediction).
+#[allow(clippy::too_many_arguments)]
+fn ibc_encode_txb(
+    c: &IbcTxbCtx,
+    recon: &mut [u16],
+    ta: &mut [i8],
+    tl: &mut [i8],
+    blk_row: usize,
+    blk_col: usize,
+    tx_size: usize,
+    tx_type: usize,
+) -> TxbEncode {
+    let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
+    let (txw_u, txh_u) = (txw >> 2, txh >> 2);
+    let txb_off = c.ref_off + (blk_row * c.stride + blk_col) * 4;
+    let src_txb_off = c.src_off + (blk_row * c.stride + blk_col) * 4;
+
+    // The prediction currently occupying the recon plane at this txb.
+    let mut pred = vec![0u16; txw * txh];
+    for r in 0..txh {
+        pred[r * txw..r * txw + txw]
+            .copy_from_slice(&recon[txb_off + r * c.stride..txb_off + r * c.stride + txw]);
+    }
+    // av1_subtract_txb.
+    let mut residual = vec![0i16; txw * txh];
+    for r in 0..txh {
+        for col in 0..txw {
+            residual[r * txw + col] = (i32::from(c.src[src_txb_off + r * c.stride + col])
+                - i32::from(pred[r * txw + col])) as i16;
+        }
+    }
+
+    let kind = if c.use_trellis {
+        crate::QuantKind::Fp
+    } else {
+        crate::QuantKind::B
+    };
+    let mut qp = crate::QuantParams::from_plane_rows(c.rows, kind, c.bd, c.lossless);
+    if let Some(level) = c.qm_level {
+        qp = qp.with_qm(level, 0);
+    }
+    let tables = c.coeff_costs.tables(tx_size);
+    let (qcoeff, dqcoeff, eob, ent_ctx, txb_skip_ctx, dc_sign_ctx);
+    if c.use_trellis {
+        let bctx = crate::BlockContext {
+            above: &ta[blk_col..],
+            left: &tl[blk_row..],
+            plane: c.plane,
+            plane_bsize: c.plane_bsize,
+        };
+        let opt = crate::OptimizeInputs {
+            cost: &tables,
+            // The INTER trellis rd-mult rows (encodetxb.h:266-273): luma 16,
+            // chroma 10 under the allintra `use_chroma_trellis_rd_mult`.
+            rdmult: if c.plane > 0 {
+                crate::var_tx::trellis_rdmult_inter_uv(c.rdmult, c.sharpness, c.bd, c.iq_tuning)
+            } else {
+                crate::var_tx::trellis_rdmult_inter_y(c.rdmult, c.sharpness, c.bd, c.iq_tuning)
+            },
+            sharpness: c.sharpness,
+        };
+        let r = crate::xform_quant_optimize(&residual, tx_size, tx_type, kind, &qp, &bctx, &opt);
+        qcoeff = r.qcoeff;
+        dqcoeff = r.dqcoeff;
+        eob = r.eob;
+        ent_ctx = r.txb_entropy_ctx;
+        txb_skip_ctx = r.txb_skip_ctx;
+        dc_sign_ctx = r.dc_sign_ctx;
+    } else {
+        let r = crate::xform_quant(&residual, tx_size, tx_type, kind, &qp, false);
+        qcoeff = r.qcoeff;
+        dqcoeff = r.dqcoeff;
+        eob = r.eob;
+        ent_ctx = r.txb_entropy_ctx;
+        let (sc, dc) = get_txb_ctx(
+            c.plane_bsize,
+            tx_size,
+            c.plane,
+            &ta[blk_col..],
+            &tl[blk_row..],
+        );
+        txb_skip_ctx = sc as usize;
+        dc_sign_ctx = dc as usize;
+    }
+
+    // if (*eob) av1_inverse_transform_block -> recon.
+    if eob > 0 {
+        let mut tight = pred.clone();
+        aom_dsp::transform::inv_txfm2d::av1_inverse_transform_add(
+            &dqcoeff,
+            &mut tight,
+            txw,
+            tx_type,
+            tx_size,
+            i32::from(c.bd),
+            eob as usize,
+            c.lossless,
+        );
+        for r in 0..txh {
+            recon[txb_off + r * c.stride..txb_off + r * c.stride + txw]
+                .copy_from_slice(&tight[r * txw..r * txw + txw]);
+        }
+    }
+
+    // av1_set_txb_context (full txb footprint).
+    let a_end = (blk_col + txw_u).min(ta.len());
+    let l_end = (blk_row + txh_u).min(tl.len());
+    for a in ta[blk_col..a_end].iter_mut() {
+        *a = ent_ctx as i8;
+    }
+    for l in tl[blk_row..l_end].iter_mut() {
+        *l = ent_ctx as i8;
+    }
+    let _ = (c.tx_size_uniform_uv, c.max_blocks_wide, c.max_blocks_high);
+
+    TxbEncode {
+        tx_type,
+        eob,
+        txb_entropy_ctx: ent_ctx,
+        qcoeff,
+        dqcoeff,
+        txb_skip_ctx,
+        dc_sign_ctx,
+    }
+}
+
+/// `encode_block_inter` (encodemb.c:482) LUMA recursion: descend until
+/// `tx_size == inter_tx_size[get_txb_size_index(bsize, blk_row, blk_col)]`,
+/// then encode that leaf. Appends txbs in C's depth-first order.
+#[allow(clippy::too_many_arguments)]
+fn ibc_encode_block_inter_y(
+    c: &IbcTxbCtx,
+    recon: &mut [u16],
+    ta: &mut [i8],
+    tl: &mut [i8],
+    pers_a: &mut [i8],
+    pers_l: &mut [i8],
+    out: &mut Vec<TxbEncode>,
+    tx_type_map: &mut [u8],
+    map_stride: usize,
+    inter_tx_size: &[usize; 16],
+    blk_row: usize,
+    blk_col: usize,
+    tx_size: usize,
+) {
+    if blk_row >= c.max_blocks_high || blk_col >= c.max_blocks_wide {
+        return;
+    }
+    let idx = crate::var_tx::get_txb_size_index(c.plane_bsize, blk_row, blk_col);
+    let plane_tx_size = inter_tx_size[idx];
+    if tx_size == plane_tx_size {
+        // av1_get_tx_type(PLANE_TYPE_Y): the map entry at this txb origin.
+        // av1_get_tx_type(PLANE_TYPE_Y) — DCT_DCT at lossless / sqr_up > TX_32X32,
+        // else the map entry at this txb origin.
+        let tx_type = crate::encode_intra::get_tx_type_y(
+            c.lossless,
+            tx_size,
+            tx_type_map,
+            map_stride,
+            blk_row,
+            blk_col,
+        );
+        // C's tokenize (`av1_update_and_record_txb_context`) derives the
+        // WRITE-side (txb_skip_ctx, dc_sign_ctx) from the PERSISTENT arrays,
+        // read BEFORE this txb's own (edge-clipped) stamp — KB-6's write-ctx
+        // root. The local ta/tl (full-footprint) feed only the trellis.
+        let (tok_tsc, tok_dsc) = get_txb_ctx(
+            c.plane_bsize,
+            tx_size,
+            c.plane,
+            &pers_a[blk_col..],
+            &pers_l[blk_row..],
+        );
+        let mut txb = ibc_encode_txb(c, recon, ta, tl, blk_row, blk_col, tx_size, tx_type);
+        txb.txb_skip_ctx = tok_tsc as usize;
+        txb.dc_sign_ctx = if txb.qcoeff.first().copied().unwrap_or(0) != 0 {
+            tok_dsc as usize
+        } else {
+            0
+        };
+        // av1_set_entropy_contexts (blockd.c:29): full footprint inside the
+        // visible area, ZERO beyond it.
+        ibc_stamp_persistent(
+            pers_a,
+            pers_l,
+            blk_row,
+            blk_col,
+            tx_size,
+            txb.txb_entropy_ctx as i8,
+            c.max_blocks_wide,
+            c.max_blocks_high,
+        );
+        // `if (*eob == 0 && plane == 0) update_txk_array(.., DCT_DCT)`.
+        if txb.eob == 0 {
+            crate::encode_intra::update_txk_array(
+                tx_type_map,
+                map_stride,
+                blk_row,
+                blk_col,
+                tx_size,
+                0,
+            );
+        }
+        out.push(txb);
+        return;
+    }
+    let sub_txs = crate::var_tx::SUB_TX_SIZE_MAP[tx_size];
+    let bsw = crate::var_tx::TX_SIZE_WIDE_UNIT[sub_txs];
+    let bsh = crate::var_tx::TX_SIZE_HIGH_UNIT[sub_txs];
+    let row_end =
+        crate::var_tx::TX_SIZE_HIGH_UNIT[tx_size].min(c.max_blocks_high - blk_row);
+    let col_end =
+        crate::var_tx::TX_SIZE_WIDE_UNIT[tx_size].min(c.max_blocks_wide - blk_col);
+    let mut row = 0usize;
+    while row < row_end {
+        let mut col = 0usize;
+        while col < col_end {
+            ibc_encode_block_inter_y(
+                c,
+                recon,
+                ta,
+                tl,
+                pers_a,
+                pers_l,
+                out,
+                tx_type_map,
+                map_stride,
+                inter_tx_size,
+                blk_row + row,
+                blk_col + col,
+                sub_txs,
+            );
+            col += bsw;
+        }
+        row += bsh;
+    }
+}
+
+
+/// `av1_set_entropy_contexts` (blockd.c:29) for ONE txb: stamp the cul across
+/// the tx footprint, but ZERO the portion beyond the block's visible extent
+/// (`memset(a + above_contexts, 0, txs_wide - above_contexts)`) — the
+/// frame-edge tail-zero KB-6 pinned as a write-side probability defect.
+#[allow(clippy::too_many_arguments)]
+fn ibc_stamp_persistent(
+    pers_a: &mut [i8],
+    pers_l: &mut [i8],
+    blk_row: usize,
+    blk_col: usize,
+    tx_size: usize,
+    cul: i8,
+    max_blocks_wide: usize,
+    max_blocks_high: usize,
+) {
+    let txw_u = TXS_W[tx_size] >> 2;
+    let txh_u = TXS_H[tx_size] >> 2;
+    let above_contexts = txw_u.min(max_blocks_wide.saturating_sub(blk_col));
+    let left_contexts = txh_u.min(max_blocks_high.saturating_sub(blk_row));
+    for i in 0..txw_u {
+        if blk_col + i < pers_a.len() {
+            pers_a[blk_col + i] = if i < above_contexts { cul } else { 0 };
+        }
+    }
+    for i in 0..txh_u {
+        if blk_row + i < pers_l.len() {
+            pers_l[blk_row + i] = if i < left_contexts { cul } else { 0 };
+        }
+    }
+}
+
+/// The intrabc COEFF-arm leaf re-encode (`av1_encode_sb`'s inter path,
+/// encodemb.c:636). Called from [`encode_b_intra_dry`]'s intrabc arm AFTER the
+/// luma DV prediction is committed to `recon_y`; builds the chroma DV
+/// prediction itself, then walks Y (var-tx recursion) / U / V (uniform) in C's
+/// plane-outer, mu-64-chunked order.
+#[allow(clippy::too_many_arguments)]
+fn encode_b_intrabc_coeff(
+    env: &SbEncodeEnv,
+    state: &mut TileCtxState,
+    recon_y: &mut [u16],
+    recon_u: &mut [u16],
+    recon_v: &mut [u16],
+    winner: &mut LeafWinner,
+    mi_row: i32,
+    mi_col: i32,
+    is_chroma_ref: bool,
+    output_enabled: bool,
+) -> LeafEncodeOut {
+    let bsize = winner.bsize;
+    let mi_w = MI_SIZE_WIDE_B[bsize];
+    let mi_h = MI_SIZE_HIGH_B[bsize];
+    let a0 = mi_col as usize;
+    let l0 = (mi_row & 31) as usize;
+    let ref_off_y = env.base_y + (mi_row as usize * 4) * env.stride + mi_col as usize * 4;
+    let use_trellis = crate::encode_intra::is_trellis_used(env.enable_optimize_b, output_enabled);
+    // Frame-edge-clipped extents via the validated `max_block_wide/high` port
+    // (av1_common_int.h:1567/1581) — hand-rolled mi-difference clips are wrong
+    // for chroma and were the shape of the KB-6 edge defects.
+    let (bwv, bhv, mb_to_right, mb_to_bottom) = crate::tx_search::max_block_units(
+        env.mi_cols,
+        env.mi_rows,
+        mi_col,
+        mi_row,
+        mi_w as i32,
+        mi_h as i32,
+        crate::tx_search::BLK_W_B[bsize],
+        crate::tx_search::BLK_H_B[bsize],
+        0,
+        0,
+    );
+
+    // ---- plane 0 (Y): the var-tx quadtree ----
+    let mut ta: Vec<i8> = state.above_ectx[0][a0..a0 + mi_w].to_vec();
+    let mut tl: Vec<i8> = state.left_ectx[0][l0..l0 + mi_h].to_vec();
+    let mut pers_a: Vec<i8> = state.above_ectx[0][a0..a0 + mi_w].to_vec();
+    let mut pers_l: Vec<i8> = state.left_ectx[0][l0..l0 + mi_h].to_vec();
+    let yc = IbcTxbCtx {
+        plane: 0,
+        plane_bsize: bsize,
+        tx_size_uniform_uv: 0,
+        bd: env.bd,
+        lossless: env.lossless,
+        stride: env.stride,
+        ref_off: ref_off_y,
+        src: env.src_y,
+        src_off: ref_off_y,
+        rows: env.rows_y,
+        coeff_costs: env.coeff_costs_y,
+        rdmult: env.rdmult,
+        sharpness: env.sharpness,
+        iq_tuning: env.tune.iq_tuning,
+        qm_level: env.qm_levels.map(|l| l[0]),
+        use_trellis,
+        max_blocks_wide: bwv,
+        max_blocks_high: bhv,
+    };
+    let max_tx = crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[bsize];
+    let bw_u = crate::var_tx::TX_SIZE_WIDE_UNIT[max_tx];
+    let bh_u = crate::var_tx::TX_SIZE_HIGH_UNIT[max_tx];
+    // KB-4 tx_type_map semantics: OUTPUT_ENABLED copies (the eob-0 -> DCT_DCT
+    // resets land in a transient frame map, the winner keeps the search state);
+    // DRY aliases (resets persist).
+    let mut frame_map;
+    let map: &mut Vec<u8> = if output_enabled {
+        frame_map = winner.tx_type_map.clone();
+        &mut frame_map
+    } else {
+        &mut winner.tx_type_map
+    };
+    let mut y_txbs: Vec<TxbEncode> = Vec::new();
+    let mu_w = MI_SIZE_WIDE_B[12].min(mi_w); // BLOCK_64X64
+    let mu_h = MI_SIZE_HIGH_B[12].min(mi_h);
+    let mut idy = 0usize;
+    while idy < mi_h {
+        let mut idx = 0usize;
+        while idx < mi_w {
+            let unit_h = (idy + mu_h).min(mi_h);
+            let unit_w = (idx + mu_w).min(mi_w);
+            let mut blk_row = idy;
+            while blk_row < unit_h {
+                let mut blk_col = idx;
+                while blk_col < unit_w {
+                    ibc_encode_block_inter_y(
+                        &yc,
+                        recon_y,
+                        &mut ta,
+                        &mut tl,
+                        &mut pers_a,
+                        &mut pers_l,
+                        &mut y_txbs,
+                        map,
+                        mi_w,
+                        &winner.inter_tx_size,
+                        blk_row,
+                        blk_col,
+                        max_tx,
+                    );
+                    blk_col += bw_u;
+                }
+                blk_row += bh_u;
+            }
+            idx += mu_w;
+        }
+        idy += mu_h;
+    }
+    state.above_ectx[0][a0..a0 + mi_w].copy_from_slice(&pers_a);
+    state.left_ectx[0][l0..l0 + mi_h].copy_from_slice(&pers_l);
+
+    // ---- planes 1/2 (U, V): DV prediction + the UNIFORM uv tx walk ----
+    let mut u_out = None;
+    let mut v_out = None;
+    if !env.monochrome && is_chroma_ref {
+        let ref_off_uv = chroma_plane_offset(
+            env.base_uv,
+            env.stride,
+            mi_row,
+            mi_col,
+            bsize,
+            env.ss_x,
+            env.ss_y,
+        );
+        let plane_bsize = get_plane_block_size(bsize, env.ss_x, env.ss_y);
+        let (pmw, pmh) = (MI_SIZE_WIDE_B[plane_bsize], MI_SIZE_HIGH_B[plane_bsize]);
+        // The chroma plane block is padded to a 4x4 minimum, so for sub-8x8
+        // luma this is LARGER than `bw >> ss_x` (see the RD-side note).
+        let (cw, ch) = (
+            crate::tx_search::BLK_W_B[plane_bsize],
+            crate::tx_search::BLK_H_B[plane_bsize],
+        );
+        let uv_tx = av1_get_tx_size_uv(bsize, env.lossless, env.ss_x, env.ss_y);
+        let au = (mi_col >> env.ss_x) as usize;
+        let lu = ((mi_row & 31) >> env.ss_y) as usize;
+        let (cvis_w, cvis_h, _, _) = crate::tx_search::max_block_units(
+            env.mi_cols,
+            env.mi_rows,
+            mi_col,
+            mi_row,
+            mi_w as i32,
+            mi_h as i32,
+            crate::tx_search::BLK_W_B[plane_bsize],
+            crate::tx_search::BLK_H_B[plane_bsize],
+            env.ss_x,
+            env.ss_y,
+        );
+        let txw_u = crate::var_tx::TX_SIZE_WIDE_UNIT[uv_tx];
+        let txh_u = crate::var_tx::TX_SIZE_HIGH_UNIT[uv_tx];
+
+        for (pi, (plane, recon)) in [(1usize, &mut *recon_u), (2usize, &mut *recon_v)]
+            .into_iter()
+            .enumerate()
+        {
+            // av1_enc_build_inter_predictor (rdopt.c:3601) already built this
+            // in the SEARCH; the re-encode rebuilds it from the recon at the DV.
+            let mut cpred = vec![0u16; cw * ch];
+            crate::intrabc_search::intrabc_predict_chroma(
+                recon,
+                ref_off_uv,
+                env.stride,
+                winner.dv_row,
+                winner.dv_col,
+                env.ss_x,
+                env.ss_y,
+                &mut cpred,
+                cw,
+                cw,
+                ch,
+                i32::from(env.bd),
+            );
+            for r in 0..ch {
+                recon[ref_off_uv + r * env.stride..ref_off_uv + r * env.stride + cw]
+                    .copy_from_slice(&cpred[r * cw..r * cw + cw]);
+            }
+
+            let mut cta: Vec<i8> = state.above_ectx[plane][au..au + pmw].to_vec();
+            let mut ctl: Vec<i8> = state.left_ectx[plane][lu..lu + pmh].to_vec();
+            let mut cpers_a: Vec<i8> = cta.clone();
+            let mut cpers_l: Vec<i8> = ctl.clone();
+            let cc = IbcTxbCtx {
+                plane,
+                plane_bsize,
+                tx_size_uniform_uv: uv_tx,
+                bd: env.bd,
+                lossless: env.lossless,
+                stride: env.stride,
+                ref_off: ref_off_uv,
+                src: if plane == 1 { env.src_u } else { env.src_v },
+                src_off: ref_off_uv,
+                rows: if plane == 1 { env.rows_u } else { env.rows_v },
+                coeff_costs: env.coeff_costs_uv,
+                rdmult: env.rdmult,
+                sharpness: env.sharpness,
+                iq_tuning: env.tune.iq_tuning,
+                qm_level: env.qm_levels.map(|l| l[plane]),
+                use_trellis,
+                max_blocks_wide: cvis_w,
+                max_blocks_high: cvis_h,
+            };
+            let mut txbs: Vec<TxbEncode> = Vec::new();
+            let cmu_w = (MI_SIZE_WIDE_B[12] >> env.ss_x).min(pmw);
+            let cmu_h = (MI_SIZE_HIGH_B[12] >> env.ss_y).min(pmh);
+            let mut cidy = 0usize;
+            while cidy < pmh {
+                let mut cidx = 0usize;
+                while cidx < pmw {
+                    let uh = (cidy + cmu_h).min(pmh);
+                    let uw = (cidx + cmu_w).min(pmw);
+                    let mut br = cidy;
+                    while br < uh {
+                        let mut bc = cidx;
+                        while bc < uw {
+                            if br < cvis_h && bc < cvis_w {
+                                // Chroma inherits the co-located LUMA tx type.
+                                let tt = crate::var_tx::uv_tx_type_inter(
+                                    uv_tx,
+                                    env.lossless,
+                                    env.reduced_tx_set_used,
+                                    map,
+                                    mi_w,
+                                    br,
+                                    bc,
+                                    env.ss_x,
+                                    env.ss_y,
+                                );
+                                let (tsc, dsc) = get_txb_ctx(
+                                    plane_bsize,
+                                    uv_tx,
+                                    plane,
+                                    &cpers_a[bc..],
+                                    &cpers_l[br..],
+                                );
+                                let mut txb = ibc_encode_txb(
+                                    &cc, recon, &mut cta, &mut ctl, br, bc, uv_tx, tt,
+                                );
+                                txb.txb_skip_ctx = tsc as usize;
+                                txb.dc_sign_ctx =
+                                    if txb.qcoeff.first().copied().unwrap_or(0) != 0 {
+                                        dsc as usize
+                                    } else {
+                                        0
+                                    };
+                                ibc_stamp_persistent(
+                                    &mut cpers_a,
+                                    &mut cpers_l,
+                                    br,
+                                    bc,
+                                    uv_tx,
+                                    txb.txb_entropy_ctx as i8,
+                                    cvis_w,
+                                    cvis_h,
+                                );
+                                txbs.push(txb);
+                            }
+                            bc += txw_u;
+                        }
+                        br += txh_u;
+                    }
+                    cidx += cmu_w;
+                }
+                cidy += cmu_h;
+            }
+            state.above_ectx[plane][au..au + pmw].copy_from_slice(&cpers_a);
+            state.left_ectx[plane][lu..lu + pmh].copy_from_slice(&cpers_l);
+            let outcome = EncodeIntraPlaneOutcome {
+                txbs,
+                ta: cta,
+                tl: ctl,
+            };
+            if pi == 0 {
+                u_out = Some(outcome);
+            } else {
+                v_out = Some(outcome);
+            }
+        }
+    }
+
+    // txfm-partition contexts: C stamps them HERE only on a DRY run
+    // (partition_search.c:559-562 `if (dry_run) tx_partition_set_contexts`);
+    // on the OUTPUT path the pack's `write_tx_size_vartx` does it instead.
+    if !output_enabled {
+        aom_dsp::entropy::partition::tx_partition_set_contexts(
+            bsize,
+            &winner.inter_tx_size,
+            mb_to_right,
+            mb_to_bottom,
+            &mut state.above_tctx[a0..a0 + mi_w],
+            &mut state.left_tctx[l0..l0 + mi_h],
+        );
+    }
+
+    LeafEncodeOut {
+        mi_row,
+        mi_col,
+        bsize,
+        is_chroma_ref,
+        store_y: false,
+        y: EncodeIntraPlaneOutcome {
+            txbs: y_txbs,
+            ta,
+            tl,
+        },
+        u: u_out,
+        v: v_out,
+    }
 }

@@ -116,8 +116,27 @@ fn intrabc_dv_search_pinned() {
                 c_frame.len()
             );
         } else {
-            // PIN: the port must still DIVERGE here (coeff arm unported). A
-            // MATCH means the coeff arm landed — fail so the cell gets promoted.
+            // Provenance for the pin: the size delta + first divergence is the
+            // KB-6-style signature that says WHICH WAY the port is wrong
+            // (fewer bytes => it is making cheaper RD decisions than C).
+            let first_diff = port_on
+                .iter()
+                .zip(c_frame.iter())
+                .position(|(a, b)| a != b)
+                .map_or_else(
+                    || port_on.len().min(c_frame.len()),
+                    |i| i,
+                );
+            eprintln!(
+                "    PINNED: port {}B vs c {}B (delta {:+}), first differing byte {} of {}",
+                port_on.len(),
+                c_frame.len(),
+                port_on.len() as i64 - c_frame.len() as i64,
+                first_diff,
+                c_frame.len()
+            );
+            // PIN: the port must still DIVERGE here. A MATCH means the coeff
+            // arm is complete — fail so the cell gets promoted.
             assert!(
                 !matched,
                 "{}: port now BYTE-MATCHES real aomenc on intrabc content — \

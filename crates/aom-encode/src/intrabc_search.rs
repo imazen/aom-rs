@@ -968,32 +968,11 @@ use crate::encode_intra::TrellisOptType;
 use aom_dsp::entropy::dv_ref::{DvNbr, DvTileBounds, find_dv_ref_mvs, find_ref_dv, is_dv_valid};
 
 /// `default_txfm_partition_cdf` (entropymode.c) — the var-tx split-flag CDF
-/// defaults (relocated from the decoder's TileKf per its own FORK NOTE; the
-/// encoder needs the same table for the pack-side var-tx symbols + the
-/// frame-init `txfm_partition_cost` fill, rd.c:110).
-pub const DEFAULT_TXFM_PARTITION_CDF: [[u16; 3]; 21] = [
-    [4187, 0, 0],
-    [8922, 0, 0],
-    [11921, 0, 0],
-    [8453, 0, 0],
-    [14572, 0, 0],
-    [20635, 0, 0],
-    [13977, 0, 0],
-    [21881, 0, 0],
-    [21763, 0, 0],
-    [5589, 0, 0],
-    [12764, 0, 0],
-    [21487, 0, 0],
-    [6219, 0, 0],
-    [13460, 0, 0],
-    [18544, 0, 0],
-    [4753, 0, 0],
-    [11222, 0, 0],
-    [18368, 0, 0],
-    [4603, 0, 0],
-    [10367, 0, 0],
-    [16680, 0, 0],
-];
+/// defaults. Re-export of the single copy that now lives beside
+/// [`aom_dsp::entropy::partition::KfFrameContext`] (which is where the
+/// decoder's own FORK NOTE said it belongs), so the pack's adapting CDF and
+/// the frame-init `txfm_partition_cost` fill (rd.c:108-111) can never drift.
+pub use aom_dsp::entropy::partition::DEFAULT_TXFM_PARTITION_CDF;
 
 /// The `txfm_partition_cost` slice of `av1_fill_mode_rates` (rd.c:108-111):
 /// per-context 2-symbol costs from the frame-init var-tx split CDF.
@@ -1698,9 +1677,46 @@ pub struct IntrabcLeafArgs<'a> {
     pub enable_optimize_b: TrellisOptType,
     pub qm_levels: Option<[usize; 3]>,
     /// Entropy neighbour ctx slices at this block (per plane, like the
-    /// intra leaf) for the coeff-arm txb_skip/dc_sign contexts.
+    /// intra leaf) for the coeff-arm txb_skip/dc_sign contexts. FULL tile
+    /// arrays — the coeff arm offsets by `mi_col` / `mi_row & 31` (and the
+    /// chroma-subsampled forms) exactly like `encode_b_intra_dry`.
     pub above_ctx: [&'a [i8]; 3],
     pub left_ctx: [&'a [i8]; 3],
+    /// `xd->above_txfm_context` / `left_txfm_context` (TXFM_CONTEXT, full tile
+    /// arrays, same offsetting as `above_ctx`) — the var-tx recursion's
+    /// `txfm_partition_context` input.
+    pub tx_above: &'a [u8],
+    pub tx_left: &'a [u8],
+    /// The COEFF-arm var-tx knobs.
+    pub vartx: IntrabcVarTxKnobs,
+}
+
+/// The scalar knobs the intrabc COEFF arm feeds to
+/// [`crate::var_tx::VarTxEnv`] / [`crate::var_tx::InterUvEnv`]. Values are the
+/// speed-0 ALLINTRA KEY (screen-content) config; each carries its C provenance.
+#[derive(Clone, Copy, Debug)]
+pub struct IntrabcVarTxKnobs {
+    pub lossless: bool,
+    /// `oxcf.txfm_cfg.enable_flip_idtx` (CLI default 1).
+    pub enable_flip_idtx: bool,
+    /// `oxcf.txfm_cfg.use_inter_dct_only` (CLI default 0).
+    pub use_inter_dct_only: bool,
+    /// `tune == AOM_TUNE_IQ || AOM_TUNE_SSIMULACRA2` (the trellis rshift 5 -> 7).
+    pub iq_tuning: bool,
+    /// `txfm_params->coeff_opt_thresholds[0]` (the trellis block-MSE gate).
+    pub coeff_opt_dist_threshold: u32,
+    /// sf `tx_sf.adaptive_txb_search_level` (allintra base 1).
+    pub adaptive_txb_search_level: i32,
+    /// sf `tx_sf.txb_split_cap` (init_tx_sf: 1) — eob==0 after no-split
+    /// suppresses the split try (tx_search.c:2662-2664).
+    pub txb_split_cap: bool,
+    /// sf `tx_sf.tx_type_search.ml_tx_split_thresh` (init_tx_sf: 8500).
+    pub ml_tx_split_thresh: i32,
+    /// sf `tx_sf.tx_type_search.prune_2d_txfm_mode >= TX_TYPE_PRUNE_1`.
+    pub prune_2d: bool,
+    /// `get_search_init_depth` for inter (`inter_tx_size_search_init_depth_rect
+    /// /_sqr`) — 0 at speed 0 sub-720p.
+    pub init_depth: i32,
 }
 
 /// The intrabc winner (mirrors `best_mbmi` + rd_stats of rdopt.c:3494-3646).
@@ -1762,6 +1778,10 @@ pub fn rd_pick_intrabc_mode_sb(
 ) -> Option<IntrabcBest> {
     let bw = crate::tx_search::BLK_W_B[a.bsize];
     let bh = crate::tx_search::BLK_H_B[a.bsize];
+    // Block extent in mi (4x4) units — the tx_type_map stride and the var-tx
+    // recursion's max_blocks_wide/high base.
+    let mi_w = crate::tx_search::MI_SIZE_WIDE_B[a.bsize];
+    let mi_h = crate::tx_search::MI_SIZE_HIGH_B[a.bsize];
     // Only the HASH is square-gated (`av1_intrabc_hash_search` returns INT_MAX
     // when block_width != block_height, mcomp.c:1918); the full-pel pixel
     // search runs for every bsize. (Non-square intrabc IS common — real screen
@@ -2009,6 +2029,7 @@ pub fn rd_pick_intrabc_mode_sb(
         // uv skip). Outside it the coeff arm (unported var-tx) would decide, so
         // we return no candidate (the frame keeps the intra winner). See the fn
         // doc + PARITY C3.
+        let _ = chroma_sse;
         let luma_skip = predict_skip_txfm(
             &luma_resid,
             bw,
@@ -2019,21 +2040,256 @@ pub fn rd_pick_intrabc_mode_sb(
             i32::from(a.bd),
             a.reduced_tx_set_used,
         );
-        if !luma_skip || chroma_sse != 0 {
-            continue;
-        }
 
-        // set_skip_txfm (tx_search.c:245): dist = sse = ROUND_POWER_OF_TWO(luma
-        // dist, 2*(bd-8)) << 4 (chroma sse is 0 here). rate = mode+mv+skip1.
-        let scaled = if a.bd > 8 {
-            let sh = 2 * (u32::from(a.bd) - 8);
-            (luma_sse + (1 << (sh - 1))) >> sh
+        // --- av1_txfm_search (tx_search.c:3795) with ref_best_rd = INT64_MAX
+        //     (rdopt.c:3611 hardcodes it), so EVERY early-exit gate inside is
+        //     inert — including `model_based_tx_search_prune`, which is gated on
+        //     `ref_best_rd != INT64_MAX` (tx_search.c:3563). mode_rate is
+        //     rate_mode + rate_mv.
+        let mode_rate = rate_mode + rate_mv;
+        let max_tx = crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[a.bsize];
+
+        // Luma: the predict_skip arm (set_skip_txfm) or the var-tx COEFF arm.
+        let (y_rate, y_dist, y_sse, y_skip, inter_tx_size, luma_tx_type_map, y_leaves) = if luma_skip
+        {
+            // set_skip_txfm (tx_search.c:245-281): tx_type_map all DCT_DCT,
+            // inter_tx_size all max_txsize_rect_lookup[bsize],
+            // dist = sse = ROUND_POWER_OF_TWO(dist, 2*(bd-8)) << 4, and the
+            // NONZERO intermediate rate = zero_blk_rate * n_txb (needed by the
+            // skip-vs-non-skip decision below even though the skip branch
+            // discards it).
+            let scaled = if a.bd > 8 {
+                let sh = 2 * (u32::from(a.bd) - 8);
+                (luma_sse + (1 << (sh - 1))) >> sh
+            } else {
+                luma_sse
+            };
+            let d = scaled << 4;
+            let (sc, _dc) = aom_dsp::txb::get_txb_ctx(
+                a.bsize,
+                max_tx,
+                0,
+                &a.above_ctx[0][a.mi_col as usize..],
+                &a.left_ctx[0][(a.mi_row & 31) as usize..],
+            );
+            let zero_blk_rate = a.coeff_costs_y.tables(max_tx).txb_skip[sc as usize * 2 + 1];
+            let n_txb = (bw / crate::tx_search::TXS_W[max_tx]).max(1)
+                * (bh / crate::tx_search::TXS_H[max_tx]).max(1);
+            (
+                zero_blk_rate * n_txb as i32,
+                d,
+                d,
+                true,
+                [max_tx; 16],
+                vec![0u8; mi_w * mi_h],
+                Vec::new(),
+            )
         } else {
-            luma_sse
+            let (ymbw, ymbh, _, _) = crate::tx_search::max_block_units(
+                a.mi_cols,
+                a.mi_rows,
+                a.mi_col,
+                a.mi_row,
+                mi_w as i32,
+                mi_h as i32,
+                bw,
+                bh,
+                0,
+                0,
+            );
+            let env = crate::var_tx::VarTxEnv {
+                bsize: a.bsize,
+                max_blocks_wide: ymbw,
+                max_blocks_high: ymbh,
+                residual: &luma_resid,
+                residual_stride: bw,
+                pred: &pred_y,
+                pred_stride: bw,
+                src: a.src_y,
+                src_off: a.off_y,
+                src_stride: a.stride,
+                lossless: a.vartx.lossless,
+                reduced_tx_set_used: a.reduced_tx_set_used,
+                enable_flip_idtx: a.vartx.enable_flip_idtx,
+                use_inter_dct_only: a.vartx.use_inter_dct_only,
+                bd: a.bd,
+                rows: a.rows_y,
+                rdmult: a.rdmult,
+                coeff_costs: a.coeff_costs_y,
+                tx_type_costs: a.tx_type_costs,
+                qm_level: a.qm_levels.map(|q| q[0]),
+                txfm_partition_cost: a.txfm_partition_costs,
+                skip_txfm_cost: a.skip_costs[a.skip_ctx],
+                above_ctx: &a.above_ctx[0][a.mi_col as usize..],
+                left_ctx: &a.left_ctx[0][(a.mi_row & 31) as usize..],
+                tx_above: &a.tx_above[a.mi_col as usize..],
+                tx_left: &a.tx_left[(a.mi_row & 31) as usize..],
+                sharpness: a.sharpness,
+                iq_tuning: a.vartx.iq_tuning,
+                coeff_opt_dist_threshold: a.vartx.coeff_opt_dist_threshold,
+                adaptive_txb_search_level: a.vartx.adaptive_txb_search_level,
+                txb_split_cap: a.vartx.txb_split_cap,
+                ml_tx_split_thresh: a.vartx.ml_tx_split_thresh,
+                prune_2d: a.vartx.prune_2d,
+                init_depth: a.vartx.init_depth,
+            };
+            let r = crate::var_tx::pick_recursive_tx_size_type_yrd(&env, i64::MAX);
+            // `if (rd_stats_y->rate == INT_MAX) return 0` (tx_search.c:3834).
+            if !r.valid || r.rate == i32::MAX {
+                continue;
+            }
+            // xd->tx_type_map: each winning leaf stamps its tx-unit footprint
+            // (tx_search.c:2208 writes the type at every unit of the txb).
+            let mut map = vec![0u8; mi_w * mi_h];
+            for leaf in &r.leaves {
+                let lw = crate::tx_search::TXS_W[leaf.tx_size] >> 2;
+                let lh = crate::tx_search::TXS_H[leaf.tx_size] >> 2;
+                for dy in 0..lh {
+                    for dx in 0..lw {
+                        let (rr, cc) = (leaf.blk_row + dy, leaf.blk_col + dx);
+                        if rr < mi_h && cc < mi_w {
+                            map[rr * mi_w + cc] = leaf.tx_type as u8;
+                        }
+                    }
+                }
+            }
+            (
+                r.rate,
+                r.dist,
+                r.sse,
+                r.skip_txfm,
+                r.inter_tx_size,
+                map,
+                r.leaves,
+            )
         };
-        let skip_dist = scaled << 4;
-        let skip_rate = rate_mode + rate_mv + a.skip_costs[a.skip_ctx][1];
-        let this_rd = crate::rd::rdcost(a.rdmult, skip_rate, skip_dist);
+        let _ = &y_leaves;
+
+        // Chroma: av1_txfm_uvrd (tx_search.c:3696) runs REGARDLESS of the luma
+        // arm — the luma skip decision does not bypass it.
+        let (uv_rate, uv_dist, uv_sse, uv_skip) = if a.monochrome || !a.is_chroma_ref {
+            // `if (!xd->is_chroma_ref) return 1` with zeroed stats (:3700);
+            // skip_txfm stays 1 from av1_init_rd_stats.
+            (0, 0i64, 0i64, true)
+        } else {
+            let plane_bsize =
+                aom_dsp::entropy::partition::get_plane_block_size(a.bsize, a.ss_x, a.ss_y);
+            let uv_tx = crate::intra_uv_rd::av1_get_tx_size_uv(
+                a.bsize,
+                a.vartx.lossless,
+                a.ss_x,
+                a.ss_y,
+            );
+            let cmi_w = crate::tx_search::MI_SIZE_WIDE_B[plane_bsize];
+            let cmi_h = crate::tx_search::MI_SIZE_HIGH_B[plane_bsize];
+            let (vis_w, vis_h, _, _) = crate::tx_search::max_block_units(
+                a.mi_cols,
+                a.mi_rows,
+                a.mi_col,
+                a.mi_row,
+                mi_w as i32,
+                mi_h as i32,
+                crate::tx_search::BLK_W_B[plane_bsize],
+                crate::tx_search::BLK_H_B[plane_bsize],
+                a.ss_x,
+                a.ss_y,
+            );
+            let au = (a.mi_col >> a.ss_x) as usize;
+            let lu = ((a.mi_row & 31) >> a.ss_y) as usize;
+            // The chroma PLANE BLOCK (`get_plane_block_size`) is padded up to a
+            // 4x4 minimum, so for sub-8x8 luma it is LARGER than `bw >> ss_x`
+            // (the skip arm's sse extent). `av1_enc_build_inter_predictor`
+            // builds the predictor over the chroma-reference extent, so the
+            // coeff arm needs plane-bsize-sized buffers or the txb walk reads
+            // past the end.
+            let (pw, ph) = (
+                crate::tx_search::BLK_W_B[plane_bsize],
+                crate::tx_search::BLK_H_B[plane_bsize],
+            );
+            let (mut cp_u, mut cp_v) = (vec![0u16; pw * ph], vec![0u16; pw * ph]);
+            intrabc_predict_chroma(
+                recon_u, a.off_uv, a.stride, dv_r, dv_c, a.ss_x, a.ss_y, &mut cp_u, pw, pw, ph,
+                i32::from(a.bd),
+            );
+            intrabc_predict_chroma(
+                recon_v, a.off_uv, a.stride, dv_r, dv_c, a.ss_x, a.ss_y, &mut cp_v, pw, pw, ph,
+                i32::from(a.bd),
+            );
+            let uenv = crate::var_tx::InterUvEnv {
+                plane_bsize,
+                uv_tx_size: uv_tx,
+                max_blocks_wide: vis_w,
+                max_blocks_high: vis_h,
+                ss_x: a.ss_x,
+                ss_y: a.ss_y,
+                pred: [&cp_u, &cp_v],
+                pred_stride: pw,
+                src: [a.src_u, a.src_v],
+                src_off: a.off_uv,
+                src_stride: a.stride,
+                tx_type_map: &luma_tx_type_map,
+                tx_type_map_stride: mi_w,
+                rows: [a.rows_u, a.rows_v],
+                coeff_costs: a.coeff_costs_uv,
+                tx_type_costs: a.tx_type_costs,
+                // Sized by the FULL chroma plane block (av1_get_entropy_contexts),
+                // not the visible clip — see the var_tx note.
+                above_ctx: [
+                    &a.above_ctx[1][au..au + cmi_w],
+                    &a.above_ctx[2][au..au + cmi_w],
+                ],
+                left_ctx: [
+                    &a.left_ctx[1][lu..lu + cmi_h],
+                    &a.left_ctx[2][lu..lu + cmi_h],
+                ],
+                lossless: a.vartx.lossless,
+                reduced_tx_set_used: a.reduced_tx_set_used,
+                enable_flip_idtx: a.vartx.enable_flip_idtx,
+                use_inter_dct_only: a.vartx.use_inter_dct_only,
+                bd: a.bd,
+                rdmult: a.rdmult,
+                sharpness: a.sharpness,
+                iq_tuning: a.vartx.iq_tuning,
+                coeff_opt_dist_threshold: a.vartx.coeff_opt_dist_threshold,
+                adaptive_txb_search_level: a.vartx.adaptive_txb_search_level,
+                qm_level: [a.qm_levels.map(|q| q[1]), a.qm_levels.map(|q| q[2])],
+            };
+            match crate::var_tx::txfm_uvrd_inter(&uenv, i64::MAX) {
+                Some(u) => (u.rate, u.dist, u.sse, u.skip_txfm),
+                None => continue, // is_cost_valid == 0 => av1_txfm_search returns 0
+            }
+        };
+
+        // --- the joint skip decision + rate assembly (tx_search.c:3861-3886) ---
+        let dist_total = y_dist + uv_dist;
+        let sse_total = y_sse + uv_sse;
+        let mut choose_skip = y_skip && uv_skip;
+        if !choose_skip && !a.vartx.lossless {
+            let rdcost_no_skip = crate::rd::rdcost(
+                a.rdmult,
+                y_rate
+                    .saturating_add(uv_rate)
+                    .saturating_add(a.skip_costs[a.skip_ctx][0]),
+                dist_total,
+            );
+            let rdcost_skip =
+                crate::rd::rdcost(a.rdmult, a.skip_costs[a.skip_ctx][1], sse_total);
+            if rdcost_no_skip >= rdcost_skip {
+                choose_skip = true;
+            }
+        }
+        let (final_rate, final_dist) = if choose_skip {
+            (mode_rate + a.skip_costs[a.skip_ctx][1], sse_total)
+        } else {
+            (
+                mode_rate
+                    .saturating_add(y_rate)
+                    .saturating_add(uv_rate)
+                    .saturating_add(a.skip_costs[a.skip_ctx][0]),
+                dist_total,
+            )
+        };
+        let this_rd = crate::rd::rdcost(a.rdmult, final_rate, final_dist);
 
         if this_rd < best_rd {
             best_rd = this_rd;
@@ -2042,13 +2298,17 @@ pub fn rd_pick_intrabc_mode_sb(
                 dv_col: dv_c,
                 dv_ref_row: ref_r,
                 dv_ref_col: ref_c,
-                skip_txfm: true,
-                rate: skip_rate,
-                dist: skip_dist,
+                skip_txfm: choose_skip,
+                rate: final_rate,
+                dist: final_dist,
                 rdcost: this_rd,
-                inter_tx_size: [0; 16],
-                tx_size: 0,
-                tx_type_map: Vec::new(),
+                inter_tx_size: if choose_skip { [0; 16] } else { inter_tx_size },
+                tx_size: if choose_skip { 0 } else { inter_tx_size[0] },
+                tx_type_map: if choose_skip {
+                    Vec::new()
+                } else {
+                    luma_tx_type_map
+                },
             });
         }
     }
