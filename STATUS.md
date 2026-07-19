@@ -3,6 +3,36 @@
 Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
 (single-thread deterministic config, `reference/BUILD_CONFIG.md`).
 
+**2026-07-19 — DECODER: the first REAL conformance INTER frame is BYTE-EXACT.** Frame 1 of
+`av1-1-b8-00-quantizer-63` (352×288, 79 inter blocks — SIMPLE 49 / OBMC 19 / WARPED_CAUSAL 11 /
+interintra 2 / intra-in-inter 3, inter var-tx throughout) decodes byte-identical to its golden
+MD5. `aom-decode/tests/inter_real_frame.rs` is PROMOTED from a self-promoting pin to a HARD gate.
+Four gaps closed (`929c6fa`, `22a4369`, `60a1a1e`), each masking the next:
+(1) **intra-in-inter** — the `is_inter == 0` arm (decodemv.c:1550), landed by SHARING the KEY
+mode-info tail (`read_intra_mode_info_tail`) and the whole post-mode-info body
+(`decode_intra_block_body`) instead of transcribing a second copy, since C shares them too (one
+frame-type-independent intra recon visitor pair, decodeframe.c:2756/:2761); only the Y-mode CDF
+differs (`y_mode_cdf[size_group_lookup[bsize]]` vs `kf_y_cdf`) plus no intrabc read.
+(2) **`get_tx_size_context`'s inter-neighbour override** — C uses the neighbour's BLOCK size when
+that neighbour `is_inter_block` (`use_intrabc || ref_frame[0] > INTRA_FRAME`); the port tested
+`use_intrabc` alone, which is equivalent on a KEY frame but wrong inside an inter frame.
+(3) **the skip-block entropy-context reset on the INTER path** (pre-existing; worth 41 of the 79
+blocks): C runs `av1_reset_entropy_context` for EVERY skip block (decodeframe.c:1219), the port
+only for intra ones — a skipped inter block left stale culs, so a later block read the same symbol
+values off a different `txb_skip_cdf` row and the arithmetic decoder drifted silently.
+(4) **interintra wiring** — read + per-plane build-intra + `combine_interintra`; an interintra
+block reads NO motion-mode symbol (gated on `ref_frame[1] != INTRA_FRAME`, decodemv.c:1421) and
+must stamp `ref_frame[1] = INTRA_FRAME` so `av1_findSamples` does not count it as a single-ref
+warp sample. **Method note for future inter desyncs:** gaps 2 and 3 were pinned by diffing the
+port's block walk against the REAL libaom decoder's per-block dump AND per-symbol accounting
+(a `CONFIG_INSPECTION=1 CONFIG_ACCOUNTING=1` build — one already exists at
+`/root/aom-inspect/examples/inspect`). That gives C's exact block list and its exact symbol
+sequence, which is what makes a "same symbol value, wrong CDF row" drift *visible* rather than
+merely inferable — reach for it FIRST. Note its JSON dump drops the first symbol at each new
+block position (an emitter quirk, `put_accounting`), so `read_skip_txfm` never appears.
+Full `cargo test -p zenav1-aom-decode` green; Gate-1 intra corpus and every inter ratchet
+(16x16/18/34/66, 64x66) unchanged.
+
 **2026-07-18 — IntraBC (C3 screen content): SEARCH + skip-arm + full wiring LANDED, PINNED on
 the coeff arm.** `rd_pick_intrabc_mode_sb` is wired (rd_pick.rs step 6 → real, gated on
 `p.allow_intrabc`) and runs the full DV search: hash + NSTEP `full_pixel_diamond` + mesh (geometry

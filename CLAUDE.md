@@ -19,6 +19,38 @@ transcribed oracles can carry shared bugs).
 Primary configuration: ALLINTRA (usage=2), speed-0 KEY frame. **Single-frame (KEY-frame)
 work must reach byte-exactness across BOTH tracks before inter-frame ("the rest") starts.**
 
+## Decoder desyncs: use the instrumented libaom decoder FIRST (do not bisect by hand)
+
+An arithmetic-decoder desync almost never shows up where it is caused. The cheapest way to
+localize one is to compare against the REAL libaom decoder's own instrumentation, which dumps
+both C's per-block mode info and C's exact per-symbol sequence. **A build already exists at
+`/root/aom-inspect/examples/inspect`** (`CONFIG_INSPECTION=1 CONFIG_ACCOUNTING=1`; rebuild the
+same way if it is ever lost):
+
+```
+/root/aom-inspect/examples/inspect --limit=<N> -bs -ts -m -r -mm <vector>.ivf   # per-MI block grid
+/root/aom-inspect/examples/inspect --limit=<N> -a          <vector>.ivf         # per-symbol accounting
+```
+
+The block dump is per-MI (replicated over each block's footprint), so collapse it to block
+top-lefts to get C's block list; diff that against the port's walk to find the FIRST structural
+divergence. Then read the accounting around that block: it gives every `aom_read_symbol` tagged
+by its reading function, so **"the port read the same symbol VALUES but off a different CDF row"**
+is directly visible instead of being inferred. That failure mode (a probability-only drift that
+desyncs several reads later, with everything looking correct locally) is the dominant one on this
+codebase — it is the KB-6 signature on the encoder side and was BOTH inter-decode roots found on
+2026-07-19.
+
+Two gotchas, both verified:
+- **The JSON emitter drops the first symbol at every new block position** (`put_accounting`,
+  examples/inspect.c: on a context change it emits `[x,y]` *instead of* that symbol's triple). So
+  `read_skip_txfm` — the first read of most blocks — never appears. Do not conclude a symbol is
+  unread; infer it from what follows (e.g. no coeff/var-tx symbols at all ⇒ that block is skip).
+- Entries are `[id, bits, samples]` against `symbolsMap`, **not** `[id, value, bits]`; `samples`
+  is the number of `aom_read_symbol` calls aggregated at that (tag, position). Reconciling those
+  counts against the port's expected read sequence is itself a strong check — e.g. inter-intra:
+  40 allowed blocks ⇒ 40 flag reads, +2 wedge flags +1 wedge index = the 43 C records.
+
 ## Known Bugs
 
 Record real bugs here immediately with file:line refs (survives context loss). Do NOT close
