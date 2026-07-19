@@ -1231,21 +1231,42 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
     before and after all four fixes, and every one of those entries' pins **asserts DIVERGENCE**
     — a flip to MATCH would have failed the pin. So KB-13 keeps its own hypothesis (a speed>=1
     prune C applies that the port does not) and KB-10/11/12/P29 keep theirs.
-  - **REMAINING RESIDUAL — ONE first-order leaf, precisely located (NOT yet fixed).** After the
-    four roots the witness is `port 1902B vs c 1891B, first differing byte 1120`. Of the 7
-    remaining CfL distortion divergences, 6 are downstream of mi(44,20) (they sit in the 32×32
-    quadrant coded after it, so their inputs genuinely differ). The one first-order case is
-    **mi(44,20) BLOCK_16X16**: port and C agree EXACTLY on `rate_y` (131981), `rate_uv` (2897),
-    `rate_tokenonly` (129456), mode (DC_PRED), angle_delta, `tx_size` (TX_16X16), `tx_type[0]`
-    (IDTX), filter-intra (`use_filter_intra=1, mode=2`), uv_mode (UV_CFL_PRED) and CfL alpha
-    (idx 16 / signs 4) — but **`dist_y` is 417353 vs C's 410535 and `dist_uv` 40432 vs 47088**.
-    Both sides' `dist_y` are ODD, so this is transform-domain distortion (`av1_block_error(coeff,
-    dqcoeff)`), not `16 * sse`: identical QUANTIZED coefficients (hence identical rate) with a
-    slightly different pre-quantization residual. **⇒ the port's intra PREDICTION at this leaf
-    differs slightly from C's**, i.e. an upstream recon pixel in its above row / left column
-    differs. Next step: dump the port's and C's 16×16 prediction block (and the neighbour row/col
-    it reads) at mi(44,20) and diff pixel-for-pixel; do NOT re-chase the rate side, the mode
-    search, or the CfL alpha — all four are proven identical at that leaf.
+  - **ROOT 5 — CLOSED ✅ 2026-07-19: the intrabc DV SEARCH ranked candidates against the RECON
+    buffer; C searches the SOURCE frame.** `rd_pick_intrabc_mode_sb` sets `xd->plane[i].pre[0]`
+    from `xd->cur_buf` (`av1_setup_pred_block`, rdopt.c:3482) and **`xd->cur_buf = cpi->source`**
+    (encoder.c:4121, encodeframe.c:217) — so the hash-candidate costing (`get_mvpred_var_cost`,
+    mcomp.c:1966) AND the full-pel diamond+mesh measure variance against the SOURCE frame; only
+    the accepted candidate's RD stage (`av1_enc_build_inter_predictor`) predicts from the recon.
+    The port passed `recon_y` as the search reference in BOTH arms (`intrabc_search.rs` hash arm
+    + `FullPelSearch.refb`). The port's source-clone recon initialization MASKED the bug wherever
+    the referenced region was never yet written (recon == source there) — which is why the DV
+    search matched C on every previously-analyzed block. At coded regions recon ≠ source:
+    measured at **mi(42,22) BLOCK_8X8** (dual byte-inert dump) — dir=1, SAME mv (-17,-39): C sme
+    26062 (vs source) / port 40162 (vs recon); dir=0: the port found dv=(-1168,224) (sme 24062
+    vs recon; RD 27551753 < intra 28154158 → **intrabc WON**) where C's source-based search finds
+    (-116,-23) → dv=(-928,-184) (RD 34841670 → intra wins). The port coded intrabc where C codes
+    intra H_PRED — the ACTUAL first divergent coded block (byte 1120 = mi(42,22)'s mode info).
+    **The earlier "mi(44,20) first-order" framing is superseded**: it came from the
+    CfL-distortion table, which only covered winner-AGREEING leaves; mi(44,20)'s wrong above-row
+    pixels were DOWNSTREAM (they are the TR-node mi(40,20) winner re-encode's output, which
+    contained the intrabc recon instead of H_PRED's). **Fix:** both search arms reference
+    `a.src_y` (intrabc-only code — non-screen envelope structurally untouched). **Measured
+    effect: port 1902B → 1895B (delta +11 → +4)**; dir=0 now finds C's exact mv and both sides
+    reject intrabc at that node. `first_diff` unchanged at 1120 (the residual below).
+  - **REMAINING RESIDUAL (witness still PINNED) — a 3-rate-unit TX-SIZE-COST TABLE gap at
+    mi(42,22).** After root 5 the intra winner at mi(42,22) matches C on mode (H_PRED=2), tx
+    (TX_4X4), dist_y (87440), dist_uv (8464), rate_tokenonly (27009) and rate_uv (162) — but
+    **rate_y is 27763 vs C's 27766 (3 low)**. Term-by-term decomposition (dual dump):
+    y_mode_cost 495==495, angle_delta_cost 45==45, intrabc_cost[0] 35==35, filter-intra n/a
+    (H_PRED), tx_size_ctx 0==0, but **`tx_size_cost[cat0][ctx0][depth1]` = 179 (port) vs 182
+    (C)** — the `TxSizeCosts` TABLE CONTENT differs while the pack's tx-size CODING is
+    byte-exact everywhere (KB-6 30/30, all speed gates), so the port's cost fill reads a
+    different cdf source than its pack writes with. Also parked: the intrabc candidate's
+    same-dv RD rate differs by +45 (33136 vs 33091, both losing — decision-inert at this node,
+    plausibly the same table-family root). Next: compare the port's `tx_size_cdf` slice feeding
+    `fill_tx_size_costs` (mode_costs.rs:543) against C's `fc->tx_size_cdf[0][0]` at fill time;
+    fix, re-run the witness, and expect the mi(42,22) chain (and the downstream mi(44,20)
+    divergences) to collapse — then RAISE the floor past 1120 or promote the cell.
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 

@@ -1,3 +1,22 @@
+## KB-15 root 5: the intrabc DV search referenced the RECON buffer — C searches the SOURCE frame (2026-07-19, encoder track)
+
+`rd_pick_intrabc_mode_sb`'s search reference in C is the SOURCE frame (`xd->plane[i].pre[0]` ←
+`av1_setup_pred_block(xd, .., xd->cur_buf, ..)`, rdopt.c:3482; `xd->cur_buf = cpi->source`,
+encoder.c:4121 / encodeframe.c:217): the hash-candidate costing AND the full-pel diamond+mesh
+rank candidates by variance-vs-SOURCE; only the accepted candidate's RD predicts from the recon.
+The port ranked against its recon plane in both arms (`intrabc_search.rs`), masked until now by
+the harness's source-clone recon init (recon == source at never-written positions). Measured at
+mi(42,22) BLOCK_8X8 on the KB-15 witness: same mv (-17,-39) costs 26062 in C vs 40162 in the
+port; the port found a recon-flavoured dv=(-1168,224) that WON RD (27551753 < 28154158) where
+C's source search finds (-116,-23) and intra wins — the port coded intrabc where C codes intra
+H_PRED, and that was the witness's first divergent coded block (byte 1120), with the previously
+documented mi(44,20) prediction divergence strictly downstream of it. Fix: both arms reference
+`a.src_y`. Effect: witness `port 1902B → 1895B (delta +11 → +4)`, first-diff unchanged 1120.
+Remaining (dual-dump decomposed, in CLAUDE.md KB-15): a 3-rate-unit `tx_size_cost[cat0][ctx0]
+[depth1]` TABLE gap (179 port vs 182 C, identical contexts; the pack's tx-size CODING is
+byte-exact everywhere, so the cost fill's cdf SOURCE is the suspect). Method: byte-inert
+instrumented sibling C (throwaway copy inside the task workspace, never the submodule).
+
 ## KB-15 intra-side residual: FOUR roots found + fixed; the shared-root hypothesis is REFUTED (2026-07-19, encoder track)
 
 The KB-15 witness's remaining divergence was framed as "the port's intra RD comes out slightly

@@ -146,6 +146,15 @@ fn intrabc_dv_search_pinned() {
             //          missing `intrabc_cost[0]` on every intra leaf, and
             //          `cfl_store_block` for inter/intrabc non-chroma-ref
             //          blocks.
+            //   1120 (size delta +11 → +4) — the intrabc full-pel search +
+            //          hash-arm costing referenced the port's RECON buffer;
+            //          C searches the SOURCE frame (`xd->cur_buf =
+            //          cpi->source`). The port found recon-flavoured DVs C
+            //          never ranks first (mi(42,22): a winning dv=(-1168,224)
+            //          C's source-based search never finds) and flipped
+            //          intra winners to intrabc. first_diff unchanged — the
+            //          remaining divergence at mi(42,22) is a 3-rate-unit
+            //          tx-size-cost table gap (KB-15 residual).
             // A DROP below the floor means a landed root was undone — that is a
             // regression, not a near-tie. (This is a strengthening, not a
             // weakening: the pin above still requires divergence, and the

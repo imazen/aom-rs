@@ -1909,12 +1909,18 @@ pub fn rd_pick_intrabc_mode_sb(
                     {
                         continue;
                     }
-                    // get_mvpred_var_cost: variance(src, recon@mv) + mv_err_cost.
+                    // get_mvpred_var_cost: variance(src, SOURCE@mv) + mv_err_cost.
+                    // The C intrabc search's reference buffer is the SOURCE
+                    // frame, not the recon: rd_pick_intrabc_mode_sb sets
+                    // `xd->plane[i].pre[0]` from `xd->cur_buf` (av1_setup_pred_
+                    // block, rdopt.c:3482) and `xd->cur_buf = cpi->source`
+                    // (encoder.c:4121, encodeframe.c:217). Only the RD stage
+                    // (av1_enc_build_inter_predictor) predicts from the recon.
                     let ref_off = (a.off_y as i64
                         + i64::from(fm_r) * a.stride as i64
                         + i64::from(fm_c)) as usize;
                     let var =
-                        variance_wxh(a.src_y, a.off_y, a.stride, recon_y, ref_off, a.stride, bw, bh);
+                        variance_wxh(a.src_y, a.off_y, a.stride, a.src_y, ref_off, a.stride, bw, bh);
                     let cost = i64::from(var)
                         + i64::from(mv_err_cost(dv_r - ref_r, dv_c - ref_c, a.dv_costs, a.error_per_bit));
                     if cost < best_hash_cost {
@@ -1929,10 +1935,12 @@ pub fn rd_pick_intrabc_mode_sb(
         }
 
         // --- av1_full_pixel_search (NSTEP diamond + mesh), ALWAYS at level 0.
+        // The search REFERENCE is the SOURCE frame (see the hash-arm note
+        // above): C's ms_buffers.ref comes from `xd->cur_buf = cpi->source`.
         let s = FullPelSearch {
             src: a.src_y,
             src_off: a.off_y,
-            refb: recon_y,
+            refb: a.src_y,
             ref_off: a.off_y,
             src_stride: a.stride,
             ref_stride: a.stride,
