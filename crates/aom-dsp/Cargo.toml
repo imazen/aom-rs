@@ -14,13 +14,7 @@ magetypes = "0.9.27"
 # Kernel crates being folded in one family at a time (facade-first: re-exported
 # as `pub use aom_X as X` below, then physically absorbed into src/X/). Removed
 # from this list as each is absorbed.
-aom-transform = { path = "../aom-transform" }
-aom-quant = { path = "../aom-quant" }
 aom-txb = { path = "../aom-txb" }
-aom-cdef = { path = "../aom-cdef" }
-aom-intra = { path = "../aom-intra" }
-aom-loopfilter = { path = "../aom-loopfilter" }
-aom-dist = { path = "../aom-dist" }
 aom-convolve = { path = "../aom-convolve" }
 aom-dispatch = { path = "../aom-dispatch" }
 aom-entropy = { path = "../aom-entropy" }

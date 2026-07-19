@@ -65,16 +65,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aom-cdef"
-version = "0.0.1"
-dependencies = [
- "aom-dispatch",
- "aom-sys-ref",
- "archmage",
- "magetypes",
-]
-
-[[package]]
 name = "aom-convolve"
 version = "0.0.1"
 dependencies = [
@@ -98,29 +88,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "aom-dist"
-version = "0.0.1"
-dependencies = [
- "aom-dispatch",
- "aom-sys-ref",
- "archmage",
- "magetypes",
-]
-
-[[package]]
 name = "aom-dsp"
 version = "0.0.1"
 dependencies = [
- "aom-cdef",
  "aom-convolve",
  "aom-dispatch",
- "aom-dist",
  "aom-entropy",
- "aom-intra",
- "aom-loopfilter",
- "aom-quant",
  "aom-sys-ref",
- "aom-transform",
  "aom-txb",
  "archmage",
  "magetypes",
@@ -144,48 +118,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "aom-intra"
-version = "0.0.1"
-dependencies = [
- "aom-dispatch",
- "aom-sys-ref",
- "archmage",
- "magetypes",
-]
-
-[[package]]
-name = "aom-loopfilter"
-version = "0.0.1"
-dependencies = [
- "aom-dispatch",
- "aom-sys-ref",
- "archmage",
- "magetypes",
-]
-
-[[package]]
-name = "aom-quant"
-version = "0.0.1"
-dependencies = [
- "aom-dispatch",
- "aom-sys-ref",
- "archmage",
- "magetypes",
-]
-
-[[package]]
 name = "aom-sys-ref"
 version = "0.0.1"
-
-[[package]]
-name = "aom-transform"
-version = "0.0.1"
-dependencies = [
- "aom-dispatch",
- "aom-sys-ref",
- "archmage",
- "magetypes",
-]
 
 [[package]]
 name = "aom-txb"

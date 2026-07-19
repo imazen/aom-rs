@@ -3,13 +3,13 @@
 //! Houses [`reconstruct_txb`] (dequant + inverse transform + add), the residual
 //! half of per-block reconstruction. It composes the already-bit-exact
 //! [`aom_txb::dequant_txb`] and
-//! [`aom_transform::inv_txfm2d::av1_inv_txfm2d_add`] kernels, so both the decoder
+//! [`crate::transform::inv_txfm2d::av1_inv_txfm2d_add`] kernels, so both the decoder
 //! (`aom-decode`) and the encoder (`aom-encode`) depend on it — the
 //! reconstruction primitive lives here rather than in the encoder crate, so the
 //! decoder does not have to depend on the encoder to reach it.
 
 
-use aom_transform::inv_txfm2d::av1_inv_txfm2d_add;
+use crate::transform::inv_txfm2d::av1_inv_txfm2d_add;
 use aom_txb::{dequant_txb, txb_high, txb_wide};
 
 /// Reconstruct one transform block's pixels from its decoded coefficients: the

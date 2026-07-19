@@ -14,16 +14,16 @@
 //! at a time, so the differential gates stay green through every step.
 #![forbid(unsafe_code)]
 
-pub use aom_cdef as cdef;
+pub mod cdef;
 pub use aom_convolve as convolve;
 pub use aom_dispatch as dispatch;
-pub use aom_dist as dist;
+pub mod dist;
 pub use aom_entropy as entropy;
 pub mod inter;
-pub use aom_intra as intra;
-pub use aom_loopfilter as loopfilter;
-pub use aom_quant as quant;
+pub mod intra;
+pub mod loopfilter;
+pub mod quant;
 pub mod recon;
 pub mod restore;
-pub use aom_transform as transform;
+pub mod transform;
 pub use aom_txb as txb;

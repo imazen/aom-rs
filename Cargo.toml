@@ -2,13 +2,7 @@
 resolver = "2"
 members = [
     "crates/aom-dsp",
-    "crates/aom-transform",
-    "crates/aom-quant",
     "crates/aom-entropy",
-    "crates/aom-intra",
-    "crates/aom-loopfilter",
-    "crates/aom-dist",
-    "crates/aom-cdef",
     "crates/aom-convolve",
     "crates/aom-txb",
     "crates/aom-encode",
