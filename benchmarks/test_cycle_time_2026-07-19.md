@@ -55,19 +55,28 @@ most at ~0.00 s. Slowest: `dv_ref_diff` 10.23 s, `hbd_dist_diff` 6.32 s, `dist_d
 
 ### Measured gain from a global work pool
 
-Running the same 95 built `aom-dsp` binaries via a 16-way pool instead of serially:
+`aom-dsp` is **342 tests across 95 binaries**. Run-only wall time, same box, back-to-back:
 
-| | wall |
-|---|---|
-| sequential (today's `cargo test`) | **57.02 s** |
-| global pool, `xargs -P 16` | **12.57 s** — 4.5x |
-| floor (slowest single binary) | 10.23 s |
+| | wall | |
+|---|---|---|
+| sequential (today's `cargo test`) | **57.02 s** | 1.0x |
+| global pool, `xargs -P 16` (process-per-*binary*) | 12.57 s | 4.5x |
+| **`cargo nextest run`** (process-per-*test*) | **12.07 s** | **4.7x** |
+| floor (slowest single test) | 11.31 s | |
 
-The pool lands near the theoretical floor. Measured with one encoder agent competing for
-CPU, so the real gain is at least this.
+nextest spawns ~3.6x more processes than the per-binary pool, so per-test spawn overhead
+was a real concern — measured, it is negligible, and nextest actually **beats** the
+per-binary pool. It schedules better: the 11.31 s long pole starts immediately instead of
+waiting for its binary's turn in the queue. It lands within 7% of the theoretical floor.
 
-**This is what `cargo-nextest` does** (one global queue across all binaries, per-test
-timing, `--partition` for CI sharding). Not currently installed.
+Measured with an encoder agent competing for CPU, so the real gain is at least this.
+
+nextest also gives per-test timing for free (stock libtest will not, on stable), which
+immediately identifies the long poles — in `aom-dsp`:
+`dv_ref_diff::find_samples_matches_c` **11.31 s**, `hbd_dist_diff::hbd_sad_variance_byte_identical`
+**6.63 s**. Those two are the entire floor.
+
+Installed for this measurement: `cargo-nextest 0.9.140` (prebuilt, `get.nexte.st`).
 
 ### Caveat: the pool does NOT help `aom-decode`
 
@@ -90,10 +99,22 @@ Worse, that binary parallelises poorly internally: 15 tests, 364 s at default th
   accumulation. Not cleaned up here — some may predate this session and one belonged to a
   live agent.
 
+## Test-hygiene check (done while here)
+
+Exactly **one** `#[ignore]` exists in the whole workspace: `aom-dsp/tests/sad_simd.rs:50`,
+`avx2_sad_perf_ratio`. It is legitimate, not a relaxation — it prints a coarse wall-time
+ratio and is documented "Not a CI gate (single untuned run, no fixed HW pinning)". The
+correctness assertions for the same kernel (`simd == scalar`, `simd == ref_sad` against the
+real exported C fn) live in the non-ignored test directly above it and run every time.
+No silent runtime self-skips were found either.
+
 ## Recommendation
 
-1. Adopt `cargo-nextest` for the global pool — 4.5x measured where work spreads across
-   binaries. Biggest win for effort.
-2. Split or shard `real_bitstream`; it is 80% of the decode suite and threads at only ~1.7x.
+1. Adopt `cargo-nextest` for the global pool — **4.7x measured** where work spreads across
+   binaries, within 7% of the floor. Biggest win for effort. Bonus: free per-test timing
+   and `--partition` for CI sharding.
+2. Attack the long poles nextest exposes. `real_bitstream` is 80% of the decode suite and
+   threads at only ~1.7x; `dv_ref_diff::find_samples_matches_c` (11.31 s) is the entire
+   `aom-dsp` floor. A pool cannot help below its slowest single test — only splitting can.
 3. Keep `--profile test-fast` as the default developer path.
 4. Do NOT consolidate test binaries. Do NOT switch to lld. Both measured, both rejected.

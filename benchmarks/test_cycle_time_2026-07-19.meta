@@ -34,3 +34,16 @@ Commands:
   cargo test --profile test-fast -p zenav1-aom-decode   # read "finished in" per binary
 
 Raw per-binary aom-dsp timings: benchmarks/test_cycle_time_2026-07-19.dsp-times.txt
+
+--- addendum: direct cargo-nextest measurement ---
+cargo-nextest 0.9.140 (a9fef2964 2026-07-05), installed prebuilt from get.nexte.st
+
+  export CARGO_TARGET_DIR=/tmp/tb-bfd
+  cargo nextest list -p zenav1-aom-dsp --cargo-profile test-fast   # warm the build
+  /usr/bin/time -f "%e" cargo nextest run -p zenav1-aom-dsp --cargo-profile test-fast
+
+Result: 341 tests run / 341 passed / 1 skipped, 12.07 s wall (nextest's own summary:
+11.753 s). Compare sequential 57.02 s, xargs-per-binary pool 12.57 s.
+
+The 1 skipped test is the documented #[ignore] perf-ratio print in sad_simd.rs -- not a
+correctness gate. See the test-hygiene section of the report.
