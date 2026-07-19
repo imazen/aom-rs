@@ -506,6 +506,7 @@ fn pick_recursive_tx_size_type_matches_c_recursion() {
                 coeff_opt_dist_threshold: 3200,
                 adaptive_txb_search_level: 1,
                 txb_split_cap: true,
+                ml_tx_split_thresh: -1, // NN off (prunes-off recursion differential)
                 init_depth: 0,
             };
             let port = pick_recursive_tx_size_type_yrd(&env, i64::MAX);

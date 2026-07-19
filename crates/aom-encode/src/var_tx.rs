@@ -410,8 +410,58 @@ pub fn search_tx_type_inter(
 // (tx_search.c:2601 / :2406 / :2454 / :3433 / :3553).
 // ===========================================================================
 
+use crate::tx_search::get_mean_dev_features;
+use crate::tx_split_nn_weights::TX_SPLIT_NN;
 use aom_entropy::partition::{txfm_partition_context, txfm_partition_update};
 use aom_txb::CoeffCostSet;
+
+/// `ml_predict_tx_split` (tx_search.c:1755) — the split-prediction NN. Returns
+/// `clamp((int)(score * 10000), -80000, 80000)`, or `-1` when no NN exists for
+/// this tx size (TX_4X4). `diff` is the WHOLE-block src_diff; the NN reads the
+/// txb's sub-block at `(4*blk_row, 4*blk_col)` (stride `diff_stride`). Faithful
+/// to `av1_nn_predict` (node-major w0, ReLU hidden, linear 1-output) +
+/// `av1_nn_output_prec_reduce` (reduce_prec=1: `((int)(x*512 + 0.5))/512`, the
+/// `+0.5` a f64 literal). Features come from [`get_mean_dev_features`] (no
+/// normalization — unlike the intra tx-depth NN).
+pub fn ml_predict_tx_split(
+    diff: &[i16],
+    diff_stride: usize,
+    blk_row: usize,
+    blk_col: usize,
+    tx_size: usize,
+) -> i32 {
+    let Some(nn) = TX_SPLIT_NN[tx_size].as_ref() else {
+        return -1;
+    };
+    let (bw, bh) = (TXS_W[tx_size], TXS_H[tx_size]);
+    let off = 4 * blk_row * diff_stride + 4 * blk_col;
+    let mut features = [0f32; 16];
+    let n = get_mean_dev_features(&diff[off..], diff_stride, bw, bh, &mut features);
+    debug_assert_eq!(n, nn.num_inputs, "feature count vs nn.num_inputs");
+
+    // Hidden layer (ReLU): buf[node] = relu(bias[node] + Σ_i w0[node*ni + i]*feat[i]).
+    let mut hidden = [0f32; 64];
+    for node in 0..nn.num_hidden {
+        let mut val = nn.b0[node];
+        for i in 0..nn.num_inputs {
+            val += nn.w0[node * nn.num_inputs + i] * features[i];
+        }
+        hidden[node] = if val > 0.0 { val } else { 0.0 };
+    }
+    // Output layer (1 output, linear): out = b1 + Σ_i w1[i]*hidden[i].
+    let mut out = nn.b1;
+    for i in 0..nn.num_hidden {
+        out += nn.w1[i] * hidden[i];
+    }
+    // av1_nn_output_prec_reduce (reduce_prec=1): `((int)(out*512 + 0.5)) * (1/512)`.
+    // C multiplies in f32 (`float * int`) then promotes to f64 for the `+ 0.5`
+    // (a double literal); `1/512` is exact in f32 so `* inv_prec == / 512`.
+    let scaled = out * 512.0f32;
+    let out = ((f64::from(scaled) + 0.5) as i32) as f32 / 512.0f32;
+    // `(int)(score * 10000)` — f32 multiply (10000 is an int in C), trunc-to-zero.
+    let int_score = (out * 10000.0f32) as i32;
+    int_score.clamp(-80000, 80000)
+}
 
 /// `sub_tx_size_map[TX_SIZES_ALL]` (common_data.h): one var-tx split step.
 const SUB_TX_SIZE_MAP: [usize; 19] = [0, 0, 1, 2, 3, 0, 0, 1, 1, 2, 2, 3, 3, 5, 6, 7, 8, 9, 10];
@@ -530,6 +580,10 @@ pub struct VarTxEnv<'a> {
     pub coeff_opt_dist_threshold: u32,
     pub adaptive_txb_search_level: i32,
     pub txb_split_cap: bool,
+    /// `sf.tx_sf.tx_type_search.ml_tx_split_thresh` — the `ml_predict_tx_split`
+    /// NN gate (bd8 only; witness value 8500). `< 0` disables the NN (the
+    /// prunes-off recursion differential passes `-1`).
+    pub ml_tx_split_thresh: i32,
     /// The var-tx quadtree init depth (`get_search_init_depth`; 0 at speed-0 sub-720p).
     pub init_depth: i32,
 }
@@ -867,8 +921,20 @@ fn select_tx_block(
         no_split_info = Some(ns);
     }
 
-    // ml_predict_tx_split (bd8): NOT yet ported — gated off (over-searches split
-    // vs C on the witness config until landed with its own differential).
+    // ml_predict_tx_split (tx_search.c:2673-2680) — bd8-only ML split prune.
+    // C gate: `bd == 8 && try_split && !(ref_best_rd == MAX && no_split.rd == MAX)`;
+    // if `split_score < -threshold` disable split. `ml_tx_split_thresh < 0`
+    // disables the NN (the prunes-off differential).
+    if env.bd == 8
+        && try_split
+        && env.ml_tx_split_thresh >= 0
+        && !(ref_best_rd == i64::MAX && no_split_rd == i64::MAX)
+    {
+        let score = ml_predict_tx_split(env.residual, env.residual_stride, blk_row, blk_col, tx_size);
+        if score < -env.ml_tx_split_thresh {
+            try_split = false;
+        }
+    }
 
     let mut split_rdcost = i64::MAX;
     let mut split_stats = RdStats::invalid();

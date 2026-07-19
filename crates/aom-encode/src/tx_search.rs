@@ -2241,7 +2241,7 @@ fn get_dev(mean: f32, x2_sum: f64, num: i32) -> f32 {
 /// `[1]` block dev, `[2..10]` per-sub (mean, dev) in raster order, `[10]`
 /// deviation of sub-means, `[11]` mean of sub-devs. Returns the next
 /// feature index (12).
-fn get_mean_dev_features(
+pub fn get_mean_dev_features(
     data: &[i16],
     stride: usize,
     bw: usize,
