@@ -12,8 +12,8 @@
 //! independently of their own correctness.
 
 use aom_entropy::dv_ref::{
-    assign_and_validate_dv, find_dv_ref_mvs, find_inter_mv_refs, find_ref_dv, is_dv_valid, DvNbr,
-    DvTileBounds,
+    DvNbr, DvTileBounds, WarpSamples, assign_and_validate_dv, find_dv_ref_mvs, find_inter_mv_refs,
+    find_ref_dv, find_samples, is_dv_valid, select_samples,
 };
 use aom_sys_ref::{self as c, RefDvNbr};
 
@@ -254,7 +254,9 @@ fn find_dv_ref_mvs_matches_c() {
             total += 1;
         }
     }
-    eprintln!("find_dv_ref_mvs_matches_c: {total} cases x {n_grids} distinct grids byte/value-identical vs C");
+    eprintln!(
+        "find_dv_ref_mvs_matches_c: {total} cases x {n_grids} distinct grids byte/value-identical vs C"
+    );
 }
 
 #[test]
@@ -678,4 +680,238 @@ fn find_inter_mv_refs_matches_c() {
     eprintln!(
         "find_inter_mv_refs_matches_c: {total} cases x {n_grids} distinct grids value-identical vs C (av1_find_mv_refs single-ref)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Local warped-motion neighbour sample gather (chunk 5): find_samples /
+// select_samples vs the REAL exported av1_findSamples / av1_selectSamples over
+// a synthetic MI grid.
+// ---------------------------------------------------------------------------
+
+/// A warp-flavoured random grid: cells are mostly single-ref inter (so
+/// `single()` matches often), with a mix of the current ref, other refs,
+/// compound (`ref1 >= 0`, ineligible), and intra.
+fn random_warp_grid(rng: &mut Rng, cur_ref: i32) -> Vec<RefDvNbr> {
+    let mut g = vec![RefDvNbr::default(); DIM * DIM];
+    for cell in g.iter_mut() {
+        cell.bsize = rng.range(0, 22) as u8;
+        cell.mv0_row = (rng.range(-256, 256)) as i16;
+        cell.mv0_col = (rng.range(-256, 256)) as i16;
+        let class = rng.next() % 100;
+        if class < 55 {
+            cell.ref_frame0 = cur_ref as i8; // matches single()
+            cell.ref_frame1 = -1;
+        } else if class < 75 {
+            cell.ref_frame0 = rng.range(1, 8) as i8; // other single ref
+            cell.ref_frame1 = -1;
+        } else if class < 90 {
+            cell.ref_frame0 = cur_ref as i8; // compound (ref1 >= 0 -> ineligible)
+            cell.ref_frame1 = rng.range(1, 8) as i8;
+        } else {
+            cell.ref_frame0 = 0; // intra
+            cell.ref_frame1 = -1;
+        }
+    }
+    g
+}
+
+fn flatten_grid(g: &[RefDvNbr]) -> ([Vec<i32>; 5], ()) {
+    let bsize: Vec<i32> = g.iter().map(|c| c.bsize as i32).collect();
+    let ref0: Vec<i32> = g.iter().map(|c| c.ref_frame0 as i32).collect();
+    let ref1: Vec<i32> = g.iter().map(|c| c.ref_frame1 as i32).collect();
+    let mvr: Vec<i32> = g.iter().map(|c| c.mv0_row as i32).collect();
+    let mvc: Vec<i32> = g.iter().map(|c| c.mv0_col as i32).collect();
+    ([bsize, ref0, ref1, mvr, mvc], ())
+}
+
+#[test]
+fn find_samples_matches_c() {
+    let mut rng = Rng(0x51ce_a1ed_f00d_1234);
+    // sb_size ∈ {BLOCK_64X64=12, BLOCK_128X128=15}; sb_mi_size = mi_size_wide.
+    let sb_choices = [(12usize, 16i32), (15usize, 32i32)];
+
+    let mut n_np_pos = 0u32;
+    let mut n_np_max = 0u32;
+    let mut n_tr = 0u32; // top-right sample present
+    let total = 30_000u32;
+
+    for _ in 0..total {
+        let cur_ref = rng.range(1, 4) as i32; // LAST..LAST3
+        let grid = random_warp_grid(&mut rng, cur_ref);
+        let ([g_bsize, g_ref0, g_ref1, g_mvr, g_mvc], ()) = flatten_grid(&grid);
+
+        // Warp-eligible current bsize (min dim >= 8 mi... actually >=8 px). Use
+        // all 22 sizes: find_samples is defined for any bsize.
+        let cur_bsize = rng.range(0, 22) as usize;
+        let (sb_size, sb_mi) = sb_choices[(rng.next() % 2) as usize];
+        let width_mi = MI_SIZE_WIDE[cur_bsize];
+        let height_mi = MI_SIZE_HIGH[cur_bsize];
+        // Keep all probes inside [0, DIM): mi_row-1 >= 0 and
+        // mi_col + width_mi < DIM, mi_row + height_mi < DIM.
+        let mi_row = rng.range(2, (DIM as i64) - 40) as i32;
+        let mi_col = rng.range(2, (DIM as i64) - 40) as i32;
+        let partition = rng.range(0, 10) as usize;
+        let up = !rng.next().is_multiple_of(10); // mostly available
+        let left = !rng.next().is_multiple_of(10);
+
+        let tile = (0i32, DIM as i32, 0i32, DIM as i32);
+
+        // Port.
+        let gclos = grid_fn(&grid, mi_row, mi_col);
+        let dv_tile = DvTileBounds {
+            mi_row_start: 0,
+            mi_row_end: DIM as i32,
+            mi_col_start: 0,
+            mi_col_end: DIM as i32,
+        };
+        let ws: WarpSamples = find_samples(
+            &gclos, &dv_tile, sb_mi, DIM as i32, DIM as i32, mi_row, mi_col, width_mi, height_mi,
+            partition, cur_ref, up, left,
+        );
+
+        // C.
+        let (c_np, c_pts, c_pir) = c::ref_find_samples(
+            DIM as i32,
+            DIM as i32,
+            DIM as i32,
+            sb_size as i32,
+            &g_bsize,
+            &g_ref0,
+            &g_ref1,
+            &g_mvr,
+            &g_mvc,
+            mi_row,
+            mi_col,
+            cur_bsize as i32,
+            cur_ref,
+            partition as i32,
+            up,
+            left,
+            tile,
+        );
+
+        assert_eq!(
+            ws.np, c_np,
+            "find_samples np mismatch (mi=({mi_row},{mi_col}) bsize={cur_bsize} \
+             sb={sb_size} part={partition} up={up} left={left} ref={cur_ref})"
+        );
+        for i in 0..ws.np * 2 {
+            assert_eq!(
+                ws.pts[i], c_pts[i],
+                "find_samples pts[{i}] mismatch (mi=({mi_row},{mi_col}) bsize={cur_bsize})"
+            );
+            assert_eq!(
+                ws.pts_inref[i], c_pir[i],
+                "find_samples pts_inref[{i}] mismatch (mi=({mi_row},{mi_col}) bsize={cur_bsize})"
+            );
+        }
+        if ws.np > 0 {
+            n_np_pos += 1;
+        }
+        if ws.np == 8 {
+            n_np_max += 1;
+        }
+        // top-right present iff the last recorded sample came from col == width_mi
+        // (heuristic anti-vacuity: count when np grew with a top-right-eligible geometry).
+        if ws.np > 0 && up && mi_col + width_mi < DIM as i32 {
+            n_tr += 1;
+        }
+    }
+
+    assert!(n_np_pos > 5_000, "too few nonzero-sample cases: {n_np_pos}");
+    assert!(
+        n_np_max > 100,
+        "sample cap (8) barely exercised: {n_np_max}"
+    );
+    assert!(n_tr > 1_000, "top-right geometry barely exercised: {n_tr}");
+    eprintln!(
+        "find_samples_matches_c: {total} cases value-identical vs C av1_findSamples (np>0 in {n_np_pos})"
+    );
+}
+
+#[test]
+fn select_samples_matches_c() {
+    let mut rng = Rng(0x5e1e_c705_a3f0_9911);
+    let mut n_kept_lt = 0u32; // some samples dropped
+    let mut n_kept_all = 0u32;
+    let total = 40_000u32;
+
+    for _ in 0..total {
+        let len = rng.range(1, 9) as usize; // 1..=8
+        let bsize = rng.range(0, 22) as i32;
+        let mv_row = rng.range(-320, 320) as i32;
+        let mv_col = rng.range(-320, 320) as i32;
+
+        // Build pts / pts_inref: source points + a per-sample mv (some within
+        // the threshold of the block mv, some far) so both keep/drop paths fire.
+        let mut ws = WarpSamples::default();
+        for i in 0..len {
+            let sx = rng.range(-1024, 1024) as i32;
+            let sy = rng.range(-1024, 1024) as i32;
+            let close = rng.next().is_multiple_of(2);
+            let (dx, dy) = if close {
+                (
+                    mv_col + rng.range(-40, 40) as i32,
+                    mv_row + rng.range(-40, 40) as i32,
+                )
+            } else {
+                (rng.range(-300, 300) as i32, rng.range(-300, 300) as i32)
+            };
+            ws.pts[2 * i] = sx;
+            ws.pts[2 * i + 1] = sy;
+            ws.pts_inref[2 * i] = sx + dx;
+            ws.pts_inref[2 * i + 1] = sy + dy;
+        }
+        ws.np = len;
+
+        // C reference (mutates copies).
+        let mut c_pts: Vec<i32> = ws.pts[..len * 2].to_vec();
+        let mut c_pir: Vec<i32> = ws.pts_inref[..len * 2].to_vec();
+        let c_ret = c::ref_select_samples(mv_row, mv_col, &mut c_pts, &mut c_pir, len, bsize);
+
+        // Port.
+        let mut pw = ws;
+        let ret = select_samples(&mut pw, mv_row, mv_col, block_w(bsize), block_h(bsize));
+
+        assert_eq!(
+            ret, c_ret,
+            "select_samples ret mismatch (len={len} bsize={bsize} mv=({mv_row},{mv_col}))"
+        );
+        for i in 0..ret * 2 {
+            assert_eq!(
+                pw.pts[i], c_pts[i],
+                "select pts[{i}] (len={len} bsize={bsize})"
+            );
+            assert_eq!(
+                pw.pts_inref[i], c_pir[i],
+                "select pts_inref[{i}] (len={len} bsize={bsize})"
+            );
+        }
+        if ret < len {
+            n_kept_lt += 1;
+        } else {
+            n_kept_all += 1;
+        }
+    }
+
+    assert!(n_kept_lt > 2_000, "drop path barely exercised: {n_kept_lt}");
+    assert!(
+        n_kept_all > 2_000,
+        "keep-all path barely exercised: {n_kept_all}"
+    );
+    eprintln!("select_samples_matches_c: {total} cases value-identical vs C av1_selectSamples");
+}
+
+// block_size_wide/high in pixels (common_data.h).
+fn block_w(bsize: i32) -> i32 {
+    const W: [i32; 22] = [
+        4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64,
+    ];
+    W[bsize as usize]
+}
+fn block_h(bsize: i32) -> i32 {
+    const H: [i32; 22] = [
+        4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+    ];
+    H[bsize as usize]
 }

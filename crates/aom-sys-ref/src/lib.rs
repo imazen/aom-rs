@@ -339,7 +339,7 @@ pub fn ref_cdef_filter16(
 extern "C" {
     fn shim_sad(idx: i32, s: *const u8, ss: i32, r: *const u8, rs: i32) -> u32;
     fn shim_variance(idx: i32, a: *const u8, as_: i32, b: *const u8, bs: i32, sse: *mut u32)
-        -> u32;
+    -> u32;
     fn shim_subpel_var(
         idx: i32,
         a: *const u8,
@@ -3650,10 +3650,12 @@ pub fn ref_get_pred_context_switchable_interp(
     above: Option<(i32, i32, usize, usize)>,
     left: Option<(i32, i32, usize, usize)>,
 ) -> i32 {
-    let (ha, a_r0, a_r1, a_yf, a_xf) =
-        above.map_or((0, 0, 0, 0, 0), |(r0, r1, yf, xf)| (1, r0, r1, yf as i32, xf as i32));
-    let (hl, l_r0, l_r1, l_yf, l_xf) =
-        left.map_or((0, 0, 0, 0, 0), |(r0, r1, yf, xf)| (1, r0, r1, yf as i32, xf as i32));
+    let (ha, a_r0, a_r1, a_yf, a_xf) = above.map_or((0, 0, 0, 0, 0), |(r0, r1, yf, xf)| {
+        (1, r0, r1, yf as i32, xf as i32)
+    });
+    let (hl, l_r0, l_r1, l_yf, l_xf) = left.map_or((0, 0, 0, 0, 0), |(r0, r1, yf, xf)| {
+        (1, r0, r1, yf as i32, xf as i32)
+    });
     unsafe {
         shim_get_pred_context_switchable_interp(
             dir as i32,
@@ -4898,11 +4900,7 @@ pub fn ref_uleb_decode(buffer: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut length = 0usize;
     let rc = unsafe { aom_uleb_decode(buffer.as_ptr(), buffer.len(), &mut value, &mut length) };
-    if rc == 0 {
-        Some((value, length))
-    } else {
-        None
-    }
+    if rc == 0 { Some((value, length)) } else { None }
 }
 
 /// Reference `aom_write_bit_buffer`: apply a sequence of literal ops (kind 0 =
@@ -13948,6 +13946,38 @@ extern "C" {
         gamma_out: *mut i16,
         delta_out: *mut i16,
     ) -> i32;
+    fn shim_find_samples(
+        mi_rows: i32,
+        mi_cols: i32,
+        grid_stride: i32,
+        sb_size: i32,
+        g_bsize: *const i32,
+        g_ref0: *const i32,
+        g_ref1: *const i32,
+        g_mv_row: *const i32,
+        g_mv_col: *const i32,
+        mi_row: i32,
+        mi_col: i32,
+        cur_bsize: i32,
+        cur_ref0: i32,
+        partition: i32,
+        up_available: i32,
+        left_available: i32,
+        tile_row_start: i32,
+        tile_row_end: i32,
+        tile_col_start: i32,
+        tile_col_end: i32,
+        pts_out: *mut i32,
+        pts_inref_out: *mut i32,
+    ) -> i32;
+    fn shim_select_samples(
+        mv_row: i32,
+        mv_col: i32,
+        pts: *mut i32,
+        pts_inref: *mut i32,
+        len: i32,
+        bsize: i32,
+    ) -> i32;
 }
 
 /// The derived warp model returned by [`ref_find_projection`] /
@@ -14062,9 +14092,7 @@ pub fn ref_find_projection(
 pub fn ref_get_shear_params(wmmat: &[i32; 6]) -> RefWarpModel {
     ref_init();
     let (mut a, mut b, mut g, mut d) = (0i16, 0i16, 0i16, 0i16);
-    let ret = unsafe {
-        shim_get_shear_params(wmmat.as_ptr(), &mut a, &mut b, &mut g, &mut d)
-    };
+    let ret = unsafe { shim_get_shear_params(wmmat.as_ptr(), &mut a, &mut b, &mut g, &mut d) };
     RefWarpModel {
         ret,
         wmmat: *wmmat,
@@ -14073,4 +14101,84 @@ pub fn ref_get_shear_params(wmmat: &[i32; 6]) -> RefWarpModel {
         gamma: g,
         delta: d,
     }
+}
+
+/// Reference libaom `av1_findSamples` (mvref_common.c:1118) over a synthetic
+/// per-cell mi grid. `g_*` are flat `mi_rows * grid_stride` arrays. Returns
+/// `(np, pts[16], pts_inref[16])`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_find_samples(
+    mi_rows: i32,
+    mi_cols: i32,
+    grid_stride: i32,
+    sb_size: i32,
+    g_bsize: &[i32],
+    g_ref0: &[i32],
+    g_ref1: &[i32],
+    g_mv_row: &[i32],
+    g_mv_col: &[i32],
+    mi_row: i32,
+    mi_col: i32,
+    cur_bsize: i32,
+    cur_ref0: i32,
+    partition: i32,
+    up_available: bool,
+    left_available: bool,
+    tile: (i32, i32, i32, i32), // (row_start, row_end, col_start, col_end)
+) -> (usize, [i32; 16], [i32; 16]) {
+    ref_init();
+    let mut pts = [0i32; 16];
+    let mut pts_inref = [0i32; 16];
+    let np = unsafe {
+        shim_find_samples(
+            mi_rows,
+            mi_cols,
+            grid_stride,
+            sb_size,
+            g_bsize.as_ptr(),
+            g_ref0.as_ptr(),
+            g_ref1.as_ptr(),
+            g_mv_row.as_ptr(),
+            g_mv_col.as_ptr(),
+            mi_row,
+            mi_col,
+            cur_bsize,
+            cur_ref0,
+            partition,
+            up_available as i32,
+            left_available as i32,
+            tile.0,
+            tile.1,
+            tile.2,
+            tile.3,
+            pts.as_mut_ptr(),
+            pts_inref.as_mut_ptr(),
+        )
+    };
+    (np as usize, pts, pts_inref)
+}
+
+/// Reference libaom `av1_selectSamples` (mvref_common.c:1092): compact `pts` /
+/// `pts_inref` (in place, `len*2` ints each) to samples within the MV-diff
+/// threshold. Returns the kept count.
+pub fn ref_select_samples(
+    mv_row: i32,
+    mv_col: i32,
+    pts: &mut [i32],
+    pts_inref: &mut [i32],
+    len: usize,
+    bsize: i32,
+) -> usize {
+    ref_init();
+    let ret = unsafe {
+        shim_select_samples(
+            mv_row,
+            mv_col,
+            pts.as_mut_ptr(),
+            pts_inref.as_mut_ptr(),
+            len as i32,
+            bsize,
+        )
+    };
+    ret as usize
 }

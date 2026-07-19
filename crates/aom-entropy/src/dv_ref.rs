@@ -1515,9 +1515,312 @@ pub fn assign_and_validate_dv(
             subsampling_y,
         );
 
-    if valid {
-        Some((mv_row, mv_col))
-    } else {
-        None
+    if valid { Some((mv_row, mv_col)) } else { None }
+}
+
+// ---------------------------------------------------------------------------
+// Local warped-motion neighbour sample gather (chunk 5 — WARPED_CAUSAL).
+//   av1_findSamples / record_samples / av1_selectSamples (mvref_common.c) +
+//   av1_count_overlappable_neighbors (reconinter.c) via foreach_overlappable_nb.
+// These walk the same `DvGrid` (mi grid) the MV-ref scan uses.
+// ---------------------------------------------------------------------------
+
+/// `NONE_FRAME` for a candidate's second ref (single-ref sample eligibility).
+const WARP_NONE_FRAME: i32 = -1;
+/// `LEAST_SQUARES_SAMPLES_MAX` (warped_motion.h) = `1 << 3`.
+pub const LEAST_SQUARES_SAMPLES_MAX: usize = 8;
+/// `SAMPLES_ARRAY_SIZE` (warped_motion.h) = `LEAST_SQUARES_SAMPLES_MAX * 2`.
+pub const SAMPLES_ARRAY_SIZE: usize = LEAST_SQUARES_SAMPLES_MAX * 2;
+
+/// Neighbour warp samples: `np` valid points, each 2 interleaved (x,y) ints
+/// (1/8-pel) in `pts` (source) and `pts_inref` (source + neighbour mv).
+#[derive(Clone, Copy, Debug)]
+pub struct WarpSamples {
+    pub np: usize,
+    pub pts: [i32; SAMPLES_ARRAY_SIZE],
+    pub pts_inref: [i32; SAMPLES_ARRAY_SIZE],
+}
+
+impl Default for WarpSamples {
+    fn default() -> Self {
+        WarpSamples {
+            np: 0,
+            pts: [0; SAMPLES_ARRAY_SIZE],
+            pts_inref: [0; SAMPLES_ARRAY_SIZE],
+        }
     }
+}
+
+/// `record_samples` (mvref_common.c:1077) — the neighbour block's centre point
+/// (source) + its projected point in the reference (`+ mv[0]`), at `idx`
+/// (2 ints each). `GET_MV_SUBPEL(x) == x * 8`.
+#[allow(clippy::too_many_arguments)]
+fn record_samples(
+    cand: &DvNbr,
+    ws: &mut WarpSamples,
+    idx: usize,
+    row_offset: i32,
+    sign_r: i32,
+    col_offset: i32,
+    sign_c: i32,
+) {
+    let bw = BLOCK_SIZE_WIDE[cand.bsize];
+    let bh = BLOCK_SIZE_HIGH[cand.bsize];
+    let x = col_offset * MI_SIZE + sign_c * bw / 2 - 1;
+    let y = row_offset * MI_SIZE + sign_r * bh / 2 - 1;
+    ws.pts[idx * 2] = x * 8;
+    ws.pts[idx * 2 + 1] = y * 8;
+    ws.pts_inref[idx * 2] = x * 8 + cand.mv0_col;
+    ws.pts_inref[idx * 2 + 1] = y * 8 + cand.mv0_row;
+}
+
+/// `av1_findSamples` (mvref_common.c:1118) — gather up to
+/// `LEAST_SQUARES_SAMPLES_MAX` neighbour samples for the warp least-squares fit
+/// from the above row, left column, top-left and top-right neighbours whose
+/// single ref matches `ref_frame`. `width_mi`/`height_mi` are the current
+/// block's `mi_size_wide/high[bsize]`; `own_partition` and `sb_mi_size` drive
+/// the top-right availability probe. Reads neighbours from `grid`
+/// (`xd->mi[row_offset * mi_stride + col_offset]`).
+#[allow(clippy::too_many_arguments)]
+pub fn find_samples(
+    grid: &impl DvGrid,
+    tile: &DvTileBounds,
+    sb_mi_size: i32,
+    frame_mi_rows: i32,
+    frame_mi_cols: i32,
+    mi_row: i32,
+    mi_col: i32,
+    width_mi: i32,
+    height_mi: i32,
+    own_partition: usize,
+    ref_frame: i32,
+    up_available: bool,
+    left_available: bool,
+) -> WarpSamples {
+    let mut ws = WarpSamples::default();
+    let mut np: usize = 0;
+    let mut do_tl = true;
+    let mut do_tr = true;
+
+    let single = |c: &DvNbr| c.ref_frame0 == ref_frame && c.ref_frame1 == WARP_NONE_FRAME;
+
+    // scan the nearest above rows
+    if up_available {
+        let above = grid.get(-1, 0);
+        let mut superblock_width = MI_SIZE_WIDE[above.bsize];
+        if width_mi <= superblock_width {
+            // current block width <= above block width
+            let col_offset = -mi_col % superblock_width;
+            if col_offset < 0 {
+                do_tl = false;
+            }
+            if col_offset + superblock_width > width_mi {
+                do_tr = false;
+            }
+            if single(&above) {
+                record_samples(&above, &mut ws, np, 0, -1, col_offset, 1);
+                np += 1;
+                if np >= LEAST_SQUARES_SAMPLES_MAX {
+                    ws.np = LEAST_SQUARES_SAMPLES_MAX;
+                    return ws;
+                }
+            }
+        } else {
+            // current block width > above block width
+            let end = width_mi.min(frame_mi_cols - mi_col);
+            let mut i = 0;
+            while i < end {
+                let cand = grid.get(-1, i);
+                superblock_width = MI_SIZE_WIDE[cand.bsize];
+                if single(&cand) {
+                    record_samples(&cand, &mut ws, np, 0, -1, i, 1);
+                    np += 1;
+                    if np >= LEAST_SQUARES_SAMPLES_MAX {
+                        ws.np = LEAST_SQUARES_SAMPLES_MAX;
+                        return ws;
+                    }
+                }
+                i += superblock_width;
+            }
+        }
+    }
+
+    // scan the nearest left columns
+    if left_available {
+        let left = grid.get(0, -1);
+        let mut superblock_height = MI_SIZE_HIGH[left.bsize];
+        if height_mi <= superblock_height {
+            let row_offset = -mi_row % superblock_height;
+            if row_offset < 0 {
+                do_tl = false;
+            }
+            if single(&left) {
+                record_samples(&left, &mut ws, np, row_offset, 1, 0, -1);
+                np += 1;
+                if np >= LEAST_SQUARES_SAMPLES_MAX {
+                    ws.np = LEAST_SQUARES_SAMPLES_MAX;
+                    return ws;
+                }
+            }
+        } else {
+            let end = height_mi.min(frame_mi_rows - mi_row);
+            let mut i = 0;
+            while i < end {
+                let cand = grid.get(i, -1);
+                superblock_height = MI_SIZE_HIGH[cand.bsize];
+                if single(&cand) {
+                    record_samples(&cand, &mut ws, np, i, 1, 0, -1);
+                    np += 1;
+                    if np >= LEAST_SQUARES_SAMPLES_MAX {
+                        ws.np = LEAST_SQUARES_SAMPLES_MAX;
+                        return ws;
+                    }
+                }
+                i += superblock_height;
+            }
+        }
+    }
+
+    // Top-left block
+    if do_tl && left_available && up_available {
+        let tl = grid.get(-1, -1);
+        if single(&tl) {
+            record_samples(&tl, &mut ws, np, 0, -1, 0, -1);
+            np += 1;
+            if np >= LEAST_SQUARES_SAMPLES_MAX {
+                ws.np = LEAST_SQUARES_SAMPLES_MAX;
+                return ws;
+            }
+        }
+    }
+
+    // Top-right block
+    let bs = width_mi.max(height_mi);
+    if do_tr
+        && mvref_has_top_right(
+            sb_mi_size,
+            mi_row,
+            mi_col,
+            bs,
+            width_mi,
+            height_mi,
+            own_partition,
+        )
+        && is_inside(tile, mi_col, mi_row, -1, width_mi)
+    {
+        let tr = grid.get(-1, width_mi);
+        if single(&tr) {
+            record_samples(&tr, &mut ws, np, 0, -1, width_mi, 1);
+            np += 1;
+            if np >= LEAST_SQUARES_SAMPLES_MAX {
+                ws.np = LEAST_SQUARES_SAMPLES_MAX;
+                return ws;
+            }
+        }
+    }
+
+    let _ = frame_mi_rows;
+    ws.np = np;
+    ws
+}
+
+/// `av1_selectSamples` (mvref_common.c:1092) — keep only samples whose MV
+/// difference from the block's own `mv` (1/8-pel `(mv_row, mv_col)`) is within
+/// the size-derived threshold, compacting them to the front of `ws`. Returns
+/// the kept count (at least 1). `bw`/`bh` are `block_size_wide/high[bsize]`.
+pub fn select_samples(ws: &mut WarpSamples, mv_row: i32, mv_col: i32, bw: i32, bh: i32) -> usize {
+    let thresh = clamp_i32(bw.max(bh), 16, 112);
+    let len = ws.np;
+    let mut ret = 0usize;
+    for i in 0..len {
+        let diff = (ws.pts_inref[2 * i] - ws.pts[2 * i] - mv_col).abs()
+            + (ws.pts_inref[2 * i + 1] - ws.pts[2 * i + 1] - mv_row).abs();
+        if diff > thresh {
+            continue;
+        }
+        if ret != i {
+            ws.pts[2 * ret] = ws.pts[2 * i];
+            ws.pts[2 * ret + 1] = ws.pts[2 * i + 1];
+            ws.pts_inref[2 * ret] = ws.pts_inref[2 * i];
+            ws.pts_inref[2 * ret + 1] = ws.pts_inref[2 * i + 1];
+        }
+        ret += 1;
+    }
+    let kept = ret.max(1);
+    ws.np = kept;
+    kept
+}
+
+/// `av1_count_overlappable_neighbors` (reconinter.c:801) reduced to the boolean
+/// the motion-mode gate needs (`check_num_overlappable_neighbors` =
+/// `overlappable_neighbors != 0`). Walks the above row (then, only if none, the
+/// left column) via `foreach_overlappable_nb_{above,left}` counting inter
+/// neighbours (`is_neighbor_overlappable` = `is_inter_block`). `is_inter` maps a
+/// grid cell to inter-block-ness.
+#[allow(clippy::too_many_arguments)]
+pub fn has_overlappable_neighbors(
+    grid: &impl DvGrid,
+    frame_mi_rows: i32,
+    frame_mi_cols: i32,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    up_available: bool,
+    left_available: bool,
+    is_inter: impl Fn(&DvNbr) -> bool,
+) -> bool {
+    if BLOCK_SIZE_WIDE[bsize].min(BLOCK_SIZE_HIGH[bsize]) < 8 {
+        return false; // !is_motion_variation_allowed_bsize
+    }
+    let width_mi = MI_SIZE_WIDE[bsize];
+    let height_mi = MI_SIZE_HIGH[bsize];
+    let m64 = MI_SIZE_WIDE[BLOCK_64X64];
+
+    // above
+    if up_available {
+        let end_col = (mi_col + width_mi).min(frame_mi_cols);
+        let mut above_mi_col = mi_col;
+        while above_mi_col < end_col {
+            let cand = grid.get(-1, above_mi_col - mi_col);
+            let mut mi_step = MI_SIZE_WIDE[cand.bsize].min(m64);
+            let cand = if mi_step == 1 {
+                let col = above_mi_col & !1;
+                let c = grid.get(-1, col - mi_col + 1);
+                above_mi_col = col;
+                mi_step = 2;
+                c
+            } else {
+                cand
+            };
+            if is_inter(&cand) {
+                return true;
+            }
+            above_mi_col += mi_step;
+        }
+    }
+
+    // left (only reached when the above scan found nothing)
+    if left_available {
+        let end_row = (mi_row + height_mi).min(frame_mi_rows);
+        let mut left_mi_row = mi_row;
+        while left_mi_row < end_row {
+            let cand = grid.get(left_mi_row - mi_row, -1);
+            let mut mi_step = MI_SIZE_HIGH[cand.bsize].min(m64);
+            let cand = if mi_step == 1 {
+                let row = left_mi_row & !1;
+                let c = grid.get(row - mi_row + 1, -1);
+                left_mi_row = row;
+                mi_step = 2;
+                c
+            } else {
+                cand
+            };
+            if is_inter(&cand) {
+                return true;
+            }
+            left_mi_row += mi_step;
+        }
+    }
+
+    false
 }
