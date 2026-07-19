@@ -496,6 +496,15 @@ impl CPick<'_> {
                     dv_col: 0,
                     dv_ref_row: 0,
                     dv_ref_col: 0,
+                    // KEY-frame intra mirror: the INTER-ENCODE chunk-2 arm is
+                    // never taken on this path.
+                    is_inter: false,
+                    ref_frame0: 0,
+                    ref_frame1: -1,
+                    inter_mode: 0,
+                    mv_row: 0,
+                    mv_col: 0,
+                    inter_mode_context: 0,
                     raw_rdstats: stats,
                     palette_y: None,
                     palette_uv: None,

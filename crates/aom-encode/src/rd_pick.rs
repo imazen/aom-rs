@@ -211,6 +211,23 @@ pub struct RdPickIntraBest {
     /// re-encode's `encode_block_inter` recursion + the pack's
     /// `write_tx_size_vartx`.
     pub inter_tx_size: [usize; 16],
+    /// `is_inter_block(mbmi)` — set when the step-6 INTER arm
+    /// ([`crate::inter_rd::rd_pick_inter_mode_sb`]) beat the assembled intra
+    /// `rd` in a P/B frame. When true the `y`/`uv` intra mode fields are dead
+    /// (C's `*mbmi = best_mbmi` overwrites them) and the block codes the inter
+    /// mode below. INTER-ENCODE chunk 2.
+    pub is_inter: bool,
+    /// `mbmi->ref_frame[0]` on the inter arm (`LAST_FRAME` = 1 in the §3
+    /// single-reference envelope).
+    pub ref_frame0: i8,
+    /// `mbmi->mode` on the inter arm (`NEARESTMV`/`NEARMV`/`GLOBALMV`/`NEWMV`).
+    pub inter_mode: i32,
+    /// `mbmi->mv[0]`, 1/8-pel.
+    pub mv_row: i32,
+    pub mv_col: i32,
+    /// The `mode_context` the inter mode rate was priced against — frozen so
+    /// the pack writes on the same CDF context slices.
+    pub inter_mode_context: i32,
 }
 
 /// The [`rd_pick_intra_mode_sb`] outcome: `best: None` models the
@@ -493,6 +510,14 @@ pub fn rd_pick_intra_mode_sb(
             dv_ref_col,
             skip_txfm: ibc_skip,
             inter_tx_size,
+            // INTER-ENCODE chunk 2: the step-6 inter arm is wired in a
+            // follow-up; a KEY/intra frame never sets these.
+            is_inter: false,
+            ref_frame0: 0,
+            inter_mode: 0,
+            mv_row: 0,
+            mv_col: 0,
+            inter_mode_context: 0,
         }),
         intra_modes_rd_cost: rd_table,
     }

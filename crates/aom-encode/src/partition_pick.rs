@@ -1485,6 +1485,13 @@ fn leaf_pick_sb_modes(
                 dv_col: best.dv_col,
                 dv_ref_row: best.dv_ref_row,
                 dv_ref_col: best.dv_ref_col,
+                is_inter: best.is_inter,
+                ref_frame0: best.ref_frame0,
+                ref_frame1: -1,
+                inter_mode: best.inter_mode,
+                mv_row: best.mv_row,
+                mv_col: best.mv_col,
+                inter_mode_context: best.inter_mode_context,
                 raw_rdstats: stats,
             };
             (stats, Some(winner), source_variance)
@@ -4593,6 +4600,16 @@ fn nonrd_leaf_pick_and_encode(
         dv_col: 0,
         dv_ref_row: 0,
         dv_ref_col: 0,
+        // The nonrd pickmode arm is intra-only (`av1_nonrd_pick_intra_mode`);
+        // its inter sibling (`av1_nonrd_pick_inter_mode_sb`, speeds 8/9) is a
+        // separate chunk.
+        is_inter: false,
+        ref_frame0: 0,
+        ref_frame1: -1,
+        inter_mode: 0,
+        mv_row: 0,
+        mv_col: 0,
+        inter_mode_context: 0,
         raw_rdstats: pick.rd,
         // Palette is guarded dead on the nonrd estimate arm (init_mbmi_nonrd
         // zeroes palette sizes; the palette search arm needs

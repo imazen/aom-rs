@@ -28,6 +28,7 @@ pub mod intra_uv_rd;
 pub mod intrabc_search;
 pub mod inter_costs;
 pub mod inter_frame;
+pub mod inter_rd;
 pub mod inter_me;
 pub mod lf_search;
 pub mod mode_costs;

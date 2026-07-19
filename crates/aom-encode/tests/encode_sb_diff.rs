@@ -169,6 +169,15 @@ fn gen_winner(rng: &mut Rng, bsize: usize, reduced: bool) -> LeafWinner {
         dv_col: 0,
         dv_ref_row: 0,
         dv_ref_col: 0,
+        // KEY-frame intra fixture: the inter arm (INTER-ENCODE chunk 2) is
+        // never taken here, so these stay at their non-inter values.
+        is_inter: false,
+        ref_frame0: 0,
+        ref_frame1: -1,
+        inter_mode: 0,
+        mv_row: 0,
+        mv_col: 0,
+        inter_mode_context: 0,
         // Synthetic fixture: this file drives encode_b_intra_dry/pack_leaf
         // directly from a hand-rolled winner, never through
         // leaf_pick_sb_modes's real AB-reuse-relevant path -- a placeholder

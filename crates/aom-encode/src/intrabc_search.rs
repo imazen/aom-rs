@@ -1091,17 +1091,27 @@ pub struct DvCell {
     /// The block's DV (1/8 pel), meaningful when `use_intrabc`.
     pub dv_row: i16,
     pub dv_col: i16,
+    /// `mbmi->ref_frame[0]` — `INTRA_FRAME` (0) for an intra/intrabc block
+    /// (the KEY-frame case, unchanged), `LAST_FRAME` (1) for an INTER block in
+    /// a P/B frame. INTER-ENCODE chunk 2: the ref-MV scan
+    /// (`find_inter_mv_refs`) matches candidates on this, so an inter frame's
+    /// grid must carry the REAL reference rather than the intra placeholder.
+    pub ref_frame0: i8,
+    /// `mbmi->ref_frame[1]` — `NONE_FRAME` (-1); compound is out of scope.
+    pub ref_frame1: i8,
 }
 
 impl DvCell {
     pub fn to_nbr(self) -> DvNbr {
         DvNbr {
             bsize: self.bsize as usize,
-            // KEY frame: intra/intrabc candidates carry INTRA_FRAME/NONE.
-            ref_frame0: 0,  // INTRA_FRAME
-            ref_frame1: -1, // NONE_FRAME
+            ref_frame0: i32::from(self.ref_frame0),
+            ref_frame1: i32::from(self.ref_frame1),
             use_intrabc: self.use_intrabc,
             mode: self.mode as i32,
+            // For an intra/intrabc cell this is the DV; for an inter cell it is
+            // `mbmi->mv[0]`. Both live in the same 1/8-pel slot in C's
+            // `MB_MODE_INFO`, which is exactly why the scan can read one field.
             mv0_row: i32::from(self.dv_row),
             mv0_col: i32::from(self.dv_col),
             mv1_row: 0,
@@ -1544,7 +1554,7 @@ const MAX_PREDICT_SF_TX_SIZE: [usize; 22] = [
 /// speed 0). `residual` is the block's src−pred (i16, row-major, stride `bw`).
 /// Returns true iff the block is predicted to skip (all coeffs below the
 /// per-bd threshold). `sse` is the residual SSE (`av1_pixel_diff_dist`).
-fn predict_skip_txfm(
+pub fn predict_skip_txfm(
     residual: &[i16],
     bw: usize,
     bh: usize,

@@ -238,6 +238,31 @@ pub struct LeafWinner {
     /// signalled diff `dv - dv_ref` (`write_intrabc_info`).
     pub dv_ref_row: i32,
     pub dv_ref_col: i32,
+    /// `is_inter_block(mbmi)` — the leaf is an INTER block in a P/B frame
+    /// (distinct from `use_intrabc`, which is intra-frame block copy). When
+    /// set, the pack takes `pack_inter_mode_mvs`' inter arm
+    /// (`av1/encoder/bitstream.c:1092`) instead of the intra prediction modes,
+    /// and the recon is built from the REFERENCE frame rather than predicted
+    /// intra. INTER-ENCODE chunk 2.
+    pub is_inter: bool,
+    /// `mbmi->ref_frame[0]` — `LAST_FRAME` (1) throughout the §3 single-
+    /// reference envelope; `INTRA_FRAME` (0) on a non-inter leaf.
+    pub ref_frame0: i8,
+    /// `mbmi->ref_frame[1]` — `NONE_FRAME` (-1); compound is out of scope.
+    pub ref_frame1: i8,
+    /// `mbmi->mode` for an inter leaf (`NEARESTMV`/`NEARMV`/`GLOBALMV`/`NEWMV`,
+    /// enums.h:337-349). Read only when `is_inter`; the intra `mode` field is
+    /// dead then, exactly as C leaves it.
+    pub inter_mode: i32,
+    /// `mbmi->mv[0]` in 1/8-pel units. `(0, 0)` for the zero-MV target.
+    pub mv_row: i32,
+    pub mv_col: i32,
+    /// The `mode_context` the inter mode rate was costed against
+    /// (`av1_mode_context_analyzer` over `find_inter_mv_refs`' result). Frozen
+    /// onto the winner so the pack writes `write_inter_mode` on the SAME
+    /// context slices the RD priced — the search has the neighbour grid live,
+    /// the pack re-walk does not.
+    pub inter_mode_context: i32,
     /// `ctx->rd_stats` (the PICK_MODE_CONTEXT's own raw mode-search RD,
     /// BEFORE any enclosing stage adds its partition-type `pt_cost` —
     /// `leaf_pick_sb_modes`'s own returned [`PartRdStats`], unconditionally
@@ -283,6 +308,13 @@ impl LeafWinner {
             dv_col: 0,
             dv_ref_row: 0,
             dv_ref_col: 0,
+            is_inter: false,
+            ref_frame0: 0,
+            ref_frame1: -1,
+            inter_mode: 0,
+            mv_row: 0,
+            mv_col: 0,
+            inter_mode_context: 0,
             raw_rdstats: PartRdStats::invalid(),
         }
     }
@@ -293,12 +325,31 @@ impl LeafWinner {
     pub fn dv_cell(&self) -> crate::intrabc_search::DvCell {
         crate::intrabc_search::DvCell {
             bsize: self.bsize as u8,
-            // DC_PRED for an intrabc block (dead otherwise).
-            mode: if self.use_intrabc { 0 } else { self.mode as u8 },
+            // An INTER leaf projects its inter mode (NEARESTMV..NEWMV) — the
+            // ref-MV scan's `add_ref_mv_candidate` matches on it. Otherwise
+            // DC_PRED for an intrabc block (dead), else the intra mode.
+            mode: if self.is_inter {
+                self.inter_mode as u8
+            } else if self.use_intrabc {
+                0
+            } else {
+                self.mode as u8
+            },
             use_intrabc: self.use_intrabc,
             skip_txfm: self.skip_txfm,
-            dv_row: self.dv_row as i16,
-            dv_col: self.dv_col as i16,
+            // The 1/8-pel motion vector for an inter leaf, the DV for intrabc.
+            dv_row: if self.is_inter {
+                self.mv_row as i16
+            } else {
+                self.dv_row as i16
+            },
+            dv_col: if self.is_inter {
+                self.mv_col as i16
+            } else {
+                self.dv_col as i16
+            },
+            ref_frame0: if self.is_inter { self.ref_frame0 } else { 0 },
+            ref_frame1: -1,
         }
     }
 }
