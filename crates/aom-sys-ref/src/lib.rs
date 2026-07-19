@@ -14289,6 +14289,48 @@ pub fn ref_get_mvpred_sse(
     r as u32
 }
 
+// me_shim.c (cont.) — the REAL av1_mv_bit_cost coded-MV rate.
+extern "C" {
+    fn shim_mv_bit_cost(
+        mv_row: i32,
+        mv_col: i32,
+        ref_row: i32,
+        ref_col: i32,
+        mvjcost: *const i32,
+        mvcost0: *const i32,
+        mvcost1: *const i32,
+        weight: i32,
+    ) -> i32;
+}
+
+/// Reference libaom `av1_mv_bit_cost` (mcomp.c:307): the coded-MV rate of `mv`
+/// (1/8-pel) vs `ref_mv` at `weight`. `mvcost{0,1}_full` are the FULL cost tables
+/// (length `2*MV_MAX+1`).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_mv_bit_cost(
+    mv: (i32, i32),
+    ref_mv: (i32, i32),
+    mvjcost: &[i32; 4],
+    mvcost0_full: &[i32],
+    mvcost1_full: &[i32],
+    weight: i32,
+) -> i32 {
+    ref_init();
+    const MV_MAX: usize = (1 << 14) - 1;
+    unsafe {
+        shim_mv_bit_cost(
+            mv.0,
+            mv.1,
+            ref_mv.0,
+            ref_mv.1,
+            mvjcost.as_ptr(),
+            mvcost0_full.as_ptr().add(MV_MAX),
+            mvcost1_full.as_ptr().add(MV_MAX),
+            weight,
+        )
+    }
+}
+
 // warp_shim.c — decoder local-warped-motion core (crate aom-inter, warp module,
 // chunk 5): the real `av1_warp_affine_c` kernel + `av1_find_projection` /
 // `av1_get_shear_params` model derivation.

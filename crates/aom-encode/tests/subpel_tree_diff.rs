@@ -218,3 +218,30 @@ fn get_mvpred_sse_matches_real_c() {
         }
     }
 }
+
+#[test]
+fn mv_bit_cost_matches_real_c() {
+    use aom_encode::inter_me::mv_bit_cost;
+    use aom_sys_ref::ref_mv_bit_cost;
+
+    let mvcost0 = mvcost_table();
+    let mvcost1 = mvcost_table();
+    let mvjcost = [0i32, 240, 240, 480];
+    // MV_COST_WEIGHT (108, RD rate) + MV_COST_WEIGHT_SUB (120, coded DV).
+    let mut rng = Rng::new(0x11B_C057_ABCD_1234 ^ 0x5A5A_5A5A);
+    for _ in 0..4000 {
+        let mv = (
+            (rng.next_u64() % 1024) as i32 - 512,
+            (rng.next_u64() % 1024) as i32 - 512,
+        );
+        let ref_mv = (
+            (rng.next_u64() % 256) as i32 - 128,
+            (rng.next_u64() % 256) as i32 - 128,
+        );
+        for &weight in &[108, 120] {
+            let got = mv_bit_cost(mv, ref_mv, &mvjcost, &mvcost0, &mvcost1, weight);
+            let want = ref_mv_bit_cost(mv, ref_mv, &mvjcost, &mvcost0, &mvcost1, weight);
+            assert_eq!(got, want, "mv={mv:?} ref={ref_mv:?} w={weight}");
+        }
+    }
+}

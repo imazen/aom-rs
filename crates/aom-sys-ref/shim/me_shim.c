@@ -202,3 +202,13 @@ int shim_get_mvpred_sse(int best_row, int best_col, const uint8_t *src,
   FULLPEL_MV best = { (int16_t)best_row, (int16_t)best_col };
   return av1_get_mvpred_sse(&mcp, best, &vfp, &src_buf, &pre_buf);
 }
+
+/* ---- shim_mv_bit_cost — the REAL av1_mv_bit_cost (mcomp.c:307). */
+int shim_mv_bit_cost(int mv_row, int mv_col, int ref_row, int ref_col,
+                     const int *mvjcost, const int *mvcost0,
+                     const int *mvcost1, int weight) {
+  MV mv = { (int16_t)mv_row, (int16_t)mv_col };
+  MV ref_mv = { (int16_t)ref_row, (int16_t)ref_col };
+  int *mvcost[2] = { (int *)mvcost0, (int *)mvcost1 };
+  return av1_mv_bit_cost(&mv, &ref_mv, mvjcost, mvcost, weight);
+}

@@ -482,3 +482,27 @@ pub fn get_mvpred_sse(
     let cost = mv_err_cost_entropy(mv, ref_mv, mvjcost, mvcost0, mvcost1, error_per_bit);
     sse.wrapping_add(cost as u32)
 }
+
+/// `av1_mv_bit_cost` (mcomp.c:307): the rate to code MV `mv` (1/8-pel) relative
+/// to `ref_mv` — `ROUND_POWER_OF_TWO(mv_cost(diff) * weight, 7)`. `weight` is
+/// `MV_COST_WEIGHT` (108) for the RD rate or `MV_COST_WEIGHT_SUB` (120) for the
+/// coded DV. This is the coded-MV rate (NOT the motion-search variance-metric
+/// cost [`mv_err_cost_entropy`]).
+///
+/// Differentially locked vs the REAL exported `av1_mv_bit_cost` in
+/// `tests/subpel_tree_diff.rs`.
+#[must_use]
+pub fn mv_bit_cost(
+    mv: (i32, i32),
+    ref_mv: (i32, i32),
+    mvjcost: &[i32; 4],
+    mvcost0: &[i32],
+    mvcost1: &[i32],
+    weight: i32,
+) -> i32 {
+    let dr = mv.0 - ref_mv.0;
+    let dc = mv.1 - ref_mv.1;
+    let joint = get_mv_joint(dr, dc) as usize;
+    let mvc = mvjcost[joint] + mvcost0[(MV_MAX + dr) as usize] + mvcost1[(MV_MAX + dc) as usize];
+    round_pow2(mvc * weight, 7)
+}
