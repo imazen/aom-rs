@@ -6037,6 +6037,187 @@ fn assert_fc_scope(s: &KfBlockState) {
     );
 }
 
+/// The intra mode-info reads shared by BOTH intra paths: everything from the Y
+/// mode onward (`read_intra_frame_mode_info`, decodemv.c:815-843, and
+/// `read_intra_block_mode_info`, :1077-1106). The two are symbol-for-symbol and
+/// CDF-for-CDF identical here; they differ ONLY in which CDF the Y mode is read
+/// on, so the caller passes that row in:
+///
+///   * KEY frame   -> `kf_y_cdf[intra_mode_context[above]][intra_mode_context[left]]`
+///     (`get_y_mode_cdf`, av1_common_int.h:1433)
+///   * INTER frame -> `y_mode_cdf[size_group_lookup[bsize]]` (decodemv.c:1077)
+///
+/// `above_present`/`left_present` are `xd->above_mbmi != NULL` / `xd->left_mbmi
+/// != NULL` — consulted only by the palette mode context.
+///
+/// The Y-mode row is passed in as a slice rather than reached through `f`
+/// because the inter-frame table lives outside [`KfFrameContext`] (the caller
+/// writes the adapted row back). The Y mode is the FIRST read here, so nothing
+/// else can observe the row mid-call.
+#[allow(clippy::too_many_arguments)]
+fn read_intra_mode_info_tail(
+    dec: &mut OdEcDec,
+    f: &mut KfFrameContext,
+    s: &mut KfBlockState,
+    info: &mut MbModeInfoKf,
+    y_mode_cdf: &mut [u16],
+    enable_filter_intra: bool,
+    above_present: bool,
+    left_present: bool,
+    above_palette: Option<PaletteNbrKf>,
+    left_palette: Option<PaletteNbrKf>,
+) {
+    let mode = read_intra_y_mode(dec, y_mode_cdf);
+    info.y_mode = mode;
+    if use_angle_delta(s.bsize) && is_directional_mode(mode) {
+        info.angle_delta_y = read_angle_delta(dec, &mut f.angle_delta[(mode - V_PRED) as usize]);
+    }
+    if !s.monochrome && s.is_chroma_ref {
+        let uv = read_intra_uv_mode(
+            dec,
+            &mut f.uv_mode[s.cfl_allowed as usize][mode as usize],
+            s.cfl_allowed,
+        );
+        info.uv_mode = uv;
+        if uv == UV_CFL_PRED {
+            let (joint_sign, idx) = read_cfl_alphas(dec, &mut f.cfl_sign, &mut f.cfl_alpha);
+            info.cfl_alpha_idx = idx;
+            info.cfl_joint_sign = joint_sign;
+        }
+        let intra_mode = get_uv_mode(uv as usize);
+        if use_angle_delta(s.bsize) && is_directional_mode(intra_mode) {
+            info.angle_delta_uv =
+                read_angle_delta(dec, &mut f.angle_delta[(intra_mode - V_PRED) as usize]);
+        }
+    }
+    // `read_palette_mode_info` (decodemv.c): NOT [`read_palette_mode_info`] (that
+    // helper takes a PRE-selected `uv_mode_cdf` row, which only works when the
+    // caller already knows `palette_size[0]` — true for a WRITE caller (its own
+    // encode decision) but not for a blind decoder, since the real C
+    // `palette_uv_mode_ctx = (pmi->palette_size[0] > 0)` depends on the Y flag
+    // this SAME call just read). Inlined here in the correct two-step order,
+    // matching the real C sequencing exactly.
+    if s.allow_palette {
+        let bsize_ctx = palette_bsize_ctx(s.bsize) as usize;
+        let mut colors = [0u16; 3 * PALETTE_MAX_SIZE];
+        if mode == DC_PRED {
+            let mode_ctx = palette_mode_ctx(
+                above_present,
+                above_palette.map_or(0, |p| p.size[0]),
+                left_present,
+                left_palette.map_or(0, |p| p.size[0]),
+            ) as usize;
+            if read_symbol(dec, &mut f.palette_y_mode[bsize_ctx][mode_ctx], 2) != 0 {
+                let n = read_symbol(dec, &mut f.palette_y_size[bsize_ctx], PALETTE_SIZES)
+                    + PALETTE_MIN_SIZE;
+                info.palette_size[0] = n;
+                let yc = read_palette_colors_plane(
+                    dec,
+                    n as usize,
+                    0,
+                    s.bit_depth,
+                    1,
+                    s.mb_to_top_edge,
+                    above_present,
+                    &above_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
+                    above_palette.map_or(0, |p| p.size[0]),
+                    left_present,
+                    &left_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
+                    left_palette.map_or(0, |p| p.size[0]),
+                );
+                colors[..n as usize].copy_from_slice(&yc);
+            }
+        }
+        if !s.monochrome && info.uv_mode == UV_DC_PRED && s.is_chroma_ref {
+            let uv_ctx = usize::from(info.palette_size[0] > 0);
+            if read_symbol(dec, &mut f.palette_uv_mode[uv_ctx], 2) != 0 {
+                let n = read_symbol(dec, &mut f.palette_uv_size[bsize_ctx], PALETTE_SIZES)
+                    + PALETTE_MIN_SIZE;
+                info.palette_size[1] = n;
+                let uc = read_palette_colors_plane(
+                    dec,
+                    n as usize,
+                    1,
+                    s.bit_depth,
+                    0,
+                    s.mb_to_top_edge,
+                    above_present,
+                    &above_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
+                    above_palette.map_or(0, |p| p.size[1]),
+                    left_present,
+                    &left_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
+                    left_palette.map_or(0, |p| p.size[1]),
+                );
+                colors[PALETTE_MAX_SIZE..PALETTE_MAX_SIZE + n as usize].copy_from_slice(&uc);
+                let vc = read_palette_colors_v(dec, n as usize, s.bit_depth);
+                let vbase = 2 * PALETTE_MAX_SIZE;
+                colors[vbase..vbase + n as usize].copy_from_slice(&vc);
+            }
+        }
+        info.palette_colors = colors;
+    }
+    let fi_allowed = filter_intra_allowed(enable_filter_intra, s.bsize, mode, info.palette_size[0]);
+    let (use_fi, fi_mode) = read_filter_intra_mode_info(
+        dec,
+        &mut f.filter_intra[s.bsize],
+        &mut f.filter_intra_mode,
+        fi_allowed,
+    );
+    info.use_filter_intra = use_fi;
+    info.filter_intra_mode = fi_mode;
+}
+
+/// `read_intra_block_mode_info` (decodemv.c:1065-1107): the mode info for an
+/// INTRA-coded block inside an INTER frame. The caller (the inter mode-info
+/// driver) has already consumed the shared `read_inter_frame_mode_info` prefix
+/// — segment_id / skip_mode / skip_txfm / cdef / delta-q / `is_inter` — and
+/// supplies the resulting fields on `info`.
+///
+/// Exactly TWO things differ from the KEY-frame [`read_mb_modes_kf_fc`] tail:
+///
+///  1. the Y mode is read on `y_mode_cdf[size_group_lookup[bsize]]` (:1077),
+///     NOT the neighbour-context `kf_y_cdf` (:815) — so no above/left MODE is
+///     consulted at all (only their PRESENCE, for the palette context);
+///  2. there is no intrabc read: `av1_allow_intrabc` is `frame_is_intra_only`-
+///     gated (reconintra.h:63), so it is false in an inter frame by
+///     construction, and `av1_read_mode_info` zeroes `use_intrabc` for both
+///     paths at :1576.
+///
+/// Everything else — angle_delta_y, the chroma-reference uv_mode / CfL alphas /
+/// angle_delta_uv, palette, filter_intra — is identical, which is why both paths
+/// run the same [`read_intra_mode_info_tail`].
+///
+/// `ref_frame` is `[INTRA_FRAME, NONE_FRAME]` (:1072-1073), so every downstream
+/// helper (`is_inter_block`, `read_tx_size`'s `inter_block_tx`,
+/// `av1_read_tx_type`) sees the block as intra and takes the byte-exact
+/// KEY-frame arms unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn read_intra_block_mode_info_fc(
+    dec: &mut OdEcDec,
+    f: &mut KfFrameContext,
+    s: &mut KfBlockState,
+    y_mode_cdf: &mut [u16],
+    enable_filter_intra: bool,
+    above_present: bool,
+    left_present: bool,
+    above_palette: Option<PaletteNbrKf>,
+    left_palette: Option<PaletteNbrKf>,
+    info: &mut MbModeInfoKf,
+) {
+    read_intra_mode_info_tail(
+        dec,
+        f,
+        s,
+        info,
+        y_mode_cdf,
+        enable_filter_intra,
+        above_present,
+        left_present,
+        above_palette,
+        left_palette,
+    );
+}
+
 /// [`read_mb_modes_kf`] with libaom's FRAME_CONTEXT context selection: every symbol's
 /// CDF instance is picked from the [`KfFrameContext`] arrays at the moment it is read,
 /// exactly as `read_intra_frame_mode_info` (av1/decoder/decodemv.c) selects from
@@ -6144,104 +6325,20 @@ pub fn read_mb_modes_kf_fc(
         }
     }
     let (ac, lc) = get_y_mode_ctx(above.map(|m| m.y_mode), left.map(|m| m.y_mode));
-    let mode = read_intra_y_mode(dec, &mut f.kf_y[ac][lc]);
-    info.y_mode = mode;
-    if use_angle_delta(s.bsize) && is_directional_mode(mode) {
-        info.angle_delta_y = read_angle_delta(dec, &mut f.angle_delta[(mode - V_PRED) as usize]);
-    }
-    if !s.monochrome && s.is_chroma_ref {
-        let uv = read_intra_uv_mode(
-            dec,
-            &mut f.uv_mode[s.cfl_allowed as usize][mode as usize],
-            s.cfl_allowed,
-        );
-        info.uv_mode = uv;
-        if uv == UV_CFL_PRED {
-            let (joint_sign, idx) = read_cfl_alphas(dec, &mut f.cfl_sign, &mut f.cfl_alpha);
-            info.cfl_alpha_idx = idx;
-            info.cfl_joint_sign = joint_sign;
-        }
-        let intra_mode = get_uv_mode(uv as usize);
-        if use_angle_delta(s.bsize) && is_directional_mode(intra_mode) {
-            info.angle_delta_uv =
-                read_angle_delta(dec, &mut f.angle_delta[(intra_mode - V_PRED) as usize]);
-        }
-    }
-    // `read_palette_mode_info` (decodemv.c): NOT [`read_palette_mode_info`] (that
-    // helper takes a PRE-selected `uv_mode_cdf` row, which only works when the
-    // caller already knows `palette_size[0]` — true for a WRITE caller (its own
-    // encode decision) but not for a blind decoder, since the real C
-    // `palette_uv_mode_ctx = (pmi->palette_size[0] > 0)` depends on the Y flag
-    // this SAME call just read). Inlined here in the correct two-step order,
-    // matching the real C sequencing exactly.
-    if s.allow_palette {
-        let bsize_ctx = palette_bsize_ctx(s.bsize) as usize;
-        let mut colors = [0u16; 3 * PALETTE_MAX_SIZE];
-        if mode == DC_PRED {
-            let mode_ctx = palette_mode_ctx(
-                above.is_some(),
-                above_palette.map_or(0, |p| p.size[0]),
-                left.is_some(),
-                left_palette.map_or(0, |p| p.size[0]),
-            ) as usize;
-            if read_symbol(dec, &mut f.palette_y_mode[bsize_ctx][mode_ctx], 2) != 0 {
-                let n = read_symbol(dec, &mut f.palette_y_size[bsize_ctx], PALETTE_SIZES)
-                    + PALETTE_MIN_SIZE;
-                info.palette_size[0] = n;
-                let yc = read_palette_colors_plane(
-                    dec,
-                    n as usize,
-                    0,
-                    s.bit_depth,
-                    1,
-                    s.mb_to_top_edge,
-                    above.is_some(),
-                    &above_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
-                    above_palette.map_or(0, |p| p.size[0]),
-                    left.is_some(),
-                    &left_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
-                    left_palette.map_or(0, |p| p.size[0]),
-                );
-                colors[..n as usize].copy_from_slice(&yc);
-            }
-        }
-        if !s.monochrome && info.uv_mode == UV_DC_PRED && s.is_chroma_ref {
-            let uv_ctx = usize::from(info.palette_size[0] > 0);
-            if read_symbol(dec, &mut f.palette_uv_mode[uv_ctx], 2) != 0 {
-                let n = read_symbol(dec, &mut f.palette_uv_size[bsize_ctx], PALETTE_SIZES)
-                    + PALETTE_MIN_SIZE;
-                info.palette_size[1] = n;
-                let uc = read_palette_colors_plane(
-                    dec,
-                    n as usize,
-                    1,
-                    s.bit_depth,
-                    0,
-                    s.mb_to_top_edge,
-                    above.is_some(),
-                    &above_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
-                    above_palette.map_or(0, |p| p.size[1]),
-                    left.is_some(),
-                    &left_palette.map_or([0u16; 3 * PALETTE_MAX_SIZE], |p| p.colors),
-                    left_palette.map_or(0, |p| p.size[1]),
-                );
-                colors[PALETTE_MAX_SIZE..PALETTE_MAX_SIZE + n as usize].copy_from_slice(&uc);
-                let vc = read_palette_colors_v(dec, n as usize, s.bit_depth);
-                let vbase = 2 * PALETTE_MAX_SIZE;
-                colors[vbase..vbase + n as usize].copy_from_slice(&vc);
-            }
-        }
-        info.palette_colors = colors;
-    }
-    let fi_allowed = filter_intra_allowed(enable_filter_intra, s.bsize, mode, info.palette_size[0]);
-    let (use_fi, fi_mode) = read_filter_intra_mode_info(
+    let mut y_cdf = f.kf_y[ac][lc];
+    read_intra_mode_info_tail(
         dec,
-        &mut f.filter_intra[s.bsize],
-        &mut f.filter_intra_mode,
-        fi_allowed,
+        f,
+        s,
+        &mut info,
+        &mut y_cdf,
+        enable_filter_intra,
+        above.is_some(),
+        left.is_some(),
+        above_palette,
+        left_palette,
     );
-    info.use_filter_intra = use_fi;
-    info.filter_intra_mode = fi_mode;
+    f.kf_y[ac][lc] = y_cdf;
     info
 }
 
