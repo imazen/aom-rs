@@ -1119,15 +1119,44 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
     0 failures) including `encoder_gate_real_image_e2e_kb6_repro` (30/30 real content); both
     var-tx differentials (`var_tx_leaf_diff`, `var_tx_recursion_diff`) still pass, plus
     `prune_tx_2d_diff` / `tx_split_nn_diff`. Non-screen frames construct no intrabc args at all.
-  - **NEXT CONCRETE STEP:** localize the first divergent BLOCK. The port's stream desyncs at byte
-    646 so a plain decode-both fails; use the sibling-C instrumented dump (the KB-2/KB-3/KB-7
-    method) at the SB containing tile-byte 646, comparing per-leaf `use_intrabc / skip_txfm /
-    inter_tx_size / tx_type` against the port's. Prime suspects, in order: (a) the chroma inter
-    tx-type inheritance (`uv_tx_type_inter` reads the luma map at the scaled-back position —
-    verify it is read AFTER the luma eob-0 DCT_DCT resets, as C's `av1_get_tx_type` does);
-    (b) the `+16`-byte surplus suggests the port codes coefficients where C chooses skip, i.e. the
-    joint skip decision (tx_search.c:3861-3886) or the `set_skip_txfm` intermediate rate; (c) the
-    AVX2-vs-scalar `av1_nn_predict` caveat on `prune_tx_2D` sort order.
+  - **ROOT CAUSE #1 — CLOSED ✅ 2026-07-19: UNCLAMPED tile bounds fed into `av1_is_dv_valid`.**
+    All THREE previously-ranked suspects are **REFUTED — do not re-chase**: it was NOT the joint
+    skip decision / `set_skip_txfm` rate, NOT the chroma inter tx-type inheritance timing, and NOT
+    the AVX2-vs-scalar `prune_tx_2D` sort order. The port's `is_dv_valid`
+    (`aom-dsp/src/entropy/dv_ref.rs:1369`) is faithful line-for-line **and its constants are
+    right** — the defect was in its INPUTS. `partition_pick.rs`'s `IntrabcLeafArgs` passed
+    `env.tile_{row,col}_end` **raw**, and those are unclamped sentinels (`1 << 16`, set at
+    `aom-bench/src/lib.rs:1381`). C's `av1_tile_set_row`/`av1_tile_set_col` (tile_common.c) CLAMP
+    the tile end to the frame (`AOMMIN(row_start_sb[i+1] << mib_size_log2, mi_rows)`). That single
+    input blows up `total_sb64_per_row = ((mi_col_end - mi_col_start - 1) >> 4) + 1` from **4** to
+    **4096** on this 196² frame, which makes the already-coded-SB64 ordering gate
+    `src_sb64 >= active_sb64 - INTRABC_DELAY_SB64` (mvref_common.h:328) stop rejecting anything —
+    so the port accepted DVs C rejects and coded intrabc where C codes intra. **Measured at the
+    first divergent block** (throwaway instrumented sibling C, byte-inertness re-verified against
+    the clean build on every rebuild — the witness reported identical 1907B / first-diff-646 with
+    and without the instrument): **mi(16,0) BLOCK_16X4 — C's own search finds the IDENTICAL
+    `dv=(-512,0)` with `bestsme=35311`, `inrange=1`, but `dvvalid=0` → `continue`**, while the
+    port had `dvvalid=1` with `tile[0,65536,0,65536]`. **Fix:** clamp to `env.mi_rows`/
+    `env.mi_cols` at the `DvTileBounds` construction (`partition_pick.rs`) — the SAME clamp
+    `pack.rs:1377` already applies to the decoder-facing bounds. `DvTileBounds` is intrabc-only
+    (non-screen frames construct no intrabc args at all), so the envelope structurally cannot move.
+    **Measured effect: size delta +16 → 0 (port 1891B == C 1891B), first differing byte 646 → 1038.**
+  - **RESIDUAL (witness still PINNED) — a partition near-tie at mi(38,4). NOT a KB-15 intrabc
+    defect.** At the BLOCK_16X8 node mi(38,4) C picks PARTITION_VERT_4 (four BLOCK_4X8 at mi cols
+    4/5/6/7 — c=4 intra mode 10, **c=5 and c=6 themselves intrabc `skip=1 dv=(-1032,-40)`**, c=7
+    intra mode 11); the port picks the AB shape **8×8 + 4×8 + 4×8**. **The intrabc COEFF ARM IS
+    BYTE-EXACT AT THAT SITE** — for the 8×8 candidate the port and C agree **to the unit**
+    (`dv=(-1032,24)`, rate 32747, dist 171120, sse 952608, rdcost 40519646, yrate 18114,
+    ydist 170288, ysse 951776, uvrate 6, uvdist 832, uvsse 832, uvskip 1) — and **C ACCEPTS that
+    same candidate** (its 40519646 beats C's incoming `best_rd` 43226527). The tip is on the
+    **INTRA** side: the intra winner rd feeding the node is **43223116 in the port vs 43226527 in
+    C — 3411 low (0.008%)**. So the residual belongs to the **KB-2 / KB-6 speed-0 partition/mode
+    near-tie family (KB-13 is the speed≥1 analogue), a SEPARATE root** — at the divergent site the
+    intrabc DV search, the DV validity, the coeff arm and the var-tx pack all match C.
+  - **NEXT CONCRETE STEP:** chase the intra-side 3411-unit gap at mi(38,4) BLOCK_8X8 (and the
+    BLOCK_16X8 parent's VERT_4-vs-AB assembly) with the same instrumented-sibling-C method —
+    dump C's per-candidate intra RD at that node and diff against the port's. Do NOT re-open the
+    intrabc arm for it.
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 

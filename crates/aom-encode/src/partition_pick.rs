@@ -1279,11 +1279,21 @@ fn leaf_pick_sb_modes(
             mi_col,
             mi_rows: env.mi_rows,
             mi_cols: env.mi_cols,
+            // `av1_tile_set_row` / `av1_tile_set_col` (tile_common.c) CLAMP the
+            // tile end to the frame: `mi_row_end = AOMMIN(row_start_sb[row+1]
+            // << mib_size_log2, mi_rows)`. `env.tile_{row,col}_end` are
+            // UNCLAMPED sentinels (`1 << 16`), so they must be clamped here or
+            // `av1_is_dv_valid`'s `total_sb64_per_row = ((mi_col_end -
+            // mi_col_start - 1) >> 4) + 1` explodes (4096 instead of 4 on a
+            // 196px frame) and the `src_sb64 >= active_sb64 -
+            // INTRABC_DELAY_SB64` already-coded-SB64 ordering constraint stops
+            // rejecting anything. Same clamp `pack.rs` already applies for the
+            // decoder-facing tile bounds.
             tile: aom_dsp::entropy::dv_ref::DvTileBounds {
                 mi_row_start: env.tile_row_start,
-                mi_row_end: env.tile_row_end,
+                mi_row_end: env.mi_rows.min(env.tile_row_end),
                 mi_col_start: env.tile_col_start,
-                mi_col_end: env.tile_col_end,
+                mi_col_end: env.mi_cols.min(env.tile_col_end),
             },
             mib_size_log2: MI_SIZE_WIDE_B[env.sb_size].trailing_zeros() as i32,
             up_available,

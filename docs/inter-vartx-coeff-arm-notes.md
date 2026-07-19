@@ -124,3 +124,43 @@ it sets `rd_stats->rate = zero_blk_rate * n_max_tx_blocks` (zero_blk_rate = `txb
 the BLOCK-ORIGIN ctx). That rate is discarded when the final decision is skip, but it is an INPUT to
 the skip-vs-non-skip comparison (:3863-3868), so a luma-predict-skip block can still come out non-skip
 once chroma is costed.
+
+## 2026-07-19 — ROOT CAUSE #1 CLOSED: unclamped tile bounds into `av1_is_dv_valid`
+
+Not a coeff-arm defect at all. `partition_pick.rs` built `DvTileBounds` from the RAW
+`env.tile_{row,col}_end`, which are unclamped sentinels (`1 << 16`, `aom-bench/src/lib.rs:1381`).
+C clamps the tile end to the frame in `av1_tile_set_row`/`_col` (tile_common.c:
+`AOMMIN(row_start_sb[i+1] << mib_size_log2, mi_rows)`).
+
+Why it matters: `av1_is_dv_valid` (mvref_common.h:279) computes
+`total_sb64_per_row = ((mi_col_end - mi_col_start - 1) >> 4) + 1`. On the 196² witness frame that
+is **4** in C but was **4096** in the port, so `active_sb64 = active_sb_row * total_sb64_per_row`
+became huge and the already-coded-SB64 ordering gate `src_sb64 >= active_sb64 -
+INTRABC_DELAY_SB64` (:328) never fired. The port accepted DVs C rejects.
+
+Fix: `mi_row_end: env.mi_rows.min(env.tile_row_end)` / `mi_col_end: env.mi_cols.min(env.tile_col_end)`
+— the clamp `pack.rs:1377` already applies for the decoder-facing bounds. `DvTileBounds` is
+intrabc-only, so the non-screen envelope cannot move.
+
+Effect on the witness cell: size delta **+16 → 0** (1891B == 1891B), first differing byte
+**646 → 1038**.
+
+### Method that found it (reuse this)
+Dual dump, both sides byte-inertness-gated:
+1. Throwaway C copy (NEVER the `upstream/` submodule). Instrument `write_modes_b` (bitstream.c,
+   after `set_mi_row_col`, before `write_mbmi_b`) and `av1_write_coeffs_txb` (encodetxb.c, before
+   the `txb_skip` symbol) with `getenv`-gated `fprintf`s carrying `aom_tell_size(w)`.
+   **`aom_tell_size` returns BITS**, not bytes (`od_ec_enc_tell` = `(cnt + 10) + offs * 8`).
+2. Mirror the same records in `pack.rs` (`pack_leaf` + the txb write sites); the port's
+   `OdEcEnc` tell is the same `(cnt + 10) + offs * 8`.
+3. Diff the two record streams. Two fields are NOT comparable and must be filtered: `tx_type_map`
+   (C dumps the FRAME-level map, which carries residue from earlier blocks) and `inter_tx_size`
+   on intra blocks (C never resets it). Everything else lines up record-for-record, including the
+   bit positions, right up to the divergence.
+4. Validate byte-inertness after EVERY rebuild: the witness must still report the same
+   port/C byte counts and first-diff offset as the clean build.
+
+For intrabc specifically, instrumenting `rd_pick_intrabc_mode_sb` pays off fast: dump (a) entry
+`best_rd` (= the intra winner's rdcost), (b) the per-direction `mv_limits`, (c) `bestsme` + the
+three bail gates (`bestsme == INT_MAX` / `av1_is_fullmv_in_range` / `av1_is_dv_valid`), and
+(d) the per-candidate RD. "C found the SAME dv but `dvvalid=0`" is what pinned this bug.
