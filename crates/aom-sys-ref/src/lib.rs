@@ -845,6 +845,22 @@ extern "C" {
         has_left: i32,
         left_inter: i32,
     ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_get_pred_context_switchable_interp(
+        dir: i32,
+        cur_r0: i32,
+        cur_r1: i32,
+        has_above: i32,
+        a_r0: i32,
+        a_r1: i32,
+        a_yf: i32,
+        a_xf: i32,
+        has_left: i32,
+        l_r0: i32,
+        l_r1: i32,
+        l_yf: i32,
+        l_xf: i32,
+    ) -> i32;
     fn shim_get_skip_mode_context(ha: i32, a_sm: i32, hl: i32, l_sm: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn shim_write_skip_mode(
@@ -3619,6 +3635,40 @@ pub fn ref_get_intra_inter_context(
             above_inter as i32,
             has_left as i32,
             left_inter as i32,
+        )
+    }
+}
+
+/// Reference `av1_get_pred_context_switchable_interp` (facade over the real
+/// exported fn). Neighbours are `Some((ref0, ref1, y_filter, x_filter))` when
+/// available, `None` otherwise.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_get_pred_context_switchable_interp(
+    dir: usize,
+    cur_ref0: i32,
+    cur_is_compound: bool,
+    above: Option<(i32, i32, usize, usize)>,
+    left: Option<(i32, i32, usize, usize)>,
+) -> i32 {
+    let (ha, a_r0, a_r1, a_yf, a_xf) =
+        above.map_or((0, 0, 0, 0, 0), |(r0, r1, yf, xf)| (1, r0, r1, yf as i32, xf as i32));
+    let (hl, l_r0, l_r1, l_yf, l_xf) =
+        left.map_or((0, 0, 0, 0, 0), |(r0, r1, yf, xf)| (1, r0, r1, yf as i32, xf as i32));
+    unsafe {
+        shim_get_pred_context_switchable_interp(
+            dir as i32,
+            cur_ref0,
+            cur_is_compound as i32,
+            ha,
+            a_r0,
+            a_r1,
+            a_yf,
+            a_xf,
+            hl,
+            l_r0,
+            l_r1,
+            l_yf,
+            l_xf,
         )
     }
 }

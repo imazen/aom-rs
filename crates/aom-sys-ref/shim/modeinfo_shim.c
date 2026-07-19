@@ -552,6 +552,46 @@ int shim_get_intra_inter_context(int has_above, int above_inter, int has_left, i
   return av1_get_intra_inter_context(&xd);
 }
 
+/* Facade for av1_get_pred_context_switchable_interp: reads the current block's
+ * ref_frame[0/1] (ctx offset + which frame the neighbours must match) and the
+ * above/left neighbours' ref_frame[0/1] + interp_filters (y/x) through the mi
+ * grid (xd->mi[-1] / xd->mi[-xd->mi_stride]). Laid out on a small pointer grid so
+ * mi[0]=cur, mi[-1]=left, mi[-stride]=above; unavailable neighbours are gated by
+ * xd->{up,left}_available (their cells are never dereferenced then). */
+int shim_get_pred_context_switchable_interp(int dir, int cur_r0, int cur_r1,
+                                            int has_above, int a_r0, int a_r1,
+                                            int a_yf, int a_xf, int has_left,
+                                            int l_r0, int l_r1, int l_yf,
+                                            int l_xf) {
+  MB_MODE_INFO cur, ami, lmi;
+  memset(&cur, 0, sizeof cur);
+  memset(&ami, 0, sizeof ami);
+  memset(&lmi, 0, sizeof lmi);
+  cur.ref_frame[0] = (MV_REFERENCE_FRAME)cur_r0;
+  cur.ref_frame[1] = (MV_REFERENCE_FRAME)cur_r1;
+  ami.ref_frame[0] = (MV_REFERENCE_FRAME)a_r0;
+  ami.ref_frame[1] = (MV_REFERENCE_FRAME)a_r1;
+  ami.interp_filters.as_filters.y_filter = (uint16_t)a_yf;
+  ami.interp_filters.as_filters.x_filter = (uint16_t)a_xf;
+  lmi.ref_frame[0] = (MV_REFERENCE_FRAME)l_r0;
+  lmi.ref_frame[1] = (MV_REFERENCE_FRAME)l_r1;
+  lmi.interp_filters.as_filters.y_filter = (uint16_t)l_yf;
+  lmi.interp_filters.as_filters.x_filter = (uint16_t)l_xf;
+  const int stride = 4;
+  MB_MODE_INFO *grid[8];
+  memset(grid, 0, sizeof grid);
+  grid[stride + 1] = &cur; /* mi[0]     */
+  grid[stride + 0] = &lmi; /* mi[-1]    */
+  grid[1] = &ami;          /* mi[-stride] */
+  MACROBLOCKD xd;
+  memset(&xd, 0, sizeof xd);
+  xd.mi = &grid[stride + 1];
+  xd.mi_stride = stride;
+  xd.up_available = has_above;
+  xd.left_available = has_left;
+  return av1_get_pred_context_switchable_interp(&xd, dir);
+}
+
 /* Facade for av1_get_reference_mode_context: two stack MB_MODE_INFO with ref_frame[0/1]
  * + use_intrabc, called through the real exported fn. */
 int shim_get_reference_mode_context(int ha, int a_r0, int a_r1, int a_ibc, int hl,

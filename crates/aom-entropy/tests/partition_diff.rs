@@ -1001,6 +1001,51 @@ fn get_intra_inter_context_matches_c() {
 }
 
 #[test]
+fn get_pred_context_switchable_interp_matches_c() {
+    use aom_entropy::partition::get_pred_context_switchable_interp;
+    // Sweep dir, the current block's ref0 / compound flag, and each neighbour's
+    // (ref0, ref1, y_filter, x_filter) plus the not-available (None) case, vs the
+    // real C av1_get_pred_context_switchable_interp (facade oracle).
+    let ref_vals = [0i32, 1, 4, 7]; // INTRA_FRAME, LAST, GOLDEN, ALTREF
+    let ref1_vals = [-1i32, 5]; // NONE, BWDREF
+    let filt_vals = [0usize, 1, 2]; // EIGHTTAP / SMOOTH / SHARP
+    // Build the neighbour candidate list: None + a spread of Some(...).
+    let mut nbrs: Vec<Option<(i32, i32, usize, usize)>> = vec![None];
+    for &r0 in &ref_vals {
+        for &r1 in &ref1_vals {
+            for &yf in &filt_vals {
+                for &xf in &filt_vals {
+                    nbrs.push(Some((r0, r1, yf, xf)));
+                }
+            }
+        }
+    }
+    let mut n = 0u64;
+    for dir in 0..2usize {
+        for &cur_ref0 in &[1i32, 4, 7] {
+            for cur_comp in [false, true] {
+                for &above in &nbrs {
+                    for &left in &nbrs {
+                        let got =
+                            get_pred_context_switchable_interp(dir, cur_ref0, cur_comp, above, left);
+                        let want = c::ref_get_pred_context_switchable_interp(
+                            dir, cur_ref0, cur_comp, above, left,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "switchable_interp_ctx dir={dir} cur_ref0={cur_ref0} \
+                             cur_comp={cur_comp} above={above:?} left={left:?}"
+                        );
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(n > 60_000, "grid too small ({n})");
+}
+
+#[test]
 fn get_reference_mode_context_matches_c() {
     use aom_entropy::partition::get_reference_mode_context;
     let mut rng = Rng(0x2ef0_c0de_a11a_0009);

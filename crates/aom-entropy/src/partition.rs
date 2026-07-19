@@ -884,6 +884,60 @@ fn nbr_is_inter(use_intrabc: bool, ref0: i32) -> bool {
 /// reference-mode CDF context from the above/left neighbours' comp-pred use, backward-ref
 /// direction, and inter-ness. Returns 0..4.
 #[allow(clippy::too_many_arguments)]
+/// `av1_get_pred_context_switchable_interp` (pred_common.c): the SWITCHABLE
+/// interp-filter CDF context for direction `dir` (0 = y-filter, 1 = x-filter).
+/// The current block's `ref_frame[0]` is `cur_ref0`; `cur_is_compound` is
+/// `ref_frame[1] > INTRA_FRAME`. Each neighbour is `Some((ref0, ref1, y_filter,
+/// x_filter))` when available, `None` otherwise (the C default of
+/// `SWITCHABLE_FILTERS` for an unavailable neighbour). `get_ref_filter_type`
+/// returns the neighbour's filter for `dir` iff it references the same frame,
+/// else `SWITCHABLE_FILTERS`; the two neighbour types combine into the final
+/// context. Result in `0..SWITCHABLE_FILTER_CONTEXTS` (16).
+///
+/// NOTE: this is the general (with-neighbours) context. The inter decoder wires
+/// only the no-available-neighbour case today (the 64x64 skeleton is switchable
+/// but neighbour-free; the 16x16 ratchet is non-switchable so no symbol/context
+/// is read at all). Storing the per-block filter grid to feed this on a
+/// switchable multi-block frame is the next switchable target's work — this
+/// function + its differential are the ported, C-verified building block.
+pub fn get_pred_context_switchable_interp(
+    dir: usize,
+    cur_ref0: i32,
+    cur_is_compound: bool,
+    above: Option<(i32, i32, usize, usize)>,
+    left: Option<(i32, i32, usize, usize)>,
+) -> i32 {
+    const SWITCHABLE_FILTERS: i32 = 3;
+    const INTER_FILTER_COMP_OFFSET: i32 = 4; // SWITCHABLE_FILTERS + 1
+    const INTER_FILTER_DIR_OFFSET: i32 = 8; // (SWITCHABLE_FILTERS + 1) * 2
+    let ctx_offset = if cur_is_compound {
+        INTER_FILTER_COMP_OFFSET
+    } else {
+        0
+    };
+    let mut ctx = ctx_offset + (dir as i32 & 1) * INTER_FILTER_DIR_OFFSET;
+    let ref_filter_type = |nbr: (i32, i32, usize, usize)| -> i32 {
+        let (r0, r1, yf, xf) = nbr;
+        if r0 == cur_ref0 || r1 == cur_ref0 {
+            if dir & 1 == 1 { xf as i32 } else { yf as i32 }
+        } else {
+            SWITCHABLE_FILTERS
+        }
+    };
+    let left_type = left.map_or(SWITCHABLE_FILTERS, ref_filter_type);
+    let above_type = above.map_or(SWITCHABLE_FILTERS, ref_filter_type);
+    if left_type == above_type {
+        ctx += left_type;
+    } else if left_type == SWITCHABLE_FILTERS {
+        ctx += above_type;
+    } else if above_type == SWITCHABLE_FILTERS {
+        ctx += left_type;
+    } else {
+        ctx += SWITCHABLE_FILTERS;
+    }
+    ctx
+}
+
 pub fn get_reference_mode_context(
     has_above: bool,
     a_r0: i32,
