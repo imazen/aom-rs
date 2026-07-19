@@ -2805,7 +2805,27 @@ impl<'c> TileKf<'c> {
             vartx_non_uniform = non_uniform;
             vartx_tx
         } else {
-            tx_size_from_tx_mode(bsize, cfg.tx_mode)
+            // read_tx_size fallback (decodeframe.c:1179-1198): a SKIP inter block
+            // (allow_select = !skip = false) or a non-SELECT frame reads NO tx-size
+            // symbol and derives `tx_size_from_tx_mode`, then MUST stamp the
+            // txfm-context arrays via `set_txfm_ctxs(tx, bw, bh, skip && is_inter)`.
+            // The var-tx quadtree above stamps itself; this else-arm did not, so a
+            // skip block left `above_t`/`left_t` at the init 64. A later var-tx
+            // block whose above/left neighbour is that skip block then read a wrong
+            // `txfm_partition` context whenever the true stamp (block width/height
+            // px) straddles the tx dim — the q63 F1 desync (mi(16,0) skip
+            // BLOCK_16X64 → above_t 16 in C vs 64 in the port; mi(32,0)'s TX_32X64
+            // read saw above=1 in C, 0 in the port).
+            let ts = tx_size_from_tx_mode(bsize, cfg.tx_mode);
+            set_txfm_ctxs(
+                &mut self.above_t[a_off..],
+                &mut self.left_t[l_off..],
+                ts,
+                bw4,
+                bh4,
+                skip != 0,
+            );
+            ts
         };
         // The leaf grid drives the non-uniform reconstruction walk
         // (collect_vartx_leaves); every block in this target is uniform (guarded),
