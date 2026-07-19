@@ -1,0 +1,4 @@
+[submodule "upstream"]
+	path = upstream
+	url = https://aomedia.googlesource.com/aom
+	ignore = dirty
