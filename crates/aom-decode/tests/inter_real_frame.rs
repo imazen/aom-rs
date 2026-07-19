@@ -2,12 +2,44 @@
 //!
 //! Target: frame 1 of `av1-1-b8-00-quantizer-63` — a genuine conformance P-frame
 //! (352x288, 79 inter blocks) that uses the FULL single-ref inter toolset at once:
-//! SIMPLE + OBMC (19) + WARPED_CAUSAL (11) + interintra (2, incl. one wedge) +
-//! intra-in-inter (3) + var-tx. Single `LAST` ref throughout (no compound).
+//! SIMPLE (49) + OBMC (19) + WARPED_CAUSAL (11) + interintra (2, incl. one wedge,
+//! at mi(56,76)/(56,78)) + intra-in-inter (3, all DC; one filter-intra, at
+//! mi(32,80)/(36,80)/(44,18)) + inter var-tx. Single `LAST` ref throughout
+//! (NO compound — verified by census, so the single-ref driver suffices).
 //!
-//! This starts as a foundation anchor (frame 0 KEY byte-exact) + a self-promoting
-//! frame-1 probe, and promotes to a hard byte-identity gate once the remaining
-//! features land.
+//! STATUS (self-promoting frame-1 probe): frame 0 (KEY) is byte-exact, and the
+//! ENTIRE inter BODY now decodes in arithmetic-sync — SIMPLE + OBMC (above/left +
+//! chroma) + WARPED_CAUSAL + inter var-tx all parse + reconstruct through the
+//! whole frame after the OBMC-chroma landing (0ca3775) + the interintra kernels
+//! (f17ee31) + the txfm-context fix (080a2bb, the mi(32,0) TX_32X64 desync). The
+//! probe now PINS on the FIRST `is_inter == 0` block (intra-in-inter), the last
+//! two remaining features:
+//!
+//!   1. **intra-in-inter** (3 DC blocks): the `is_inter == 0` arm of
+//!      read_inter_frame_mode_info (decodemv.c:1547). Per the C spec, this is the
+//!      EXISTING byte-exact KEY intra decode (read_mb_modes_kf_fc +
+//!      decode_token_recon_block, the `else` branch at lib.rs:3409+) with exactly
+//!      TWO parse differences: (a) `y_mode_cdf[size_group_lookup[bsize]]` instead
+//!      of the neighbour-context kf_y_mode (a NEW `default_y_mode_cdf`
+//!      [BLOCK_SIZE_GROUPS][INTRA_MODES], NOT yet ported — add to
+//!      xtask/gen_default_cdfs.py + thread on InterCdfs), and (b) NO intrabc read
+//!      (frame_is_intra_only false). uv_mode/angle/filter_intra/cfl/tx_size/coeff
+//!      CDFs already live in `cdfs`; the INTRA tx-size (read_selected_tx_size, NOT
+//!      var-tx), intra tx-type (intra_ext_tx_cdf, dir = filter-intra-adjusted
+//!      y_mode via fimode_to_intradir), predict + reconstruct all reuse the KEY
+//!      path unchanged (recon routes on `is_inter_block == false`, so
+//!      ref_frame=[INTRA,NONE] fires the KEY intra recon with no special-casing).
+//!      For q63 all 3 are DC (no angle/cfl read; palette off — non-screen); one
+//!      codes filter-intra.
+//!   2. **interintra prediction WIRING** (2 blocks): the kernels are done +
+//!      differential-locked (`aom-inter/src/interintra.rs`,
+//!      `aom-inter/tests/interintra_diff.rs`); the read (`read_interintra_info`,
+//!      already in aom-entropy) + the per-plane build-intra + combine_interintra
+//!      blend must replace the `assert interintra == 0` guard in decode_block_inter.
+//!
+//! When both land, this probe self-promotes to the hard golden byte-identity
+//! gate below (MILESTONE MET). All prior inter ratchet gates
+//! (16x16/18/34/66, 64x66) stay byte-exact.
 
 mod common;
 
