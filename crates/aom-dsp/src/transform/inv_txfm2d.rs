@@ -129,8 +129,24 @@ fn highbd_clip_pixel_add(dest: u16, trans: i32, bd: i32) -> u16 {
 /// Remap the (possibly 32-capped) coefficient `input` into the full
 /// `col_n*row_n` buffer with zeros, matching the C entry points for the 5
 /// large sizes. Returns the full modified input buffer.
-fn remap_input(input: &[i32], tx_size: usize, col_n: usize, row_n: usize) -> Vec<i32> {
-    let mut mod_input = vec![0i32; col_n * row_n];
+fn remap_input<'a>(
+    input: &'a [i32],
+    tx_size: usize,
+    col_n: usize,
+    row_n: usize,
+    scratch: &'a mut Vec<i32>,
+) -> &'a [i32] {
+    // Only the five 64-point-family sizes expand a 32-wide/tall coded region
+    // into the full transform grid; for every other size C feeds the packed
+    // input straight in, so borrow it instead of copying (Gate 3: this was a
+    // `vec![0i32; col_n * row_n]` + `copy_from_slice` on EVERY transform block).
+    if !matches!(tx_size, 4 | 11 | 12 | 17 | 18) {
+        debug_assert_eq!(input.len().min(col_n * row_n), col_n * row_n);
+        return &input[..col_n * row_n];
+    }
+    scratch.clear();
+    scratch.resize(col_n * row_n, 0);
+    let mod_input = &mut scratch[..];
     match tx_size {
         4 => {
             // 64x64: 32x32 -> 64x64
@@ -158,11 +174,9 @@ fn remap_input(input: &[i32], tx_size: usize, col_n: usize, row_n: usize) -> Vec
             // 64x16: 32x16 contiguous -> first half
             mod_input[..16 * 32].copy_from_slice(&input[..16 * 32]);
         }
-        _ => {
-            mod_input.copy_from_slice(input);
-        }
+        _ => unreachable!("remap_input: non-64-family sizes return borrowed above"),
     }
-    mod_input
+    &scratch[..]
 }
 
 /// Expected packed coefficient input length for a given tx_size (what the C
@@ -185,6 +199,48 @@ pub fn av1_inv_txfm2d_add(
     tx_size: usize,
     bd: i32,
 ) {
+    let mut scratch = InvTxfmScratch::default();
+    av1_inv_txfm2d_add_into(input, output, stride, tx_type, tx_size, bd, &mut scratch);
+}
+
+/// Reusable scratch for [`av1_inv_txfm2d_add_into`]: the row-pass buffer and
+/// the 64-point-family input-expansion buffer.
+///
+/// Both are fully rewritten on every use (the row pass writes every element of
+/// `buf` before the column pass reads it — the SIMD path stores all
+/// `row_n * col_n` positions and declines outright when `row_n % 8 != 0`;
+/// `mod_input` is zero-filled by `resize` before the expansion copies into it),
+/// so reuse is byte-for-byte identical to a fresh allocation.
+#[derive(Default, Clone, Debug)]
+pub struct InvTxfmScratch {
+    buf: Vec<i32>,
+    mod_input: Vec<i32>,
+}
+
+/// [`av1_inv_txfm2d_add`] with a caller-owned row-pass scratch buffer.
+///
+/// Behaviourally identical (byte-for-byte — `buf` is fully written by the row
+/// pass before the column pass reads it, so its prior contents are dead); the
+/// only difference is that the caller keeps the allocation alive across calls.
+/// C uses a stack buffer here (`int txfm_buf[...]` in each
+/// `av1_inv_txfm2d_add_*_c`); the port cannot size a stack array to the exact
+/// transform without either a 16 KiB worst-case memset on every 4x4 block or
+/// `unsafe`, so the decoder threads one reusable `Vec` down instead.
+///
+/// Gate 3: the per-block `vec![0i32; col_n * row_n]` this replaces was the
+/// single largest allocator caller in the decode profile (measured 61.7 M
+/// Ir/decode of calloc+free on `dec_mosaic_4k_cq20`, ~1.9 % of the decode).
+#[allow(clippy::too_many_arguments)]
+pub fn av1_inv_txfm2d_add_into(
+    input: &[i32],
+    output: &mut [u16],
+    stride: usize,
+    tx_type: usize,
+    tx_size: usize,
+    bd: i32,
+    scratch: &mut InvTxfmScratch,
+) {
+    let InvTxfmScratch { buf, mod_input: mod_input_scratch } = scratch;
     let cfg = get_inv_txfm_cfg(tx_type, tx_size);
     assert!(cfg.valid, "unsupported inverse (tx_type={tx_type}, tx_size={tx_size})");
     let col_n = TX_SIZE_WIDE[tx_size];
@@ -195,9 +251,14 @@ pub fn av1_inv_txfm2d_add(
     let stage_range_row = [opt_range_row; 12];
     let stage_range_col = [opt_range_col; 12];
 
-    let mod_input = remap_input(input, tx_size, col_n, row_n);
+    let mod_input = remap_input(input, tx_size, col_n, row_n, mod_input_scratch);
 
-    let mut buf = vec![0i32; col_n * row_n];
+    // Reused across calls when the caller supplies a live scratch; `resize`
+    // touches only `col_n * row_n` elements, and every one of them is
+    // overwritten by the row pass below before the column pass reads it.
+    buf.clear();
+    buf.resize(col_n * row_n, 0);
+    let mut buf = &mut buf[..];
     let mut temp_in = [0i32; 64];
     let mut temp_out = [0i32; 64];
 

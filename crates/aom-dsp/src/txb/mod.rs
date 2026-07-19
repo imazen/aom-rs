@@ -173,19 +173,25 @@ pub fn txb_init_levels_scalar(coeff: &[i32], width: usize, height: usize, levels
 }
 
 /// `get_padded_idx`: transposed raster index → padded levels-buffer index.
-#[inline]
+#[inline(always)]
 fn get_padded_idx(idx: usize, bhl: u32) -> usize {
     idx + ((idx >> bhl) << TX_PAD_HOR_LOG2)
 }
 
-#[inline]
+#[inline(always)]
 fn min3(v: u8) -> i32 {
     (v as i32).min(3)
 }
 
 /// `get_nz_mag`: neighbour-magnitude sum for the base-level context, reading
 /// the padded levels buffer at the coefficient's padded position.
-#[inline]
+///
+/// `AOM_FORCE_INLINE` in C (txb_common.h:150). Gate 3: plain `#[inline]` left
+/// this out-of-line in the decoder's per-coefficient loop (measured: a real
+/// `t aom_dsp::txb::get_nz_mag` symbol, ~35 Ir/call of which ~10 is call
+/// overhead), so it is forced. Inlining also lets LLVM hoist the loop-invariant
+/// `tx_class` / `bhl` work out of `read_txb_body`'s reverse scan.
+#[inline(always)]
 fn get_nz_mag(levels: &[u8], base: usize, bhl: u32, tx_class: TxClass) -> i32 {
     let bhl = bhl as usize;
     // { 0, 1 } then { 1, 0 }
@@ -213,6 +219,10 @@ fn get_nz_mag(levels: &[u8], base: usize, bhl: u32, tx_class: TxClass) -> i32 {
 
 /// `get_br_ctx` (txb_common.h): coefficient base-range context, transposed
 /// layout. `c` is the transposed raster index; reads the padded levels buffer.
+///
+/// `AOM_FORCE_INLINE` in C (txb_common.h:76); forced here for the same Gate-3
+/// reason as [`get_nz_mag`].
+#[inline(always)]
 pub fn get_br_ctx(levels: &[u8], c: usize, bhl: u32, tx_class: TxClass) -> i32 {
     let col = c >> bhl;
     let row = c - (col << bhl);
@@ -268,8 +278,8 @@ fn nz_map_ctx_offset_1d(i: usize) -> i32 {
     }
 }
 
-/// `get_nz_map_ctx_from_stats`.
-#[inline]
+/// `get_nz_map_ctx_from_stats`. `AOM_FORCE_INLINE` in C (txb_common.h:190).
+#[inline(always)]
 fn get_nz_map_ctx_from_stats(
     stats: i32,
     coeff_idx: usize,
@@ -326,6 +336,11 @@ fn get_nz_map_ctx(
 }
 
 /// `get_lower_levels_ctx` (txb_common.h): base context from neighbour stats.
+///
+/// C's `get_lower_levels_ctx` is a `static inline` that folds into
+/// `av1_read_coeffs_txb`'s reverse scan; forced here (Gate 3 — this was the
+/// decoder's single largest self-cost helper, ~103 Ir/call inclusive).
+#[inline(always)]
 pub(crate) fn get_lower_levels_ctx(
     levels: &[u8],
     coeff_idx: usize,

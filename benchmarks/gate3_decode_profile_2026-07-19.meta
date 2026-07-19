@@ -1,0 +1,57 @@
+measurement: Gate-3 DECODE re-profile — current hotspot ranking + exact port-vs-C
+  per-module gap, plus the paired wall-clock baseline and the instruction-count
+  deltas of three landed byte-exact optimizations.
+git commit (baseline profiled): 93228daff7fcfc020a4846a2ef50b01ccfd5f182  (main@origin at capture:
+  "feat(encode): inter-encode 2f — full P-frame payload byte-exact; multi-block pinned")
+  -- authoritative form: `jj log -r main@origin` at 2026-07-19T18:28Z gave zlunllow 93228daf.
+git commit (after-chunks measurement): the commit this .meta lands in.
+date: 2026-07-19 (profiles 18:31-19:20Z; wall-clock baseline 18:36-18:58Z)
+host: dedicated aom-rs box, 16 cores, 30 GiB RAM; shared with a concurrent aom-encode agent session.
+oracle: upstream/ submodule libaom v3.14.1 @ 03087864cf4bea6abb0d28f95cf7843511413d8f,
+  CONFIG_MULTITHREAD=0, Release, SIMD on (reference/BUILD_CONFIG.md), linked in-process
+  via aom-sys-ref `shim_decode_av1_kf`.
+
+COMMANDS (exact):
+  # instruction counts (deterministic; the primary signal)
+  cargo build --profile profiling -p zenav1-aom-bench --bin gate3_profile
+  valgrind --tool=callgrind --callgrind-out-file=/tmp/g3cg/cg_<cell>_port.out \
+      ./target/profiling/gate3_profile dec port <cell> <iters>
+    iters: 3 for the four dec_mosaic_* cells and dec_352x288_q00; 12 for
+    dec_352x288_q32, dec_352x288_q63, dec_196x196.
+    (port decode count = iters + 1, because the harness's byte-exactness setup
+     performs one extra port decode AND the single C-oracle decode.)
+  # wall-clock (paired, port vs the same C oracle, interleaved rounds)
+  cargo bench -p zenav1-aom-bench --bench gate3 -- --group=dec
+  # NO -Ctarget-cpu anywhere: runtime SIMD dispatch is what ships.
+
+ANALYSIS TOOLING: the port/C split walks the callgrind call graph (libaom is
+  statically linked into the same binary, so object-file splitting does not work).
+  Ratio = inclusive Ir of `aom_decode::frame::decode_frame_obus` / port-decode-count
+  over inclusive Ir of `shim_decode_av1_kf` / 1. Shared libc leaves (memset / memcpy /
+  calloc) are attributed through their caller edges, whose inclusive cost callgrind
+  records exactly. Scripts were throwaway (/tmp) and are NOT committed; the method is
+  fully described in the .md so it can be rebuilt.
+
+BYTE-EXACTNESS: every profiled cell runs `DecodeCell::assert_byte_exact()` (port Y/U/V
+  vs the C oracle's) in setup before any timing, so all 8 profile runs on the changed
+  binary are also byte-identity evidence on real streams. In addition:
+  `cargo nextest run --cargo-profile test-fast -p zenav1-aom-dsp` 341/341 pass, and the
+  same with AOM_FORCE_SCALAR=1 341/341 pass.
+
+HONEST LIMITS (read before quoting anything here):
+- Gate 3 (<= 1.20x C) is NOT met. Headline 4K wall-clock is 1.45x / 1.39x, the same
+  band as the 2026-07-17 measurement. This session moved instruction counts, not the gate.
+- The three landed chunks have MEASURED INSTRUCTION-COUNT deltas only. No post-change
+  wall-clock re-measure was taken (the track was stood down first). Do not quote a
+  wall-clock delta for them, and do not convert the Ir delta into one.
+- Wall-clock: every decode cell gate-truncated to 4 rounds (zenbench's resource gate),
+  identical to the 2026-07-17 baseline's behaviour on this box. The 4K cells are the
+  reproducible ones; dec_352x288_q63's CI is +136.6%..+483.6% and is a band, not a point.
+- The per-module rollup's C column sums ABOVE the C entry-inclusive total
+  (1,703.8 M vs 1,507.3 M on dec_mosaic_4k_cq20) because some libc-leaf edges attribute
+  to C-named symbols outside the decode subtree. Use the rollup for relative shares and
+  per-module ratios; use the entry-inclusive figure for the ratio itself.
+- The C oracle side includes codec init + destroy, which inflates C and therefore
+  UNDERSTATES port/C, most visibly on the tiny cells. The committed wall-clock gate has
+  always measured the same shape, so the two remain comparable.
+- Nothing in these files is extrapolated across sizes; every size reported was measured.

@@ -9,7 +9,7 @@
 //! decoder does not have to depend on the encoder to reach it.
 
 
-use crate::transform::inv_txfm2d::av1_inv_txfm2d_add;
+use crate::transform::inv_txfm2d::{InvTxfmScratch, av1_inv_txfm2d_add_into};
 use crate::txb::{dequant_txb, txb_high, txb_wide};
 
 /// Reconstruct one transform block's pixels from its decoded coefficients: the
@@ -42,10 +42,58 @@ pub fn reconstruct_txb(
     iqmatrix: Option<&[u8]>,
     bd: i32,
 ) {
+    let mut scratch = ReconScratch::default();
+    reconstruct_txb_into(
+        dst, stride, tx_size, tx_type, qcoeff, dequant, iqmatrix, bd, &mut scratch,
+    );
+}
+
+/// Reusable per-transform-block scratch for [`reconstruct_txb_into`].
+///
+/// Holds the dequantized-coefficient block and the inverse transform's row-pass
+/// buffer. Both are fully overwritten on every use (`dequant_txb` zero-fills
+/// its output; the row pass writes every element of the transform buffer before
+/// the column pass reads it), so reuse is byte-for-byte identical to allocating
+/// fresh — it only removes allocator traffic.
+///
+/// Gate 3: the decoder reconstructs one transform block at a time and was
+/// heap-allocating both buffers per block. On `dec_mosaic_4k_cq20` that
+/// measured 89.5 M Ir/decode of calloc/free (2.8 % of the decode) across
+/// ~126 k transform blocks.
+#[derive(Default, Clone, Debug)]
+pub struct ReconScratch {
+    dqcoeff: Vec<i32>,
+    txfm: InvTxfmScratch,
+}
+
+/// [`reconstruct_txb`] with caller-owned scratch. Byte-identical output; see
+/// [`ReconScratch`].
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_txb_into(
+    dst: &mut [u16],
+    stride: usize,
+    tx_size: usize,
+    tx_type: usize,
+    qcoeff: &[i32],
+    dequant: [i16; 2],
+    iqmatrix: Option<&[u8]>,
+    bd: i32,
+    scratch: &mut ReconScratch,
+) {
     // area == inv_input_len(tx_size) for every size (the coded region the inverse
     // transform reads), so the dequantized block feeds in directly.
     let area = txb_wide(tx_size) * txb_high(tx_size);
-    let mut dqcoeff = vec![0i32; area];
-    dequant_txb(qcoeff, &mut dqcoeff, tx_size, dequant, iqmatrix, bd);
-    av1_inv_txfm2d_add(&dqcoeff, dst, stride, tx_type, tx_size, bd);
+    let dq = &mut scratch.dqcoeff;
+    dq.clear();
+    dq.resize(area, 0);
+    dequant_txb(qcoeff, dq, tx_size, dequant, iqmatrix, bd);
+    av1_inv_txfm2d_add_into(
+        dq,
+        dst,
+        stride,
+        tx_type,
+        tx_size,
+        bd,
+        &mut scratch.txfm,
+    );
 }

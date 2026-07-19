@@ -342,6 +342,10 @@ static NZ_MAP_CTX_OFFSET_32X8: [i8; 256] = [
 /// `av1_nz_map_ctx_offset[TX_SIZES_ALL]`: per-tx-size 2D context-offset
 /// table (indexed by transposed raster `coeff_idx`), with libaom's exact
 /// alias mapping (e.g. TX_8X4 -> the 16x4 table, TX_64X64 -> 32x32).
+/// Gate 3: forced inline so that, when `tx_size` is loop-invariant (it is for
+/// every coefficient of one transform block), the match — and the resulting
+/// slice base+len — hoist out of the per-coefficient scan.
+#[inline(always)]
 pub fn nz_map_ctx_offset(tx_size: usize) -> &'static [i8] {
     match tx_size {
         0 => &NZ_MAP_CTX_OFFSET_4X4,

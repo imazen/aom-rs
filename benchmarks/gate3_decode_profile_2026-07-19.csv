@@ -1,0 +1,47 @@
+kind,cell,metric,port,c_oracle,port_over_c,note
+ir,dec_mosaic_4k_cq20,ir_per_decode,3183499464,1507323206,2.112,4K photographic KEY (aomenc --allintra) qindex 80
+ir,dec_mosaic_4k_cq40,ir_per_decode,2060645369,845650902,2.437,4K photographic KEY qindex 160
+ir,dec_mosaic_2k_cq20,ir_per_decode,642948632,281964424,2.280,2K photographic KEY qindex 80
+ir,dec_mosaic_2k_cq40,ir_per_decode,447417855,173829515,2.574,2K photographic KEY qindex 160
+ir,dec_352x288_q00,ir_per_decode,125323250,87571566,1.431,conformance av1-1-b8-00-quantizer-00
+ir,dec_352x288_q32,ir_per_decode,59815656,24221718,2.470,conformance av1-1-b8-00-quantizer-32
+ir,dec_352x288_q63,ir_per_decode,22823595,7930363,2.878,conformance av1-1-b8-00-quantizer-63
+ir,dec_196x196,ir_per_decode,14154805,6779319,2.088,conformance av1-1-b8-01-size-196x196 (partial SB)
+wall,dec_64x64,ns_per_decode,148800,91500,1.626,zenbench paired; 4 rounds (resource gate)
+wall,dec_196x196,ns_per_decode,987800,402900,2.452,zenbench paired; 4 rounds
+wall,dec_352x288_q00,ns_per_decode,12200000,9200000,1.326,zenbench paired; 4 rounds
+wall,dec_352x288_q32,ns_per_decode,5700000,3200000,1.781,zenbench paired; 4 rounds
+wall,dec_352x288_q63,ns_per_decode,2366600,669400,3.101,zenbench paired; 4 rounds; WIDE CI +136.6..+483.6 pct - report as a band
+wall,dec_mosaic_2k_cq20,ns_per_decode,59600000,31300000,1.905,zenbench paired; 4 rounds
+wall,dec_mosaic_2k_cq40,ns_per_decode,38500000,18900000,2.037,zenbench paired; 4 rounds
+wall,dec_mosaic_4k_cq20,ns_per_decode,340400000,234700000,1.450,zenbench paired; 4 rounds; HEADLINE 4K cell
+wall,dec_mosaic_4k_cq40,ns_per_decode,190600000,137400000,1.387,zenbench paired; 4 rounds; HEADLINE 4K cell
+module,dec_mosaic_4k_cq20,coeff_txb,917242418,541853496,1.69,self-Ir rollup
+module,dec_mosaic_4k_cq20,transform,454471276,92751604,4.90,self-Ir rollup
+module,dec_mosaic_4k_cq20,loopfilter,507448364,239628064,2.12,self-Ir rollup
+module,dec_mosaic_4k_cq20,intra_pred,301556908,94470183,3.19,self-Ir rollup
+module,dec_mosaic_4k_cq20,entropy,480692670,343466100,1.40,self-Ir rollup
+module,dec_mosaic_4k_cq20,decode_driver,216169432,123056816,1.76,self-Ir rollup
+module,dec_mosaic_4k_cq20,alloc_libc,273620762,220257302,1.24,self-Ir rollup; shared-leaf edge attribution is approximate
+module,dec_mosaic_4k_cq20,recon,12637360,16857539,0.75,self-Ir rollup
+module,dec_mosaic_4k_cq40,transform,317887574,64617047,4.92,self-Ir rollup
+module,dec_mosaic_4k_cq40,loopfilter,467341600,217643814,2.15,self-Ir rollup
+module,dec_mosaic_4k_cq40,intra_pred,246786840,72273740,3.41,self-Ir rollup
+module,dec_mosaic_4k_cq40,coeff_txb,396416716,222578467,1.78,self-Ir rollup
+module,dec_mosaic_4k_cq40,entropy,223168275,129139084,1.73,self-Ir rollup
+module,dec_mosaic_2k_cq20,transform,105068008,19761206,5.32,self-Ir rollup
+module,dec_mosaic_2k_cq20,coeff_txb,148090061,85368455,1.73,self-Ir rollup
+module,dec_mosaic_2k_cq20,loopfilter,118350744,56236935,2.10,self-Ir rollup
+module,dec_mosaic_2k_cq20,intra_pred,63508946,21301152,2.98,self-Ir rollup
+module,dec_mosaic_2k_cq40,transform,72715026,13084821,5.56,self-Ir rollup
+module,dec_mosaic_2k_cq40,loopfilter,108500008,51419049,2.11,self-Ir rollup
+module,dec_mosaic_2k_cq40,intra_pred,54984206,17213841,3.19,self-Ir rollup
+module,dec_mosaic_2k_cq40,coeff_txb,67651968,36914640,1.83,self-Ir rollup
+delta,dec_mosaic_4k_cq20,ir_after_chunks_1_3,2977417517,1507323206,1.975,-6.47 pct vs baseline
+delta,dec_mosaic_4k_cq40,ir_after_chunks_1_3,1962410316,845650902,2.321,-4.77 pct vs baseline
+delta,dec_mosaic_2k_cq20,ir_after_chunks_1_3,607794643,281964424,2.156,-5.47 pct vs baseline
+delta,dec_mosaic_2k_cq40,ir_after_chunks_1_3,429142838,173829515,2.469,-4.08 pct vs baseline
+delta,dec_352x288_q00,ir_after_chunks_1_3,118813802,87571566,1.357,-5.19 pct vs baseline
+delta,dec_352x288_q32,ir_after_chunks_1_3,57489692,24221718,2.373,-3.89 pct vs baseline
+delta,dec_352x288_q63,ir_after_chunks_1_3,22423946,7930363,2.828,-1.75 pct vs baseline
+delta,dec_196x196,ir_after_chunks_1_3,13823005,6779319,2.039,-2.34 pct vs baseline

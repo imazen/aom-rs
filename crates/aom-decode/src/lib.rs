@@ -157,7 +157,7 @@ pub mod qm;
 mod qm_tables;
 
 use aom_dsp::entropy::cdf::read_symbol;
-use aom_dsp::recon::reconstruct_txb;
+use aom_dsp::recon::{ReconScratch, reconstruct_txb_into};
 
 /// Lossless residual reconstruction: dequantize the 4x4 coefficient block (flat,
 /// qindex-0 dequant) and add the inverse 4x4 Walsh–Hadamard transform onto the
@@ -1414,6 +1414,13 @@ struct TileKf<'c> {
     /// blocks so they adapt like the intra [`KfFrameContext`]. Reset to defaults
     /// per tile in [`start_tile`]; unused (but harmless) on KEY frames.
     inter_cdfs: InterCdfs,
+    /// Reusable dequant + inverse-transform scratch for
+    /// [`aom_dsp::recon::reconstruct_txb_into`]. Gate 3: the decoder
+    /// reconstructs one transform block at a time, and allocating these two
+    /// buffers per block was the largest allocator caller in the decode
+    /// profile. Contents are fully overwritten on every use, so reuse is
+    /// byte-for-byte identical to a fresh allocation.
+    recon_scratch: ReconScratch,
 }
 
 impl<'c> TileKf<'c> {
@@ -1597,6 +1604,7 @@ impl<'c> TileKf<'c> {
             tile: TileBoundsKf::whole_frame(cfg),
             inter: None,
             inter_cdfs: InterCdfs::defaults(),
+            recon_scratch: ReconScratch::default(),
         };
         // Run the same per-tile reset `start_tile` applies to any later tile
         // — for the first (or only) tile this re-touches already-fresh state
@@ -3513,7 +3521,7 @@ impl<'c> TileKf<'c> {
                             + (mi_col * 4) as usize
                             + blk_col * 4;
                         let iqm = qm::iqmatrix(self.block_qm_level[0], 0, tx_size, tt);
-                        reconstruct_txb(
+                        reconstruct_txb_into(
                             &mut self.recon[off..],
                             self.stride,
                             tx_size,
@@ -3522,6 +3530,7 @@ impl<'c> TileKf<'c> {
                             self.dequants[0],
                             iqm,
                             cfg.bd,
+                            &mut self.recon_scratch,
                         );
                     }
                     blk_col += txw;
@@ -3610,7 +3619,7 @@ impl<'c> TileKf<'c> {
                                 } else {
                                     &mut self.recon_v
                                 };
-                                reconstruct_txb(
+                                reconstruct_txb_into(
                                     &mut dst[off..],
                                     self.stride_uv,
                                     uv_tx,
@@ -3619,6 +3628,7 @@ impl<'c> TileKf<'c> {
                                     self.dequants[plane],
                                     iqm,
                                     cfg.bd,
+                                    &mut self.recon_scratch,
                                 );
                             }
                             blk_col += uv_txw;
@@ -4377,7 +4387,7 @@ impl<'c> TileKf<'c> {
                 }
                 if info.skip == 0 && eob > 0 {
                     let iqm = qm::iqmatrix(self.block_qm_level[0], 0, cur_tx, tx_type);
-                    reconstruct_txb(
+                    reconstruct_txb_into(
                         &mut self.recon[off..],
                         self.stride,
                         cur_tx,
@@ -4386,6 +4396,7 @@ impl<'c> TileKf<'c> {
                         self.dequants[0],
                         iqm,
                         cfg.bd,
+                        &mut self.recon_scratch,
                     );
                 }
                 txbs.push((eob, tx_type));
@@ -4611,7 +4622,7 @@ impl<'c> TileKf<'c> {
                                 );
                             } else {
                                 let iqm = qm::iqmatrix(self.block_qm_level[0], 0, tx_size, tx_type);
-                                reconstruct_txb(
+                                reconstruct_txb_into(
                                     &mut self.recon[off..],
                                     self.stride,
                                     tx_size,
@@ -4620,6 +4631,7 @@ impl<'c> TileKf<'c> {
                                     self.dequants[0],
                                     iqm,
                                     cfg.bd,
+                                    &mut self.recon_scratch,
                                 );
                             }
                         }
@@ -4956,7 +4968,7 @@ impl<'c> TileKf<'c> {
                                                 uv_tx,
                                                 tt_uv_eff,
                                             );
-                                            reconstruct_txb(
+                                            reconstruct_txb_into(
                                                 &mut plane_recon[off_uv..],
                                                 self.stride_uv,
                                                 uv_tx,
@@ -4965,6 +4977,7 @@ impl<'c> TileKf<'c> {
                                                 self.dequants[plane],
                                                 iqm,
                                                 cfg.bd,
+                                                &mut self.recon_scratch,
                                             );
                                         }
                                     }
