@@ -29,6 +29,12 @@
   at the repo root; they continue to cover the upstream work this port derives
   from. We will release this port under MIT or the original upstream license
   if Imazen's 2026 AI + server costs are covered. (527852efc15a)
+- CI: added the org-bar platform matrix — `windows-11-arm`, `macos-15-intel`,
+  and `i686-unknown-linux-gnu` (via cross) — as pure-Rust portability jobs
+  (invariant A: no C toolchain, no cmake/nasm), while the full C-oracle
+  differential suite stays on the linux jobs. Also renamed the CI comment's
+  stale `crates/aom-dispatch` ref to `aom_dsp::dispatch`. (GitHub #3 Phase 4;
+  fb7e8da)
 
 ### Added
 
@@ -36,5 +42,10 @@
   `encode` (both default). `default-features = false, features = ["decode"]`
   builds a decode-only stack (the encoder crate is never compiled) for
   size-sensitive / wasm consumers. (GitHub #2; 52be170)
-- README.md (project summary, status pointers, licensing) and this changelog.
-  (527852efc15a)
+- Rust-consumer docs for the 4-crate `zenav1-aom-*` structure (GitHub #3
+  Phase 3): a rewritten Rust-facing README.md (crate map, install snippet,
+  honest early-dev status, fresh-box `--recurse-submodules && cargo test` flow,
+  `imazen/zenav1-aom` badges; 5bfa09a); `PORTING.md`, the C→Rust auditability
+  map pairing each module with its `upstream/` libaom source + differential gate
+  (9d8ddce); and minimal per-crate READMEs for the 4 published crates (e8ec2c1).
+  (initial README + this changelog: 527852efc15a)
