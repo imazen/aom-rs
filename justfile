@@ -33,7 +33,7 @@ test-fast-scalar:
 # Measured 2026-07-17: ~45s cold (optimized build-dominated), test-RUN a few
 # seconds — the transform per-kernel differential is 1.5s here vs ~10s in debug.
 test-simd:
-    cargo test --profile test-fast -p aom-transform -p aom-quant -p aom-cdef -p aom-dist -p aom-txb -p aom-convolve --no-fail-fast
+    cargo test --profile test-fast -p aom-dsp --test txfm2d_simd_perm_diff --test quantize_fp_simd_diff --test cdef_filter_simd_diff --test sad_simd --test hbd_variance_simd_diff --test txb_init_levels_simd_diff --test intra_simd_diff --test lpf_simd_diff --test wiener_simd_diff --test convolve_diff --no-fail-fast
 
 # Gate-3 paired benchmark, port vs C oracle (zenbench interleaved rounds).
 # QUIET BOX ONLY — the resource gate flags noisy rounds; a loaded box makes
@@ -60,7 +60,7 @@ profile kind side cell iters:
 # extracted C. Scalar output must be byte-identical to the committed files
 # (verified: `diff` after regenerating). The lane files are the SIMD twins.
 gen-txfm1d:
-    python3 xtask/transpile_txfm1d.py --inv reference/extracted/idct4.c reference/extracted/idct8.c reference/extracted/idct16.c reference/extracted/idct32.c reference/extracted/idct64.c reference/extracted/iadst8.c reference/extracted/iadst16.c > crates/aom-transform/src/inv_txfm1d_gen.rs
-    python3 xtask/transpile_txfm1d.py reference/extracted/fdct8.c reference/extracted/fdct16.c reference/extracted/fdct32.c reference/extracted/fdct64.c reference/extracted/fadst8.c reference/extracted/fadst16.c > crates/aom-transform/src/txfm1d_gen.rs
-    python3 xtask/transpile_txfm1d.py --inv --lanes reference/extracted/idct4.c reference/extracted/idct8.c reference/extracted/idct16.c reference/extracted/idct32.c reference/extracted/idct64.c reference/extracted/iadst8.c reference/extracted/iadst16.c > crates/aom-transform/src/simd/inv1d_v3_gen.rs
-    python3 xtask/transpile_txfm1d.py --lanes reference/extracted/fdct8.c reference/extracted/fdct16.c reference/extracted/fdct32.c reference/extracted/fdct64.c reference/extracted/fadst8.c reference/extracted/fadst16.c > crates/aom-transform/src/simd/txfm1d_v3_gen.rs
+    python3 xtask/transpile_txfm1d.py --inv reference/extracted/idct4.c reference/extracted/idct8.c reference/extracted/idct16.c reference/extracted/idct32.c reference/extracted/idct64.c reference/extracted/iadst8.c reference/extracted/iadst16.c > crates/aom-dsp/src/transform/inv_txfm1d_gen.rs
+    python3 xtask/transpile_txfm1d.py reference/extracted/fdct8.c reference/extracted/fdct16.c reference/extracted/fdct32.c reference/extracted/fdct64.c reference/extracted/fadst8.c reference/extracted/fadst16.c > crates/aom-dsp/src/transform/txfm1d_gen.rs
+    python3 xtask/transpile_txfm1d.py --inv --lanes reference/extracted/idct4.c reference/extracted/idct8.c reference/extracted/idct16.c reference/extracted/idct32.c reference/extracted/idct64.c reference/extracted/iadst8.c reference/extracted/iadst16.c > crates/aom-dsp/src/transform/simd/inv1d_v3_gen.rs
+    python3 xtask/transpile_txfm1d.py --lanes reference/extracted/fdct8.c reference/extracted/fdct16.c reference/extracted/fdct32.c reference/extracted/fdct64.c reference/extracted/fadst8.c reference/extracted/fadst16.c > crates/aom-dsp/src/transform/simd/txfm1d_v3_gen.rs

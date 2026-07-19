@@ -7059,7 +7059,7 @@ pub fn has_bottom_left(
 /// block's grid position, the frame/tile bounds, and the mode. Composes
 /// [`has_top_right`] / [`has_bottom_left`] with the have_top/have_left/xr/yd
 /// geometry. Returns `(n_top_px, n_topright_px, n_left_px, n_bottomleft_px)` — the
-/// exact inputs `aom_intra::predict_intra_high` needs. Shared by the decode
+/// exact inputs `crate::intra::predict_intra_high` needs. Shared by the decode
 /// reconstruction driver and the encoder's intra RD search.
 ///
 /// `up_available`/`left_available` are the plane's neighbour flags

@@ -247,7 +247,7 @@ pub fn tx_scale(tx_size: usize) -> i32 {
 /// indexed by raster position; `None` selects the flat (no-QM) dequant.
 ///
 /// This is the structural inverse of the encoder's dqcoeff computation in
-/// [`aom_quantize_b`](../../aom_quant/fn.aom_quantize_b_no_qmatrix.html): for a
+/// `crate::quant::aom_quantize_b_no_qmatrix`: for a
 /// conformant stream the two agree (the masks/clamp are no-ops on in-range
 /// coefficients); the masks/clamp additionally bound malformed input.
 pub fn dequant_txb(

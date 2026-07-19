@@ -1,7 +1,7 @@
 //! SIMD column kernel for `txb_init_levels` (Gate 3) — bit-identical to the
 //! scalar port on the FULL i32 domain, at every dispatch tier.
 //!
-//! Same aom-rs SIMD pattern as `aom_quant::simd` / `aom_cdef::simd`: the
+//! Same aom-rs SIMD pattern as `crate::quant::simd` / `crate::cdef::simd`: the
 //! magetypes kernel handles heights 8/16/32 (whole 8-lane column chunks);
 //! the `_scalar` incant variant and the height-4 route call the transcribed
 //! port verbatim ([`crate::txb::txb_init_levels_scalar`]).
