@@ -26,6 +26,34 @@ test-fast:
 test-fast-scalar:
     AOM_FORCE_SCALAR=1 cargo test --profile test-fast --workspace --no-fail-fast
 
+# FASTEST full-suite run — same coverage as `just test-fast`, but scheduled by
+# cargo-nextest. Stock `cargo test` drains test BINARIES sequentially, threading
+# only within each one; nextest puts every test across every binary into ONE
+# global work pool. That matters here because the cost is wildly concentrated:
+# aom-decode sums to 458s with 364s (80%) in a single binary, and aom-dsp is 57s
+# across 95 binaries with most at ~0.00s.
+#
+# MEASURED 2026-07-19 (aom-dsp, 342 tests / 95 binaries, run-only wall):
+#   cargo test sequential  57.02s | nextest  12.07s  = 4.7x, within 7% of the
+#   floor (the slowest single test, dv_ref_diff::find_samples_matches_c 11.31s).
+# A pool cannot beat its slowest single test — see benchmarks/test_cycle_time_
+# 2026-07-19.md for why binary consolidation and lld were measured and rejected.
+#
+# Needs cargo-nextest (prebuilt: curl -LsSf https://get.nexte.st/latest/linux
+# | tar zxf - -C ~/.cargo/bin). CI still uses plain `cargo test`.
+test-next:
+    cargo nextest run --cargo-profile test-fast --workspace --no-fail-fast
+
+# Same, scalar-pinned (pairs with `test-next` for the both-dispatch-modes gate).
+test-next-scalar:
+    AOM_FORCE_SCALAR=1 cargo nextest run --cargo-profile test-fast --workspace --no-fail-fast
+
+# Where is the suite time actually going? Prints the 25 slowest tests. nextest
+# reports per-test timing, which stock libtest will not on stable — this is how
+# you find the long poles worth splitting.
+test-slowest:
+    cargo nextest run --cargo-profile test-fast --workspace --no-fail-fast --final-status-level slow 2>&1 | grep -E '(PASS|SLOW|FAIL)' | sort -t'[' -k2 -rn | head -25
+
 # QUICK SIMD-parity subset (opt-level 3) — the Gate-3 kernel crates' per-kernel
 # SIMD==scalar differentials + the transform 2-D permutation-equality gate,
 # WITHOUT the minutes-long encoder e2e gates. For tight iteration on SIMD /
