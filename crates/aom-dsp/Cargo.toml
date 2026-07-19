@@ -1,0 +1,38 @@
+[package]
+name = "aom-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Consolidated DSP kernels for the aom-rs bit-exact libaom v3.14.1 port: transform, quant, txb, cdef, restore, intra, loopfilter, dist, inter, convolve, recon, dispatch, and the MSAC entropy coder — each a module under this crate."
+
+[dependencies]
+# ONE archmage universe workspace-wide (registry, exact version) so
+# aom-dispatch's AOM_FORCE_SCALAR process-wide pin reaches every kernel module.
+archmage = "0.9.27"
+magetypes = "0.9.27"
+# Kernel crates being folded in one family at a time (facade-first: re-exported
+# as `pub use aom_X as X` below, then physically absorbed into src/X/). Removed
+# from this list as each is absorbed.
+aom-transform = { path = "../aom-transform" }
+aom-quant = { path = "../aom-quant" }
+aom-txb = { path = "../aom-txb" }
+aom-cdef = { path = "../aom-cdef" }
+aom-restore = { path = "../aom-restore" }
+aom-intra = { path = "../aom-intra" }
+aom-loopfilter = { path = "../aom-loopfilter" }
+aom-dist = { path = "../aom-dist" }
+aom-inter = { path = "../aom-inter" }
+aom-convolve = { path = "../aom-convolve" }
+aom-recon = { path = "../aom-recon" }
+aom-dispatch = { path = "../aom-dispatch" }
+aom-entropy = { path = "../aom-entropy" }
+
+[features]
+# AVX-512 tiers (X64V4Token codegen). Default-on: runtime dispatch decides, so
+# the binary stays portable; disable to cut compile time on non-x86.
+default = ["avx512"]
+avx512 = ["archmage/avx512", "magetypes/avx512"]
+
+[dev-dependencies]
+aom-sys-ref = { path = "../aom-sys-ref" }

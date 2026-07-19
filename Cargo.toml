@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/aom-dsp",
     "crates/aom-transform",
     "crates/aom-quant",
     "crates/aom-entropy",

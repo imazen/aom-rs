@@ -121,6 +121,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aom-dsp"
+version = "0.0.1"
+dependencies = [
+ "aom-cdef",
+ "aom-convolve",
+ "aom-dispatch",
+ "aom-dist",
+ "aom-entropy",
+ "aom-inter",
+ "aom-intra",
+ "aom-loopfilter",
+ "aom-quant",
+ "aom-recon",
+ "aom-restore",
+ "aom-sys-ref",
+ "aom-transform",
+ "aom-txb",
+ "archmage",
+ "magetypes",
+]
+
+[[package]]
 name = "aom-encode"
 version = "0.0.1"
 dependencies = [
