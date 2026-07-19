@@ -244,19 +244,25 @@ fn inter_ratchet_16x66_switchable_interp_frame1() {
             // Current pinned state: an inter-envelope guard fired. Confirm it is one
             // of OUR documented guards, not a stray panic.
             //
-            // KNOWN BLOCKER (discovered 2026-07-19 while landing chunk 4 OBMC — which
-            // removed the TX_MODE_LARGEST assert that used to pin this frame at the
-            // very first block, so mi(0,0)'s mode-info now runs for the first time):
-            // mi(0,0) (BLOCK_16X16, NEWMV, switchable) DESYNCS in its mode-info reads
-            // — the port decodes mv=(0,-15) where C codes (-1,-7), so the downstream
-            // inter-intra flag reads a garbage 1 and trips the inter-intra guard. It
-            // is NOT global motion (LAST is IDENTITY) and NOT chunk-4 OBMC (16x18 is
-            // byte-exact) — it is a pre-existing switchable-frame mode-info bug
-            // (mode/drl/mv read for a 16x16 block) that the switchable-interp + WARP
-            // track must root-cause. So the "inter-intra" pin below is a SYMPTOM of
-            // that desync, not a clean feature gap; the real work is the mode-info
-            // fix + WARP (mi(4,0)) + inter-intra prediction. Until then this stays
-            // pinned; it self-promotes to the golden byte-match once all three land.
+            // FIXED 2026-07-19 — the mi(0,0) mode-info DESYNC was a MISSING `read_cdef`.
+            // (History: chunk-4 OBMC removed the TX_MODE_LARGEST assert that used to pin
+            // this frame at the first block, exposing that mi(0,0) — BLOCK_16X16, NEWMV,
+            // non-skip — decoded mv=(0,-15) where C codes (-1,-7), tripping the
+            // inter-intra guard. It was mislabelled a "switchable-frame mode-info bug".)
+            // Root cause: `decode_block_inter` never performed the `read_cdef` entropy
+            // read (only a comment stood where it belongs, after read_skip). On a
+            // CDEF-enabled frame (`cdef_bits > 0`) the FIRST non-skip block of each
+            // 64x64 unit codes a `cdef_bits`-wide strength literal; skipping that read
+            // shifts every following symbol, so mi(0,0)'s `read_mv` desynced. The
+            // earlier byte-exact inter targets masked it: 16x18 has `cdef_bits == 0`,
+            // and 64x66 (also switchable) has a SKIP mi(0,0) — neither reads a CDEF
+            // strength. 16x66 frame 1 has `cdef_bits == 1` + a non-skip NEWMV mi(0,0),
+            // so it was the first to exercise the read. With the read wired in, mi(0,0)
+            // now parses mv=(-1,-7) byte-exact and the decode advances through mi(4,0)
+            // (WARPED_CAUSAL, now handled) to mi(12,0), where it pins on the chunk-4
+            // CHROMA above-OBMC guard. The REMAINING gaps are genuine feature guards:
+            // chroma OBMC (mi(12,0)/(16,0)), non-uniform inter var-tx, and inter-intra
+            // prediction. Self-promotes to the golden byte-match once those land.
             let msg = payload
                 .downcast_ref::<String>()
                 .map(String::as_str)
@@ -266,6 +272,8 @@ fn inter_ratchet_16x66_switchable_interp_frame1() {
                 msg.contains("inter skeleton")
                     || msg.contains("inter ratchet")
                     || msg.contains("WARPED_CAUSAL")
+                    || msg.contains("chunk 4")
+                    || msg.contains("OBMC")
                     || msg.contains("non-uniform inter var-tx")
                     || msg.contains("non-identity global motion")
                     || msg.contains("inter-intra prediction not yet handled"),
@@ -274,9 +282,10 @@ fn inter_ratchet_16x66_switchable_interp_frame1() {
                  inter-intra), but panicked with: {msg}"
             );
             eprintln!(
-                "inter ratchet 16x66: frame-1 byte gate PINNED on `{msg}` (SYMPTOM of a \
-                 mi(0,0) 16x16 mode-info desync; needs that fix + WARP + inter-intra \
-                 pred). Self-promotes to the golden byte-match when they land."
+                "inter ratchet 16x66: frame-1 byte gate PINNED on `{msg}` (mi(0,0) \
+                 mode-info now parses byte-exact — the missing read_cdef is FIXED; \
+                 remaining gaps are chroma-OBMC + var-tx + inter-intra pred). \
+                 Self-promotes to the golden byte-match when they land."
             );
         }
     }

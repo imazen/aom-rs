@@ -2315,8 +2315,33 @@ impl<'c> TileKf<'c> {
             left_mi.map_or(0, |m| m.skip_txfm),
         ) as usize;
         let skip = ep::read_skip(dec, &mut cdfs.skip[skip_ctx], false);
-        // read_cdef: the first NON-skip block in a CDEF unit reads the strength;
-        // a skip block reads nothing (envelope: single skip block -> no read).
+        // read_cdef (decodemv.c, ordered after read_skip, before read_delta_q /
+        // read_is_inter): the FIRST non-skip block in each 64x64 CDEF unit reads
+        // that unit's `cdef_bits`-wide strength literal; skip blocks and
+        // already-read units read nothing. This is a real entropy read on any
+        // CDEF-enabled frame (`cdef_bits > 0`) — omitting it desyncs the
+        // arithmetic decoder for every following symbol. (The earlier envelope
+        // targets — 16x18, 64x66 — had `cdef_bits == 0` or a skip mi(0,0), so the
+        // gap was inert; `av1-1-b8-01-size-16x66` frame 1 has `cdef_bits == 1`
+        // with a non-skip NEWMV mi(0,0), so the missing read shifted its `read_mv`
+        // and mv desynced to (0,-15) vs C's (-1,-7).)
+        let coded_lossless = self.st.coded_lossless;
+        let allow_intrabc = self.st.allow_intrabc;
+        let mib_size = self.st.mib_size;
+        let sb_size = self.st.sb_size;
+        let cdef_bits = self.st.cdef_bits;
+        let cdef_strength = ep::read_cdef(
+            dec,
+            coded_lossless,
+            allow_intrabc,
+            mi_row,
+            mi_col,
+            mib_size,
+            sb_size,
+            skip,
+            &mut self.st.cdef_transmitted,
+            cdef_bits,
+        );
         // read_delta_q_params: delta_q_present off -> no read.
 
         // read_is_inter_block.
@@ -3159,7 +3184,10 @@ impl<'c> TileKf<'c> {
         let info = MbModeInfoKf {
             segment_id: 0,
             skip,
-            cdef_strength: 0,
+            // The per-64x64-unit CDEF strength `read_cdef` returned for THIS block
+            // (-1 = skip / unit already coded). The frame CDEF walk (apply_cdef)
+            // stamps it on every covered 64x64 unit, exactly as for intra blocks.
+            cdef_strength,
             current_qindex: cfg.base_qindex,
             delta_lf: [0; 4],
             delta_lf_from_base: 0,
