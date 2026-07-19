@@ -11,13 +11,20 @@ verified by decode-both.
 | **2b** fixed-Q inter RC | `dfc6c58` | `aom_encode::rc::base_qindex_lowdelay_p_from_cq` — the low-delay P (inter leaf) frame `base_qindex`. Traced: `rc_pick_q_and_bounds_q_mode` → `get_active_best_quality` `is_leaf_frame && AOM_Q` returns `cq_level` (ratectrl.c:2092), i.e. `quantizer_to_qindex(cq)` (NOT the dead `rc_pick_q_and_bounds_no_stats_cq`). | `aom-bench/tests/inter_rc_qindex_diff.rs` — frame-1 coded qindex byte-matches across cq {8,12,20,32,48,60,63}; anti-vacuity: KEY qindex is boosted lower. |
 | **2d.1** subpel predictor | `ad99442` | `aom_encode::inter_me::upsampled_pred` — `aom_upsampled_pred` (lowbd, USE_8_TAPS): the 8-tap fixed-phase subpel predictor; the subpel-search cost primitive. | `aom-encode/tests/upsampled_pred_diff.rs` — byte-matches real `aom_upsampled_pred_c` (2304 cells). |
 | **2d.2** subpel search | `654614f` | `aom_encode::inter_me::find_best_sub_pixel_tree` — `av1_find_best_sub_pixel_tree` (SUBPEL_TREE / USE_8_TAPS, the speed-0 path). The biggest net-new ME kernel. | `aom-encode/tests/subpel_tree_diff.rs` — `(best_mv, distortion, sse, besterr)` byte-match real C (432 cells). |
+| **2d.3** full-pel score | `dd59677` | `aom_encode::inter_me::get_mvpred_sse` — `av1_get_mvpred_sse` (mcomp.c:3963): the full-pel predictor SSE + coded-MV cost `av1_single_motion_search` scores the full-pel result with. | `subpel_tree_diff.rs::get_mvpred_sse_matches_real_c` (126 cells). |
+| **2d.4** coded-MV rate | `dc8ae93` | `aom_encode::inter_me::mv_bit_cost` — `av1_mv_bit_cost` (mcomp.c:307): the NEWMV RD rate (weight 108/120). `mv_err_cost_entropy` (the motion-search variance-metric cost) is a shared free fn. | `subpel_tree_diff.rs::mv_bit_cost_matches_real_c` (8000 cells). |
 
-New oracle: `aom-sys-ref/shim/me_shim.c` (`shim_upsampled_pred`, `shim_find_best_sub_pixel_tree`)
-+ `ref_upsampled_pred` / `ref_find_best_sub_pixel_tree` in `aom-sys-ref/src/lib.rs`. `me_shim`
-registered in `aom-sys-ref/build.rs`. `aom-encode` gained an `aom-convolve` dep (filter tables).
+New oracle: `aom-sys-ref/shim/me_shim.c` (`shim_upsampled_pred`, `shim_find_best_sub_pixel_tree`,
+`shim_get_mvpred_sse`, `shim_mv_bit_cost`) + the `ref_*` wrappers in `aom-sys-ref/src/lib.rs`.
+`me_shim` registered in `aom-sys-ref/build.rs`. `aom-encode` gained an `aom-convolve` dep (filter
+tables). The tree oracle's MACROBLOCKD/SUBPEL_MOTION_SEARCH_PARAMS construction (me_shim.c) is the
+template for the full-pel `av1_full_pixel_search` shim.
 
-**So 2d — the single biggest net-new inter ME kernel (subpel) — is DONE and real-C-locked. 2b is
-DONE.** Both subpel-tree leaves are real-C-locked (`upsampled_pred` here + `aom_dist::variance`).
+**So 2d — the subpel motion search + its cost primitives — is DONE and real-C-locked (the biggest
+net-new inter ME work). 2b (RC) is DONE.** All leaves are real-C-locked: `upsampled_pred` (2d.1),
+`aom_dist::variance` (pre-locked), `mv_err_cost_entropy` (via the tree diff), `mv_bit_cost` (2d.4).
+The only ME piece left is the **full-pel search inter retarget + its differential** (below) — then
+`av1_single_motion_search` is just glue (full-pel → `get_mvpred_sse` → `find_best_sub_pixel_tree`).
 
 ## Head-start inventory (REUSE — do not rebuild)
 
