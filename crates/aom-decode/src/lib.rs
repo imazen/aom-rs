@@ -1288,6 +1288,18 @@ struct TileKf<'c> {
     /// is a non-intrabc DC default until an intrabc block stamps its DV. Also
     /// carries the neighbour `is_inter_block`/`bsize` `get_tx_size_context` reads.
     mi_dv: Vec<DvNbr>,
+    /// Per-mi coded interpolation-filter grid `(y_filter, x_filter)` — the
+    /// neighbour projection of `MB_MODE_INFO::interp_filters` that
+    /// `av1_get_pred_context_switchable_interp` (pred_common.c) reads through
+    /// `xd->mi[-1]` / `xd->mi[-mi_stride]` when selecting the switchable-interp
+    /// CDF context. Kept parallel to `mi_dv` (which supplies the neighbour's
+    /// `ref_frame[0/1]` — `get_ref_filter_type` only returns the stored filter
+    /// when the neighbour references the current block's ref). Frame-cropped
+    /// stamps like `mi_dv`; every cell is `(0, 0)` = `EIGHTTAP_REGULAR` (C's mi
+    /// grid init) until an inter block stamps its resolved filters. Only inter
+    /// frames read it (KEY frames never reach the switchable-interp path), so
+    /// ordinary KEY decodes never index it.
+    mi_interp: Vec<(u8, u8)>,
     /// Per-mi luma transform-type grid (`cm->tx_type_map`, mi granularity): the
     /// luma tx-type each 4x4 unit resolved to, stamped over every luma txb's mi
     /// footprint. Read only by colour intrabc chroma reconstruction, where the
@@ -1501,6 +1513,7 @@ impl<'c> TileKf<'c> {
                 (cfg.mi_rows * cfg.mi_cols) as usize
             ],
             mi_dv: vec![DvNbr::default(); (cfg.mi_rows * cfg.mi_cols) as usize],
+            mi_interp: vec![(0u8, 0u8); (cfg.mi_rows * cfg.mi_cols) as usize],
             luma_tt: if cfg.allow_intrabc && !cfg.monochrome {
                 vec![0u8; (cfg.mi_rows * cfg.mi_cols) as usize]
             } else {
@@ -1698,6 +1711,19 @@ impl<'c> TileKf<'c> {
         }
     }
 
+    /// [`Self::stamp_dv`]'s interp-filter twin — stamp the block's resolved
+    /// `(y_filter, x_filter)` over its frame-cropped mi footprint so later
+    /// switchable inter blocks' `av1_get_pred_context_switchable_interp`
+    /// neighbour reads see it (`cm->mi[..]->interp_filters`).
+    fn stamp_interp(&mut self, mi_row: i32, mi_col: i32, bsize: usize, cell: (u8, u8)) {
+        let x_mis = MI_SIZE_WIDE[bsize].min(self.cfg.mi_cols - mi_col);
+        let y_mis = MI_SIZE_HIGH[bsize].min(self.cfg.mi_rows - mi_row);
+        for r in 0..y_mis {
+            let base = ((mi_row + r) * self.cfg.mi_cols + mi_col) as usize;
+            self.mi_interp[base..base + x_mis as usize].fill(cell);
+        }
+    }
+
     /// [`Self::neighbours`]'s palette-info twin — `None` when `mi_palette` is empty
     /// (non-screen-content frames, where it's never allocated).
     fn palette_neighbours(
@@ -1818,6 +1844,11 @@ impl<'c> TileKf<'c> {
         let (above_mi, left_mi) = self.neighbours(mi_row, mi_col);
         let above_dv = up_available.then(|| self.mi_dv[((mi_row - 1) * cols + mi_col) as usize]);
         let left_dv = left_available.then(|| self.mi_dv[(mi_row * cols + mi_col - 1) as usize]);
+        // The neighbours' coded interp filters (parallel to `mi_dv`), for
+        // `av1_get_pred_context_switchable_interp`. Gated by the same edge
+        // availability as `above_dv`/`left_dv`, so they zip cleanly below.
+        let above_if = up_available.then(|| self.mi_interp[((mi_row - 1) * cols + mi_col) as usize]);
+        let left_if = left_available.then(|| self.mi_interp[(mi_row * cols + mi_col - 1) as usize]);
         let dv_inter = |d: DvNbr| d.use_intrabc || d.ref_frame0 > 0;
 
         // Snapshot the tile's persistent inter CDFs; every read below adapts this
@@ -1971,26 +2002,48 @@ impl<'c> TileKf<'c> {
             _ => panic!("inter skeleton: unexpected single-ref mode {mode}"),
         };
 
-        // read_mb_interp_filter. A non-switchable frame broadcasts its fixed
-        // filter with NO symbol read (av1_broadcast_interp_filter); a switchable
-        // frame reads a per-direction filter on a context selected from the
-        // neighbour filters (av1_get_pred_context_switchable_interp). That
-        // neighbour context needs a per-block filter grid (item 3) — only the
-        // no-available-neighbour context (SWITCHABLE_FILTERS) is wired here, exact
-        // for the single-block skeleton; a switchable frame WITH an available
-        // neighbour is deferred (asserted). This ratchet target is non-switchable
-        // EIGHTTAP, so the else branch runs and no symbol/context is read.
-        const SWITCHABLE_FILTERS: usize = 3;
-        const INTER_FILTER_DIR_OFFSET: usize = 8;
+        // read_mb_interp_filter (decodemv.c:1034). C's read_inter_block_mode_info
+        // reads motion_mode FIRST (:1422) and interp_filter AFTER (:1481), because
+        // av1_is_interp_needed (reconinter.h:420) gates on motion_mode ==
+        // WARPED_CAUSAL. In THIS envelope motion_mode is always SIMPLE_TRANSLATION
+        // (the OBMC/WARP symbol read is a separate chunk — the guard below asserts
+        // the SIMPLE precondition), skip_mode is off (asserted at fn top), and the
+        // global motion is identity, so av1_is_interp_needed is always true. When
+        // the OBMC/WARP chunk lands its motion_mode read (which per the C order
+        // must sit ABOVE this point), gate `interp_needed` on
+        // `motion_mode != WARPED_CAUSAL` (a WARPED_CAUSAL block reads NO interp
+        // symbol and takes the set_default_interp_filters branch below).
+        let interp_needed = true;
         let is_switchable = inter.interp_filter == SWITCHABLE;
-        // av1_extract_interp_filter: dir0 = y_filter, dir1 = x_filter.
-        let (filter_y, filter_x) = if is_switchable {
-            assert!(
-                !up_available && !left_available,
-                "inter ratchet: switchable-interp neighbour context (item 3) not yet stored"
-            );
-            let ctx0 = SWITCHABLE_FILTERS;
-            let ctx1 = INTER_FILTER_DIR_OFFSET + SWITCHABLE_FILTERS;
+        // av1_extract_interp_filter: dir 0 = y_filter (vertical), dir 1 = x_filter.
+        let (filter_y, filter_x) = if !interp_needed {
+            // set_default_interp_filters -> av1_broadcast_interp_filter(
+            // av1_unswitchable_filter(frame_filter)): EIGHTTAP_REGULAR (0) for a
+            // SWITCHABLE frame, else the frame's fixed filter. No symbol is read.
+            let f = if is_switchable { 0 } else { inter.interp_filter as usize };
+            (f, f)
+        } else if is_switchable {
+            // A switchable frame reads a per-direction filter on the CDF context
+            // selected from the neighbour filters
+            // (av1_get_pred_context_switchable_interp). The neighbour projections
+            // are Some((ref_frame0, ref_frame1, y_filter, x_filter)) when the edge
+            // is available (C's xd->mi[-1] / xd->mi[-mi_stride]); get_ref_filter_type
+            // returns the neighbour's coded filter only when it references the
+            // current block's ref, else SWITCHABLE_FILTERS. With no neighbours the
+            // context is (dir==0 ? 3 : 11), matching the single-block skeleton.
+            let above_flt = above_dv
+                .zip(above_if)
+                .map(|(d, (yf, xf))| (d.ref_frame0, d.ref_frame1, yf as usize, xf as usize));
+            let left_flt = left_dv
+                .zip(left_if)
+                .map(|(d, (yf, xf))| (d.ref_frame0, d.ref_frame1, yf as usize, xf as usize));
+            let cur_is_compound = ref1 > 0; // ref_frame[1] > INTRA_FRAME
+            let ctx0 = ep::get_pred_context_switchable_interp(0, ref0, cur_is_compound, above_flt, left_flt)
+                as usize;
+            let ctx1 = ep::get_pred_context_switchable_interp(1, ref0, cur_is_compound, above_flt, left_flt)
+                as usize;
+            // ctx0 (dir 0) and ctx1 (dir 1) always differ by the 8-wide dir offset
+            // -> distinct CDF rows, no aliasing. Non-dual reads only ctx0.
             let mut c0 = icdfs.switchable_interp[ctx0];
             let mut c1 = icdfs.switchable_interp[ctx1];
             let (f0, f1) =
@@ -1999,6 +2052,7 @@ impl<'c> TileKf<'c> {
             icdfs.switchable_interp[ctx1] = c1;
             (f0 as usize, f1 as usize)
         } else {
+            // av1_broadcast_interp_filter(frame_filter): the fixed frame filter.
             (inter.interp_filter as usize, inter.interp_filter as usize)
         };
 
@@ -2375,6 +2429,9 @@ impl<'c> TileKf<'c> {
                 mv1_col: 0,
             },
         );
+        // Stamp the block's coded interp filters so later switchable inter blocks'
+        // av1_get_pred_context_switchable_interp neighbour reads see them.
+        self.stamp_interp(mi_row, mi_col, bsize, (filter_y as u8, filter_x as u8));
         // Minimal per-block record for the post-filter / output structures. The
         // inter block carries no intra fields; `skip`/`current_qindex` are what
         // the deblock reads (the mode-info's inter-ness lives in the DV grid).

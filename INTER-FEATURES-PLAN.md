@@ -128,8 +128,25 @@ chunk-1d `inter_pred_diff.rs` pattern.
   (`av1_find_projection` / `av1_warp_plane`) — larger; needs its own census pass.
 - Chunk 6 = **switchable-interp with neighbours** (target `16x66`): the
   `av1_get_pred_context_switchable_interp` neighbour-filter grid — the entropy
-  side landed (origin/main `835b0c0`); wiring + the filter grid remain. 16x66
-  also needs chunks 4+5 (OBMC+WARP), so sequence it after both.
+  side landed (origin/main `835b0c0`). **WIRING LANDED (this chunk):**
+  `read_mb_interp_filter` is wired into `decode_block_inter` — the per-direction
+  switchable read on the neighbour-context CDF (`get_pred_context_switchable_
+  interp`), a per-mi interp-filter grid (`TileKf::mi_interp`, stamped/read like
+  `mi_dv`), and the `av1_is_interp_needed` gate (dead `!interp_needed` branch is
+  the WARPED_CAUSAL seam for chunk 5 — a WARPED_CAUSAL block reads NO interp
+  symbol; `motion_mode` must be threaded in ABOVE the interp read per the C
+  order, `read_inter_block_mode_info` :1422 motion_mode / :1481 interp). The
+  no-neighbour switchable read is byte-gated by the 64x64 skeleton (SHARP); the
+  with-neighbour + dual-filter context is C-locked at the primitive layer
+  (`partition_diff.rs`). **The 16x66 STEP-0 census corrects the plan: frame 1 is
+  `TX_MODE_SELECT` (var-tx) — mi(8,x)/(16,0) carry non-largest tx — so 16x66
+  needs var-tx AND OBMC (chunk 4, mi(12,0)/(16,0)) AND WARP (chunk 5, mi(4,0)),
+  not just 4+5.** The port's inter envelope hard-asserts LARGEST tx / SIMPLE
+  motion, so it cannot yet parse frame 1 to completion in isolation. Gate:
+  `inter_ratchet.rs::inter_ratchet_16x66_switchable_interp_frame1` — SELF-
+  PROMOTING (frame-0 KEY byte-exact anchor + frame-1 pinned on the current
+  inter-envelope guard, auto-flips to the golden `9d7759bc…` byte-match when
+  var-tx + OBMC + WARP all land).
 - Compound / interintra / temporal-MV + multi-ref DPB (the `05-mv` / `-00-
   quantizer` frames) come after the single-ref ladder is complete; `05-mv` also
   needs an ALTREF slot in the reference store and order-hint MV projection.

@@ -154,3 +154,100 @@ fn inter_ratchet_64x66_partial_edge_frame1_byte_identical() {
         "86f20606b0408bd3ba6771a6a37df429",
     );
 }
+
+/// CHUNK-6 GATE (SELF-PROMOTING): switchable interpolation filter with neighbour
+/// context. `av1-1-b8-01-size-16x66` frame 1 is the switchable-interp target
+/// (STEP-0 census `/tmp/inspect_frame`, single `LAST` ref throughout):
+///
+/// | mi     | bsize    | mode     | motion_mode    | (fy,fx)    | note                       |
+/// |--------|----------|----------|----------------|------------|----------------------------|
+/// | (0,0)  | 16x16    | NEWMV    | SIMPLE         | (SHARP,SHARP)=(2,2) | switchable, no neighbour |
+/// | (4,0)  | 16x16    | NEARESTMV| WARPED_CAUSAL  | (0,0)      | NO interp symbol (default) |
+/// | (8,0..3)| 16x4    | NEARESTMV| SIMPLE         | (0,0)      | switchable, reads EIGHTTAP  |
+/// | (12,0) | 16x16    | NEARESTMV| OBMC_CAUSAL    | (2,0)      | **dual** filter (SHARP/EIGHTTAP) |
+/// | (16,0) | 16x8     | NEARESTMV| OBMC_CAUSAL    | (2,0)      | dual filter                |
+///
+/// This chunk wires the per-direction switchable read
+/// (`av1_get_pred_context_switchable_interp` neighbour context + the per-mi
+/// interp-filter grid + the `av1_is_interp_needed` gate) into
+/// `decode_block_inter`. But the full frame-1 decode ALSO needs
+/// `TX_MODE_SELECT` var-tx (mi(8,x)/(16,0) carry non-largest tx), WARPED_CAUSAL
+/// (mi(4,0), chunk 5) and OBMC_CAUSAL (mi(12,0)/(16,0), chunk 4) — the port's
+/// inter envelope hard-asserts LARGEST tx / SIMPLE motion, so it cannot yet
+/// parse frame 1 to completion in isolation. The switchable *no-neighbour* read
+/// is byte-gated by the 64x64 skeleton (SHARP); the *with-neighbour* + dual
+/// context is C-locked at the primitive layer
+/// (`aom-entropy/tests/partition_diff.rs`: `get_pred_context_switchable_interp_
+/// matches_c` 60k+ configs + the `read_mb_interp_filter` round-trip vs real C).
+///
+/// This gate is SELF-PROMOTING (the codebase's pinned-divergence pattern): it
+/// asserts the byte-exact golden the moment the whole frame decodes (var-tx +
+/// OBMC + WARP all landed), and until then pins the current inter-envelope
+/// blocker so a landing that reaches full decode flips it to a hard byte-match.
+#[test]
+fn inter_ratchet_16x66_switchable_interp_frame1() {
+    // Golden per-frame i420 MD5s (`av1-1-b8-01-size-16x66.ivf.md5`).
+    const GOLDEN_F0: &str = "7babdb736f1ddf88273c337a67275f63";
+    const GOLDEN_F1: &str = "9d7759bc7409225a6e48d5c111622d93";
+
+    let dir = corpus_dir();
+    let ivf_path = dir.join("av1-1-b8-01-size-16x66.ivf");
+    let ivf = match std::fs::read(&ivf_path) {
+        Ok(b) => b,
+        Err(e) => panic!(
+            "conformance vector {} not found ({e}). Fetch with \
+             `python3 xtask/conformance.py --fetch --scope intra` or set AOM_CONFORMANCE_DIR.",
+            ivf_path.display()
+        ),
+    };
+    let tus = ivf_temporal_units(&ivf);
+    assert_eq!(tus.len(), 2, "16x66 has exactly 2 frames (KEY + INTER)");
+
+    // Anchor: frame 0 (KEY, fully supported) decodes byte-exact — proves the
+    // golden format matches `image_md5` and the harness is sound.
+    let f0 = decode_frames(&tus[0]).expect("16x66 KEY frame decodes");
+    assert_eq!(f0.len(), 1, "one shown KEY frame");
+    assert_eq!(image_md5(&f0[0]), GOLDEN_F0, "16x66 frame 0 (KEY) golden");
+
+    let mut stream = tus[0].clone();
+    stream.extend_from_slice(&tus[1]);
+    // The inter-envelope guards `panic!` on a not-yet-supported feature; cargo
+    // captures the caught message for a passing test, so this stays quiet.
+    let res = std::panic::catch_unwind(|| decode_frames(&stream));
+    match res {
+        Ok(Ok(frames)) => {
+            // var-tx + OBMC + WARP have landed → the whole frame decodes.
+            // PROMOTED: assert the byte-exact golden (a real regression gate).
+            assert_eq!(frames.len(), 2, "two shown frames decoded");
+            assert_eq!(image_md5(&frames[0]), GOLDEN_F0, "16x66 frame 0 golden");
+            assert_eq!(
+                image_md5(&frames[1]),
+                GOLDEN_F1,
+                "16x66 frame 1 (switchable interp + var-tx + OBMC + WARP) golden"
+            );
+            eprintln!("inter ratchet 16x66: FULL byte-match — switchable interp gate PROMOTED");
+        }
+        Ok(Err(e)) => panic!("16x66 decode returned an unexpected error (not a pin): {e}"),
+        Err(payload) => {
+            // Current pinned state: an inter-envelope guard fired (var-tx / OBMC /
+            // WARP not yet wired). Confirm it is one of OUR guards, not a stray
+            // panic — a switchable-interp desync would corrupt earlier reads and
+            // surface as a different failure.
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("<non-string panic>");
+            assert!(
+                msg.contains("inter skeleton") || msg.contains("inter ratchet"),
+                "16x66 frame 1 expected to pin on a documented inter-envelope guard \
+                 (var-tx / OBMC / WARP), but panicked with: {msg}"
+            );
+            eprintln!(
+                "inter ratchet 16x66: switchable-interp wiring landed; frame-1 byte gate \
+                 PINNED on `{msg}` (needs var-tx + OBMC + WARP). Self-promotes to the \
+                 golden byte-match when they land."
+            );
+        }
+    }
+}

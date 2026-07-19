@@ -3908,3 +3908,33 @@ partial-SB source-border extension (dims not a multiple of 8px — the KB-6 part
 external-rate-file arm); `--auto-intra-tools-off` (`automatic_intra_tools_off` — a separate intra-tool
 disable gate). The `--aq-mode=1/2` (variance/complexity segmentation) arm is unstarted (needs the
 two-pass path on stills). `--deltaq-mode=1` OBJECTIVE is TPL-gated → inert for a lone still.
+
+## Inter chunk 6 — switchable interpolation filter wired (2026-07-19, decoder track)
+
+`read_mb_interp_filter` (decodemv.c:1034) is wired into `TileKf::decode_block_inter`
+(`aom-decode/src/lib.rs`): the per-direction switchable filter read on the
+neighbour-context CDF (`aom_entropy::partition::get_pred_context_switchable_interp`,
+the C-locked context fn from `835b0c0`), backed by a new per-mi interp-filter grid
+`TileKf::mi_interp` (`(y_filter, x_filter)` per cell, stamped/read parallel to `mi_dv`,
+`stamp_interp`), plus the `av1_is_interp_needed` gate. The switchable *no-neighbour*
+read (64x64 skeleton = SHARP) stays byte-exact through the refactor; the *with-neighbour*
++ dual-filter context is C-locked at the primitive layer (`partition_diff.rs`:
+`get_pred_context_switchable_interp_matches_c` 60k+ configs + the `read_mb_interp_filter`
+round-trip). The `!interp_needed` branch (set_default_interp_filters) is currently dead
+(motion_mode is always SIMPLE in-envelope) — it is the WARPED_CAUSAL seam for chunk 5
+(a WARPED_CAUSAL block reads NO interp symbol; per C's `read_inter_block_mode_info`
+order, motion_mode is read at :1422 BEFORE interp at :1481, so the OBMC/WARP chunk must
+thread its `motion_mode` in ABOVE the interp read and gate `interp_needed`).
+
+STEP-0 census of the switchable target `av1-1-b8-01-size-16x66` frame 1 (single LAST
+throughout): mi(0,0) 16x16 NEWMV SIMPLE → switchable read (SHARP,SHARP); mi(4,0)
+WARPED_CAUSAL → no interp symbol; mi(8,0..3) 16x4 SIMPLE → EIGHTTAP; mi(12,0)/(16,0)
+OBMC_CAUSAL → **dual** filter (fy=SHARP, fx=EIGHTTAP). The census also corrects the
+plan: frame 1 is **TX_MODE_SELECT** (var-tx), so full decode needs var-tx AND OBMC
+(chunk 4) AND WARP (chunk 5) — the port's inter envelope hard-asserts LARGEST tx / SIMPLE
+motion, so it cannot yet parse frame 1 in isolation. Gate:
+`inter_ratchet.rs::inter_ratchet_16x66_switchable_interp_frame1` — SELF-PROMOTING
+(frame-0 KEY byte-exact anchor + frame-1 pinned on the current inter-envelope guard,
+auto-flips to the golden `9d7759bc…` byte-match when var-tx + OBMC + WARP land).
+Regressions green: `inter_walking_skeleton` + `inter_ratchet` (16x16/64x66) +
+`real_bitstream` (15/15).
