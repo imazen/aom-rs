@@ -213,6 +213,12 @@ pub struct InterLeafResult {
     pub best_tx_type: usize,
     pub best_eob: u16,
     pub best_txb_ctx: u8,
+    /// `get_txb_ctx`'s pair for the WINNING type, from the pre-write neighbour
+    /// contexts (the same pair the rate used). The coded-bytes writer re-derives
+    /// its own pair from the PERSISTENT arrays at the tokenize read point
+    /// (KB-6's write-ctx root) — these are the SEARCH-side values.
+    pub txb_skip_ctx: usize,
+    pub dc_sign_ctx: usize,
     pub rate: i32,
     pub dist: i64,
     pub sse: i64,
@@ -472,6 +478,8 @@ pub fn search_tx_type_inter(
                 best_tx_type: tx_type,
                 best_eob: res.eob,
                 best_txb_ctx: res.txb_entropy_ctx,
+                txb_skip_ctx: res.txb_skip_ctx,
+                dc_sign_ctx: res.dc_sign_ctx,
                 rate: rate_cost,
                 dist,
                 sse,
@@ -1238,4 +1246,290 @@ pub fn pick_recursive_tx_size_type_yrd(env: &VarTxEnv, ref_best_rd: i64) -> VarT
         };
     }
     res
+}
+
+// ===========================================================================
+// Inter/intrabc CHROMA — `av1_txfm_uvrd` (tx_search.c:3696) + the
+// `av1_txfm_rd_in_plane` (:3751) / `block_rd_txfm` (:3065) walk, inter arm.
+//
+// Chroma for an inter block is UNIFORM tx (one `av1_get_max_uv_txsize`, no
+// var-tx quadtree — `encode_block_inter`'s `plane ? av1_get_max_uv_txsize(..)`
+// short-circuit at encodemb.c:495-505) and searches NO tx types: the type is
+// INHERITED from the co-located luma txb (`av1_get_tx_type`, blockd.h:1296-1301)
+// and pinned by `get_tx_mask`'s `if (plane)` arm.
+// ===========================================================================
+
+/// One chroma txb's coded state (the pack + re-encode input).
+#[derive(Clone, Debug)]
+pub struct InterUvLeaf {
+    /// Chroma 4x4-unit position within the chroma plane block.
+    pub blk_row: usize,
+    pub blk_col: usize,
+    pub tx_type: usize,
+    pub eob: u16,
+    pub txb_ctx: u8,
+    pub txb_skip_ctx: usize,
+    pub dc_sign_ctx: usize,
+    pub qcoeff: Vec<i32>,
+    pub dqcoeff: Vec<i32>,
+}
+
+/// Inputs for [`txfm_uvrd_inter`]. `pred`/`src` are the two chroma planes
+/// (index 0 = U, 1 = V); `pred` is the intrabc DV copy that
+/// `av1_enc_build_inter_predictor` (rdopt.c:3601) already wrote.
+pub struct InterUvEnv<'a> {
+    /// `get_plane_block_size(bsize, ss_x, ss_y)` — the CHROMA plane bsize
+    /// (`get_txb_ctx` / `av1_get_entropy_contexts` operate on this).
+    pub plane_bsize: usize,
+    /// `av1_get_max_uv_txsize(bsize, ss_x, ss_y)` — uniform across the block.
+    pub uv_tx_size: usize,
+    /// Chroma 4x4 units, frame-visible-clipped (`max_block_wide/high`).
+    pub max_blocks_wide: usize,
+    pub max_blocks_high: usize,
+    pub ss_x: usize,
+    pub ss_y: usize,
+    /// Chroma prediction + source planes, U then V. `pred` is contiguous with
+    /// stride `pred_stride`; `src` is the frame plane read at `src_off`.
+    pub pred: [&'a [u16]; 2],
+    pub pred_stride: usize,
+    pub src: [&'a [u16]; 2],
+    pub src_off: usize,
+    pub src_stride: usize,
+    /// The block-local LUMA `xd->tx_type_map` (stride `tx_type_map_stride`,
+    /// luma 4x4 units) the var-tx search produced — chroma reads it at the
+    /// subsampling-scaled-back position.
+    pub tx_type_map: &'a [u8],
+    pub tx_type_map_stride: usize,
+    pub rows: [&'a aom_dsp::quant::PlaneQuantRows<'a>; 2],
+    /// The chroma (PLANE_TYPE_UV) coefficient cost set.
+    pub coeff_costs: &'a CoeffCostSet,
+    pub tx_type_costs: &'a TxTypeCosts,
+    /// Chroma neighbour entropy contexts (U, V), `av1_get_entropy_contexts`.
+    pub above_ctx: [&'a [i8]; 2],
+    pub left_ctx: [&'a [i8]; 2],
+    pub lossless: bool,
+    pub reduced_tx_set_used: bool,
+    pub enable_flip_idtx: bool,
+    pub use_inter_dct_only: bool,
+    pub bd: u8,
+    pub rdmult: i32,
+    pub sharpness: i32,
+    pub iq_tuning: bool,
+    pub coeff_opt_dist_threshold: u32,
+    pub adaptive_txb_search_level: i32,
+    /// Per-plane QM levels (U, V).
+    pub qm_level: [Option<usize>; 2],
+}
+
+/// The chroma RD outcome (`rd_stats_uv`) plus the per-plane coded txbs.
+pub struct InterUvResult {
+    pub rate: i32,
+    pub dist: i64,
+    pub sse: i64,
+    /// `rd_stats_uv->skip_txfm` — EOB-based: 1 iff EVERY U and V txb has
+    /// `eob == 0` (`this_rd_stats.skip_txfm &= !eobs[block]`, tx_search.c:3126,
+    /// AND-reduced by `av1_merge_rd_stats`). NOT an SSE threshold.
+    pub skip_txfm: bool,
+    pub u: Vec<InterUvLeaf>,
+    pub v: Vec<InterUvLeaf>,
+}
+
+/// `av1_get_tx_type(xd, PLANE_TYPE_UV, blk_row, blk_col, tx_size, reduced)`
+/// (blockd.h:1283-1315) for an INTER block: DCT_DCT at lossless / `sqr_up >
+/// TX_32X32`, else the co-located LUMA map entry at the subsampling-scaled-back
+/// position, falling back to DCT_DCT when that type is not in the chroma tx set.
+pub fn uv_tx_type_inter(
+    tx_size: usize,
+    lossless: bool,
+    reduced_tx_set_used: bool,
+    tx_type_map: &[u8],
+    tx_type_map_stride: usize,
+    blk_row: usize,
+    blk_col: usize,
+    ss_x: usize,
+    ss_y: usize,
+) -> usize {
+    if lossless || TXSIZE_SQR_UP_MAP[tx_size] > 3 {
+        return 0; // DCT_DCT
+    }
+    // "scale back to y plane's coordinate" (blockd.h:1299-1300).
+    let lr = blk_row << ss_y;
+    let lc = blk_col << ss_x;
+    let idx = lr * tx_type_map_stride + lc;
+    let tx_type = tx_type_map.get(idx).copied().unwrap_or(0) as usize;
+    // `if (!av1_ext_tx_used[tx_set_type][tx_type]) tx_type = DCT_DCT`, with the
+    // set taken at `is_inter_block(mbmi)` = true.
+    let d = aom_dsp::txb::ext_tx_derive(tx_size, true, reduced_tx_set_used, tx_type, false, 0, 0);
+    if d.used == 0 { 0 } else { tx_type }
+}
+
+/// `av1_txfm_uvrd` (tx_search.c:3696), INTER arm. Returns `None` for C's
+/// `is_cost_valid = 0` (invalid rd stats).
+///
+/// `perform_best_rd_based_gating_for_chroma` is 0 at speed-0 ALLINTRA
+/// (`init_inter_sf`, speed_features.c:2391; only raised at GOOD speed >= 3,
+/// :1311) so `chroma_ref_best_rd` stays `ref_best_rd` — and for intrabc
+/// `ref_best_rd` is INT64_MAX anyway (rdopt.c:3611), making every early exit
+/// here inert.
+pub fn txfm_uvrd_inter(env: &InterUvEnv, ref_best_rd: i64) -> Option<InterUvResult> {
+    if ref_best_rd < 0 {
+        return None;
+    }
+    let tx_size = env.uv_tx_size;
+    let txwu = TX_SIZE_WIDE_UNIT[tx_size];
+    let txhu = TX_SIZE_HIGH_UNIT[tx_size];
+    let (txw, txh) = (TXS_W[tx_size], TXS_H[tx_size]);
+
+    let mut rate: i32 = 0;
+    let mut dist: i64 = 0;
+    let mut sse: i64 = 0;
+    let mut skip_txfm = true;
+    let mut out: [Vec<InterUvLeaf>; 2] = [Vec::new(), Vec::new()];
+
+    for plane_ix in 0..2usize {
+        let plane = plane_ix + 1;
+        // av1_get_entropy_contexts: working copies, stamped per txb.
+        let mut ta: Vec<i8> = env.above_ctx[plane_ix].to_vec();
+        let mut tl: Vec<i8> = env.left_ctx[plane_ix].to_vec();
+        // `current_rd` accumulates per txb; `best_rd - current_rd` is the leaf
+        // budget (block_rd_txfm, tx_search.c:3108).
+        let mut current_rd: i64 = 0;
+
+        let mut blk_row = 0usize;
+        while blk_row < env.max_blocks_high {
+            let mut blk_col = 0usize;
+            while blk_col < env.max_blocks_wide {
+                // Visible extent of this txb (partial at the frame edge).
+                let visible_cols = (env.max_blocks_wide - blk_col).min(txwu) * 4;
+                let visible_rows = (env.max_blocks_high - blk_row).min(txhu) * 4;
+                let visible_cols = visible_cols.min(txw);
+                let visible_rows = visible_rows.min(txh);
+
+                // av1_subtract_plane already ran on the whole plane; extract
+                // this txb's residual from (pred, src).
+                let poff = (4 * blk_row) * env.pred_stride + 4 * blk_col;
+                let soff = env.src_off + (4 * blk_row) * env.src_stride + 4 * blk_col;
+                let mut residual = vec![0i16; txw * txh];
+                let mut pred_txb = vec![0u16; txw * txh];
+                for r in 0..txh {
+                    for c in 0..txw {
+                        let p = env.pred[plane_ix][poff + r * env.pred_stride + c];
+                        let s = env.src[plane_ix][soff + r * env.src_stride + c];
+                        pred_txb[r * txw + c] = p;
+                        residual[r * txw + c] = (i32::from(s) - i32::from(p)) as i16;
+                    }
+                }
+
+                let uv_tt = uv_tx_type_inter(
+                    tx_size,
+                    env.lossless,
+                    env.reduced_tx_set_used,
+                    env.tx_type_map,
+                    env.tx_type_map_stride,
+                    blk_row,
+                    blk_col,
+                    env.ss_x,
+                    env.ss_y,
+                );
+
+                let bctx = BlockContext {
+                    above: &ta[blk_col..],
+                    left: &tl[blk_row..],
+                    plane,
+                    plane_bsize: env.plane_bsize,
+                };
+                let tables = env.coeff_costs.tables(tx_size);
+                let inp = InterLeafInputs {
+                    forced_uv_tx_type: Some(uv_tt),
+                    residual: &residual,
+                    pred: &pred_txb,
+                    src: env.src[plane_ix],
+                    src_off: soff,
+                    src_stride: env.src_stride,
+                    tx_size,
+                    lossless: env.lossless,
+                    reduced_tx_set_used: env.reduced_tx_set_used,
+                    enable_flip_idtx: env.enable_flip_idtx,
+                    use_inter_dct_only: env.use_inter_dct_only,
+                    bd: env.bd,
+                    rows: env.rows[plane_ix],
+                    bctx: &bctx,
+                    rdmult: env.rdmult,
+                    coeff_costs: &tables,
+                    tx_type_costs: env.tx_type_costs,
+                    visible_cols,
+                    visible_rows,
+                    qm_level: env.qm_level[plane_ix],
+                    prune_2d: false,
+                };
+                let leaf_budget = if ref_best_rd == i64::MAX {
+                    i64::MAX
+                } else {
+                    ref_best_rd - current_rd
+                };
+                let r = search_tx_type_inter(
+                    &inp,
+                    env.sharpness,
+                    env.iq_tuning,
+                    env.coeff_opt_dist_threshold,
+                    env.adaptive_txb_search_level,
+                    leaf_budget,
+                )?;
+
+                // av1_set_txb_context (full txb footprint).
+                let ent = r.best_txb_ctx as i8;
+                let (a_end, l_end) = ((blk_col + txwu).min(ta.len()), (blk_row + txhu).min(tl.len()));
+                for a in ta[blk_col..a_end].iter_mut() {
+                    *a = ent;
+                }
+                for l in tl[blk_row..l_end].iter_mut() {
+                    *l = ent;
+                }
+
+                // Inter arm (tx_search.c:3120-3127).
+                let no_skip_rd = rdcost(env.rdmult, r.rate, r.dist);
+                let skip_rd = rdcost(env.rdmult, 0, r.sse);
+                current_rd += no_skip_rd.min(skip_rd);
+                skip_txfm &= r.best_eob == 0;
+
+                rate = rate.saturating_add(r.rate);
+                dist += r.dist;
+                sse += r.sse;
+
+                out[plane_ix].push(InterUvLeaf {
+                    blk_row,
+                    blk_col,
+                    tx_type: r.best_tx_type,
+                    eob: r.best_eob,
+                    txb_ctx: r.best_txb_ctx,
+                    txb_skip_ctx: r.txb_skip_ctx,
+                    dc_sign_ctx: r.dc_sign_ctx,
+                    qcoeff: r.qcoeff,
+                    dqcoeff: r.dqcoeff,
+                });
+
+                blk_col += txwu;
+            }
+            blk_row += txhu;
+        }
+
+        // Per-plane early exit (tx_search.c:3735-3741) — inert at INT64_MAX.
+        if ref_best_rd != i64::MAX {
+            let this_rd = rdcost(env.rdmult, rate, dist);
+            let skip_rd = rdcost(env.rdmult, 0, sse);
+            if this_rd.min(skip_rd) > ref_best_rd {
+                return None;
+            }
+        }
+    }
+
+    let [u, v] = out;
+    Some(InterUvResult {
+        rate,
+        dist,
+        sse,
+        skip_txfm,
+        u,
+        v,
+    })
 }
