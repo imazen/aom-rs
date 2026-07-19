@@ -580,6 +580,51 @@ fn split_subsize(bsize: usize) -> usize {
 ///   into the second walk's re-quant input, and a skip-winning txb (non-DCT
 ///   winner, eob 0) re-quantized as DCT_DCT with eob > 0 — the KB-4
 ///   bd10/bd12 mono coded-eob divergence.
+/// `encode_superblock`'s inter-path CfL luma store (partition_search.c:580-583,
+/// `!CONFIG_REALTIME_ONLY`):
+/// `if (is_inter_block(mbmi) && !xd->is_chroma_ref && is_cfl_allowed(xd))
+///  cfl_store_block(xd, mbmi->bsize, mbmi->tx_size);`
+///
+/// `is_inter_block` is TRUE for intra-block-copy (blockd.h:372:
+/// `is_intrabc_block(mbmi) || ref_frame[0] > INTRA_FRAME`), so on a
+/// screen-content frame an intrabc block that is NOT a chroma reference must
+/// still publish its reconstructed luma to the CfL buffer — the later
+/// chroma-reference sibling covering that luma reads it when it evaluates
+/// `UV_CFL_PRED`. The intra path never reaches here (an intra non-chroma-ref
+/// block stores per-txb inside the plane-0 walk, via `store_cfl_required`'s
+/// `!is_chroma_ref => CFL_ALLOWED` arm), which is why this site was previously
+/// documented as dead — true until the intrabc arm landed.
+fn cfl_store_block_for_inter(
+    env: &SbEncodeEnv,
+    cfl: &mut aom_dsp::intra::cfl::CflCtx,
+    recon_y: &[u16],
+    ref_off_y: usize,
+    winner: &LeafWinner,
+    mi_row: i32,
+    mi_col: i32,
+) {
+    let bsize = winner.bsize;
+    let is_chroma_ref = is_chroma_reference(mi_row, mi_col, bsize, env.ss_x, env.ss_y);
+    if env.monochrome
+        || is_chroma_ref
+        || !aom_dsp::entropy::partition::is_cfl_allowed(bsize, env.lossless, env.ss_x, env.ss_y)
+    {
+        return;
+    }
+    aom_dsp::intra::cfl::cfl_store_block(
+        cfl,
+        recon_y,
+        ref_off_y,
+        env.stride,
+        bsize,
+        winner.tx_size,
+        mi_row,
+        mi_col,
+        env.mi_rows,
+        env.mi_cols,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn encode_b_intra_dry(
     env: &SbEncodeEnv,
@@ -635,7 +680,7 @@ pub fn encode_b_intra_dry(
         //     recurses on `inter_tx_size`, chroma is uniform; both reconstruct
         //     into the recon planes and stamp the real entropy contexts.
         if !winner.skip_txfm {
-            return encode_b_intrabc_coeff(
+            let out = encode_b_intrabc_coeff(
                 env,
                 state,
                 recon_y,
@@ -647,6 +692,8 @@ pub fn encode_b_intra_dry(
                 is_chroma_ref,
                 output_enabled,
             );
+            cfl_store_block_for_inter(env, cfl, recon_y, ref_off_y, winner, mi_row, mi_col);
+            return out;
         }
 
         // Reset luma coeff entropy context (skip → cul 0).
@@ -690,6 +737,8 @@ pub fn encode_b_intra_dry(
         // set_txfm_ctxs skip convention: ctx = block width/height in pixels.
         state.above_tctx[a0..a0 + mi_w].fill((mi_w * 4) as u8);
         state.left_tctx[l0..l0 + mi_h].fill((mi_h * 4) as u8);
+
+        cfl_store_block_for_inter(env, cfl, recon_y, ref_off_y, winner, mi_row, mi_col);
 
         return LeafEncodeOut {
             mi_row,

@@ -974,6 +974,14 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   never evaluates because a speed-feature prune killed it; the port under-prunes). Consumer:
   `prune_ab_partitions` / `predict_ab_partition_prune` (ab_nn_prune.rs) + the rect/split prunes.
   Shared-root candidate (AB / rect / split pruning at speed 1..4), NOT scattered RD noise.
+- **NOT the KB-15 root (checked 2026-07-19, do not conflate).** KB-15's "intra RD is slightly
+  cheap" residual root-caused to a MISSING `intrabc_cost[0]` on every intra leaf
+  (`intra_mode_info_cost_y`, intra_mode_search_utils.h:563-564 — see KB-15's four-roots block).
+  That term is gated on `av1_allow_intrabc(cm)`, which is **0 for every KB-13 cell** (decoded
+  photographic content ⇒ `allow_screen_content_tools = 0`), so it is structurally inert here.
+  Empirical confirmation: all four KB-15 fixes left this gate's 36 DIFF pins asserting
+  divergence and its 24 MATCH cells byte-exact (suite 340/340 unchanged). KB-13's own
+  hypothesis below still stands.
 - **Tracking:** task **#39**. Next: sibling-C RD/prune dump at a representative 16X16 node (the
   KB-3/KB-7 method) to find which prune C applies that the port doesn't; graduate the cells it closes.
 
@@ -1158,10 +1166,86 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
     C — 3411 low (0.008%)**. So the residual belongs to the **KB-2 / KB-6 speed-0 partition/mode
     near-tie family (KB-13 is the speed≥1 analogue), a SEPARATE root** — at the divergent site the
     intrabc DV search, the DV validity, the coeff arm and the var-tx pack all match C.
-  - **NEXT CONCRETE STEP:** chase the intra-side 3411-unit gap at mi(38,4) BLOCK_8X8 (and the
-    BLOCK_16X8 parent's VERT_4-vs-AB assembly) with the same instrumented-sibling-C method —
-    dump C's per-candidate intra RD at that node and diff against the port's. Do NOT re-open the
-    intrabc arm for it.
+  - **THE INTRA-SIDE RESIDUAL — FOUR ROOTS FOUND AND FIXED 2026-07-19.** Method: a byte-inert
+    instrumented sibling C (`/root/intra-rd-instr`, throwaway, removed) dumping (a) every
+    `pick_sb_modes` leaf's incoming budget + rate/dist/rdcost/mode/ibc/skip/tx, (b) every
+    `av1_rd_pick_partition` node's chosen partition + best_rdc, and (c)
+    `av1_rd_pick_intra_mode_sb`'s luma/chroma split (`rate_y`/`rate_uv`/`dist_y`/`dist_uv`,
+    filter-intra, tx_type, CfL alpha). **Byte-inertness was verified on every rebuild** — the
+    instrumented binary reproduces the clean build's stream byte-for-byte (1891-byte frame OBU).
+    The KB's "3411 low" number decomposes as **exactly 6 rate units** at this cell's
+    rdmult (291065). The roots (in the order they were found):
+    1. **`rd_pick.rs` — the intra-budget early exit SKIPPED the intrabc search.**
+       `av1_rd_pick_intra_mode_sb` (rdopt.c:3680-3690) sets `rd_cost->rate = INT_MAX` when
+       `intra_yrd >= best_rd` and skips the uv search + assembly, but it does **not return**:
+       `rd_pick_intrabc_mode_sb` still runs, with `best_rd` left at the INCOMING budget (the
+       `best_rd = rd_cost->rdcost` tightening at :3686 is gated on `rate != INT_MAX`), and
+       `RD_STATS best_rdstats = *rd_stats` (:3491) carries that INT_MAX in so a winning DV
+       overwrites the whole tuple — the `assert(rd_cost->rate != INT_MAX)` at :3690 exists
+       precisely for this rescue. The port returned early, dropping the intrabc candidate on
+       exactly the leaves intrabc exists for (badly intra-predicted = repeated content).
+       Measured at the divergent BLOCK_8X8 mi(38,4): C's VERT sub-1 at mi(38,5) is rescued by
+       intrabc, the port's bailed → VERT lost → the port took NONE (the 8×8 intrabc block).
+       Effect: first differing byte **1038 → 1120**.
+    2. **`partition_pick.rs` — `skip_ctx` hardcoded 0.** `av1_get_skip_txfm_context` is
+       `above->skip_txfm + left->skip_txfm`; `pick_sb_modes` zeroes `mbmi->skip_txfm`
+       (partition_search.c:910) and the intra path never sets it, so ctx is identically 0 on a
+       pure-intra KEY frame — the invariant the hardcode encoded. It BREAKS under intrabc: a
+       skip-arm intrabc block has `skip_txfm = 1` (`set_skip_txfm`, tx_search.c:254), so its
+       neighbours owe the dearer `skip_txfm_cost[1..2][0]`. Now read from the live DV grid
+       (which already carries the per-mi `skip_txfm` projection). Byte-inert without a DV grid.
+    3. **`partition_pick.rs` — `allow_intrabc: false` hardcoded in the leaf mode-cost cfg, so
+       `intra_mode_info_cost_y` never added `intrabc_cost[use_intrabc]`
+       (intra_mode_search_utils.h:563-564).** On an intrabc frame EVERY intra luma candidate pays
+       the `use_intrabc = 0` flag (`write_intra_frame_mode_info` writes it for every block), so
+       every intra leaf's luma rate was **35 units too CHEAP** on this cell while the PACK still
+       wrote the flag — a systematic under-cost of the whole intra side against the intrabc arm
+       and against every partition assembled from more leaves. **This is the measured root of the
+       "intra RD comes out slightly cheap" signature.** Verified at the first divergent node
+       mi(44,20) BLOCK_16X16: port luma rate 131946 → **131981 == C's 131981** exactly (chroma
+       already matched at 2897, and after the fix `rate`/`rytok`/`mode`/`tx_size`/`tx_type`/
+       filter-intra/CfL-alpha ALL match C to the unit).
+    4. **`encode_sb.rs` + `aom-dsp/src/intra/cfl.rs` — `cfl_store_block` was unported.**
+       `encode_superblock` (partition_search.c:580-583) runs `if (is_inter_block(mbmi) &&
+       !xd->is_chroma_ref && is_cfl_allowed(xd)) cfl_store_block(xd, mbmi->bsize, mbmi->tx_size);`
+       and **`is_inter_block` is TRUE for intrabc** (blockd.h:372). So an intrabc block that is not
+       a chroma reference must still publish its reconstructed luma to the CfL buffer for the later
+       chroma-reference sibling covering it. The port's own docs called this site "dead for intra"
+       — TRUE until the intrabc arm landed, FALSE after. Without it, a CfL chroma-ref block whose
+       luma footprint contains an intrabc sibling predicted from a STALE luma buffer. Found
+       statistically: of 995 leaves where port and C agree on winner+rates, 985 had identical
+       distortion and **all 10 divergences were `UV_CFL_PRED`**, 9 of them chroma-only and every
+       delta a multiple of 16 (i.e. real SSE). The fix closed the 3 earliest — exactly the ones
+       with a coded intrabc block inside their CfL luma footprint. `cfl_store_block` +
+       `get_tx_size` are now ported (frame-edge clip via `max_block_wide/high` + align-up, then
+       one synthetic tx). The intrabc SKIP arm's `mbmi->tx_size` was also corrected to
+       `max_txsize_rect_lookup[bsize]` per `set_skip_txfm` (previously the dead intra winner's
+       size; now live because `cfl_store_block` reads it for the edge alignment).
+  - **SHARED-ROOT HYPOTHESIS: REFUTED (do not re-chase).** The "intra RD is slightly cheap"
+    signature is shared across KB-15 / KB-13 / KB-10 / KB-11 / KB-12 / KB-P29, but the ROOT is
+    not. Root 3 — the only one that is a systematic intra under-cost — is gated on
+    `av1_allow_intrabc(cm)` and is therefore **structurally zero** on every other member:
+    KB-13's cells are decoded photographic content (`allow_screen_content_tools = 0`), KB-10/11/12
+    are synthetic noise/diag (non-screen), and the KB-P29 palette gate runs
+    `enable_intrabc = 0`. Empirically confirmed: the full encode+bench suite is 340/340 both
+    before and after all four fixes, and every one of those entries' pins **asserts DIVERGENCE**
+    — a flip to MATCH would have failed the pin. So KB-13 keeps its own hypothesis (a speed>=1
+    prune C applies that the port does not) and KB-10/11/12/P29 keep theirs.
+  - **REMAINING RESIDUAL — ONE first-order leaf, precisely located (NOT yet fixed).** After the
+    four roots the witness is `port 1902B vs c 1891B, first differing byte 1120`. Of the 7
+    remaining CfL distortion divergences, 6 are downstream of mi(44,20) (they sit in the 32×32
+    quadrant coded after it, so their inputs genuinely differ). The one first-order case is
+    **mi(44,20) BLOCK_16X16**: port and C agree EXACTLY on `rate_y` (131981), `rate_uv` (2897),
+    `rate_tokenonly` (129456), mode (DC_PRED), angle_delta, `tx_size` (TX_16X16), `tx_type[0]`
+    (IDTX), filter-intra (`use_filter_intra=1, mode=2`), uv_mode (UV_CFL_PRED) and CfL alpha
+    (idx 16 / signs 4) — but **`dist_y` is 417353 vs C's 410535 and `dist_uv` 40432 vs 47088**.
+    Both sides' `dist_y` are ODD, so this is transform-domain distortion (`av1_block_error(coeff,
+    dqcoeff)`), not `16 * sse`: identical QUANTIZED coefficients (hence identical rate) with a
+    slightly different pre-quantization residual. **⇒ the port's intra PREDICTION at this leaf
+    differs slightly from C's**, i.e. an upstream recon pixel in its above row / left column
+    differs. Next step: dump the port's and C's 16×16 prediction block (and the neighbour row/col
+    it reads) at mi(44,20) and diff pixel-for-pixel; do NOT re-chase the rate side, the mode
+    search, or the CfL alpha — all four are proven identical at that leaf.
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 

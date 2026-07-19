@@ -488,3 +488,83 @@ pub fn cfl_predict_block(
         TX_H[tx_size],
     );
 }
+
+/// `get_tx_size(width, height)` (av1_common_int.h:1710) — the TX_SIZE whose
+/// dimensions are exactly `(width, height)`; squares clamp 128 to `TX_64X64`
+/// via `get_sqr_tx_size`. Used by [`cfl_store_block`], which synthesises a
+/// single "transform" covering the whole (edge-clipped) luma block.
+fn get_tx_size(width: usize, height: usize) -> usize {
+    if width == height {
+        // get_sqr_tx_size (av1_common_int.h:1690).
+        return match width {
+            128 | 64 => 4, // TX_64X64
+            32 => 3,
+            16 => 2,
+            8 => 1,
+            _ => 0, // TX_4X4
+        };
+    }
+    for t in 0..19usize {
+        if TX_W[t] == width && TX_H[t] == height {
+            return t;
+        }
+    }
+    debug_assert!(false, "get_tx_size: no TX_SIZE for {width}x{height}");
+    0
+}
+
+/// `cfl_store_block` (cfl.c:421) — store a WHOLE block's reconstructed luma
+/// into the CfL buffer in one call, as C does for **inter (and intra-block-copy)
+/// blocks that are not a chroma reference**: `encode_superblock`
+/// (partition_search.c:580-583) runs
+/// `if (is_inter_block(mbmi) && !xd->is_chroma_ref && is_cfl_allowed(xd))
+///  cfl_store_block(xd, mbmi->bsize, mbmi->tx_size);`
+/// so that the later chroma-reference sibling covering this luma can still
+/// predict with CfL. The intra path never needs it — an intra non-chroma-ref
+/// block stores per-txb inside the plane-0 encode walk via
+/// `store_cfl_required`'s `!is_chroma_ref => CFL_ALLOWED` arm.
+///
+/// `luma`/`block_off`/`stride` address the block-origin luma pixels
+/// (C's `pd->dst.buf`). `mi_cols`/`mi_rows` give the frame-edge clip
+/// (`max_intra_block_width/height` → `max_block_wide/high`, which subtract
+/// `mb_to_right_edge`/`mb_to_bottom_edge` when negative); the clipped extent is
+/// then aligned UP to the block's transform dimensions, exactly as C does,
+/// before being collapsed to one synthetic `get_tx_size`.
+#[allow(clippy::too_many_arguments)]
+pub fn cfl_store_block(
+    cfl: &mut CflCtx,
+    luma: &[u16],
+    block_off: usize,
+    stride: usize,
+    bsize: usize,
+    tx_size: usize,
+    mi_row: i32,
+    mi_col: i32,
+    mi_rows: i32,
+    mi_cols: i32,
+) {
+    let (mut row, mut col) = (0i32, 0i32);
+    if BLK_H[bsize] == 4 || BLK_W[bsize] == 4 {
+        sub8x8_adjust_offset(cfl, mi_row, mi_col, &mut row, &mut col);
+    }
+    // max_block_wide/high (blockd.h) for PLANE 0 (no chroma subsampling), in
+    // 4x4 units, then back to pixels: `max_blocks >> MI_SIZE_LOG2 << MI_SIZE_LOG2`.
+    let bw_mi = BLK_W[bsize] >> 2;
+    let bh_mi = BLK_H[bsize] >> 2;
+    let mb_to_right = (mi_cols - bw_mi - mi_col) * 32; // MI_SIZE(4) * 8
+    let mb_to_bottom = (mi_rows - bh_mi - mi_row) * 32;
+    let mut wide_px = BLK_W[bsize];
+    let mut high_px = BLK_H[bsize];
+    if mb_to_right < 0 {
+        wide_px += mb_to_right >> 3; // plane 0: subsampling_x == 0
+    }
+    if mb_to_bottom < 0 {
+        high_px += mb_to_bottom >> 3;
+    }
+    // ALIGN_POWER_OF_TWO(max_block_* << MI_SIZE_LOG2, tx_size_*_log2[tx_size]).
+    let align_up = |v: i32, to: i32| -> i32 { (v + to - 1) & !(to - 1) };
+    let width = align_up((wide_px >> 2) << 2, TX_W[tx_size] as i32);
+    let height = align_up((high_px >> 2) << 2, TX_H[tx_size] as i32);
+    let store_tx = get_tx_size(width as usize, height as usize);
+    cfl_store(cfl, luma, block_off, stride, row, col, store_tx);
+}

@@ -135,6 +135,31 @@ fn intrabc_dv_search_pinned() {
                 first_diff,
                 c_frame.len()
             );
+            // REGRESSION FLOOR (tightens as roots land; never relaxed).
+            // Every byte before `first_diff` is byte-identical to real aomenc,
+            // so `first_diff` only moves FORWARD as the port gets more correct.
+            // Landed roots and where they put it:
+            //   646  — coeff arm wired end-to-end (2026-07-19)
+            //   1038 — unclamped DV tile bounds (`434b865d`)
+            //   1120 — the four intra-RD roots: the intrabc rescue on the
+            //          intra-budget miss, `skip_ctx` from the DV grid, the
+            //          missing `intrabc_cost[0]` on every intra leaf, and
+            //          `cfl_store_block` for inter/intrabc non-chroma-ref
+            //          blocks.
+            // A DROP below the floor means a landed root was undone — that is a
+            // regression, not a near-tie. (This is a strengthening, not a
+            // weakening: the pin above still requires divergence, and the
+            // correct end state is full byte-identity, which fails the pin and
+            // promotes the cell.)
+            const FIRST_DIFF_FLOOR: usize = 1120;
+            assert!(
+                first_diff >= FIRST_DIFF_FLOOR,
+                "{}: first differing byte REGRESSED to {} (floor {}) — a landed \
+                 intrabc/intra-RD root was undone; see KB-15",
+                cell.label,
+                first_diff,
+                FIRST_DIFF_FLOOR
+            );
             // Decode BOTH streams and report the first block whose coded
             // mode-info differs — the actionable half of the pin. Everything
             // before it is byte-exact, so the divergence is AT this block.

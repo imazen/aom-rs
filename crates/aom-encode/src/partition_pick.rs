@@ -1497,10 +1497,14 @@ fn leaf_pick_sb_modes(
                 // dead there. Inert for the intrabc pack (`write_tx_size_vartx`
                 // reads `inter_tx_size`, chroma derives from bsize), carried for
                 // mbmi faithfulness.
-                tx_size: if best.use_intrabc && !best.skip_txfm {
-                    best.inter_tx_size[0]
-                } else {
-                    best.y.tx_size
+                tx_size: match (best.use_intrabc, best.skip_txfm) {
+                    (true, false) => best.inter_tx_size[0],
+                    // `set_skip_txfm` (tx_search.c:250-253) stamps
+                    // `mbmi->tx_size = max_txsize_rect_lookup[bsize]` on the
+                    // skip arm — the intra winner's own size is dead there.
+                    // Read by `cfl_store_block`'s edge alignment.
+                    (true, true) => crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[bsize],
+                    (false, _) => best.y.tx_size,
                 },
                 luma_edge_filter_type,
                 uv_mode: if best.use_intrabc { 0 } else { uv_mode },

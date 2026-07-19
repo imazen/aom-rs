@@ -1,3 +1,62 @@
+## KB-15 intra-side residual: FOUR roots found + fixed; the shared-root hypothesis is REFUTED (2026-07-19, encoder track)
+
+The KB-15 witness's remaining divergence was framed as "the port's intra RD comes out slightly
+cheap" — a signature shared with KB-13 / KB-10 / KB-11 / KB-12 / KB-P29. **It is four separate,
+concrete roots, and the shared-root hypothesis is refuted:** the one root that IS a systematic
+intra under-cost is gated on `av1_allow_intrabc(cm)` and is structurally zero on every other
+member of the family.
+
+**Method (the KB-2/KB-3/KB-7 pattern).** A throwaway instrumented sibling C at
+`/root/intra-rd-instr` (copied out of the pinned `upstream/` submodule, never touching it;
+removed afterwards, submodule re-verified clean at `03087864`) dumping per-leaf `pick_sb_modes`
+RD + budget, per-node `av1_rd_pick_partition` choice, and `av1_rd_pick_intra_mode_sb`'s
+luma/chroma split. **Byte-inertness re-verified on every rebuild** — the instrumented binary
+reproduces the clean build's stream byte-for-byte (1891-byte frame OBU, `cmp` clean). The port
+side got a matching env-gated dump (removed before landing).
+
+**The four roots** (full detail in CLAUDE.md KB-15):
+1. `rd_pick.rs` — the intra-budget early exit skipped `rd_pick_intrabc_mode_sb` entirely. C
+   (rdopt.c:3680-3690) sets `rate = INT_MAX` but does NOT return; the intrabc search still runs
+   against the incoming budget and can rescue the leaf. First divergence 1038 → 1120.
+2. `partition_pick.rs` — `skip_ctx` hardcoded 0. Correct for pure intra, wrong once intrabc
+   skip-arm neighbours (`skip_txfm = 1`) exist. Now read from the live DV grid.
+3. `partition_pick.rs` — `allow_intrabc: false` hardcoded, so `intra_mode_info_cost_y` never
+   added `intrabc_cost[0]`. **Every** intra leaf's luma rate was 35 units cheap on this cell
+   while the pack still wrote the flag. This is the measured root of the "3411 low" residual
+   (3411 rd = exactly 6 rate units at rdmult 291065). Verified: the port's luma rate at the
+   first divergent node went 131946 → 131981 == C's 131981 exactly.
+4. `encode_sb.rs` + `aom-dsp/src/intra/cfl.rs` — `cfl_store_block` (partition_search.c:580-583)
+   was unported. `is_inter_block` is TRUE for intrabc, so an intrabc non-chroma-ref block must
+   publish its luma to the CfL buffer for the chroma-ref sibling covering it. Found
+   statistically: of 995 leaves where port and C agree on winner + rates, 985 had identical
+   distortion and **all 10 divergences were `UV_CFL_PRED`** (9 chroma-only, every delta a
+   multiple of 16 = real SSE). The fix closed the 3 earliest — exactly the ones with a coded
+   intrabc block inside their CfL luma footprint.
+
+**Shared-root verdict — REFUTED, measured not assumed.** Root 3 is the only systematic intra
+under-cost, and `av1_allow_intrabc(cm)` is 0 for every other family member: KB-13 is decoded
+photographic content (`allow_screen_content_tools = 0`), KB-10/11/12 are synthetic non-screen,
+and the KB-P29 palette gate runs `enable_intrabc = 0`. Empirical proof: the full encode+bench
+suite is **340/340 before and after all four fixes**, and each of those entries pins its cells
+as DIVERGENT — any flip to MATCH would have failed the pin. Those entries keep their own
+hypotheses.
+
+**Residual (honest).** The witness still PINS: `port 1902B vs c 1891B, first differing byte
+1120`. Six of the seven remaining CfL distortion divergences are downstream of mi(44,20). The
+one first-order case is mi(44,20) BLOCK_16X16, where port and C agree EXACTLY on rate_y,
+rate_uv, rate_tokenonly, mode, angle_delta, tx_size, tx_type, filter-intra mode and CfL alpha,
+but `dist_y` is 417353 vs 410535. Both are ODD ⇒ transform-domain distortion ⇒ identical
+QUANTIZED coefficients with a slightly different pre-quantization residual ⇒ **the port's intra
+prediction at that leaf differs slightly from C's**. Next step is a pixel-for-pixel diff of the
+prediction block and the neighbour row/column it reads; the rate side, mode search and CfL alpha
+are proven identical there and must not be re-chased.
+
+**Gate.** `rd_close_intrabc::intrabc_dv_search_pinned` keeps its self-promoting pin and gains a
+**regression floor**: `first_diff >= 1120`. Every byte before it is byte-identical to real
+aomenc, so the floor only moves forward as roots land; a drop means a landed root was undone.
+This is a strengthening — the pin still requires divergence, and full byte-identity fails the
+pin and promotes the cell.
+
 ## INTER-ENCODE chunk 2 (2f pack): the P-frame payload is BYTE-EXACT — single-block (2026-07-19, encoder track)
 
 First byte-identity claim on the inter ENCODE side. Commits `41ac27f` (inter cost tables +
