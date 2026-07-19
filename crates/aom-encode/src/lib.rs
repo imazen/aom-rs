@@ -48,6 +48,7 @@ pub mod speed_features;
 pub mod superres_select;
 pub mod tx_search;
 pub mod var_part;
+pub mod var_tx;
 
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;
