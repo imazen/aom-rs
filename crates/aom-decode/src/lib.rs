@@ -605,6 +605,15 @@ pub struct DecodedBlockKf {
     pub tx_size: usize,
     pub txbs: Vec<(usize, usize)>,
     pub txbs_uv: Vec<(usize, usize)>,
+    /// Loop-filter mode-info the INTER path carries out-of-band (the intra
+    /// `info` fields don't describe an inter block): `Some((ref_frame[0], mode))`
+    /// for an inter block, `None` for intra/intrabc. C's `av1_loop_filter_frame`
+    /// reads `ref_frame[0]`, `is_inter_block`, and `mode_lf_lut[mode]` per block
+    /// to pick the per-block filter level (`ref_deltas`/`mode_deltas`) and the
+    /// `skip_txfm && is_inter` boundary-skip decision; for an inter block those
+    /// come from here, for intra/intrabc from `info` (ref0 = INTRA_FRAME,
+    /// is_inter = `use_intrabc`, mode = `y_mode`).
+    pub inter_lf: Option<(i32, i32)>,
 }
 
 /// A decoded KEY-frame tile: the reconstruction planes (superblock-aligned;
@@ -2789,6 +2798,21 @@ impl<'c> TileKf<'c> {
                             let d = self.mi_dv[((mi_row + row) * cols + (mi_col + col)) as usize];
                             (d.mv0_row, d.mv0_col)
                         };
+                        // Per-plane clamp for this covered sub-block (C's sub8x8
+                        // predictor runs dec_calc_subpel_params per b4 with the
+                        // block's shared luma edges + the b4 dims).
+                        let (smv_r, smv_c) = clamp_mv_to_umv_border_plane(
+                            smv_r,
+                            smv_c,
+                            mi_row,
+                            mi_col,
+                            bsize,
+                            b4_w as i32,
+                            b4_h as i32,
+                            ss_x,
+                            ss_y,
+                            &cfg,
+                        );
                         let bxu = uv_org_x + x;
                         let byu = uv_org_y + y;
                         let doff = byu * self.stride_uv + bxu;
@@ -2824,6 +2848,23 @@ impl<'c> TileKf<'c> {
             } else {
                 let bw_uv = bw_px >> ss_x;
                 let bh_uv = bh_px >> ss_y;
+                // Per-plane MV clamp (clamp_mv_to_umv_border_sb with the CHROMA
+                // subsampling): C re-clamps the RAW block MV against chroma-scaled
+                // edges + the chroma prediction dims (decodeframe.c:625). Reusing
+                // the luma clamp (`cmv_*`) is wrong once the clamp fires — the
+                // chroma bounds differ (edges * (1<<(1-ss)), spel from `bw_uv`).
+                let (cmv_row_uv, cmv_col_uv) = clamp_mv_to_umv_border_plane(
+                    mv_row,
+                    mv_col,
+                    mi_row,
+                    mi_col,
+                    bsize,
+                    bw_uv as i32,
+                    bh_uv as i32,
+                    ss_x,
+                    ss_y,
+                    &cfg,
+                );
                 let doff = uv_org_y * self.stride_uv + uv_org_x;
                 // Chroma warp only when the (subsampled) plane block is >= 8 in both
                 // dims (av1_init_warp_params); otherwise translational.
@@ -2852,6 +2893,9 @@ impl<'c> TileKf<'c> {
                         );
                     }
                 } else {
+                    // Translational chroma MC uses the PER-PLANE clamped MV
+                    // (cmv_*_uv), not the luma-clamped cmv_* — see the
+                    // clamp_mv_to_umv_border_plane call above.
                     for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
                         aom_inter::build_inter_predictor(
                             src,
@@ -2865,8 +2909,8 @@ impl<'c> TileKf<'c> {
                             uv_org_y,
                             bw_uv,
                             bh_uv,
-                            cmv_row,
-                            cmv_col,
+                            cmv_row_uv,
+                            cmv_col_uv,
                             ss_x,
                             ss_y,
                             filter_x,
@@ -3143,6 +3187,9 @@ impl<'c> TileKf<'c> {
             tx_size,
             txbs: Vec::new(),
             txbs_uv: Vec::new(),
+            // Inter block: carry ref_frame[0] + mode for the loop-filter grid
+            // (build_lf_inputs derives is_inter/ref/mode_lf from this).
+            inter_lf: Some((ref0, mode)),
         });
     }
 
@@ -4405,6 +4452,9 @@ impl<'c> TileKf<'c> {
             tx_size,
             txbs,
             txbs_uv,
+            // Intra/intrabc block: the loop-filter grid derives ref/is_inter/
+            // mode from `info` (ref0 = INTRA_FRAME, is_inter = use_intrabc).
+            inter_lf: None,
         });
     }
 
@@ -4700,26 +4750,39 @@ pub fn decode_frame_tiles_inter(
     t.into_decode()
 }
 
-/// `clamp_mv_to_umv_border_sb` (reconinter.h:343) in the LUMA (`ss = 0`) domain,
-/// returning a 1/8-pel MV. C clamps per plane in q4 (`mv * 2`); the q4 limits
-/// are always even, so the luma clamp is exact in 1/8-pel and
-/// [`aom_inter::build_inter_predictor`] rescales it per plane. This is exact
-/// whenever the clamp does NOT fire (every `01-size-*` target, whose MVs stay
-/// well within the frame + interp border); an MV large enough to clamp
-/// *differently* per plane (chroma uses `ss = 1` limits) is later-chunk work.
-fn clamp_mv_to_umv_border(
+/// `clamp_mv_to_umv_border_sb` (reconinter.h:343), the general **per-plane** form.
+/// C applies this once per plane in `dec_calc_subpel_params` (decodeframe.c:611/625)
+/// with the plane's `subsampling_x`/`subsampling_y` and the plane prediction dims
+/// `bw`/`bh` (`= inter_pred_params->block_{width,height}` = `xd->plane[p].{width,
+/// height}`, plane pixels): it scales the MV **and** the (luma-domain 1/8-pel)
+/// block edges by `1 << (1 - ss)` before clamping, using a `spel` margin computed
+/// from the plane dims. The returned `MV mv_q4` is in the plane's q4 (1/16-plane-
+/// pel) grid.
+///
+/// This port keeps the MV in 1/8-pel-luma units and lets
+/// [`aom_inter::build_inter_predictor`] re-apply the `1 << (1 - ss)` plane scaling,
+/// so this returns `mv_q4 / (1 << (1 - ss))` (division is exact: for `ss = 0` the
+/// q4 value is even — the edge/spel terms are multiples of 16 — and for `ss = 1`
+/// the scale is 1). `mb_to_*` are the CURRENT block's luma edges (mi_row/mi_col/
+/// bsize), shared by every plane; `bw`/`bh` are this plane's prediction dims.
+#[allow(clippy::too_many_arguments)]
+fn clamp_mv_to_umv_border_plane(
     mv_row: i32,
     mv_col: i32,
     mi_row: i32,
     mi_col: i32,
     bsize: usize,
+    bw: i32,
+    bh: i32,
+    ss_x: usize,
+    ss_y: usize,
     cfg: &KfTileConfig,
 ) -> (i32, i32) {
     const AOM_INTERP_EXTEND: i32 = 4;
     const SUBPEL_BITS: i32 = 4;
     const SUBPEL_SHIFTS: i32 = 16;
-    let bw = MI_SIZE_WIDE[bsize] * 4;
-    let bh = MI_SIZE_HIGH[bsize] * 4;
+    let sx = 1i32 << (1 - ss_x as i32);
+    let sy = 1i32 << (1 - ss_y as i32);
     let mb_to_left = -(mi_col * 4 * 8);
     let mb_to_right = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 4 * 8;
     let mb_to_top = -(mi_row * 4 * 8);
@@ -4728,13 +4791,31 @@ fn clamp_mv_to_umv_border(
     let spel_right = spel_left - SUBPEL_SHIFTS;
     let spel_top = (AOM_INTERP_EXTEND + bh) << SUBPEL_BITS;
     let spel_bottom = spel_top - SUBPEL_SHIFTS;
-    let col_min = mb_to_left * 2 - spel_left;
-    let col_max = mb_to_right * 2 + spel_right;
-    let row_min = mb_to_top * 2 - spel_top;
-    let row_max = mb_to_bottom * 2 + spel_bottom;
-    let cq4 = (mv_col * 2).clamp(col_min, col_max);
-    let rq4 = (mv_row * 2).clamp(row_min, row_max);
-    (rq4 / 2, cq4 / 2)
+    let col_min = mb_to_left * sx - spel_left;
+    let col_max = mb_to_right * sx + spel_right;
+    let row_min = mb_to_top * sy - spel_top;
+    let row_max = mb_to_bottom * sy + spel_bottom;
+    let cq4 = (mv_col * sx).clamp(col_min, col_max);
+    let rq4 = (mv_row * sy).clamp(row_min, row_max);
+    (rq4 / sy, cq4 / sx)
+}
+
+/// `clamp_mv_to_umv_border_sb` (reconinter.h:343) in the LUMA (`ss = 0`) domain —
+/// a thin wrapper over [`clamp_mv_to_umv_border_plane`] with the luma plane dims
+/// (`block_size_{wide,high}[bsize]`). Returns a 1/8-pel MV. The q4 limits are
+/// always even, so the luma clamp is exact in 1/8-pel and
+/// [`aom_inter::build_inter_predictor`] rescales it per plane.
+fn clamp_mv_to_umv_border(
+    mv_row: i32,
+    mv_col: i32,
+    mi_row: i32,
+    mi_col: i32,
+    bsize: usize,
+    cfg: &KfTileConfig,
+) -> (i32, i32) {
+    let bw = MI_SIZE_WIDE[bsize] * 4;
+    let bh = MI_SIZE_HIGH[bsize] * 4;
+    clamp_mv_to_umv_border_plane(mv_row, mv_col, mi_row, mi_col, bsize, bw, bh, 0, 0, cfg)
 }
 
 // ===================================================================

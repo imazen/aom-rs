@@ -1324,13 +1324,28 @@ pub fn build_lf_inputs(
     let mi_cols = cfg.mi_cols as usize;
     let mut mi = vec![LfMi::default(); mi_rows * mi_cols];
     for b in &t.blocks {
+        // C's per-block loop-filter mode-info: `ref_frame[0]`, `is_inter_block`,
+        // and `mode_lf_lut[mode]`. For an INTER block these come from `inter_lf`
+        // (carried out-of-band — `info` describes only intra fields); for
+        // intra/intrabc they come from `info` (ref0 = INTRA_FRAME, is_inter =
+        // `use_intrabc`, mode = `y_mode`). Getting this wrong for inter blocks
+        // desyncs the chroma filter level (ref/mode deltas) and the
+        // `skip_txfm && is_inter` boundary-skip decision.
+        let (ref0, is_inter, mode_lf) = match b.inter_lf {
+            Some((r, m)) => (r as u8, true, MODE_LF_LUT[m as usize]),
+            None => (
+                0,
+                b.info.use_intrabc != 0,
+                MODE_LF_LUT[b.info.y_mode as usize],
+            ),
+        };
         let cell = LfMi {
             bsize: b.bsize as u8,
             tx_size: b.tx_size as u8,
             segment_id: b.info.segment_id as u8,
-            ref0: 0, // INTRA_FRAME
-            mode_lf: MODE_LF_LUT[b.info.y_mode as usize],
-            is_inter: b.info.use_intrabc != 0,
+            ref0,
+            mode_lf,
+            is_inter,
             skip_txfm: b.info.skip != 0,
             delta_lf_from_base: b.info.delta_lf_from_base as i8,
             delta_lf: [

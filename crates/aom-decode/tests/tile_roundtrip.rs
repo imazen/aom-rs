@@ -1364,6 +1364,7 @@ impl<'a> Mirror<'a> {
             tx_size,
             txbs,
             txbs_uv,
+            inter_lf: None,
         });
     }
 

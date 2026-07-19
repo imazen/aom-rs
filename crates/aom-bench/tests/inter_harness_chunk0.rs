@@ -331,7 +331,14 @@ fn chunk0_decoder_inter_envelope_report_bounds_chunk2() {
         "\n=== port inter-decoder envelope on aomenc's simplest-config P (4:2:0 64x64, dx=3, cq60, cdef/lr off) ==="
     );
     println!("cpu | frame0 KEY | frame1 P (port-decode vs C)");
-    let mut cpu0_chroma_pinned = false;
+    // BYTE-EXACT GATE (was a pinned-divergence probe): the port inter decoder now
+    // decodes aomenc's simplest-config P byte-exact at EVERY cpu level, luma AND
+    // chroma. The former cpu-0/3/4/6 chroma (and cpu-1 luma) ± divergences were
+    // the loop-filter grid treating inter blocks as intra (`build_lf_inputs`
+    // hardcoded ref_frame[0]=INTRA_FRAME + is_inter=use_intrabc-only), so the
+    // per-block deblock level/skip decision was wrong for inter blocks — fixed by
+    // carrying `ref_frame[0]`/mode/is_inter into the LF grid (DecodedBlockKf::
+    // inter_lf). Any future frame-1 divergence here is a regression, NOT a probe.
     for cpu in 0..=6 {
         let base = textured_base(&format!("tex_420_64_cpu{cpu}"), 64, 64, false, 60, cpu);
         let cell = MultiFrameEncodeCell::translational(&base, 3, 0);
@@ -355,33 +362,15 @@ fn chunk0_decoder_inter_envelope_report_bounds_chunk2() {
         };
         println!("{cpu:>3} | exact      | {verdict}");
 
-        // cpu=0 is documented to diverge in CHROMA (probed); assert the
-        // localizer PINS it (frame 1, a real divergence) — proves the tool works
-        // on genuine bitstream divergence, not just synthetic corruption.
-        if cpu == 0 {
-            match &div {
-                Some(Divergence::Sample { frame, plane, .. }) => {
-                    assert_eq!(*frame, 1, "cpu0 divergence must be on frame 1 (the P)");
-                    assert!(
-                        matches!(plane, Plane::U | Plane::V),
-                        "cpu0 divergence is in chroma; got plane {plane}"
-                    );
-                    cpu0_chroma_pinned = true;
-                }
-                other => panic!(
-                    "cpu0: expected the localizer to pin the known chroma divergence, got {other:?}"
-                ),
-            }
-        }
+        // Frame 1 (the P) must be byte-exact too — luma AND chroma — at every cpu.
+        assert_eq!(
+            div, None,
+            "cpu{cpu}: frame 1 (P) diverged from the C decode — {verdict}"
+        );
     }
-    assert!(
-        cpu0_chroma_pinned,
-        "localizer failed to pin the cpu0 chroma divergence"
-    );
     println!(
-        "FINDING: the port INTER DECODER decodes aomenc's simplest-config P byte-exact in LUMA and \n\
-         fully byte-exact at some cpu levels, but CHROMA inter reconstruction diverges (small ±) at \n\
-         cpu 0/others. This is a DECODER-track gap (aom-decode/aom-inter), and it BOUNDS the chunk-2 \n\
-         target: the encoder can be decode-both-verified byte-exact only where the decoder is."
+        "FINDING: the port INTER DECODER decodes aomenc's simplest-config P BYTE-EXACT at every \n\
+         cpu 0..6 (luma AND chroma). The former chroma/luma ± divergences were the loop-filter grid \n\
+         mislabelling inter blocks as intra; fixed by threading ref/mode/is_inter into the LF grid."
     );
 }
