@@ -16,8 +16,14 @@
 //! inter_predictor` here only checks the wiring (no panics, zero-MV == plain copy,
 //! frame-edge MVs stay in range).
 
-use aom_inter::{build_inter_predictor, build_mc_border, inter_predictor};
-use aom_sys_ref::{ref_build_mc_border, ref_inter_predictor};
+use aom_inter::{
+    blend_a64_hmask, blend_a64_vmask, build_inter_predictor, build_mc_border, get_obmc_mask,
+    inter_predictor,
+};
+use aom_sys_ref::{
+    ref_blend_a64_hmask, ref_blend_a64_vmask, ref_build_mc_border, ref_get_obmc_mask,
+    ref_inter_predictor,
+};
 
 struct Rng(u64);
 impl Rng {
@@ -149,7 +155,17 @@ fn facade_4tap_matches_c() {
 
         let mut dst_port = vec![0u8; w * h];
         inter_predictor(
-            &src, src_off, stride, &mut dst_port, w, w, h, subpel_x, subpel_y, filter_x, filter_y,
+            &src,
+            src_off,
+            stride,
+            &mut dst_port,
+            w,
+            w,
+            h,
+            subpel_x,
+            subpel_y,
+            filter_x,
+            filter_y,
         );
         let dst_c = ref_inter_predictor(
             &src, src_off, stride, w, h, subpel_x, subpel_y, filter_x, filter_y,
@@ -300,6 +316,89 @@ fn smoke_build_inter_predictor() {
         );
         for &v in &dst {
             assert!(v <= 255, "lowbd predictor out of range: {v}");
+        }
+    }
+}
+
+// ===================================================================
+// OBMC (chunk 4) — mask table + A64 blend differentials vs real C.
+// ===================================================================
+
+/// `av1_get_obmc_mask` (reconinter.c:774): the port table byte-matches C for
+/// every legal overlap length.
+#[test]
+fn obmc_mask_matches_c() {
+    for &len in &[1usize, 2, 4, 8, 16, 32, 64] {
+        let port = get_obmc_mask(len);
+        let c = ref_get_obmc_mask(len);
+        assert_eq!(port, &c[..], "av1_get_obmc_mask({len}) diverges");
+    }
+}
+
+/// `aom_blend_a64_vmask_c` / `aom_blend_a64_hmask_c`: the OBMC A64 blends
+/// byte-match C across random pixels + random masks AND the real OBMC feather
+/// masks, over the power-of-two shapes OBMC uses (`aom_blend_a64_*mask` asserts
+/// `IS_POWER_OF_TWO(w)` / `(h)`). The port operates in-place (`src0 == dst`, as
+/// the OBMC caller does); the reference computes it out-of-place from the same
+/// `src0`, so agreement locks the identical arithmetic.
+#[test]
+fn blend_a64_masks_match_c() {
+    let mut rng = Rng(0x0b3c_a55e_11d0_7a41);
+    // Power-of-two block shapes (bw x bh) OBMC exercises.
+    let shapes: &[(usize, usize)] = &[
+        (8, 4),
+        (4, 8),
+        (8, 8),
+        (16, 4),
+        (4, 16),
+        (16, 8),
+        (32, 16),
+        (16, 32),
+        (64, 32),
+        (32, 64),
+        (4, 4),
+        (2, 2),
+    ];
+    for &(w, h) in shapes {
+        for iter in 0..40 {
+            let src0: Vec<u8> = (0..w * h).map(|_| rng.byte()).collect();
+            let src1: Vec<u8> = (0..w * h).map(|_| rng.byte()).collect();
+
+            // --- vmask (per-row mask, length h) ---
+            // On even iterations use the real OBMC feather mask for `h`; else a
+            // random 0..=64 mask (A64 alpha range).
+            let vmask: Vec<u8> = if iter % 2 == 0 {
+                get_obmc_mask(h).to_vec()
+            } else {
+                (0..h).map(|_| rng.below(65) as u8).collect()
+            };
+            let mut port_v: Vec<u16> = src0.iter().map(|&b| b as u16).collect();
+            let src1_v: Vec<u16> = src1.iter().map(|&b| b as u16).collect();
+            blend_a64_vmask(&mut port_v, 0, w, &src1_v, 0, w, &vmask, w, h);
+            let c_v = ref_blend_a64_vmask(&src0, &src1, &vmask, w, h);
+            for i in 0..w * h {
+                assert_eq!(
+                    port_v[i], c_v[i] as u16,
+                    "vmask diverges at {i} (w={w} h={h} iter={iter})"
+                );
+            }
+
+            // --- hmask (per-column mask, length w) ---
+            let hmask: Vec<u8> = if iter % 2 == 0 {
+                get_obmc_mask(w).to_vec()
+            } else {
+                (0..w).map(|_| rng.below(65) as u8).collect()
+            };
+            let mut port_h: Vec<u16> = src0.iter().map(|&b| b as u16).collect();
+            let src1_h: Vec<u16> = src1.iter().map(|&b| b as u16).collect();
+            blend_a64_hmask(&mut port_h, 0, w, &src1_h, 0, w, &hmask, w, h);
+            let c_h = ref_blend_a64_hmask(&src0, &src1, &hmask, w, h);
+            for i in 0..w * h {
+                assert_eq!(
+                    port_h[i], c_h[i] as u16,
+                    "hmask diverges at {i} (w={w} h={h} iter={iter})"
+                );
+            }
         }
     }
 }

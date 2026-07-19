@@ -527,3 +527,119 @@ pub fn build_inter_predictor(
         }
     }
 }
+
+// ===================================================================
+// OBMC (overlapped block motion compensation) — mask tables + blend.
+// ===================================================================
+//
+// After a block's own inter predictor is built, an `OBMC_CAUSAL` block blends
+// it with predictors generated from its overlappable above/left neighbours'
+// motion (each neighbour's strip MC uses the existing [`build_inter_predictor`]
+// with the NEIGHBOUR's mv/ref/filter). The blend is a raised-cosine feather:
+// the block's own predictor dominates far from the neighbour edge and the
+// neighbour's predictor near it. Ported from `av1/common/reconinter.c`:
+// `obmc_mask_{1,2,4,8,16,32,64}` (:751-782), `av1_get_obmc_mask` (:774), and the
+// `aom_blend_a64_vmask` (above) / `aom_blend_a64_hmask` (left) blends
+// (`aom_dsp/blend_a64_{v,h}mask.c`) used by `build_obmc_inter_pred_{above,left}`
+// (:852/:891). Differentially locked in `tests/inter_pred_diff.rs`.
+
+// obmc_mask_N[overlap_position] (reconinter.c:751-782).
+static OBMC_MASK_1: [u8; 1] = [64];
+static OBMC_MASK_2: [u8; 2] = [45, 64];
+static OBMC_MASK_4: [u8; 4] = [39, 50, 59, 64];
+static OBMC_MASK_8: [u8; 8] = [36, 42, 48, 53, 57, 61, 64, 64];
+static OBMC_MASK_16: [u8; 16] = [
+    34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64,
+];
+static OBMC_MASK_32: [u8; 32] = [
+    33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55, 56, 57, 58, 59, 60, 60, 61, 62,
+    64, 64, 64, 64, 64, 64, 64, 64,
+];
+static OBMC_MASK_64: [u8; 64] = [
+    33, 34, 35, 35, 36, 37, 38, 39, 40, 40, 41, 42, 43, 44, 44, 44, 45, 46, 47, 47, 48, 49, 50, 51,
+    51, 51, 52, 52, 53, 54, 55, 56, 56, 56, 57, 57, 58, 58, 59, 60, 60, 60, 60, 60, 61, 62, 62, 62,
+    62, 62, 63, 63, 63, 63, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+];
+
+/// `av1_get_obmc_mask` (reconinter.c:774): the raised-cosine OBMC feather mask
+/// for an overlap length of `length` (a power of two in `1..=64`).
+pub fn get_obmc_mask(length: usize) -> &'static [u8] {
+    match length {
+        1 => &OBMC_MASK_1,
+        2 => &OBMC_MASK_2,
+        4 => &OBMC_MASK_4,
+        8 => &OBMC_MASK_8,
+        16 => &OBMC_MASK_16,
+        32 => &OBMC_MASK_32,
+        64 => &OBMC_MASK_64,
+        _ => panic!("aom-inter: invalid OBMC mask length {length} (want a power of two 1..=64)"),
+    }
+}
+
+const AOM_BLEND_A64_ROUND_BITS: i32 = 6;
+const AOM_BLEND_A64_MAX_ALPHA: i32 = 1 << AOM_BLEND_A64_ROUND_BITS; // 64
+
+/// `AOM_BLEND_A64(m, v0, v1)` (aom_dsp/blend.h): `round(m*v0 + (64-m)*v1, 6)`.
+#[inline]
+fn blend_a64(m: i32, v0: u16, v1: u16) -> u16 {
+    rpo2(
+        m * v0 as i32 + (AOM_BLEND_A64_MAX_ALPHA - m) * v1 as i32,
+        AOM_BLEND_A64_ROUND_BITS,
+    ) as u16
+}
+
+/// `aom_blend_a64_vmask_c` (aom_dsp/blend_a64_vmask.c) — the **vertical** (per-row)
+/// mask blend used by OBMC's ABOVE neighbours (`build_obmc_inter_pred_above`,
+/// reconinter.c:852). In-place form: `src0 == dst` (the block's own predictor in
+/// the recon buffer), matching libaom's call
+/// `aom_blend_a64_vmask(dst, dst_stride, dst, dst_stride, tmp, tmp_stride, ...)`.
+/// Each output row `i` uses the scalar weight `mask[i]`:
+/// `dst = round(mask[i]*dst + (64-mask[i])*src1, 6)`. Planes are `u16` (bd8
+/// values `0..=255`); the arithmetic is byte-identical to C's `u8` kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn blend_a64_vmask(
+    dst: &mut [u16],
+    dst_off: usize,
+    dst_stride: usize,
+    src1: &[u16],
+    src1_off: usize,
+    src1_stride: usize,
+    mask: &[u8],
+    w: usize,
+    h: usize,
+) {
+    for i in 0..h {
+        let m = mask[i] as i32;
+        for j in 0..w {
+            let d = dst[dst_off + i * dst_stride + j];
+            let s1 = src1[src1_off + i * src1_stride + j];
+            dst[dst_off + i * dst_stride + j] = blend_a64(m, d, s1);
+        }
+    }
+}
+
+/// `aom_blend_a64_hmask_c` (aom_dsp/blend_a64_hmask.c) — the **horizontal**
+/// (per-column) mask blend used by OBMC's LEFT neighbours
+/// (`build_obmc_inter_pred_left`, reconinter.c:891). In-place form (`src0 == dst`).
+/// Each output column `j` uses the scalar weight `mask[j]`.
+#[allow(clippy::too_many_arguments)]
+pub fn blend_a64_hmask(
+    dst: &mut [u16],
+    dst_off: usize,
+    dst_stride: usize,
+    src1: &[u16],
+    src1_off: usize,
+    src1_stride: usize,
+    mask: &[u8],
+    w: usize,
+    h: usize,
+) {
+    for i in 0..h {
+        for j in 0..w {
+            let m = mask[j] as i32;
+            let d = dst[dst_off + i * dst_stride + j];
+            let s1 = src1[src1_off + i * src1_stride + j];
+            dst[dst_off + i * dst_stride + j] = blend_a64(m, d, s1);
+        }
+    }
+}

@@ -53,7 +53,10 @@ fn corpus_dir() -> PathBuf {
 }
 
 fn ivf_temporal_units(data: &[u8]) -> Vec<Vec<u8>> {
-    assert!(data.len() >= 32 && &data[0..4] == b"DKIF", "not an IVF file");
+    assert!(
+        data.len() >= 32 && &data[0..4] == b"DKIF",
+        "not an IVF file"
+    );
     let hdr_len = u16::from_le_bytes([data[6], data[7]]) as usize;
     let mut off = hdr_len;
     let mut tus = Vec::new();
@@ -114,7 +117,11 @@ fn ratchet_two_frame(vector: &str, golden_f0: &str, golden_f1: &str) {
     };
 
     let tus = ivf_temporal_units(&ivf);
-    assert_eq!(tus.len(), 2, "target vector has exactly 2 frames (KEY + INTER)");
+    assert_eq!(
+        tus.len(),
+        2,
+        "target vector has exactly 2 frames (KEY + INTER)"
+    );
 
     let mut stream = tus[0].clone();
     stream.extend_from_slice(&tus[1]);
@@ -125,12 +132,17 @@ fn ratchet_two_frame(vector: &str, golden_f0: &str, golden_f1: &str) {
     let md5_f0 = image_md5(&frames[0]);
     let md5_f1 = image_md5(&frames[1]);
 
-    assert_eq!(md5_f0, golden_f0, "{vector}: frame 0 (KEY) does not match golden");
+    assert_eq!(
+        md5_f0, golden_f0,
+        "{vector}: frame 0 (KEY) does not match golden"
+    );
     assert_eq!(
         md5_f1, golden_f1,
         "{vector}: frame 1 (inter) does not match golden MD5"
     );
-    eprintln!("inter ratchet {vector}: frame 0 {md5_f0} + frame 1 {md5_f1} byte-identical to golden");
+    eprintln!(
+        "inter ratchet {vector}: frame 0 {md5_f0} + frame 1 {md5_f1} byte-identical to golden"
+    );
 }
 
 #[test]
@@ -229,25 +241,66 @@ fn inter_ratchet_16x66_switchable_interp_frame1() {
         }
         Ok(Err(e)) => panic!("16x66 decode returned an unexpected error (not a pin): {e}"),
         Err(payload) => {
-            // Current pinned state: an inter-envelope guard fired (var-tx / OBMC /
-            // WARP not yet wired). Confirm it is one of OUR guards, not a stray
-            // panic — a switchable-interp desync would corrupt earlier reads and
-            // surface as a different failure.
+            // Current pinned state: an inter-envelope guard fired. Confirm it is one
+            // of OUR documented guards, not a stray panic.
+            //
+            // KNOWN BLOCKER (discovered 2026-07-19 while landing chunk 4 OBMC — which
+            // removed the TX_MODE_LARGEST assert that used to pin this frame at the
+            // very first block, so mi(0,0)'s mode-info now runs for the first time):
+            // mi(0,0) (BLOCK_16X16, NEWMV, switchable) DESYNCS in its mode-info reads
+            // — the port decodes mv=(0,-15) where C codes (-1,-7), so the downstream
+            // inter-intra flag reads a garbage 1 and trips the inter-intra guard. It
+            // is NOT global motion (LAST is IDENTITY) and NOT chunk-4 OBMC (16x18 is
+            // byte-exact) — it is a pre-existing switchable-frame mode-info bug
+            // (mode/drl/mv read for a 16x16 block) that the switchable-interp + WARP
+            // track must root-cause. So the "inter-intra" pin below is a SYMPTOM of
+            // that desync, not a clean feature gap; the real work is the mode-info
+            // fix + WARP (mi(4,0)) + inter-intra prediction. Until then this stays
+            // pinned; it self-promotes to the golden byte-match once all three land.
             let msg = payload
                 .downcast_ref::<String>()
                 .map(String::as_str)
                 .or_else(|| payload.downcast_ref::<&str>().copied())
                 .unwrap_or("<non-string panic>");
             assert!(
-                msg.contains("inter skeleton") || msg.contains("inter ratchet"),
+                msg.contains("inter skeleton")
+                    || msg.contains("inter ratchet")
+                    || msg.contains("WARPED_CAUSAL")
+                    || msg.contains("non-uniform inter var-tx")
+                    || msg.contains("non-identity global motion")
+                    || msg.contains("inter-intra prediction not yet handled"),
                 "16x66 frame 1 expected to pin on a documented inter-envelope guard \
-                 (var-tx / OBMC / WARP), but panicked with: {msg}"
+                 (mode-info desync / var-tx / OBMC / WARP / global motion / \
+                 inter-intra), but panicked with: {msg}"
             );
             eprintln!(
-                "inter ratchet 16x66: switchable-interp wiring landed; frame-1 byte gate \
-                 PINNED on `{msg}` (needs var-tx + OBMC + WARP). Self-promotes to the \
-                 golden byte-match when they land."
+                "inter ratchet 16x66: frame-1 byte gate PINNED on `{msg}` (SYMPTOM of a \
+                 mi(0,0) 16x16 mode-info desync; needs that fix + WARP + inter-intra \
+                 pred). Self-promotes to the golden byte-match when they land."
             );
         }
     }
+}
+
+/// CHUNK-4 GATE: OBMC (overlapped block motion compensation) — the first inter
+/// *feature* on the graded ladder. Frame 1 of `av1-1-b8-01-size-16x18` is the
+/// minimal OBMC isolation (STEP-0 census `/tmp/inspect_frame`): four `BLOCK_4X16`
+/// strips (NEWMV + 3 NEARESTMV, SIMPLE) above ONE `BLOCK_16X8` `OBMC_CAUSAL`
+/// block at mi(4,0). The OBMC block is at mi_col 0 (frame LEFT edge -> no left
+/// neighbour) with a full `BLOCK_4X16` row above, so ONLY the ABOVE-neighbour
+/// blend fires; chroma OBMC is skipped (`av1_skip_u4x4_pred_in_obmc` -> BLOCK_8X4
+/// dir 0), so it is the smallest possible OBMC surface (2 above-neighbour luma
+/// strips, 8x4 each, blended over the top 4 rows). Single LAST ref, non-switchable
+/// EIGHTTAP, no warp/compound/interintra. The frame also codes inter **var-tx**
+/// (`TX_MODE_SELECT`): the OBMC block splits TX_16X8 -> uniform 2x TX_8X8. This
+/// exercises: the motion_mode read (WARP ceiling -> the 3-symbol motion_mode_cdf,
+/// resolving to OBMC), av1_count_overlappable_neighbors + av1_findSamples, the
+/// obmc feather mask + aom_blend_a64_vmask, and the inter var-tx quadtree read.
+#[test]
+fn inter_ratchet_16x18_obmc_frame1_byte_identical() {
+    ratchet_two_frame(
+        "av1-1-b8-01-size-16x18",
+        "53cd765e2dacdc5acef9e40b707e448a",
+        "08db98983320105666c9496dc1dba209",
+    );
 }

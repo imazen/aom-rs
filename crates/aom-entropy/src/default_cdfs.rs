@@ -771,6 +771,13 @@ pub const DEFAULT_MOTION_MODE: [[u16; 4]; 22] = [
     [3026, 1565, 0, 0],
 ];
 
+/// `default_interintra_cdf[BLOCK_SIZE_GROUPS]` (CDF_SIZE(2)): the inter-intra
+/// flag, read (per `size_group_lookup[bsize]`) for an interintra-allowed inter
+/// block when `enable_interintra_compound`. Only the flag is wired (the target's
+/// blocks always code flag == 0); the mode / wedge sub-reads are a later chunk.
+pub const DEFAULT_INTERINTRA: [[u16; 3]; 4] =
+    [[16384, 0, 0], [5881, 0, 0], [5171, 0, 0], [2531, 0, 0]];
+
 /// `default_obmc_cdf[BLOCK_SIZES_ALL]`.
 pub const DEFAULT_OBMC: [[u16; 3]; 22] = [
     [16384, 0, 0],

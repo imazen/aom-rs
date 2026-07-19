@@ -844,6 +844,8 @@ fn decode_inter_tile_payload(
         enable_dual_filter: seq.seq_header.enable_dual_filter,
         allow_warped_motion: p.allow_warped_motion,
         skip_mode_allowed: p.skip_mode_allowed,
+        enable_interintra_compound: seq.seq_header.enable_interintra_compound,
+        gm_wmtype: std::array::from_fn(|i| p.global_motion[i].wmtype),
         order_hint: p.prefix.order_hint,
     };
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;

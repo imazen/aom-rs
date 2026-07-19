@@ -14348,3 +14348,85 @@ pub fn ref_select_samples(
     };
     ret as usize
 }
+
+// obmc_shim.c — OBMC feather mask + A64 blends (crate aom-inter, chunk 4).
+extern "C" {
+    fn shim_get_obmc_mask(length: i32) -> *const u8;
+    fn shim_blend_a64_vmask(
+        dst: *mut u8,
+        dst_stride: u32,
+        src0: *const u8,
+        src0_stride: u32,
+        src1: *const u8,
+        src1_stride: u32,
+        mask: *const u8,
+        w: i32,
+        h: i32,
+    );
+    fn shim_blend_a64_hmask(
+        dst: *mut u8,
+        dst_stride: u32,
+        src0: *const u8,
+        src0_stride: u32,
+        src1: *const u8,
+        src1_stride: u32,
+        mask: *const u8,
+        w: i32,
+        h: i32,
+    );
+}
+
+/// Reference libaom `av1_get_obmc_mask` (reconinter.c:774): the raised-cosine OBMC
+/// feather mask of `length` entries (`length` a power of two in `1..=64`).
+pub fn ref_get_obmc_mask(length: usize) -> Vec<u8> {
+    ref_init();
+    let p = unsafe { shim_get_obmc_mask(length as i32) };
+    assert!(!p.is_null(), "av1_get_obmc_mask({length}) returned NULL");
+    unsafe { std::slice::from_raw_parts(p, length) }.to_vec()
+}
+
+/// Reference libaom `aom_blend_a64_vmask_c` (aom_dsp/blend_a64_vmask.c): the
+/// per-row A64 blend. `dst = round(mask[row]*src0 + (64-mask[row])*src1, 6)` over
+/// a `w`×`h` region; each buffer is tightly packed (stride == its width). Returns
+/// the `w`×`h` output.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_blend_a64_vmask(src0: &[u8], src1: &[u8], mask: &[u8], w: usize, h: usize) -> Vec<u8> {
+    ref_init();
+    let mut dst = vec![0u8; w * h];
+    unsafe {
+        shim_blend_a64_vmask(
+            dst.as_mut_ptr(),
+            w as u32,
+            src0.as_ptr(),
+            w as u32,
+            src1.as_ptr(),
+            w as u32,
+            mask.as_ptr(),
+            w as i32,
+            h as i32,
+        )
+    }
+    dst
+}
+
+/// Reference libaom `aom_blend_a64_hmask_c` (aom_dsp/blend_a64_hmask.c): the
+/// per-column A64 blend. `dst = round(mask[col]*src0 + (64-mask[col])*src1, 6)`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_blend_a64_hmask(src0: &[u8], src1: &[u8], mask: &[u8], w: usize, h: usize) -> Vec<u8> {
+    ref_init();
+    let mut dst = vec![0u8; w * h];
+    unsafe {
+        shim_blend_a64_hmask(
+            dst.as_mut_ptr(),
+            w as u32,
+            src0.as_ptr(),
+            w as u32,
+            src1.as_ptr(),
+            w as u32,
+            mask.as_ptr(),
+            w as i32,
+            h as i32,
+        )
+    }
+    dst
+}

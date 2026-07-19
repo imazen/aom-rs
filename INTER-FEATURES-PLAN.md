@@ -1,5 +1,14 @@
 # Inter-decode feature ladder — chunk-4 plan (STEP-0 census)
 
+**✅ CHUNK 4 (OBMC) DONE** — `av1-1-b8-01-size-16x18` frame 1 byte-exact (md5
+`08db98983320105666c9496dc1dba209`), gated by
+`inter_ratchet.rs::inter_ratchet_16x18_obmc_frame1_byte_identical`. See
+`INTER-CHUNK1-HANDOFF.md` "Chunk 4 — OBMC". NOTE: the census below UNDER-STATED
+16x18 as "OBMC only" — it also codes **inter var-tx** (`TX_MODE_SELECT`; the OBMC
+block splits TX_16X8 → 2× TX_8X8) AND an **inter-intra flag** (coded 0 for the
+BLOCK_16X8 block, but the read is required for entropy sync). Both landed with OBMC.
+Next: chunk 5 = WARP (target 16x34).
+
 **Status as of chunk 3 (partial-edge single-ref):** byte-exact for
 `av1-1-b8-01-size-{64x64, 16x16, 64x66}` frame 1. The single-ref translational
 path — multi-block, residual-carrying, partial-SB (128-SB `BLOCK_64X128` clipped

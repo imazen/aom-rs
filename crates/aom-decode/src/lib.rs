@@ -709,6 +709,15 @@ pub struct InterFrameCfg<'r> {
     pub enable_dual_filter: bool,
     pub allow_warped_motion: bool,
     pub skip_mode_allowed: bool,
+    /// `seq_header.enable_interintra_compound`: gates the inter-intra flag read
+    /// on an interintra-allowed inter block.
+    pub enable_interintra_compound: bool,
+    /// Per-reference global-motion `wmtype` (`global_motion[ref].wmtype`;
+    /// `0 = IDENTITY`). The inter MV scan (`find_inter_mv_refs`) currently assumes
+    /// IDENTITY global motion (the base MV for a NEWMV/GLOBALMV block with an empty
+    /// ref-mv list); a non-identity ref is guarded (a later chunk — every target
+    /// through 16x18 is identity-GM).
+    pub gm_wmtype: [u8; 7],
     pub order_hint: i32,
 }
 
@@ -731,6 +740,14 @@ struct InterCdfs {
     switchable_interp: [[u16; 4]; 16],
     nmv_joints: [u16; 5],
     nmv_comps: [[u16; 69]; 2],
+    /// `obmc_cdf[BLOCK_SIZES_ALL]` (CDF_SIZE(2)): the 2-symbol OBMC-vs-SIMPLE
+    /// flag read when the motion-mode ceiling is `OBMC_CAUSAL`.
+    obmc: [[u16; 3]; 22],
+    /// `motion_mode_cdf[BLOCK_SIZES_ALL]` (CDF_SIZE(MOTION_MODES=3)): the
+    /// 3-symbol SIMPLE/OBMC/WARP mode read when the ceiling is `WARPED_CAUSAL`.
+    motion_mode: [[u16; 4]; 22],
+    /// `interintra_cdf[BLOCK_SIZE_GROUPS]` (CDF_SIZE(2)): the inter-intra flag.
+    interintra: [[u16; 3]; 4],
 }
 
 impl InterCdfs {
@@ -746,6 +763,9 @@ impl InterCdfs {
             switchable_interp: d::DEFAULT_SWITCHABLE_INTERP,
             nmv_joints: d::DEFAULT_NMV_JOINTS,
             nmv_comps: d::DEFAULT_NMV_COMPS,
+            obmc: d::DEFAULT_OBMC,
+            motion_mode: d::DEFAULT_MOTION_MODE,
+            interintra: d::DEFAULT_INTERINTRA,
         }
     }
 
@@ -1796,15 +1816,427 @@ impl<'c> TileKf<'c> {
         }
     }
 
+    /// `foreach_overlappable_nb_above` (obmc.h): walk the mi row above the block
+    /// across its width, stepping by each above-neighbour's mi width (a width-4
+    /// block is pair-adjusted to its chroma-carrying second half), collecting
+    /// inter (`is_neighbor_overlappable`) neighbours up to `nb_max`. Returns
+    /// `(rel_mi_col, op_mi_size, neighbour)` per hit.
+    fn overlappable_above(
+        &self,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: usize,
+        nb_max: i32,
+    ) -> Vec<(i32, i32, DvNbr)> {
+        let cols = self.cfg.mi_cols;
+        let mut out = Vec::new();
+        if mi_row <= self.tile.mi_row_start {
+            return out; // !up_available
+        }
+        // mi_size_wide[BLOCK_64X64] = 16.
+        const MI64: i32 = 16;
+        let width = MI_SIZE_WIDE[bsize];
+        let end_col = (mi_col + width).min(cols);
+        let mut amc = mi_col;
+        while amc < end_col && (out.len() as i32) < nb_max {
+            let d0 = self.mi_dv[((mi_row - 1) * cols + amc) as usize];
+            let mut mi_step = MI_SIZE_WIDE[d0.bsize].min(MI64);
+            let nb = if mi_step == 1 {
+                amc &= !1;
+                mi_step = 2;
+                self.mi_dv[((mi_row - 1) * cols + amc + 1) as usize]
+            } else {
+                d0
+            };
+            if nb.use_intrabc || nb.ref_frame0 > 0 {
+                out.push((amc - mi_col, width.min(mi_step), nb));
+            }
+            amc += mi_step;
+        }
+        out
+    }
+
+    /// `foreach_overlappable_nb_left` (obmc.h): the left-column twin of
+    /// [`Self::overlappable_above`]. Returns `(rel_mi_row, op_mi_size, neighbour)`.
+    fn overlappable_left(
+        &self,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: usize,
+        nb_max: i32,
+    ) -> Vec<(i32, i32, DvNbr)> {
+        let cols = self.cfg.mi_cols;
+        let mut out = Vec::new();
+        if mi_col <= self.tile.mi_col_start {
+            return out; // !left_available
+        }
+        const MI64: i32 = 16;
+        let height = MI_SIZE_HIGH[bsize];
+        let end_row = (mi_row + height).min(self.cfg.mi_rows);
+        let mut amr = mi_row;
+        while amr < end_row && (out.len() as i32) < nb_max {
+            let d0 = self.mi_dv[(amr * cols + mi_col - 1) as usize];
+            let mut mi_step = MI_SIZE_HIGH[d0.bsize].min(MI64);
+            let nb = if mi_step == 1 {
+                amr &= !1;
+                mi_step = 2;
+                self.mi_dv[((amr + 1) * cols + mi_col - 1) as usize]
+            } else {
+                d0
+            };
+            if nb.use_intrabc || nb.ref_frame0 > 0 {
+                out.push((amr - mi_row, height.min(mi_step), nb));
+            }
+            amr += mi_step;
+        }
+        out
+    }
+
+    /// `av1_count_overlappable_neighbors` (reconinter.c:801): whether the block
+    /// has any overlappable (inter) above/left neighbour — the OBMC/warp
+    /// motion-mode gate. Only `!= 0` is consulted by `motion_mode_allowed`.
+    fn has_overlappable_neighbors(&self, mi_row: i32, mi_col: i32, bsize: usize) -> bool {
+        if !is_motion_variation_allowed_bsize(bsize) {
+            return false;
+        }
+        if !self
+            .overlappable_above(mi_row, mi_col, bsize, i32::MAX)
+            .is_empty()
+        {
+            return true;
+        }
+        !self
+            .overlappable_left(mi_row, mi_col, bsize, i32::MAX)
+            .is_empty()
+    }
+
+    /// `av1_findSamples` (mvref_common.c:1118), count-only: the number of warp
+    /// projection samples = above/left/top-left neighbours whose single reference
+    /// matches `ref_frame` (`ref[0] == ref_frame && ref[1] == NONE`), capped at
+    /// `LEAST_SQUARES_SAMPLES_MAX = 8`. Feeds the `num_proj_ref >= 1` arm of the
+    /// motion-mode ceiling. The TOP-RIGHT scan (mvref_common.c:1223, gated by
+    /// `has_top_right`) is not ported: it only ADDS samples, so the ceiling's
+    /// `>= 1` test is unaffected whenever the above/left/top-left scan already
+    /// yields a sample — true for every OBMC block in the chunk-4 target (whose
+    /// OBMC block is at the frame's left+right edges, so its 4 samples all come
+    /// from the above scan). The exact count + `record_samples` for warp land
+    /// with chunk 5 (WARPED_CAUSAL).
+    fn num_proj_ref(&self, mi_row: i32, mi_col: i32, bsize: usize, ref_frame: i32) -> i32 {
+        const MAX: i32 = 8; // LEAST_SQUARES_SAMPLES_MAX
+        let cols = self.cfg.mi_cols;
+        let rows = self.cfg.mi_rows;
+        let up = mi_row > self.tile.mi_row_start;
+        let left = mi_col > self.tile.mi_col_start;
+        let width = MI_SIZE_WIDE[bsize];
+        let height = MI_SIZE_HIGH[bsize];
+        let matches = |d: &DvNbr| d.ref_frame0 == ref_frame && d.ref_frame1 == -1;
+        let mut np = 0i32;
+        let mut do_tl = true;
+
+        if up {
+            let d0 = self.mi_dv[((mi_row - 1) * cols + mi_col) as usize];
+            let sbw = MI_SIZE_WIDE[d0.bsize];
+            if width <= sbw {
+                let col_offset = (-mi_col) % sbw;
+                if col_offset < 0 {
+                    do_tl = false;
+                }
+                if matches(&d0) {
+                    np += 1;
+                    if np >= MAX {
+                        return MAX;
+                    }
+                }
+            } else {
+                let end = width.min(cols - mi_col);
+                let mut i = 0;
+                while i < end {
+                    let d = self.mi_dv[((mi_row - 1) * cols + mi_col + i) as usize];
+                    if matches(&d) {
+                        np += 1;
+                        if np >= MAX {
+                            return MAX;
+                        }
+                    }
+                    i += MI_SIZE_WIDE[d.bsize];
+                }
+            }
+        }
+
+        if left {
+            let d0 = self.mi_dv[(mi_row * cols + mi_col - 1) as usize];
+            let sbh = MI_SIZE_HIGH[d0.bsize];
+            if height <= sbh {
+                let row_offset = (-mi_row) % sbh;
+                if row_offset < 0 {
+                    do_tl = false;
+                }
+                if matches(&d0) {
+                    np += 1;
+                    if np >= MAX {
+                        return MAX;
+                    }
+                }
+            } else {
+                let end = height.min(rows - mi_row);
+                let mut i = 0;
+                while i < end {
+                    let d = self.mi_dv[((mi_row + i) * cols + mi_col - 1) as usize];
+                    if matches(&d) {
+                        np += 1;
+                        if np >= MAX {
+                            return MAX;
+                        }
+                    }
+                    i += MI_SIZE_HIGH[d.bsize];
+                }
+            }
+        }
+
+        if do_tl && left && up {
+            let d = self.mi_dv[((mi_row - 1) * cols + mi_col - 1) as usize];
+            if matches(&d) {
+                np += 1;
+                if np >= MAX {
+                    return MAX;
+                }
+            }
+        }
+        np
+    }
+
+    /// `motion_mode_allowed` (blockd.h:1477): the motion-mode ceiling given the
+    /// block's mode/refs and the frame's `allow_warped_motion`. Returns
+    /// `0 = SIMPLE_TRANSLATION`, `1 = OBMC_CAUSAL`, `2 = WARPED_CAUSAL`. Global
+    /// motion is identity here (`gm_type = IDENTITY`, not `> TRANSLATION`), so
+    /// `is_global_mv_block` is unconditionally false and its early-out is skipped.
+    fn motion_mode_ceiling(
+        &self,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: usize,
+        mode: i32,
+        ref0: i32,
+        ref1: i32,
+        inter: &InterFrameCfg,
+    ) -> i32 {
+        // NEARESTMV=13 .. NEWMV=16 are the single-ref inter modes.
+        const NEARESTMV: i32 = 13;
+        if !self.has_overlappable_neighbors(mi_row, mi_col, bsize) {
+            return 0;
+        }
+        let is_inter_mode = mode >= NEARESTMV;
+        // ref1 != INTRA_FRAME (0) and !has_second_ref (ref1 <= INTRA_FRAME).
+        if is_motion_variation_allowed_bsize(bsize) && is_inter_mode && ref1 < 0 {
+            let npr = self.num_proj_ref(mi_row, mi_col, bsize, ref0);
+            if npr >= 1 && inter.allow_warped_motion && !inter.cur_frame_force_integer_mv {
+                // && !av1_is_scaled: single unscaled LAST ref -> not scaled.
+                return 2; // WARPED_CAUSAL
+            }
+            return 1; // OBMC_CAUSAL
+        }
+        0
+    }
+
+    /// `dec_build_prediction_by_above_preds` + `av1_build_obmc_inter_prediction`
+    /// (ABOVE half), luma: for each overlappable above-neighbour, MC-predict a
+    /// narrow `op_mi_size*4`-wide × `overlap`-tall strip from the reference using
+    /// the NEIGHBOUR's mv/ref/filter, then feather-blend it into the block's own
+    /// predictor (already in `recon`) with the vertical OBMC mask. Chroma OBMC is
+    /// skipped here (`av1_skip_u4x4_pred_in_obmc` returns 1 for a `<= 8x8`
+    /// chroma-plane block in the ABOVE direction — true for this target's
+    /// BLOCK_16X8 -> BLOCK_8X4 chroma); a chroma-carrying above-OBMC block is a
+    /// later target and is asserted-guarded.
+    fn obmc_above_blend(
+        &mut self,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: usize,
+        inter: &InterFrameCfg,
+        nb_filter_x: usize,
+        nb_filter_y: usize,
+    ) {
+        let (ss_x, ss_y) = (self.cfg.subsampling_x, self.cfg.subsampling_y);
+        // Chroma above-OBMC must be skipped for this envelope (hard-guarded so a
+        // block that WOULD blend chroma — e.g. BLOCK_16X16+ at 4:2:0, plane BLOCK_8X8
+        // — can never silently produce luma-only OBMC output). Chunk-4 luma-only.
+        assert!(
+            self.cfg.monochrome || skip_u4x4_pred_in_obmc(bsize, ss_x, ss_y, 0),
+            "chunk 4: chroma above-OBMC not yet handled (block {bsize})"
+        );
+        let nb_max = MAX_NEIGHBOR_OBMC[mi_size_wide_log2(bsize)];
+        let neighbours = self.overlappable_above(mi_row, mi_col, bsize, nb_max);
+        if neighbours.is_empty() {
+            return;
+        }
+        let bsize_high = BLOCK_SIZE_HIGH[bsize]; // px
+        let overlap = bsize_high.min(64) >> 1; // luma overlap rows
+        let width = MI_SIZE_WIDE[bsize];
+        // dec_build_prediction_by_above_preds edge adjustments (decodeframe.c:736).
+        let this_height = MI_SIZE_HIGH[bsize] * 4;
+        let pred_height = (this_height / 2).min(32);
+        let block_mb_to_right = (self.cfg.mi_cols - width - mi_col) * 32;
+        let block_mb_to_bottom = (self.cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 32;
+        let nb_mb_to_bottom = block_mb_to_bottom + (this_height - pred_height) * 8;
+        let nb_mb_to_top = -(mi_row * 32);
+        let last = inter.last;
+        for (rel_mi_col, op_mi_size, nb) in neighbours {
+            let above_mi_col = mi_col + rel_mi_col;
+            // Luma prediction dims (dec_build_prediction_by_above_pred, ss=0):
+            // bw = op_mi_size*4; bh = clamp(bsize_high>>1, 4, 32).
+            let bw = (op_mi_size * 4) as usize;
+            let bh = (bsize_high >> 1).clamp(4, 32) as usize;
+            // OBMC-neighbour mb edges (av1_setup_build_prediction_by_above_pred).
+            let nb_mb_to_left = -(above_mi_col * 32);
+            let nb_mb_to_right = block_mb_to_right + (width - rel_mi_col - op_mi_size) * 32;
+            let (nmv_r, nmv_c) = clamp_mv_umv_border_px(
+                nb.mv0_row,
+                nb.mv0_col,
+                bw as i32,
+                bh as i32,
+                nb_mb_to_left,
+                nb_mb_to_right,
+                nb_mb_to_top,
+                nb_mb_to_bottom,
+            );
+            let mut scratch = vec![0u16; bw * bh];
+            aom_inter::build_inter_predictor(
+                &last.y,
+                last.stride,
+                last.width,
+                last.height,
+                &mut scratch,
+                0,
+                bw,
+                (above_mi_col * 4) as usize, // ref-read pix col
+                (mi_row * 4) as usize,       // ref-read pix row (current block row)
+                bw,
+                bh,
+                nmv_r,
+                nmv_c,
+                0,
+                0,
+                nb_filter_x,
+                nb_filter_y,
+            );
+            // Blend the top `overlap` rows of the block's own predictor with the
+            // neighbour strip (build_obmc_inter_pred_above -> aom_blend_a64_vmask).
+            let plane_col = (rel_mi_col * 4) as usize;
+            let dst_off = (mi_row * 4) as usize * self.stride + (mi_col * 4) as usize + plane_col;
+            let mask = aom_inter::get_obmc_mask(overlap as usize);
+            aom_inter::blend_a64_vmask(
+                &mut self.recon,
+                dst_off,
+                self.stride,
+                &scratch,
+                0,
+                bw,
+                mask,
+                bw,
+                overlap as usize,
+            );
+        }
+    }
+
+    /// `dec_build_prediction_by_left_preds` + `av1_build_obmc_inter_prediction`
+    /// (LEFT half), luma: the left-column twin of [`Self::obmc_above_blend`],
+    /// feather-blending with the horizontal OBMC mask. INERT for the chunk-4
+    /// target (the OBMC block is at the frame's left edge -> no left neighbour),
+    /// but faithful for a future left-OBMC target.
+    fn obmc_left_blend(
+        &mut self,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: usize,
+        inter: &InterFrameCfg,
+        nb_filter_x: usize,
+        nb_filter_y: usize,
+    ) {
+        let (ss_x, ss_y) = (self.cfg.subsampling_x, self.cfg.subsampling_y);
+        let nb_max = MAX_NEIGHBOR_OBMC[mi_size_high_log2(bsize)];
+        let neighbours = self.overlappable_left(mi_row, mi_col, bsize, nb_max);
+        if neighbours.is_empty() {
+            return; // inert for the chunk-4 target (OBMC block at the left frame edge)
+        }
+        // Hard-guard: chroma LEFT-OBMC always fires (av1_skip_u4x4_pred_in_obmc
+        // skips only the ABOVE direction), so any non-mono left-OBMC block needs
+        // chroma handling this luma-only path lacks — a later chunk.
+        assert!(
+            self.cfg.monochrome || skip_u4x4_pred_in_obmc(bsize, ss_x, ss_y, 1),
+            "chunk 4+: chroma left-OBMC not yet handled (block {bsize})"
+        );
+        let bsize_wide = BLOCK_SIZE_WIDE[bsize];
+        let overlap = bsize_wide.min(64) >> 1; // luma overlap cols
+        let height = MI_SIZE_HIGH[bsize];
+        let this_width = MI_SIZE_WIDE[bsize] * 4;
+        let pred_width = (this_width / 2).min(32);
+        let block_mb_to_bottom = (self.cfg.mi_rows - height - mi_row) * 32;
+        let block_mb_to_right = (self.cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 32;
+        let nb_mb_to_right = block_mb_to_right + (this_width - pred_width) * 8;
+        let nb_mb_to_left = -(mi_col * 32);
+        let last = inter.last;
+        for (rel_mi_row, op_mi_size, nb) in neighbours {
+            let left_mi_row = mi_row + rel_mi_row;
+            let bw = (bsize_wide >> 1).clamp(4, 32) as usize;
+            let bh = (op_mi_size * 4) as usize;
+            let nb_mb_to_top = -(left_mi_row * 32);
+            let nb_mb_to_bottom = block_mb_to_bottom + (height - rel_mi_row - op_mi_size) * 32;
+            let (nmv_r, nmv_c) = clamp_mv_umv_border_px(
+                nb.mv0_row,
+                nb.mv0_col,
+                bw as i32,
+                bh as i32,
+                nb_mb_to_left,
+                nb_mb_to_right,
+                nb_mb_to_top,
+                nb_mb_to_bottom,
+            );
+            let mut scratch = vec![0u16; bw * bh];
+            aom_inter::build_inter_predictor(
+                &last.y,
+                last.stride,
+                last.width,
+                last.height,
+                &mut scratch,
+                0,
+                bw,
+                (mi_col * 4) as usize,
+                (left_mi_row * 4) as usize,
+                bw,
+                bh,
+                nmv_r,
+                nmv_c,
+                0,
+                0,
+                nb_filter_x,
+                nb_filter_y,
+            );
+            let plane_row = (rel_mi_row * 4) as usize;
+            let dst_off = ((mi_row * 4) as usize + plane_row) * self.stride + (mi_col * 4) as usize;
+            let mask = aom_inter::get_obmc_mask(overlap as usize);
+            aom_inter::blend_a64_hmask(
+                &mut self.recon,
+                dst_off,
+                self.stride,
+                &scratch,
+                0,
+                bw,
+                mask,
+                overlap as usize,
+                bh,
+            );
+        }
+    }
+
     /// One leaf block: `parse_decode_block` (mode info + tx sizing + skip
     /// entropy-reset) followed by the intra `decode_token_recon_block` txb loop.
     /// The INTER-frame single-block mode-info + motion-compensation path,
     /// mirroring `read_inter_frame_mode_info` + `read_inter_block_mode_info`
-    /// (decodemv.c) then `dec_build_inter_predictors` (decodeframe.c) for the
-    /// walking-skeleton envelope (STEP-0 census of `av1-1-b8-01-size-64x64`
-    /// frame 1): single LAST reference, `SINGLE_REFERENCE`, `SIMPLE_TRANSLATION`
-    /// (no overlappable neighbours), `TX_MODE_LARGEST`, `skip = 1` (pure MC, no
-    /// residual). The pre-mode reads that are no-ops in this envelope
+    /// (decodemv.c) then `dec_build_inter_predictors` (decodeframe.c). The
+    /// walking-skeleton envelope was single LAST reference, `SINGLE_REFERENCE`,
+    /// `SIMPLE_TRANSLATION`, `skip = 1`; chunk 4 adds `OBMC_CAUSAL` (motion_mode
+    /// read + above/left neighbour feather-blend) and inter var-tx
+    /// (`TX_MODE_SELECT`). The pre-mode reads that are no-ops in this envelope
     /// (segment_id, skip_mode, cdef-for-skip, delta-q) are asserted off.
     #[allow(clippy::too_many_arguments)]
     fn decode_block_inter(
@@ -1835,9 +2267,15 @@ impl<'c> TileKf<'c> {
         assert!(!cfg.seg.enabled, "inter skeleton: segmentation off");
         assert!(!inter.skip_mode_allowed, "inter skeleton: skip_mode off");
         assert!(!cfg.delta_q_present, "inter skeleton: delta-q off");
+        // tx_mode is TX_MODE_SELECT for the OBMC target (av1-1-b8-01-size-16x18):
+        // inter blocks code a var-tx quadtree (read_tx_size_vartx). The earlier
+        // walking-skeleton / ratchet targets were TX_MODE_LARGEST; both are
+        // handled below (the var-tx read collapses to the single largest tx when
+        // the frame codes LARGEST).
         assert!(
-            cfg.tx_mode == TxMode::Largest,
-            "inter skeleton: TX_MODE_LARGEST"
+            matches!(cfg.tx_mode, TxMode::Largest | TxMode::Select),
+            "inter: unsupported tx_mode {:?}",
+            cfg.tx_mode
         );
 
         // Neighbour projections for the mode-info contexts.
@@ -1847,7 +2285,8 @@ impl<'c> TileKf<'c> {
         // The neighbours' coded interp filters (parallel to `mi_dv`), for
         // `av1_get_pred_context_switchable_interp`. Gated by the same edge
         // availability as `above_dv`/`left_dv`, so they zip cleanly below.
-        let above_if = up_available.then(|| self.mi_interp[((mi_row - 1) * cols + mi_col) as usize]);
+        let above_if =
+            up_available.then(|| self.mi_interp[((mi_row - 1) * cols + mi_col) as usize]);
         let left_if = left_available.then(|| self.mi_interp[(mi_row * cols + mi_col - 1) as usize]);
         let dv_inter = |d: DvNbr| d.use_intrabc || d.ref_frame0 > 0;
 
@@ -1914,6 +2353,17 @@ impl<'c> TileKf<'c> {
         assert!(
             !is_compound && ref0 == 1 && ref1 == -1,
             "inter ratchet: single LAST reference (compound is a later chunk)"
+        );
+        // find_inter_mv_refs below hardcodes IDENTITY global motion (base MV (0,0),
+        // gm_type 0). A frame whose reference carries non-identity global motion
+        // (`global_motion[ref].wmtype > IDENTITY`) needs the real global-MV base +
+        // is_global_mv_block gating — a later chunk. Guarded so such a frame pins
+        // cleanly here rather than reading a wrong NEWMV base and desyncing (every
+        // target through 16x18 is identity-GM; e.g. 16x66 uses global motion).
+        assert!(
+            inter.gm_wmtype[ref0 as usize] == 0,
+            "chunk 5+: non-identity global motion not handled (ref {ref0} wmtype {})",
+            inter.gm_wmtype[ref0 as usize]
         );
 
         // find_inter_mv_refs (identity GM, empty temporal field per the census).
@@ -2002,25 +2452,63 @@ impl<'c> TileKf<'c> {
             _ => panic!("inter skeleton: unexpected single-ref mode {mode}"),
         };
 
-        // read_mb_interp_filter (decodemv.c:1034). C's read_inter_block_mode_info
-        // reads motion_mode FIRST (:1422) and interp_filter AFTER (:1481), because
-        // av1_is_interp_needed (reconinter.h:420) gates on motion_mode ==
-        // WARPED_CAUSAL. In THIS envelope motion_mode is always SIMPLE_TRANSLATION
-        // (the OBMC/WARP symbol read is a separate chunk — the guard below asserts
-        // the SIMPLE precondition), skip_mode is off (asserted at fn top), and the
-        // global motion is identity, so av1_is_interp_needed is always true. When
-        // the OBMC/WARP chunk lands its motion_mode read (which per the C order
-        // must sit ABOVE this point), gate `interp_needed` on
-        // `motion_mode != WARPED_CAUSAL` (a WARPED_CAUSAL block reads NO interp
-        // symbol and takes the set_default_interp_filters branch below).
-        let interp_needed = true;
+        // interintra flag (decodemv.c:1387 — AFTER assign_mv, BEFORE findSamples /
+        // read_motion_mode). Coded for an interintra-allowed single-ref inter
+        // block when `enable_interintra_compound`. It is 0 for every block in this
+        // target (no inter-intra prediction), but the flag read is REQUIRED for
+        // entropy sync — even a 0 narrows the arithmetic range. The mode/wedge
+        // sub-reads (flag == 1) are a later chunk (guarded). The BLOCK_16X8 OBMC
+        // block is interintra-allowed (8x8..32x32); the BLOCK_4X16 strips are not.
+        if inter.enable_interintra_compound && is_interintra_allowed(bsize, mode, ref0, ref1) {
+            let grp = SIZE_GROUP_LOOKUP[bsize];
+            let interintra = read_symbol(dec, &mut icdfs.interintra[grp], 2);
+            assert_eq!(
+                interintra, 0,
+                "chunk 4+: inter-intra prediction not yet handled (block {bsize} @ mi({mi_row},{mi_col}))"
+            );
+        }
+
+        // read_motion_mode (decodemv.c:1422 — BEFORE read_mb_interp_filter). A
+        // symbol is read only when the frame allows switchable motion modes AND
+        // (via motion_mode_allowed) the block is motion-variation-allowed
+        // (min(bw,bh) >= 8) with >= 1 overlappable inter neighbour. The ceiling
+        // selects the 2-symbol obmc_cdf (OBMC ceiling) or the 3-symbol
+        // motion_mode_cdf (WARP ceiling); the resolved mode may still be SIMPLE.
+        // The earlier targets read nothing (64x64 skeleton: no neighbours; 16x16
+        // ratchet: BLOCK_16X4 fails the size gate). WARPED_CAUSAL is chunk 5.
+        let motion_mode = if inter.switchable_motion_mode {
+            let ceiling = self.motion_mode_ceiling(mi_row, mi_col, bsize, mode, ref0, ref1, inter);
+            ep::read_motion_mode(
+                dec,
+                &mut icdfs.obmc[bsize],
+                &mut icdfs.motion_mode[bsize],
+                ceiling,
+            )
+        } else {
+            0 // SIMPLE_TRANSLATION
+        };
+        assert!(
+            motion_mode != 2,
+            "chunk 5: WARPED_CAUSAL not yet handled (block {bsize} @ mi({mi_row},{mi_col}))"
+        );
+
+        // read_mb_interp_filter (decodemv.c:1481 — AFTER motion_mode). av1_is_interp_needed
+        // (reconinter.h:420) gates on motion_mode != WARPED_CAUSAL: a WARPED_CAUSAL block
+        // reads NO interp symbol (set_default_interp_filters). WARPED_CAUSAL is guarded off
+        // above, so interp_needed holds here; the switchable per-direction neighbour-context
+        // read (chunk 6) follows.
+        let interp_needed = motion_mode != 2; // 2 = WARPED_CAUSAL
         let is_switchable = inter.interp_filter == SWITCHABLE;
         // av1_extract_interp_filter: dir 0 = y_filter (vertical), dir 1 = x_filter.
         let (filter_y, filter_x) = if !interp_needed {
             // set_default_interp_filters -> av1_broadcast_interp_filter(
             // av1_unswitchable_filter(frame_filter)): EIGHTTAP_REGULAR (0) for a
             // SWITCHABLE frame, else the frame's fixed filter. No symbol is read.
-            let f = if is_switchable { 0 } else { inter.interp_filter as usize };
+            let f = if is_switchable {
+                0
+            } else {
+                inter.interp_filter as usize
+            };
             (f, f)
         } else if is_switchable {
             // A switchable frame reads a per-direction filter on the CDF context
@@ -2038,16 +2526,32 @@ impl<'c> TileKf<'c> {
                 .zip(left_if)
                 .map(|(d, (yf, xf))| (d.ref_frame0, d.ref_frame1, yf as usize, xf as usize));
             let cur_is_compound = ref1 > 0; // ref_frame[1] > INTRA_FRAME
-            let ctx0 = ep::get_pred_context_switchable_interp(0, ref0, cur_is_compound, above_flt, left_flt)
-                as usize;
-            let ctx1 = ep::get_pred_context_switchable_interp(1, ref0, cur_is_compound, above_flt, left_flt)
-                as usize;
+            let ctx0 = ep::get_pred_context_switchable_interp(
+                0,
+                ref0,
+                cur_is_compound,
+                above_flt,
+                left_flt,
+            ) as usize;
+            let ctx1 = ep::get_pred_context_switchable_interp(
+                1,
+                ref0,
+                cur_is_compound,
+                above_flt,
+                left_flt,
+            ) as usize;
             // ctx0 (dir 0) and ctx1 (dir 1) always differ by the 8-wide dir offset
             // -> distinct CDF rows, no aliasing. Non-dual reads only ctx0.
             let mut c0 = icdfs.switchable_interp[ctx0];
             let mut c1 = icdfs.switchable_interp[ctx1];
-            let (f0, f1) =
-                ep::read_mb_interp_filter(dec, &mut c0, &mut c1, true, true, inter.enable_dual_filter);
+            let (f0, f1) = ep::read_mb_interp_filter(
+                dec,
+                &mut c0,
+                &mut c1,
+                true,
+                true,
+                inter.enable_dual_filter,
+            );
             icdfs.switchable_interp[ctx0] = c0;
             icdfs.switchable_interp[ctx1] = c1;
             (f0 as usize, f1 as usize)
@@ -2056,25 +2560,73 @@ impl<'c> TileKf<'c> {
             (inter.interp_filter as usize, inter.interp_filter as usize)
         };
 
-        // read_motion_mode (av1_is_motion_mode_switchable): a symbol is read only
-        // when the frame allows switchable motion modes AND the block is
-        // motion-variation-allowed (min(bw,bh) >= 8) AND it has overlappable
-        // neighbours. Neither envelope target reads it: the 64x64 skeleton block is
-        // at the tile top-left (no neighbours -> no overlappable candidates); the
-        // 16x16 ratchet's BLOCK_16X4 (h=4) fails the size gate. A >=8x8 switchable
-        // block WITH an available neighbour would need the OBMC/warp read (later
-        // chunk) -> guarded here.
-        let min_dim = BLOCK_SIZE_WIDE[bsize].min(BLOCK_SIZE_HIGH[bsize]);
+        // tx_size (decodeframe.c:1179-1198, inter path): TX_MODE_SELECT + a
+        // signalling block (bsize > BLOCK_4X4) + !skip -> the inter var-tx
+        // quadtree (read_tx_size_vartx over txfm_partition_cdf; it stamps the
+        // txfm-context arrays itself). Else the tx_mode fallback (TX_MODE_LARGEST
+        // for the 64x64 / 16x16 / 64x66 targets — a single per-block tx, no
+        // symbol). Every block in the 16x18 OBMC target is Select + skip=0 and
+        // resolves to a UNIFORM leaf tiling (the strips stay TX_4X16; the OBMC
+        // BLOCK_16X8 splits to 2x TX_8X8) — a non-uniform partition would need the
+        // reconstruction-phase leaf walk (collect_vartx_leaves) and is guarded.
+        let a_off = mi_col as usize;
+        let l_off = (mi_row & 31) as usize;
+        let bw4 = MI_SIZE_WIDE[bsize] as usize;
+        let bh4 = MI_SIZE_HIGH[bsize] as usize;
+        let mut vartx_leaf_grid: Vec<u8> = Vec::new();
+        let mut vartx_non_uniform = false;
+        let tx_size = if cfg.tx_mode == TxMode::Select && bsize > 0 && skip == 0 {
+            let max_tx = MAX_TXSIZE_RECT_LOOKUP[bsize];
+            let bw_u = TX_SIZE_WIDE_UNIT[max_tx] as i32;
+            let bh_u = TX_SIZE_HIGH_UNIT[max_tx] as i32;
+            let width_u = MI_SIZE_WIDE[bsize];
+            let height_u = MI_SIZE_HIGH[bsize];
+            let mb_to_right_edge = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 32;
+            let mb_to_bottom_edge = (cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 32;
+            let mut vartx_tx = max_tx;
+            let mut first_leaf = -1i32;
+            let mut non_uniform = false;
+            vartx_leaf_grid = vec![0u8; bw4 * bh4];
+            let mut idy = 0;
+            while idy < height_u {
+                let mut idx = 0;
+                while idx < width_u {
+                    read_tx_size_vartx(
+                        dec,
+                        &mut self.txfm_partition,
+                        &mut self.above_t[a_off..],
+                        &mut self.left_t[l_off..],
+                        bsize,
+                        mb_to_right_edge,
+                        mb_to_bottom_edge,
+                        max_tx,
+                        0,
+                        idy,
+                        idx,
+                        &mut vartx_tx,
+                        &mut first_leaf,
+                        &mut non_uniform,
+                        &mut vartx_leaf_grid,
+                        bw4,
+                        bh4,
+                    );
+                    idx += bw_u;
+                }
+                idy += bh_u;
+            }
+            vartx_non_uniform = non_uniform;
+            vartx_tx
+        } else {
+            tx_size_from_tx_mode(bsize, cfg.tx_mode)
+        };
+        // The leaf grid drives the non-uniform reconstruction walk
+        // (collect_vartx_leaves); every block in this target is uniform (guarded),
+        // so the uniform residual loop below tiles with `tx_size` = the read size.
+        let _ = &vartx_leaf_grid;
         assert!(
-            !inter.switchable_motion_mode
-                || min_dim < 8
-                || (!up_available && !left_available),
-            "inter ratchet: motion_mode symbol (OBMC/warp) not yet handled for a \
-             >=8x8 switchable block with neighbours"
+            !vartx_non_uniform,
+            "chunk 4: non-uniform inter var-tx not yet handled (block {bsize} @ mi({mi_row},{mi_col}))"
         );
-
-        // tx_size: TX_MODE_LARGEST -> the single per-block luma size, no symbol read.
-        let tx_size = tx_size_from_tx_mode(bsize, cfg.tx_mode);
 
         // --- motion compensation (predict phase; NO entropy reads) ---
         let (cmv_row, cmv_col) = clamp_mv_to_umv_border(mv_row, mv_col, mi_row, mi_col, bsize, cfg);
@@ -2106,8 +2658,7 @@ impl<'c> TileKf<'c> {
         // Chroma prediction only at the chroma-reference block (sub-8x8 members
         // share one chroma block, coded on the group's bottom/right member). The
         // shared-group origin is `adj` (setup_pred_plane's odd-position shift).
-        let chroma_ref =
-            !cfg.monochrome && is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
+        let chroma_ref = !cfg.monochrome && is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
         let adj_row = if ss_y != 0 && (mi_row & 1) != 0 && MI_SIZE_HIGH[bsize] == 1 {
             mi_row - 1
         } else {
@@ -2212,11 +2763,23 @@ impl<'c> TileKf<'c> {
             }
         }
 
+        // --- OBMC (predict_inter_block, decodeframe.c:878): after the block's own
+        // predictor is built (luma + chroma above) and BEFORE the residual add,
+        // an OBMC_CAUSAL block feather-blends its predictor with predictors from
+        // its overlappable above/left neighbours' motion. Non-switchable frame ->
+        // every neighbour shares the frame filter (filter_x == filter_y); a
+        // switchable frame would feed each neighbour's own stored filter (chunk 6).
+        if motion_mode == 1 {
+            self.obmc_above_blend(mi_row, mi_col, bsize, inter, filter_x, filter_y);
+            self.obmc_left_blend(mi_row, mi_col, bsize, inter, filter_x, filter_y);
+        }
+
         // --- reconstruction: read residual coefficients + ADD onto the MC
         // prediction (decode_token_recon_block inter path). Skip blocks read no
-        // coeffs. TX_MODE_LARGEST => one uniform luma tx tiling the block, then
-        // (at the chroma reference) one U and one V tx, in that plane order — all
-        // within the single <=64px 64x64 chunk this ratchet's blocks occupy.
+        // coeffs. tx_size is the (uniform) var-tx / LARGEST per-block luma tx
+        // tiling the block, then (at the chroma reference) one U and one V tx, in
+        // that plane order — all within the single <=64px 64x64 chunk the target's
+        // blocks occupy.
         let mb_to_right_edge = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 32;
         let mb_to_bottom_edge = (cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 32;
         let mut luma_tt0 = 0usize; // co-located luma tx-type for inter chroma
@@ -4047,6 +4610,86 @@ fn clamp_mv_to_umv_border(
     let mb_to_right = (cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 4 * 8;
     let mb_to_top = -(mi_row * 4 * 8);
     let mb_to_bottom = (cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 4 * 8;
+    let spel_left = (AOM_INTERP_EXTEND + bw) << SUBPEL_BITS;
+    let spel_right = spel_left - SUBPEL_SHIFTS;
+    let spel_top = (AOM_INTERP_EXTEND + bh) << SUBPEL_BITS;
+    let spel_bottom = spel_top - SUBPEL_SHIFTS;
+    let col_min = mb_to_left * 2 - spel_left;
+    let col_max = mb_to_right * 2 + spel_right;
+    let row_min = mb_to_top * 2 - spel_top;
+    let row_max = mb_to_bottom * 2 + spel_bottom;
+    let cq4 = (mv_col * 2).clamp(col_min, col_max);
+    let rq4 = (mv_row * 2).clamp(row_min, row_max);
+    (rq4 / 2, cq4 / 2)
+}
+
+// ===================================================================
+// OBMC (chunk 4) — motion_mode ceiling + overlapped-block MC helpers.
+// ===================================================================
+
+/// `is_motion_variation_allowed_bsize` (blockd.h:1460): OBMC/warp are allowed
+/// only for blocks whose smaller side is `>= 8` px.
+fn is_motion_variation_allowed_bsize(bsize: usize) -> bool {
+    BLOCK_SIZE_WIDE[bsize].min(BLOCK_SIZE_HIGH[bsize]) >= 8
+}
+
+/// `is_interintra_allowed` (blockd.h:1430): the block can carry inter-intra
+/// (bsize BLOCK_8X8..=BLOCK_32X32, a single-ref inter mode, single reference).
+/// The flag is coded (and hence must be read for entropy sync) whenever this
+/// holds AND `enable_interintra_compound`. BLOCK_8X8=3, BLOCK_32X32=9;
+/// SINGLE_INTER_MODE_START=NEARESTMV=13, SINGLE_INTER_MODE_END=NEAREST_NEARESTMV=17.
+fn is_interintra_allowed(bsize: usize, mode: i32, ref0: i32, ref1: i32) -> bool {
+    (3..=9).contains(&bsize) && (13..17).contains(&mode) && ref0 > 0 && ref1 <= 0
+}
+
+/// `size_group_lookup[bsize]` (common_data.h): selects `interintra_cdf[group]`.
+const SIZE_GROUP_LOOKUP: [usize; 22] = [
+    0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 0, 0, 1, 1, 2, 2,
+];
+
+/// `max_neighbor_obmc[log2(mi_width)]` (blockd.h:1471): the OBMC neighbour cap.
+const MAX_NEIGHBOR_OBMC: [i32; 6] = [0, 1, 2, 3, 4, 4];
+
+/// `mi_size_wide_log2[bsize]`: log2 of the block's mi width (a power of two).
+fn mi_size_wide_log2(bsize: usize) -> usize {
+    MI_SIZE_WIDE[bsize].trailing_zeros() as usize
+}
+
+/// `mi_size_high_log2[bsize]`: log2 of the block's mi height (a power of two).
+fn mi_size_high_log2(bsize: usize) -> usize {
+    MI_SIZE_HIGH[bsize].trailing_zeros() as usize
+}
+
+/// `av1_skip_u4x4_pred_in_obmc` (reconinter.c:818): for a plane whose subsampled
+/// block size is `<= 8x8` in one dimension, OBMC blends only from the LEFT (skip
+/// ABOVE). `dir` is 0 = above, 1 = left. (`DISABLE_CHROMA_U8X8_OBMC == 0`, so the
+/// one-sided form.)
+fn skip_u4x4_pred_in_obmc(bsize: usize, ss_x: usize, ss_y: usize, dir: i32) -> bool {
+    // BLOCK_4X4 = 0, BLOCK_4X8 = 1, BLOCK_8X4 = 2 (enums.h).
+    let bsize_plane = get_plane_block_size(bsize, ss_x, ss_y);
+    matches!(bsize_plane, 0 | 1 | 2) && dir == 0
+}
+
+/// `clamp_mv_to_umv_border_sb` (reconinter.h:343) with the caller's explicit
+/// `mb_to_*_edge` (1/8-pel) and the PREDICTION block dims `bw`/`bh` (px) — the
+/// OBMC-neighbour form (the edges are the OBMC-adjusted values, the dims are the
+/// narrow overlap strip, not the coding block). Luma (ss = 0). Returns the
+/// (possibly clamped) MV in 1/8-pel luma units (the doubling for the 1/16-pel
+/// clamp math is internal, matching [`clamp_mv_to_umv_border`]).
+#[allow(clippy::too_many_arguments)]
+fn clamp_mv_umv_border_px(
+    mv_row: i32,
+    mv_col: i32,
+    bw: i32,
+    bh: i32,
+    mb_to_left: i32,
+    mb_to_right: i32,
+    mb_to_top: i32,
+    mb_to_bottom: i32,
+) -> (i32, i32) {
+    const AOM_INTERP_EXTEND: i32 = 4;
+    const SUBPEL_BITS: i32 = 4;
+    const SUBPEL_SHIFTS: i32 = 16;
     let spel_left = (AOM_INTERP_EXTEND + bw) << SUBPEL_BITS;
     let spel_right = spel_left - SUBPEL_SHIFTS;
     let spel_top = (AOM_INTERP_EXTEND + bh) << SUBPEL_BITS;

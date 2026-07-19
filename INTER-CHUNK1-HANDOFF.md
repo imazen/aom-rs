@@ -303,9 +303,66 @@ already C-differentially-locked in `aom-inter/tests/inter_pred_diff.rs` across a
 is unchanged — only the dims fed to it. 64x64/16x16 were byte-exact already because for them the
 visible dims equal the mi-aligned dims (multiples of 8px); 64x66 is the first where they differ.
 
-## Chunk 4+ — feature ladder → see `INTER-FEATURES-PLAN.md`
+## Chunk 4 — OBMC — ✅ COMPLETE (`01-size-16x18` frame-1 byte-exact)
 
-Recommended chunk 4 = **OBMC**, isolated by `01-size-16x18` frame 1 (single-ref, all SIMPLE +
-exactly one OBMC block). Then WARP (`16x34`), switchable-interp-nbr (`16x66`), then compound /
-interintra / temporal-MV + multi-ref DPB (the `00-quantizer` / `05-mv` frames — full-toolset,
-censused as NOT minimal). Full C file:line map + differentials in that doc.
+**`av1-1-b8-01-size-16x18` frame 1 decodes to golden md5 `08db98983320105666c9496dc1dba209`**
+(`.md5` line 2), frame 0 (KEY) unchanged + the 64x64 skeleton + 16x16 + 64x66 ratchets stay green.
+Gate: `aom-decode/tests/inter_ratchet.rs::inter_ratchet_16x18_obmc_frame1_byte_identical`.
+
+STEP-0 census: frame 1 = four `BLOCK_4X16` strips (NEWMV + 3 NEARESTMV, SIMPLE) above ONE
+`BLOCK_16X8` `OBMC_CAUSAL` block at mi(4,0), single LAST, non-switchable EIGHTTAP. The OBMC block
+is at mi_col 0 (frame LEFT edge → no left neighbour) with a full `BLOCK_4X16` row above, so ONLY
+the ABOVE-neighbour blend fires; chroma above-OBMC is skipped (`av1_skip_u4x4_pred_in_obmc` →
+BLOCK_8X4 dir 0). num_proj_ref=4, allow_warped_motion=1 → motion_mode ceiling = **WARPED_CAUSAL**
+(the 3-symbol `motion_mode_cdf`, resolving to OBMC).
+
+**What landed (three sub-features — the census under-stated the scope):**
+1. **motion_mode read** (`decode_block_inter`, reordered BEFORE interp per decodemv.c): the
+   `motion_mode_allowed` ceiling (`has_overlappable_neighbors` = `foreach_overlappable_nb_above/left`
+   + `num_proj_ref` = count-only `av1_findSamples`) → `read_motion_mode`. WARPED_CAUSAL result guarded
+   (chunk 5). `DEFAULT_OBMC` / `DEFAULT_MOTION_MODE` CDFs threaded on `InterCdfs`.
+2. **OBMC blend** (aom-inter kernels + `obmc_above_blend`/`obmc_left_blend`): `av1_get_obmc_mask` +
+   `aom_blend_a64_vmask`/`hmask`, **differentially locked vs real C** in
+   `aom-inter/tests/inter_pred_diff.rs` (`obmc_mask_matches_c`, `blend_a64_masks_match_c` + the new
+   `obmc_shim.c` oracle). The above-neighbour luma strips reuse the existing `build_inter_predictor`
+   with the neighbour's mv/ref/filter into a scratch, then vmask-feather into the block's own
+   predictor over the top `overlap = min(bh,64)>>1` rows. `clamp_mv_umv_border_sb` faithful (inert
+   here). Left blend written+guarded (inert: left frame edge). Non-switchable → neighbour filter =
+   frame filter (switchable-neighbour filter = chunk 6).
+3. **inter var-tx** (`TX_MODE_SELECT`, MISSED by the plan's "OBMC only" census): the OBMC block
+   splits TX_16X8 → uniform 2× TX_8X8. Wired `read_tx_size_vartx` (reusing the intrabc var-tx
+   machinery) into `decode_block_inter`; the uniform-leaf residual loop uses the read tx size.
+   Non-uniform partitions guarded (`collect_vartx_leaves` path is a later target).
+
+**THE ROOT-CAUSE BUG (found via tell/rng bit-trace vs an instrumented throwaway C decoder):** the
+port desynced only the OBMC block's LUMA (chroma + strips byte-exact, because the OBMC block is the
+LAST block and its chroma has no residual). Same context + CDF + bit-position as C at the var-tx
+split, but different `rng` → an earlier read narrowed the range differently. The culprit: the
+**inter-intra flag** (`decodemv.c:1387`, `interintra_cdf[size_group_lookup[bsize]]`) is coded for an
+interintra-allowed block (BLOCK_8X8..=BLOCK_32X32 — the BLOCK_16X8 OBMC block qualifies; the
+BLOCK_4X16 strips do NOT) when `enable_interintra_compound`. It is 0 (no inter-intra), but the flag
+read still narrows the arithmetic range — the port skipped it and desynced. **Fix:** read the flag
+(new `DEFAULT_INTERINTRA` CDF + `enable_interintra_compound` on `InterFrameCfg`), assert 0
+(inter-intra prediction is a later chunk). Placed AFTER the mv read, BEFORE motion_mode (C order).
+
+## Chunk 5+ — feature ladder → see `INTER-FEATURES-PLAN.md`
+
+Next chunk 5 = **WARP** (WARPED_CAUSAL), target `01-size-16x34` frame 1 (mix of SIMPLE + OBMC +
+**one WARPED_CAUSAL** @ mi(4,0)); needs `av1_findSamples` full sample record + `av1_find_projection`
+/ `av1_warp_plane`. Then switchable-interp-nbr (`16x66`, also needs OBMC+WARP), then compound /
+interintra prediction / temporal-MV + multi-ref DPB (the `00-quantizer` / `05-mv` frames —
+full-toolset, censused as NOT minimal). Full C file:line map + differentials in that doc.
+
+**New envelope guard (chunk 4):** `decode_block_inter` now asserts the block's reference has
+IDENTITY global motion (`gm_wmtype[ref0] == 0`) — `find_inter_mv_refs` still hardcodes the (0,0)
+global-MV base, correct for every target through 16x18 (all identity-GM). A non-identity-GM frame
+pins cleanly here instead of desyncing on a wrong NEWMV base.
+
+**DISCOVERED chunk-6 blocker (16x66) — mi(0,0) mode-info desync, NOT global motion.** Landing OBMC
+removed the `TX_MODE_LARGEST` assert that used to pin `16x66` frame 1 at its very first block, so
+its mode-info now runs for the first time. `mi(0,0)` (BLOCK_16X16, NEWMV, switchable) DESYNCS: the
+port decodes **mv=(0,-15)** where C codes **(-1,-7)**, so the inter-intra flag then reads a garbage
+1 and trips the inter-intra guard. Ruled out: global motion (LAST is IDENTITY), and chunk-4 OBMC
+(16x18 is byte-exact through the SAME merged mode-info path). It is a pre-existing switchable-frame
+mode/drl/mv-read bug for a 16x16 block — the switchable-interp + WARP track must root-cause it (the
+`inter_ratchet_16x66` gate is pinned on the SYMPTOM and documents this).
