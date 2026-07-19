@@ -203,6 +203,8 @@ fn search_tx_type_inter_matches_c_chain() {
 
             // ---- Rust side (the inter leaf) ----
             let inp = InterLeafInputs {
+                // Luma leaf differential: the multi-type inter mask arm.
+                forced_uv_tx_type: None,
                 residual: &residual,
                 pred: &pred,
                 src: &src,

@@ -170,6 +170,8 @@ fn c_try_no_split(
     let zero_blk_rate = c.coeff_costs.tables(tx_size).txb_skip[skip_ctx as usize * 2 + 1];
 
     let inp = InterLeafInputs {
+        // Luma recursion differential: the multi-type inter mask arm.
+        forced_uv_tx_type: None,
         residual: &residual,
         pred: &pred,
         src: c.src,

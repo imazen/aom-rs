@@ -60,6 +60,57 @@ pub fn trellis_rdmult_inter_y(rdmult: i32, sharpness: i32, bd: u8, iq_tuning: bo
     )
 }
 
+/// `plane_rd_mult_chroma[is_inter=1][PLANE_TYPE_UV] = 10` (encodetxb.h:266-269)
+/// selected by the allintra speed-0 `use_chroma_trellis_rd_mult = 1`
+/// (speed_features.c:370); without the sf it would be `plane_rd_mult[1][1] = 20`.
+/// Same `rshift` / `(8 - sharpness)` / `<< 2*(bd-8)` shape as the luma form
+/// ([`trellis_rdmult_inter_y`]) — txb_rdopt.c:381-393.
+#[inline]
+pub fn trellis_rdmult_inter_uv(rdmult: i32, sharpness: i32, bd: u8, iq_tuning: bool) -> i64 {
+    round_power_of_two_i64(
+        (rdmult as i64) * ((8 - sharpness) as i64) * ((10i64) << (2 * (bd as i32 - 8))),
+        if iq_tuning { 7 } else { 5 },
+    )
+}
+
+/// `get_tx_mask` (tx_search.c:1776) — the CHROMA (`plane != 0`) arm. C pins
+/// `txk_allowed = uv_tx_type` (the co-located luma type, tx_search.c:1841-1847)
+/// so the mask collapses to a single bit (:1872-1874) — chroma NEVER searches
+/// tx types (the full-set branch asserts `plane == 0`, :1882). The DCT-only
+/// override (:1862-1868) and the flip/idtx strip (:1870-1871) still apply, and
+/// the empty-mask fallback restores the **uv type** (not DCT_DCT) for `plane != 0`.
+///
+/// Returns `(allowed_tx_mask, txk_allowed)`.
+pub fn get_tx_mask_inter_uv(
+    tx_size: usize,
+    uv_tx_type: usize,
+    lossless: bool,
+    reduced_tx_set_used: bool,
+    enable_flip_idtx: bool,
+    use_inter_dct_only: bool,
+) -> (u16, usize) {
+    let tx_set_type = ext_tx_set_type(tx_size, true, reduced_tx_set_used);
+    let mut ext_tx_used_flag = AV1_EXT_TX_USED_FLAG[tx_set_type];
+    let mut txk_allowed = uv_tx_type;
+
+    if lossless || TXSIZE_SQR_UP_MAP[tx_size] > 3 || ext_tx_used_flag == 0x0001 || use_inter_dct_only
+    {
+        txk_allowed = 0; // DCT_DCT
+    }
+    if !enable_flip_idtx {
+        ext_tx_used_flag &= DCT_ADST_TX_MASK;
+    }
+
+    let mut allowed_tx_mask = (1u16 << txk_allowed) & ext_tx_used_flag;
+    if allowed_tx_mask == 0 {
+        // `txk_allowed = (plane ? uv_tx_type : DCT_DCT)` — chroma restores the
+        // inherited type here, unlike the luma DCT_DCT fallback.
+        txk_allowed = uv_tx_type;
+        allowed_tx_mask = 1 << txk_allowed;
+    }
+    (allowed_tx_mask, txk_allowed)
+}
+
 /// `get_tx_mask` (tx_search.c:1776) — the INTER (is_inter) arm, at the speed-0
 /// DEFAULT_EVAL config (intrabc): `default_inter_tx_type_prob_thresh == INT_MAX`
 /// (no forced tx type), `prune_tx_type_using_stats == 0`, `rd_model ==
@@ -141,6 +192,13 @@ pub struct InterLeafInputs<'a> {
     /// Frame-edge visible txb extent (`get_txb_visible_dimensions`).
     pub visible_cols: usize,
     pub visible_rows: usize,
+    /// CHROMA (`bctx.plane > 0`) only: the derived `uv_tx_type` that
+    /// `get_tx_mask`'s `if (plane)` arm pins (tx_search.c:1841-1847 — chroma
+    /// inherits the co-located LUMA tx type via `av1_get_tx_type`,
+    /// blockd.h:1296-1301). `None` = the luma multi-type arm
+    /// ([`get_tx_mask_inter`]). C asserts `plane == 0` on the full-set branch
+    /// (tx_search.c:1882), so chroma ALWAYS carries `Some`.
+    pub forced_uv_tx_type: Option<usize>,
     /// Frame QM level (`qmatrix_level_y`), `None` = QM off.
     pub qm_level: Option<usize>,
     /// `prune_2d_txfm_mode >= TX_TYPE_PRUNE_1` — enable the `prune_tx_2D` NN prune
@@ -206,14 +264,27 @@ pub fn search_tx_type_inter(
     let _ = block_sse_u;
     block_sse *= 16;
 
-    // The allowed tx-type set (get_tx_mask inter arm).
-    let (mut allowed_tx_mask, txk_allowed) = get_tx_mask_inter(
-        tx_size,
-        inp.lossless,
-        inp.reduced_tx_set_used,
-        inp.enable_flip_idtx,
-        inp.use_inter_dct_only,
-    );
+    // The allowed tx-type set (get_tx_mask inter arm; chroma pins one type).
+    let (mut allowed_tx_mask, txk_allowed) = match inp.forced_uv_tx_type {
+        Some(uv) => {
+            let (m, t) = get_tx_mask_inter_uv(
+                tx_size,
+                uv,
+                inp.lossless,
+                inp.reduced_tx_set_used,
+                inp.enable_flip_idtx,
+                inp.use_inter_dct_only,
+            );
+            (m, Some(t))
+        }
+        None => get_tx_mask_inter(
+            tx_size,
+            inp.lossless,
+            inp.reduced_tx_set_used,
+            inp.enable_flip_idtx,
+            inp.use_inter_dct_only,
+        ),
+    };
     // Search order: the natural 0..16 unless prune_tx_2D reorders it.
     let mut txk_map: [usize; TX_TYPES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
     // `prune_tx_2D` (tx_search.c:1934): the multi-type inter arm, when the set has
@@ -244,7 +315,15 @@ pub fn search_tx_type_inter(
     if let Some(level) = inp.qm_level {
         qp = qp.with_qm(level, 0);
     }
-    let trellis_rdmult = trellis_rdmult_inter_y(inp.rdmult, sharpness, inp.bd, iq_tuning);
+    // `plane_rd_mult_chroma[is_inter][plane_type]` under the allintra speed-0
+    // `use_chroma_trellis_rd_mult = 1` (speed_features.c:370): inter luma 16
+    // (== `plane_rd_mult[1][0]`, so the sf is a no-op there) but inter chroma
+    // **10** (vs 20 without the sf) — encodetxb.h:266-273, txb_rdopt.c:387-393.
+    let trellis_rdmult = if inp.bctx.plane > 0 {
+        trellis_rdmult_inter_uv(inp.rdmult, sharpness, inp.bd, iq_tuning)
+    } else {
+        trellis_rdmult_inter_y(inp.rdmult, sharpness, inp.bd, iq_tuning)
+    };
     let opt = OptimizeInputs {
         cost: inp.coeff_costs,
         rdmult: trellis_rdmult,
@@ -274,7 +353,7 @@ pub fn search_tx_type_inter(
             let ttc = if r.eob > 0 {
                 get_tx_type_cost(
                     inp.tx_type_costs,
-                    0,
+                    inp.bctx.plane,
                     tx_size,
                     tx_type,
                     true,
@@ -309,7 +388,7 @@ pub fn search_tx_type_inter(
             ) + if xq.eob > 0 {
                 get_tx_type_cost(
                     inp.tx_type_costs,
-                    0,
+                    inp.bctx.plane,
                     tx_size,
                     tx_type,
                     true,
@@ -704,6 +783,8 @@ fn try_tx_block_no_split(
     let zero_blk_rate = tables.txb_skip[txb_skip_ctx as usize * 2 + 1];
 
     let leaf_inputs = InterLeafInputs {
+        // Luma var-tx leaf: the multi-type inter arm (chroma pins a type instead).
+        forced_uv_tx_type: None,
         residual: &residual,
         pred: &pred,
         src: env.src,
