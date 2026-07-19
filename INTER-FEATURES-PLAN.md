@@ -159,3 +159,45 @@ chunk-1d `inter_pred_diff.rs` pattern.
 - Compound / interintra / temporal-MV + multi-ref DPB (the `05-mv` / `-00-
   quantizer` frames) come after the single-ref ladder is complete; `05-mv` also
   needs an ALTREF slot in the reference store and order-hint MV projection.
+
+## CHUNK 5 — WARPED_CAUSAL (local warped motion) — LANDED (kernel + parse), full 16x34 gate blocked on OBMC + var-tx
+
+**Status:** the WARP arithmetic + parse are byte-exact and C-differentially locked;
+the driver reads `motion_mode` and dispatches warp MC. Landed on origin/main:
+
+- **Warp kernel** `av1_warp_affine_c` (bd8, non-compound) + the AFFINE model
+  derivation `av1_find_projection` / `find_affine_int` / `av1_get_shear_params`
+  → `crates/aom-inter/src/warp.rs`. Differentials vs the REAL exported C
+  (`crates/aom-inter/tests/warp_diff.rs`): `warp_affine_matches_c` (20k, byte-
+  identical pred), `find_projection_matches_c` (40k), `get_shear_params_matches_c`
+  (40k). (commit `3576752`)
+- **Neighbour sample gather** `av1_findSamples` / `av1_selectSamples` /
+  `record_samples` + `av1_count_overlappable_neighbors`'s boolean →
+  `crates/aom-entropy/src/dv_ref.rs` (`find_samples` / `select_samples` /
+  `has_overlappable_neighbors` / `motion_mode_allowed`). Differentials
+  (`dv_ref_diff.rs`): `find_samples_matches_c` (30k), `select_samples_matches_c`
+  (40k). (commit `611bc78`)
+- **Driver:** `TileKf::decode_block_inter` now reads `read_motion_mode`
+  (ceiling = `motion_mode_allowed`, obmc/motion_mode CDFs threaded through
+  `InterCdfs`) and, for WARPED blocks, derives the model + does the affine warp
+  MC (luma + chroma, per-plane `>= 8` gate). SIMPLE unchanged; OBMC uses
+  translational MC (the overlap blend is chunk 4 — parse is unaffected).
+- **Parse census-match (the DONE proof):**
+  `crates/aom-decode/tests/warp_census.rs::census_match_16x34_warp_block` drives
+  the real parse fns over `av1-1-b8-01-size-16x34` frame-1's warp block mi(4,0)
+  (`BLOCK_16X16` NEARESTMV mv=(-1,-7) num_proj_ref=3) and asserts the derived
+  model == the C-instrument census `wmmat=[-57869,-9917,65611,0,0,65611]
+  alpha=64 beta=0 gamma=0 delta=64` (cross-checked vs real C `av1_find_projection`).
+
+**Full 16x34 frame-1 MD5 gate (golden `0a026e579f57bb108b9fd01bf0af557a`,
+`.md5` line 2) — a SELF-PROMOTING gate is now in `inter_ratchet.rs`
+(`inter_ratchet_16x34_warp_frame1`), currently PINNED.** After rebasing onto
+origin (chunk-4 OBMC + inter var-tx both landed), the WARP driver hook is wired
+and the frame's inter var-tx (TX_MODE_SELECT: the warp BLOCK_16X16 codes TX_8X8)
++ SIMPLE + the motion_mode reads all run — but the frame pins EARLIER than the
+WARP block mi(4,0): the OBMC block **mi(0,2)** needs the **chroma-left OBMC
+blend** (`chunk 4+: chroma left-OBMC not yet handled`), a remaining chunk-4 gap
+(chunk 4 shipped luma above-OBMC for the 16x18 target). So the WARP feature is
+byte-exact + C-locked in isolation (kernel `warp_diff.rs`, gather+model
+`dv_ref_diff.rs`, PARSE census-match `warp_census.rs`), and the end-to-end gate
+self-promotes to the golden byte-match the moment OBMC chroma-left lands.

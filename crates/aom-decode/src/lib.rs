@@ -182,6 +182,7 @@ fn reconstruct_txb_wht(
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::dv_ref::{
     DvGrid, DvNbr, DvTileBounds, assign_and_validate_dv, find_dv_ref_mvs, find_inter_mv_refs,
+    find_samples, select_samples,
 };
 use aom_entropy::partition::{
     KfBlockState, KfFrameContext, MbModeInfoKf, MiNbrKf, PaletteNbrKf, TXFM_CTX_INIT, TxMode,
@@ -2487,10 +2488,68 @@ impl<'c> TileKf<'c> {
         } else {
             0 // SIMPLE_TRANSLATION
         };
-        assert!(
-            motion_mode != 2,
-            "chunk 5: WARPED_CAUSAL not yet handled (block {bsize} @ mi({mi_row},{mi_col}))"
-        );
+        // WARPED_CAUSAL (chunk 5): gather the warp samples (av1_findSamples),
+        // select (av1_selectSamples when num_proj_ref > 1), derive the local
+        // AFFINE model (av1_find_projection). C: decodemv.c:1484-1503. An invalid
+        // model marks `wm.invalid` -> MC falls back to translational (allow_warp ->
+        // global(identity) -> TRANSLATION_PRED). Ordering vs read_mb_interp_filter is
+        // moot: find_projection reads NO entropy symbols. `warp_luma` (a usable local
+        // model) drives the affine MC below; luma always passes the per-plane >= 8
+        // gate (motion-variation requires min dim >= 8), chroma is re-gated at its MC.
+        let warp_params: Option<aom_inter::warp::WarpedMotionParams> = if motion_mode == 2 {
+            let warp_grid = MiDvGrid {
+                mi_dv: &self.mi_dv,
+                cols: cfg.mi_cols,
+                rows: cfg.mi_rows,
+                mi_row,
+                mi_col,
+            };
+            let mut ws = find_samples(
+                &warp_grid,
+                &dv_tile,
+                mib_size,
+                cfg.mi_rows,
+                cfg.mi_cols,
+                mi_row,
+                mi_col,
+                MI_SIZE_WIDE[bsize],
+                MI_SIZE_HIGH[bsize],
+                partition,
+                ref0,
+                up_available,
+                left_available,
+            );
+            if ws.np > 1 {
+                select_samples(
+                    &mut ws,
+                    mv_row,
+                    mv_col,
+                    BLOCK_SIZE_WIDE[bsize],
+                    BLOCK_SIZE_HIGH[bsize],
+                );
+            }
+            let mut wm = aom_inter::warp::WarpedMotionParams {
+                wmtype: aom_inter::warp::AFFINE,
+                ..Default::default()
+            };
+            let invalid = aom_inter::warp::find_projection(
+                ws.np,
+                &ws.pts,
+                &ws.pts_inref,
+                BLOCK_SIZE_WIDE[bsize],
+                BLOCK_SIZE_HIGH[bsize],
+                mv_row,
+                mv_col,
+                &mut wm,
+                mi_row,
+                mi_col,
+            ) != 0;
+            wm.invalid = invalid as u8;
+            Some(wm)
+        } else {
+            None
+        };
+        let warp_luma = warp_params.filter(|w| w.invalid == 0);
 
         // read_mb_interp_filter (decodemv.c:1481 — AFTER motion_mode). av1_is_interp_needed
         // (reconinter.h:420) gates on motion_mode != WARPED_CAUSAL: a WARPED_CAUSAL block
@@ -2636,25 +2695,52 @@ impl<'c> TileKf<'c> {
         let blk_x = (mi_col * 4) as usize;
         let blk_y = (mi_row * 4) as usize;
         let dst_off = blk_y * self.stride + blk_x;
-        aom_inter::build_inter_predictor(
-            &last.y,
-            last.stride,
-            last.width,
-            last.height,
-            &mut self.recon,
-            dst_off,
-            self.stride,
-            blk_x,
-            blk_y,
-            bw_px,
-            bh_px,
-            cmv_row,
-            cmv_col,
-            0,
-            0,
-            filter_x,
-            filter_y,
-        );
+        // Luma MC: WARPED_CAUSAL affine warp (av1_warp_plane) with a valid local
+        // model; else translational. OBMC uses translational here (its overlap
+        // blend runs after, below). Luma block is always >= 8 -> passes
+        // av1_init_warp_params' per-plane size gate.
+        if let Some(wm) = warp_luma {
+            aom_inter::warp::warp_affine(
+                &wm.wmmat,
+                &last.y,
+                last.width,
+                last.height,
+                last.stride,
+                &mut self.recon,
+                dst_off,
+                self.stride,
+                blk_x as i32,
+                blk_y as i32,
+                bw_px,
+                bh_px,
+                0,
+                0,
+                wm.alpha,
+                wm.beta,
+                wm.gamma,
+                wm.delta,
+            );
+        } else {
+            aom_inter::build_inter_predictor(
+                &last.y,
+                last.stride,
+                last.width,
+                last.height,
+                &mut self.recon,
+                dst_off,
+                self.stride,
+                blk_x,
+                blk_y,
+                bw_px,
+                bh_px,
+                cmv_row,
+                cmv_col,
+                0,
+                0,
+                filter_x,
+                filter_y,
+            );
+        }
         // Chroma prediction only at the chroma-reference block (sub-8x8 members
         // share one chroma block, coded on the group's bottom/right member). The
         // shared-group origin is `adj` (setup_pred_plane's odd-position shift).
@@ -2739,26 +2825,54 @@ impl<'c> TileKf<'c> {
                 let bw_uv = bw_px >> ss_x;
                 let bh_uv = bh_px >> ss_y;
                 let doff = uv_org_y * self.stride_uv + uv_org_x;
-                for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
-                    aom_inter::build_inter_predictor(
-                        src,
-                        last.stride_uv,
-                        last.width_uv,
-                        last.height_uv,
-                        dst,
-                        doff,
-                        self.stride_uv,
-                        uv_org_x,
-                        uv_org_y,
-                        bw_uv,
-                        bh_uv,
-                        cmv_row,
-                        cmv_col,
-                        ss_x,
-                        ss_y,
-                        filter_x,
-                        filter_y,
-                    );
+                // Chroma warp only when the (subsampled) plane block is >= 8 in both
+                // dims (av1_init_warp_params); otherwise translational.
+                let warp_chroma = warp_luma.filter(|_| bw_uv >= 8 && bh_uv >= 8);
+                if let Some(wm) = warp_chroma {
+                    for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
+                        aom_inter::warp::warp_affine(
+                            &wm.wmmat,
+                            src,
+                            last.width_uv,
+                            last.height_uv,
+                            last.stride_uv,
+                            dst,
+                            doff,
+                            self.stride_uv,
+                            uv_org_x as i32,
+                            uv_org_y as i32,
+                            bw_uv,
+                            bh_uv,
+                            ss_x,
+                            ss_y,
+                            wm.alpha,
+                            wm.beta,
+                            wm.gamma,
+                            wm.delta,
+                        );
+                    }
+                } else {
+                    for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
+                        aom_inter::build_inter_predictor(
+                            src,
+                            last.stride_uv,
+                            last.width_uv,
+                            last.height_uv,
+                            dst,
+                            doff,
+                            self.stride_uv,
+                            uv_org_x,
+                            uv_org_y,
+                            bw_uv,
+                            bh_uv,
+                            cmv_row,
+                            cmv_col,
+                            ss_x,
+                            ss_y,
+                            filter_x,
+                            filter_y,
+                        );
+                    }
                 }
             }
         }

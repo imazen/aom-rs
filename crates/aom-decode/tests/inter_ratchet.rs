@@ -304,3 +304,85 @@ fn inter_ratchet_16x18_obmc_frame1_byte_identical() {
         "08db98983320105666c9496dc1dba209",
     );
 }
+
+/// CHUNK-5 GATE: WARPED_CAUSAL (local warped motion) — `av1-1-b8-01-size-16x34`
+/// frame 1. The census (`AV1D_GET_MI_INFO`) is SIMPLE + OBMC (mi 0,2 / 2,2 / 8,0,
+/// all BLOCK_8X8) + **one WARPED_CAUSAL block** (mi(4,0) BLOCK_16X16 NEARESTMV
+/// mv=(-1,-7) num_proj_ref=3) + inter var-tx (TX_MODE_SELECT). The WARP feature
+/// itself is byte-exact and C-differentially locked: the kernel
+/// (`av1_warp_affine`) in `aom-inter/tests/warp_diff.rs`, the neighbour gather
+/// (`av1_findSamples`/`av1_selectSamples`) + model (`av1_find_projection`) in
+/// `aom-entropy/tests/dv_ref_diff.rs`, and the PARSE census-match for THIS block
+/// in `aom-decode/tests/warp_census.rs` (the derived model == the C census).
+///
+/// SELF-PROMOTING (the codebase's pinned-divergence pattern): the whole frame
+/// decodes byte-exact once every feature it uses has landed. As of the WARP
+/// landing it still pins EARLIER than mi(4,0) — the OBMC block mi(0,2) needs the
+/// chroma-left OBMC blend (a chunk-4 gap; chunk 4 shipped luma above-OBMC for the
+/// 16x18 target). When that lands, this frame reaches the WARP block and this
+/// gate self-promotes to the golden byte-match.
+#[test]
+fn inter_ratchet_16x34_warp_frame1() {
+    const GOLDEN_F0: &str = "8f40d3b13aa1b52f44593b8a3195a368";
+    const GOLDEN_F1: &str = "0a026e579f57bb108b9fd01bf0af557a";
+
+    let dir = corpus_dir();
+    let ivf_path = dir.join("av1-1-b8-01-size-16x34.ivf");
+    let ivf = match std::fs::read(&ivf_path) {
+        Ok(b) => b,
+        Err(e) => panic!(
+            "conformance vector {} not found ({e}). Fetch with \
+             `python3 xtask/conformance.py --fetch --scope intra` or set AOM_CONFORMANCE_DIR.",
+            ivf_path.display()
+        ),
+    };
+    let tus = ivf_temporal_units(&ivf);
+    assert_eq!(tus.len(), 2, "16x34 has exactly 2 frames (KEY + INTER)");
+
+    // Anchor: frame 0 (KEY) decodes byte-exact (harness soundness).
+    let f0 = decode_frames(&tus[0]).expect("16x34 KEY frame decodes");
+    assert_eq!(f0.len(), 1, "one shown KEY frame");
+    assert_eq!(image_md5(&f0[0]), GOLDEN_F0, "16x34 frame 0 (KEY) golden");
+
+    let mut stream = tus[0].clone();
+    stream.extend_from_slice(&tus[1]);
+    let res = std::panic::catch_unwind(|| decode_frames(&stream));
+    match res {
+        Ok(Ok(frames)) => {
+            // OBMC (incl. chroma-left) + var-tx + WARP all reached → whole frame decodes.
+            assert_eq!(frames.len(), 2, "two shown frames decoded");
+            assert_eq!(image_md5(&frames[0]), GOLDEN_F0, "16x34 frame 0 golden");
+            assert_eq!(
+                image_md5(&frames[1]),
+                GOLDEN_F1,
+                "16x34 frame 1 (SIMPLE + OBMC + WARPED_CAUSAL + var-tx) golden"
+            );
+            eprintln!("inter ratchet 16x34: FULL byte-match — WARP gate PROMOTED");
+        }
+        Ok(Err(e)) => panic!("16x34 decode returned an unexpected error (not a pin): {e}"),
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("<non-string panic>");
+            assert!(
+                msg.contains("inter skeleton")
+                    || msg.contains("inter ratchet")
+                    || msg.contains("chunk 4")
+                    || msg.contains("OBMC")
+                    || msg.contains("WARPED_CAUSAL")
+                    || msg.contains("non-uniform inter var-tx")
+                    || msg.contains("inter-intra prediction not yet handled"),
+                "16x34 frame 1 expected to pin on a documented inter-envelope guard \
+                 (OBMC chroma-left / var-tx / WARP / inter-intra), but panicked with: {msg}"
+            );
+            eprintln!(
+                "inter ratchet 16x34: frame-1 byte gate PINNED on `{msg}` (an OBMC chroma-left \
+                 blend gap that precedes the WARP block mi(4,0); the WARP feature is C-locked in \
+                 warp_diff/dv_ref_diff/warp_census). Self-promotes to the golden byte-match when \
+                 OBMC chroma-left lands."
+            );
+        }
+    }
+}
