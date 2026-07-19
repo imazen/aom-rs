@@ -143,6 +143,10 @@ pub struct InterLeafInputs<'a> {
     pub visible_rows: usize,
     /// Frame QM level (`qmatrix_level_y`), `None` = QM off.
     pub qm_level: Option<usize>,
+    /// `prune_2d_txfm_mode >= TX_TYPE_PRUNE_1` — enable the `prune_tx_2D` NN prune
+    /// (witness config: true). When true and the multi-type inter arm has >5
+    /// candidates, the NN prunes + reorders the tx-type search order.
+    pub prune_2d: bool,
 }
 
 /// The winner of one inter leaf's tx-type search (`search_tx_type`, inter arm).
@@ -202,21 +206,28 @@ pub fn search_tx_type_inter(
     let _ = block_sse_u;
     block_sse *= 16;
 
-    // The allowed tx-type set. `prune_tx_2D` (the NN 2D prune, TX_TYPE_PRUNE_1)
-    // is not yet ported — gated OFF here; added incrementally with its own
-    // real-C differential. Until then this leaf evaluates the FULL inter set,
-    // which over-searches vs C on num_allowed>5 blocks (the reason the e2e
-    // witness is not yet closed).
-    let (allowed_tx_mask, _txk_allowed) = get_tx_mask_inter(
+    // The allowed tx-type set (get_tx_mask inter arm).
+    let (mut allowed_tx_mask, txk_allowed) = get_tx_mask_inter(
         tx_size,
         inp.lossless,
         inp.reduced_tx_set_used,
         inp.enable_flip_idtx,
         inp.use_inter_dct_only,
     );
-    // Search order: the natural 0..16 (C `txk_map` identity when prune_tx_2D is
-    // off; when ported, prune_tx_2D reorders it via tx_type_table_2D + sort).
-    let txk_map: [usize; TX_TYPES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    // Search order: the natural 0..16 unless prune_tx_2D reorders it.
+    let mut txk_map: [usize; TX_TYPES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    // `prune_tx_2D` (tx_search.c:1934): the multi-type inter arm, when the set has
+    // more than `allowed_tx_count` (5 at PRUNE_1) candidates — the NN prunes the
+    // mask + reorders `txk_map` (with TX_TYPE_INVALID padding after the kept types).
+    if inp.prune_2d && txk_allowed.is_none() && allowed_tx_mask.count_ones() > 5 {
+        let set = ext_tx_set_type(tx_size, true, inp.reduced_tx_set_used);
+        if let Some(r) =
+            crate::prune_tx_2d::prune_tx_2d(inp.residual, w, tx_size, set, 1, allowed_tx_mask)
+        {
+            allowed_tx_mask = r.allowed_tx_mask;
+            txk_map = r.txk_map;
+        }
+    }
 
     // Trellis gating: block-MSE / qstep^2 threshold (perform_block_coeff_opt).
     let perform_block_coeff_opt =
@@ -246,6 +257,10 @@ pub fn search_tx_type_inter(
 
     for idx in 0..TX_TYPES {
         let tx_type = txk_map[idx];
+        // prune_tx_2D pads the reordered txk_map with TX_TYPE_INVALID (255).
+        if tx_type >= TX_TYPES {
+            continue;
+        }
         if allowed_tx_mask & (1 << tx_type) == 0 {
             continue;
         }
@@ -584,6 +599,9 @@ pub struct VarTxEnv<'a> {
     /// NN gate (bd8 only; witness value 8500). `< 0` disables the NN (the
     /// prunes-off recursion differential passes `-1`).
     pub ml_tx_split_thresh: i32,
+    /// `prune_2d_txfm_mode >= TX_TYPE_PRUNE_1` — enable the leaf `prune_tx_2D` NN
+    /// (witness: true). The prunes-off recursion differential passes `false`.
+    pub prune_2d: bool,
     /// The var-tx quadtree init depth (`get_search_init_depth`; 0 at speed-0 sub-720p).
     pub init_depth: i32,
 }
@@ -705,6 +723,7 @@ fn try_tx_block_no_split(
         visible_cols,
         visible_rows,
         qm_level: env.qm_level,
+        prune_2d: env.prune_2d,
     };
 
     let mut rd_stats = RdStats::init();

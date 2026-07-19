@@ -222,6 +222,7 @@ fn search_tx_type_inter_matches_c_chain() {
                 visible_cols: w,
                 visible_rows: h,
                 qm_level: None,
+                prune_2d: false,
             };
             let got = search_tx_type_inter(&inp, 0, false, 3200, 1, ref_best_rd);
 

@@ -189,6 +189,7 @@ fn c_try_no_split(
         visible_cols: vis_c.min(w),
         visible_rows: vis_r.min(h),
         qm_level: None,
+        prune_2d: false,
     };
     let Some(leaf) = search_tx_type_inter(&inp, 0, false, 3200, 1, ref_best_rd) else {
         return (Rd::invalid(), i64::MAX, 0, 0);
@@ -507,6 +508,7 @@ fn pick_recursive_tx_size_type_matches_c_recursion() {
                 adaptive_txb_search_level: 1,
                 txb_split_cap: true,
                 ml_tx_split_thresh: -1, // NN off (prunes-off recursion differential)
+                prune_2d: false,
                 init_depth: 0,
             };
             let port = pick_recursive_tx_size_type_yrd(&env, i64::MAX);
