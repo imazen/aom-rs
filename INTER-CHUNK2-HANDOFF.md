@@ -13,28 +13,36 @@ verified by decode-both.
 | **2d.2** subpel search | `654614f` | `aom_encode::inter_me::find_best_sub_pixel_tree` — `av1_find_best_sub_pixel_tree` (SUBPEL_TREE / USE_8_TAPS, the speed-0 path). The biggest net-new ME kernel. | `aom-encode/tests/subpel_tree_diff.rs` — `(best_mv, distortion, sse, besterr)` byte-match real C (432 cells). |
 | **2d.3** full-pel score | `dd59677` | `aom_encode::inter_me::get_mvpred_sse` — `av1_get_mvpred_sse` (mcomp.c:3963): the full-pel predictor SSE + coded-MV cost `av1_single_motion_search` scores the full-pel result with. | `subpel_tree_diff.rs::get_mvpred_sse_matches_real_c` (126 cells). |
 | **2d.4** coded-MV rate | `dc8ae93` | `aom_encode::inter_me::mv_bit_cost` — `av1_mv_bit_cost` (mcomp.c:307): the NEWMV RD rate (weight 108/120). `mv_err_cost_entropy` (the motion-search variance-metric cost) is a shared free fn. | `subpel_tree_diff.rs::mv_bit_cost_matches_real_c` (8000 cells). |
+| **2d.5** MV cost tables | `54dd141` | `aom_encode::intrabc_search::fill_nmv_costs(precision, joints, comp0, comp1)` — `av1_build_nmv_cost_table` (encodemv.c:294): the REAL per-frame inter MV cost tables (`x->mv_costs`) the motion search consumes, at LOW/HIGH precision. Generalizes the intrabc `fill_dv_costs` (which is now this at `MV_SUBPEL_NONE`) with the fp/hp cost fills. | `aom-encode/tests/nmv_cost_table_diff.rs` — default + 24 random contexts × NONE/LOW/HIGH byte-match the 4 joint costs + both full magnitude tables; anti-vacuity + `fill_dv_costs` tie. |
+| **2d.6** full-pel search | `7188476` | `aom_encode::intrabc_search::full_pixel_search_inter(...)` — `av1_full_pixel_search` (mcomp.c:1768) inter SIMPLE_TRANSLATION speed-0 NSTEP diamond, mesh off. Retargets the intrabc `FullPelSearch` (stride split into src/ref) + the real 2d.5 nmv tables + `get_fullmv_from_mv` rounding. **First real-C validation of the port's full-pel diamond.** | `aom-encode/tests/full_pixel_search_diff.rs` — `(var_cost, best_row, best_col)` byte-match real C across ~670 cells (sizes × random + converging content × integer/subpel ref MVs × step params). |
 
 New oracle: `aom-sys-ref/shim/me_shim.c` (`shim_upsampled_pred`, `shim_find_best_sub_pixel_tree`,
-`shim_get_mvpred_sse`, `shim_mv_bit_cost`) + the `ref_*` wrappers in `aom-sys-ref/src/lib.rs`.
-`me_shim` registered in `aom-sys-ref/build.rs`. `aom-encode` gained an `aom-convolve` dep (filter
-tables). The tree oracle's MACROBLOCKD/SUBPEL_MOTION_SEARCH_PARAMS construction (me_shim.c) is the
-template for the full-pel `av1_full_pixel_search` shim.
+`shim_get_mvpred_sse`, `shim_mv_bit_cost`, **`shim_build_nmv_cost_table`**, **`shim_full_pixel_search`**)
++ the `ref_*` wrappers in `aom-sys-ref/src/lib.rs`. `me_shim` registered in `aom-sys-ref/build.rs`.
+`aom-encode` gained an `aom-convolve` dep (filter tables). The full-pel shim builds a
+`FULLPEL_MOTION_SEARCH_PARAMS` field-by-field — the NSTEP `search_site_config` via the real
+`av1_init_motion_compensation[NSTEP]` (level 0, ref stride), per-size `aom_*_c` SAD/variance fn
+ptrs, mesh forced off (`force_mesh_thresh = INT_MAX`).
 
-**So 2d — the subpel motion search + its cost primitives — is DONE and real-C-locked (the biggest
-net-new inter ME work). 2b (RC) is DONE.** All leaves are real-C-locked: `upsampled_pred` (2d.1),
-`aom_dist::variance` (pre-locked), `mv_err_cost_entropy` (via the tree diff), `mv_bit_cost` (2d.4).
-The only ME piece left is the **full-pel search inter retarget + its differential** (below) — then
-`av1_single_motion_search` is just glue (full-pel → `get_mvpred_sse` → `find_best_sub_pixel_tree`).
+**So 2d — the ENTIRE single-ref motion search — is DONE and real-C-locked.** All primitives:
+full-pel (`full_pixel_search_inter`, 2d.6), subpel tree (2d.2), `upsampled_pred` (2d.1),
+`get_mvpred_sse` (2d.3), `mv_bit_cost` (2d.4), the real MV cost tables (`fill_nmv_costs`, 2d.5),
+`aom_dist::variance`/SAD (pre-locked). 2b (RC) is DONE. **The only ME piece not built is the
+composition glue `av1_single_motion_search`** (full-pel → subpel) — but both halves are C-locked,
+so it is pure glue (no new kernel). Follow-ups deferred as speed≥1 / later chunks: the inter
+exhaustive mesh (needs `mv_sf->mesh_patterns`, distinct from intrabc's), the full-pel `cost_list`
+(`calc_int_cost_list`, only used by the pruned-subpel/DRL paths — the speed-0 SUBPEL_TREE does not
+read it), and `second_best_mv`.
 
 ## Head-start inventory (REUSE — do not rebuild)
 
-- **Full-pel ME** (`aom-encode/src/intrabc_search.rs`, 1921 LOC): `FullPelSearch` (:1166) is
-  ALREADY a generic reference-plane abstraction (`refb`/`ref_off` fields); `diamond_search_sad`
-  (:1252), `full_pixel_diamond` (:1319), `full_pixel_exhaustive` (:1397), `set_mv_search_range`
-  (:1099). **NO C oracle yet — geometry-unit-locked only.** MV cost model: `mv_cost` (:556),
-  `mv_err_cost` (:579), `mvsad_err_cost` (:593), `DvCosts`/`fill_dv_costs` (:418/:536) — forms
-  generalize to inter, but tables are `MV_SUBPEL_NONE` (integer-pel); inter needs the
-  subpel-precision `av1_build_nmv_cost_table` build (fp/hp arrays).
+- **Full-pel ME** (`aom-encode/src/intrabc_search.rs`): `FullPelSearch` now carries separate
+  `src_stride`/`ref_stride` (equal for intrabc); `diamond_search_sad`, `full_pixel_diamond`,
+  `full_pixel_exhaustive`, `set_mv_search_range`. **NOW real-C-locked** (2d.6,
+  `full_pixel_search_diff.rs`) via `pub full_pixel_search_inter(...)` — call it for inter.
+  MV cost model: `mv_cost`, `mv_err_cost`, `mvsad_err_cost`, `DvCosts`; the inter cost tables are
+  `pub fill_nmv_costs(precision, joints, comp0, comp1)` (2d.5, `MV_SUBPEL_LOW`/`HIGH`) —
+  `fill_dv_costs` is that at `MV_SUBPEL_NONE`.
 - **Encoder inter MC is ALREADY built + byte-exact**: `aom-inter::build_inter_predictor` (single-ref
   translational, lowbd, 4-tap/8-tap, dual filters, border) — the SAME `reconinter` chain the
   decoder uses (proven vs `inter_predictor` + decoder MD5). `aom-decode` already consumes it. For
@@ -90,17 +98,32 @@ Ordered as the roadmap suggests (structure → search wiring → RD → gate):
   mono / luma-inter / zero-MV 4:2:0 / cpu 2,5 4:2:0; arbitrary-content chroma-inter decode is a
   concurrent decoder-track fix).
 
-## Suggested next kernel (if continuing before 2f integration)
+## Next work (the ME kernel surface is DONE — 2d complete; next is 2f integration)
 
-- **Full-pel search inter retarget + first real-C differential** (`av1_full_pixel_search`,
-  mcomp.c:1768). Would lock the ENTIRE motion search (full-pel + subpel already done). Needs:
-  split `FullPelSearch.stride`, expose the diamond/mesh `pub(crate)`, and a
-  `shim_full_pixel_search` (FULLPEL_MOTION_SEARCH_PARAMS + a calloc'd MACROBLOCKD + the SAD fn-ptr
-  `sdf`; same shim shape as `shim_find_best_sub_pixel_tree` in `me_shim.c`). NOTE: `intrabc_search.rs`
-  is also touched by the concurrent KB-15 agent (~line 1890) — keep edits additive (the struct
-  region ~1166 and a new inter entry are far from 1890).
-- **`av1_build_nmv_cost_table`** (full precision, encodemv.c) — the real MV cost tables the subpel
-  tree currently takes as synthetic input. Differentiable vs exported C; self-contained.
+Both pre-2f ME kernels have landed (2d.5 nmv cost tables `54dd141`, 2d.6 full-pel search `7188476`);
+**every motion-search primitive is now real-C-locked.** The remaining path to the byte-exact gate is
+the integration (2a/2c/2e/2f/2g above), whose center of gravity is **2f `handle_inter_mode` RD** —
+none of it is independently byte-testable without the RD loop (unlike the kernels). Suggested order:
+
+1. **`av1_single_motion_search` glue** (motion_search_facade.c:120) — pure composition of the two
+   locked halves: `full_pixel_search_inter` (best full-pel) → `find_best_sub_pixel_tree` (start =
+   best full-pel MV) → `mv_bit_cost` (NEWMV rate). No new kernel; a real-C differential needs a
+   heavier shim (full `MACROBLOCK`/`AV1_COMP` state: `mv_costs`, `mbmi_ext`, `mv_search_params`,
+   `sf.mv_sf`, the inert-at-lag0 TPL gather) — or validate the composition on converging content.
+2. **2e MC wire** — add `aom-inter = {path="../aom-inter"}` to `aom-encode/Cargo.toml`; call
+   `aom_inter::build_inter_predictor` per plane. Kernel already byte-exact (decoder uses it); only
+   the 2f caller is new.
+3. **2f `handle_inter_mode` RD** (single-ref, SIMPLE motion, NEWMV/NEAREST/NEAR/GLOBALMV) — the
+   integration center of gravity (see 2f above). Plug the locked ME + `find_inter_mv_refs` +
+   `build_inter_predictor` + var-tx + the inter symbol writers into the leaf RD at
+   `partition_pick.rs:~1375`. Add the inter mode/drl/ref cost tables the RD consumes.
+4. **2a ref buffer + 2g gate** — a `RefFrame` (border-extended recon) + the 2-frame loop; the inter
+   frame-header WRITE machinery is ALREADY byte-exact (`write_frame_header_obu` INTER branch,
+   `aom-entropy/src/header.rs:1486`, anchor-validated) — 2a is value-derivation + ref mgmt, not the
+   bit-writing. Then decode-both at the §3 mono/luma config.
+
+Deferred ME follow-ups (speed≥1 / not needed for the speed-0 SIMPLE gate): the inter exhaustive mesh
+(`mv_sf->mesh_patterns`), the full-pel `cost_list` (`calc_int_cost_list`), `second_best_mv`.
 
 ## Coordination
 
