@@ -1,0 +1,22 @@
+[package]
+name = "zenav1-aom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust, bit-exact libaom v3.14.1 AV1 codec — thin facade re-exporting the DSP kernels plus the (feature-gated) decoder and encoder as one dependency."
+
+[lib]
+name = "zenav1_aom"
+
+[dependencies]
+# The consolidated kernels are always present; decode/encode are feature-gated
+# so size-sensitive consumers can pull a decode-only stack (encoder never built).
+zenav1-aom-dsp = { path = "../aom-dsp" }
+zenav1-aom-decode = { path = "../aom-decode", optional = true }
+zenav1-aom-encode = { path = "../aom-encode", optional = true }
+
+[features]
+default = ["decode", "encode"]
+decode = ["dep:zenav1-aom-decode"]
+encode = ["dep:zenav1-aom-encode"]

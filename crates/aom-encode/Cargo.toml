@@ -1,10 +1,13 @@
 [package]
-name = "aom-encode"
+name = "zenav1-aom-encode"
 version = "0.0.1"
 edition = "2024"
 license.workspace = true
 description = "Encoder composition layer for aom-rs: av1_xform_quant (forward transform + quantize + entropy context), bit-exact vs libaom."
-publish = false
+
+[lib]
+# Short lib name kept after the package rename to zenav1-aom-encode.
+name = "aom_encode"
 
 [dependencies]
 # Consolidated DSP/entropy kernels (was: aom-transform/quant/txb/recon/entropy/
@@ -12,17 +15,17 @@ publish = false
 # reuse notes that lived here (subpel filter tables for aom_upsampled_pred;
 # loop_filter_frame as the LF-search trial primitive; the CDEF-search kernels)
 # still apply — those kernels are now aom_dsp::{convolve,loopfilter,cdef}.
-aom-dsp = { path = "../aom-dsp" }
+zenav1-aom-dsp = { path = "../aom-dsp" }
 
 [dev-dependencies]
-aom-sys-ref = { path = "../aom-sys-ref" }
+zenav1-aom-sys-ref = { path = "../aom-sys-ref" }
 # Read-only use for decode-diff diagnostics only (see
 # tests/decode_diff_noise_case.rs) -- aom-decode itself is owned by the
 # decoder track; this crate never modifies it. dev-dependency only, so this
 # does not create a cycle in the library build graph (aom-decode's own
 # [dependencies] on aom-encode only applies when building aom-decode itself;
 # test binaries here are a separate compilation unit).
-aom-decode = { path = "../aom-decode" }
+zenav1-aom-decode = { path = "../aom-decode" }
 # AVIF container muxer -- used ONLY by the `avif_parity` test (Gate 4,
 # zenavif integration): wraps the port's byte-exact AV1 OBU frame into an
 # AVIF still, which the harness then round-trips (parse container -> extract

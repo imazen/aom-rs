@@ -47,7 +47,7 @@ jobs:
           key: libaom-${{ runner.os }}-${{ env.LIBAOM_SHA }}-v2
 
       - name: Build C libaom oracle (cargo-driven)
-        run: cargo build -p aom-sys-ref
+        run: cargo build -p zenav1-aom-sys-ref
 
       # Deterministically provision the Gate-1 conformance corpus. The workspace
       # conformance test (conformance_corpus.rs) fail-loud-asserts when
@@ -99,7 +99,7 @@ jobs:
           path: upstream/build
           key: libaom-${{ runner.os }}-${{ env.LIBAOM_SHA }}-v2
       - name: Build C libaom oracle (cargo-driven)
-        run: cargo build -p aom-sys-ref
+        run: cargo build -p zenav1-aom-sys-ref
       - name: Cache conformance corpus
         uses: actions/cache@v6
         with:

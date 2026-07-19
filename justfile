@@ -33,25 +33,25 @@ test-fast-scalar:
 # Measured 2026-07-17: ~45s cold (optimized build-dominated), test-RUN a few
 # seconds — the transform per-kernel differential is 1.5s here vs ~10s in debug.
 test-simd:
-    cargo test --profile test-fast -p aom-dsp --test txfm2d_simd_perm_diff --test quantize_fp_simd_diff --test cdef_filter_simd_diff --test sad_simd --test hbd_variance_simd_diff --test txb_init_levels_simd_diff --test intra_simd_diff --test lpf_simd_diff --test wiener_simd_diff --test convolve_diff --no-fail-fast
+    cargo test --profile test-fast -p zenav1-aom-dsp --test txfm2d_simd_perm_diff --test quantize_fp_simd_diff --test cdef_filter_simd_diff --test sad_simd --test hbd_variance_simd_diff --test txb_init_levels_simd_diff --test intra_simd_diff --test lpf_simd_diff --test wiener_simd_diff --test convolve_diff --no-fail-fast
 
 # Gate-3 paired benchmark, port vs C oracle (zenbench interleaved rounds).
 # QUIET BOX ONLY — the resource gate flags noisy rounds; a loaded box makes
 # the numbers worthless. Results: commit to benchmarks/ per CLAUDE.md.
 bench-gate3:
-    cargo bench -p aom-bench --bench gate3
+    cargo bench -p zenav1-aom-bench --bench gate3
 
 # Harness smoke: proves the bench runs end-to-end (byte-verify + tiny rounds,
 # resource gate off). NUMBERS ARE MEANINGLESS — never quote them.
 bench-smoke:
-    AOM_BENCH_SMOKE=1 cargo bench -p aom-bench --bench gate3
+    AOM_BENCH_SMOKE=1 cargo bench -p zenav1-aom-bench --bench gate3
 
 # Callgrind instruction-count profile of one Gate-3 cell (load-tolerant).
 # kind=enc|dec side=port|c cell=<label> iters=N; see gate3_profile --help
 # for cell labels. Output: /tmp/cg_<cell>_<side>.out (annotate with
 # `callgrind_annotate --threshold=95 <file>`).
 profile kind side cell iters:
-    cargo build --profile profiling -p aom-bench --bin gate3_profile
+    cargo build --profile profiling -p zenav1-aom-bench --bin gate3_profile
     valgrind --tool=callgrind --callgrind-out-file=/tmp/cg_{{cell}}_{{side}}.out \
         ./target/profiling/gate3_profile {{kind}} {{side}} {{cell}} {{iters}}
     callgrind_annotate --threshold=95 /tmp/cg_{{cell}}_{{side}}.out | head -60

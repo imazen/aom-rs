@@ -1,9 +1,15 @@
 [package]
-name = "aom-sys-ref"
+name = "zenav1-aom-sys-ref"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "FFI bindings to the pinned C libaom v3.14.1 — ORACLE ONLY (test/bench use)."
+# Dev / differential-harness only — never published (invariant: no published
+# crate links C; this stays a dev-dependency of the shipping crates).
+publish = false
 
 [lib]
+# Short lib name kept after the package rename to zenav1-aom-sys-ref, so every
+# dev-dependent keeps `use aom_sys_ref::...` unchanged.
+name = "aom_sys_ref"
 # Links the reference static archive; used only to diff against the pure-Rust port.

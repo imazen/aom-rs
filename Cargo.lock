@@ -53,50 +53,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aom-bench"
-version = "0.0.1"
-dependencies = [
- "aom-decode",
- "aom-dsp",
- "aom-encode",
- "aom-sys-ref",
- "zenbench",
- "zensim",
-]
-
-[[package]]
-name = "aom-decode"
-version = "0.0.1"
-dependencies = [
- "aom-dsp",
- "aom-encode",
- "aom-sys-ref",
-]
-
-[[package]]
-name = "aom-dsp"
-version = "0.0.1"
-dependencies = [
- "aom-sys-ref",
- "archmage",
- "magetypes",
-]
-
-[[package]]
-name = "aom-encode"
-version = "0.0.1"
-dependencies = [
- "aom-decode",
- "aom-dsp",
- "aom-sys-ref",
- "zenavif-serialize",
-]
-
-[[package]]
-name = "aom-sys-ref"
-version = "0.0.1"
-
-[[package]]
 name = "archmage"
 version = "0.9.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -700,6 +656,59 @@ checksum = "b66463ad2e0ea3bbf808b7f1d371311c80e115c0b71d60efc142cafbcfb057a6"
 dependencies = [
  "windows-link 0.1.3",
 ]
+
+[[package]]
+name = "zenav1-aom"
+version = "0.0.1"
+dependencies = [
+ "zenav1-aom-decode",
+ "zenav1-aom-dsp",
+ "zenav1-aom-encode",
+]
+
+[[package]]
+name = "zenav1-aom-bench"
+version = "0.0.1"
+dependencies = [
+ "zenav1-aom-decode",
+ "zenav1-aom-dsp",
+ "zenav1-aom-encode",
+ "zenav1-aom-sys-ref",
+ "zenbench",
+ "zensim",
+]
+
+[[package]]
+name = "zenav1-aom-decode"
+version = "0.0.1"
+dependencies = [
+ "zenav1-aom-dsp",
+ "zenav1-aom-encode",
+ "zenav1-aom-sys-ref",
+]
+
+[[package]]
+name = "zenav1-aom-dsp"
+version = "0.0.1"
+dependencies = [
+ "archmage",
+ "magetypes",
+ "zenav1-aom-sys-ref",
+]
+
+[[package]]
+name = "zenav1-aom-encode"
+version = "0.0.1"
+dependencies = [
+ "zenav1-aom-decode",
+ "zenav1-aom-dsp",
+ "zenav1-aom-sys-ref",
+ "zenavif-serialize",
+]
+
+[[package]]
+name = "zenav1-aom-sys-ref"
+version = "0.0.1"
 
 [[package]]
 name = "zenavif-serialize"

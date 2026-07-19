@@ -1,21 +1,24 @@
 [package]
-name = "aom-decode"
+name = "zenav1-aom-decode"
 version = "0.0.1"
 edition = "2024"
 license.workspace = true
 description = "Decoder composition layer for aom-rs: KEY-frame luma tile reconstruction driver (partition walk + per-leaf mode-info/coeff decode + intra predict + inverse transform), roundtrip-pinned to the byte-identical-to-C writers."
-publish = false
+
+[lib]
+# Short lib name kept after the package rename to zenav1-aom-decode.
+name = "aom_decode"
 
 [dependencies]
 # Consolidated DSP/entropy kernels (was: aom-cdef/entropy/inter/intra/loopfilter/
 # quant/recon/restore/transform/txb — folded into aom-dsp per GitHub #2).
-aom-dsp = { path = "../aom-dsp" }
+zenav1-aom-dsp = { path = "../aom-dsp" }
 
 [dev-dependencies]
-aom-sys-ref = { path = "../aom-sys-ref" }
+zenav1-aom-sys-ref = { path = "../aom-sys-ref" }
 # Encoder side, used ONLY by the roundtrip test harness
 # (tests/tile_roundtrip.rs: xform_quant / QuantKind / QuantParams) -- an
 # encode->decode roundtrip legitimately needs the encoder. As a dev-dependency
 # the decode LIBRARY no longer depends on aom-encode: the reverse-dependency
 # edge is broken (reconstruct_txb now comes from aom-recon).
-aom-encode = { path = "../aom-encode" }
+zenav1-aom-encode = { path = "../aom-encode" }

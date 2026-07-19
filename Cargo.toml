@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/zenav1-aom",
     "crates/aom-dsp",
     "crates/aom-encode",
     "crates/aom-decode",

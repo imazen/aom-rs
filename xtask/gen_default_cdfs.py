@@ -11,7 +11,7 @@ av1_setup_past_independence) in crates/aom-entropy/tests/default_cdfs_diff.rs â€
 that closes the loop over this parse, the Rust struct mapping, and the aom-txb
 arena packing.
 
-Usage: python3 xtask/gen_default_cdfs.py && cargo fmt -p aom-entropy  (repo root)
+Usage: python3 xtask/gen_default_cdfs.py && cargo fmt -p zenav1-aom-dsp  (repo root)
 """
 
 import re

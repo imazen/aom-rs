@@ -1,19 +1,21 @@
 [package]
-name = "aom-dsp"
+name = "zenav1-aom-dsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Consolidated DSP kernels for the aom-rs bit-exact libaom v3.14.1 port: transform, quant, txb, cdef, restore, intra, loopfilter, dist, inter, convolve, recon, dispatch, and the MSAC entropy coder — each a module under this crate."
 
+[lib]
+# Short lib name retained after the package rename to zenav1-aom-dsp, so every
+# consumer keeps `use aom_dsp::...` unchanged.
+name = "aom_dsp"
+
 [dependencies]
-# ONE archmage universe workspace-wide (registry, exact version) so
-# aom-dispatch's AOM_FORCE_SCALAR process-wide pin reaches every kernel module.
+# ONE archmage universe workspace-wide (registry, exact version) so the
+# dispatch module's AOM_FORCE_SCALAR process-wide pin reaches every kernel.
 archmage = "0.9.27"
 magetypes = "0.9.27"
-# Kernel crates being folded in one family at a time (facade-first: re-exported
-# as `pub use aom_X as X` below, then physically absorbed into src/X/). Removed
-# from this list as each is absorbed.
 
 [features]
 # AVX-512 tiers (X64V4Token codegen). Default-on: runtime dispatch decides, so
@@ -22,4 +24,4 @@ default = ["avx512"]
 avx512 = ["archmage/avx512", "magetypes/avx512"]
 
 [dev-dependencies]
-aom-sys-ref = { path = "../aom-sys-ref" }
+zenav1-aom-sys-ref = { path = "../aom-sys-ref" }
