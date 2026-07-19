@@ -228,6 +228,28 @@ fn round_pow2_i64(v: i64, n: i32) -> i64 {
     (v + (1i64 << (n - 1))) >> n
 }
 
+/// `mv_err_cost` (mcomp.c:317) at `MV_COST_ENTROPY`: the MV rate→distortion cost
+/// of `mv` (1/8-pel) relative to `ref_mv`, with per-component cost tables centred
+/// at [`MV_MAX`]. Shift = `RDDIV_BITS(7) + AV1_PROB_COST_SHIFT(9) - RD_EPB_SHIFT(6)
+/// + PIXEL_TRANSFORM_ERROR_SCALE(4) = 14`.
+#[inline]
+fn mv_err_cost_entropy(
+    mv: (i32, i32),
+    ref_mv: (i32, i32),
+    mvjcost: &[i32; 4],
+    mvcost0: &[i32],
+    mvcost1: &[i32],
+    error_per_bit: i32,
+) -> i32 {
+    let dr = mv.0 - ref_mv.0;
+    let dc = mv.1 - ref_mv.1;
+    let joint = get_mv_joint(dr, dc) as usize;
+    let mvc = mvjcost[joint] as i64
+        + mvcost0[(MV_MAX + dr) as usize] as i64
+        + mvcost1[(MV_MAX + dc) as usize] as i64;
+    round_pow2_i64(mvc * error_per_bit as i64, 14) as i32
+}
+
 /// Mutable subpel-search state — mirrors the in-place `bestmv`/`besterr`/
 /// `distortion`/`sse1` pointers `av1_find_best_sub_pixel_tree` threads through
 /// `check_better`.
@@ -259,18 +281,16 @@ impl<'a> Search<'a> {
         }
     }
 
-    /// `mv_err_cost_` (mcomp.c:343) at `MV_COST_ENTROPY`: the MV rate→distortion
-    /// cost of `mv` relative to `ref_mv`.
+    /// `mv_err_cost_` (mcomp.c:343) at `MV_COST_ENTROPY`.
     fn mv_err_cost(&self, mv: (i32, i32)) -> i32 {
-        let dr = mv.0 - self.p.ref_mv.0;
-        let dc = mv.1 - self.p.ref_mv.1;
-        let joint = get_mv_joint(dr, dc) as usize;
-        let mvc = self.p.mvjcost[joint] as i64
-            + self.p.mvcost0[(MV_MAX + dr) as usize] as i64
-            + self.p.mvcost1[(MV_MAX + dc) as usize] as i64;
-        // RDDIV_BITS(7) + AV1_PROB_COST_SHIFT(9) - RD_EPB_SHIFT(6) +
-        // PIXEL_TRANSFORM_ERROR_SCALE(4) = 14.
-        round_pow2_i64(mvc * self.p.error_per_bit as i64, 14) as i32
+        mv_err_cost_entropy(
+            mv,
+            self.p.ref_mv,
+            &self.p.mvjcost,
+            self.p.mvcost0,
+            self.p.mvcost1,
+            self.p.error_per_bit,
+        )
     }
 
     /// `upsampled_pref_error` (mcomp.c:2521), lowbd USE_8_TAPS: build the
@@ -414,4 +434,51 @@ pub fn find_best_sub_pixel_tree(p: &SubpelSearchParams) -> SubpelResult {
         sse: s.sse,
         besterr: s.besterr,
     }
+}
+
+/// `av1_get_mvpred_sse` (mcomp.c:3963): the score `av1_single_motion_search`
+/// assigns a full-pel search result — the plain (non-upsampled) predictor SSE at
+/// `best_full_mv` plus the coded-MV rate cost. `pre`/`pre_origin` locate the
+/// reference `buf_2d` origin (fullmv 0); `get_buf_from_fullmv` offsets it by the
+/// integer MV. Cost is on the 1/8-pel MV (`best_full_mv * 8`). Returns
+/// `sse + mv_err_cost` (libaom's `int` return; both terms non-negative here).
+///
+/// Differentially locked vs the REAL exported `av1_get_mvpred_sse` in
+/// `tests/subpel_tree_diff.rs`.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn get_mvpred_sse(
+    best_full_mv: (i32, i32),
+    src: &[u16],
+    src_off: usize,
+    src_stride: usize,
+    pre: &[u16],
+    pre_origin: usize,
+    pre_stride: usize,
+    w: usize,
+    h: usize,
+    ref_mv: (i32, i32),
+    mvjcost: &[i32; 4],
+    mvcost0: &[i32],
+    mvcost1: &[i32],
+    error_per_bit: i32,
+) -> u32 {
+    // get_buf_from_fullmv(pre, best_mv) = pre + row*stride + col.
+    let pre_at = (pre_origin as isize
+        + best_full_mv.0 as isize * pre_stride as isize
+        + best_full_mv.1 as isize) as usize;
+    let mut src8 = vec![0u8; w * h];
+    let mut pre8 = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            src8[y * w + x] = src[src_off + y * src_stride + x] as u8;
+            pre8[y * w + x] = pre[pre_at + y * pre_stride + x] as u8;
+        }
+    }
+    // vfp->vf(src->buf, src->stride, pre_at, pre->stride, &sse) -> (var, sse).
+    let (_var, sse) = aom_dist::variance(&src8, w, &pre8, w, w, h);
+    // get_mv_from_fullmv(best_mv) = best_mv * 8 (full-pel -> 1/8-pel).
+    let mv = (best_full_mv.0 * 8, best_full_mv.1 * 8);
+    let cost = mv_err_cost_entropy(mv, ref_mv, mvjcost, mvcost0, mvcost1, error_per_bit);
+    sse.wrapping_add(cost as u32)
 }

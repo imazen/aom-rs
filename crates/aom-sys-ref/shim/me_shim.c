@@ -164,3 +164,41 @@ int shim_find_best_sub_pixel_tree(
   free(xd); free(mbmi); free(cb); free(sf); free(cm); free(tmp_pred);
   return besterr;
 }
+
+/* ---- shim_get_mvpred_sse ---------------------------------------------
+ * Drives the REAL exported av1_get_mvpred_sse (mcomp.c:3963): the full-pel
+ * predictor SSE + coded-MV rate cost the motion-search facade scores a full-pel
+ * result with. Reuses shim_pick_vf; caller-supplied MV cost tables (centred).
+ */
+int shim_get_mvpred_sse(int best_row, int best_col, const uint8_t *src,
+                        int src_stride, const uint8_t *pre_at_origin,
+                        int pre_stride, int w, int h, int ref_mv_row,
+                        int ref_mv_col, const int *mvjcost, const int *mvcost0,
+                        const int *mvcost1, int error_per_bit) {
+  aom_variance_fn_ptr_t vfp;
+  memset(&vfp, 0, sizeof(vfp));
+  vfp.vf = shim_pick_vf(w, h);
+
+  MV ref_mv = { (int16_t)ref_mv_row, (int16_t)ref_mv_col };
+  MV_COST_PARAMS mcp;
+  memset(&mcp, 0, sizeof(mcp));
+  mcp.ref_mv = &ref_mv;
+  mcp.mv_cost_type = MV_COST_ENTROPY;
+  mcp.mvjcost = mvjcost;
+  mcp.mvcost[0] = (int *)mvcost0;
+  mcp.mvcost[1] = (int *)mvcost1;
+  mcp.error_per_bit = error_per_bit;
+  mcp.sad_per_bit = 0;
+
+  struct buf_2d src_buf;
+  memset(&src_buf, 0, sizeof(src_buf));
+  src_buf.buf = (uint8_t *)src;
+  src_buf.stride = src_stride;
+  struct buf_2d pre_buf;
+  memset(&pre_buf, 0, sizeof(pre_buf));
+  pre_buf.buf = (uint8_t *)pre_at_origin;
+  pre_buf.stride = pre_stride;
+
+  FULLPEL_MV best = { (int16_t)best_row, (int16_t)best_col };
+  return av1_get_mvpred_sse(&mcp, best, &vfp, &src_buf, &pre_buf);
+}

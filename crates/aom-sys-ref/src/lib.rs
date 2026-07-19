@@ -14224,6 +14224,71 @@ pub fn ref_find_best_sub_pixel_tree(
     }
 }
 
+// me_shim.c (cont.) — the REAL av1_get_mvpred_sse full-pel score.
+extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn shim_get_mvpred_sse(
+        best_row: i32,
+        best_col: i32,
+        src: *const u8,
+        src_stride: i32,
+        pre_at_origin: *const u8,
+        pre_stride: i32,
+        w: i32,
+        h: i32,
+        ref_mv_row: i32,
+        ref_mv_col: i32,
+        mvjcost: *const i32,
+        mvcost0: *const i32,
+        mvcost1: *const i32,
+        error_per_bit: i32,
+    ) -> i32;
+}
+
+/// Reference libaom `av1_get_mvpred_sse` (mcomp.c:3963): the full-pel predictor
+/// SSE + coded-MV rate cost at `best_full_mv`. `src`/`src_off` = the source
+/// block; `pre`/`pre_origin` = the reference `buf_2d` origin (fullmv 0).
+/// `mvcost{0,1}_full` are the FULL cost tables (length `2*MV_MAX+1`).
+#[allow(clippy::too_many_arguments)]
+pub fn ref_get_mvpred_sse(
+    best_full_mv: (i32, i32),
+    src: &[u8],
+    src_off: usize,
+    src_stride: usize,
+    pre: &[u8],
+    pre_origin: usize,
+    pre_stride: usize,
+    w: usize,
+    h: usize,
+    ref_mv: (i32, i32),
+    mvjcost: &[i32; 4],
+    mvcost0_full: &[i32],
+    mvcost1_full: &[i32],
+    error_per_bit: i32,
+) -> u32 {
+    ref_init();
+    const MV_MAX: usize = (1 << 14) - 1;
+    let r = unsafe {
+        shim_get_mvpred_sse(
+            best_full_mv.0,
+            best_full_mv.1,
+            src.as_ptr().add(src_off),
+            src_stride as i32,
+            pre.as_ptr().add(pre_origin),
+            pre_stride as i32,
+            w as i32,
+            h as i32,
+            ref_mv.0,
+            ref_mv.1,
+            mvjcost.as_ptr(),
+            mvcost0_full.as_ptr().add(MV_MAX),
+            mvcost1_full.as_ptr().add(MV_MAX),
+            error_per_bit,
+        )
+    };
+    r as u32
+}
+
 // warp_shim.c — decoder local-warped-motion core (crate aom-inter, warp module,
 // chunk 5): the real `av1_warp_affine_c` kernel + `av1_find_projection` /
 // `av1_get_shear_params` model derivation.

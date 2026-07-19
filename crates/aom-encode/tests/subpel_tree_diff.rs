@@ -173,3 +173,48 @@ fn subpel_tree_matches_real_c() {
         }
     }
 }
+
+#[test]
+fn get_mvpred_sse_matches_real_c() {
+    use aom_encode::inter_me::get_mvpred_sse;
+    use aom_sys_ref::ref_get_mvpred_sse;
+
+    let mut rng = Rng::new(0x6E7D_9AED_5A5E_0F11 ^ 0x1234_5678);
+    let mvcost0 = mvcost_table();
+    let mvcost1 = mvcost_table();
+    let mvjcost = [0i32, 240, 240, 480];
+    let sizes = [
+        (4, 4),
+        (8, 8),
+        (16, 16),
+        (32, 32),
+        (64, 64),
+        (8, 4),
+        (16, 8),
+        (8, 16),
+        (16, 64),
+    ];
+    // Full-pel MVs (the reference is offset by mv * stride, within BORDER).
+    let mvs = [(0, 0), (1, 0), (0, 1), (1, 1), (-1, -1), (2, -3), (-4, 5)];
+    let ref_mv = (0, 0);
+    for &(w, h) in &sizes {
+        for &mv in &mvs {
+            for &epb in &[128, 384] {
+                let (pre8, pre_origin, pre_stride) = ref_plane(&mut rng, w, h);
+                let pre16: Vec<u16> = pre8.iter().map(|&b| b as u16).collect();
+                let src8: Vec<u8> = (0..w * h).map(|_| rng.byte()).collect();
+                let src16: Vec<u16> = src8.iter().map(|&b| b as u16).collect();
+
+                let got = get_mvpred_sse(
+                    mv, &src16, 0, w, &pre16, pre_origin, pre_stride, w, h, ref_mv, &mvjcost,
+                    &mvcost0, &mvcost1, epb,
+                );
+                let want = ref_get_mvpred_sse(
+                    mv, &src8, 0, w, &pre8, pre_origin, pre_stride, w, h, ref_mv, &mvjcost,
+                    &mvcost0, &mvcost1, epb,
+                );
+                assert_eq!(got, want, "w={w} h={h} mv={mv:?} epb={epb}");
+            }
+        }
+    }
+}
