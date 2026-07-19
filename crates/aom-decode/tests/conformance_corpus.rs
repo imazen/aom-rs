@@ -425,6 +425,16 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
     // high bit depth, CDEF, loop restoration, intrabc, odd frame sizes,
     // monochrome, and film-grain synthesis).
     let (mut saw_bd10, mut saw_cdef, mut saw_lr, mut saw_intrabc) = (false, false, false, false);
+    // Stronger CDEF witness: a frame that actually READ a per-SB strength literal
+    // (`cdef_bits > 0`), not merely a `cdef_bits == 0` single-strength frame (which
+    // reads zero bits). This is the anti-vacuity proof that the intra KEY-frame
+    // `read_cdef` path (`decode_block` -> `read_mb_modes_kf_fc` ->
+    // `read_mb_modes_kf_prefix` -> `read_cdef`) was exercised with a LIVE read: a
+    // `cdef_bits > 0` KEY frame decoded byte-identical to C means the per-SB read is
+    // consuming the exact bits C does (an omitted read would desync every following
+    // symbol). Kept distinct from `saw_cdef` so a corpus of only `cdef_bits == 0`
+    // CDEF frames can never satisfy it.
+    let mut saw_cdef_bits_gt0 = false;
     let mut saw_odd_size = false;
     let (mut saw_monochrome, mut saw_film_grain) = (false, false);
 
@@ -561,6 +571,7 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
             saw_cdef |= rust.cdef_bits != 0
                 || rust.cdef_strengths[0] != 0
                 || rust.cdef_uv_strengths[0] != 0;
+            saw_cdef_bits_gt0 |= rust.cdef_bits > 0;
             saw_lr |= rust.lr_frame_restoration_type.iter().any(|&t| t != 0);
             saw_intrabc |= name.contains("intrabc");
             saw_odd_size |= w % 8 != 0 || h % 8 != 0;
@@ -614,6 +625,17 @@ fn conformance_single_frame_intra_byte_identical_to_c_and_golden() {
         assert!(
             saw_cdef,
             "CDEF-carrying vectors present but no CDEF frame verified"
+        );
+        // Prove the per-SB CDEF strength READ (intra `read_cdef`) was exercised —
+        // not just a `cdef_bits == 0` frame. Without this, the corpus could pass
+        // while the intra KEY path never consumed a per-SB strength literal, which
+        // is exactly the latent-desync blind spot the weaker `saw_cdef` left open.
+        assert!(
+            saw_cdef_bits_gt0,
+            "CDEF-carrying vectors present but no `cdef_bits > 0` KEY frame was \
+             decoded byte-identical — the intra per-SB CDEF strength read \
+             (read_mb_modes_kf_fc -> read_mb_modes_kf_prefix -> read_cdef) is \
+             UNPROVEN; a cdef_bits>0 KEY frame must be exercised"
         );
         assert!(
             saw_lr,
