@@ -3,7 +3,7 @@
 (Gate 1's authoritative test set) from libaom's own test-data manifest.
 
 libaom ships the canonical vector list as name+sha1 pairs in
-`reference/libaom/test/test-data.sha1`, and hosts the bytes at
+`upstream/test/test-data.sha1`, and hosts the bytes at
 `https://storage.googleapis.com/aom-test-data/<name>`. Each `av1-1-*.ivf`
 vector has a companion `<name>.md5` holding one MD5 per decoded frame over the
 raw i420 output -- that per-frame MD5 list is the golden Gate-1 answer libaom's
@@ -35,7 +35,9 @@ import sys
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REF = os.path.join(ROOT, "reference", "libaom")
+# The pinned libaom C oracle lives in the `upstream/` git submodule (repo-reorg
+# #3 Phase 1). The gitignored `reference/libaom` clone remains a fallback.
+REF = os.path.join(ROOT, "upstream")
 SHA1_MANIFEST = os.path.join(REF, "test", "test-data.sha1")
 DATA_URL = "https://storage.googleapis.com/aom-test-data"
 DATA_DIR = os.path.join(ROOT, "conformance", "data")

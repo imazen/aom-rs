@@ -14,7 +14,10 @@ Outputs coverage/features.json and a summary to stdout.
 import json, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REF = os.path.join(ROOT, "reference", "libaom")
+# The pinned libaom C oracle lives in the `upstream/` git submodule (repo-reorg
+# #3 Phase 1); its aomenc/aomdec + headers are under `upstream/build`. Override
+# with `--ref <dir>` (e.g. the fallback `reference/libaom`).
+REF = os.path.join(ROOT, "upstream")
 if "--ref" in sys.argv:
     REF = sys.argv[sys.argv.index("--ref") + 1]
 

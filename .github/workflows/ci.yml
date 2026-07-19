@@ -21,7 +21,11 @@ jobs:
     name: linux differential (x86-64)
     runs-on: ubuntu-latest
     steps:
+      # `submodules: recursive` checks out the pinned libaom C oracle at
+      # `upstream/`; the cargo-driven aom-sys-ref/build.rs builds it from there.
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Install C-oracle build deps
         run: |
@@ -32,31 +36,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Every crate links the C libaom oracle via aom-sys-ref, so the whole
-      # workspace needs it built. Cache it keyed on the pinned commit — after
-      # the first run reference/build.sh no-ops and this restores in seconds.
-      - name: Cache libaom reference oracle
+      # workspace needs it built. aom-sys-ref/build.rs builds it from the
+      # `upstream/` submodule into `upstream/build/`. Cache that build keyed on
+      # the pinned commit — after the first run the build.rs SHA stamp skips the
+      # rebuild and this restores in seconds.
+      - name: Cache libaom oracle build
         uses: actions/cache@v6
         with:
-          path: reference/libaom
-          key: libaom-${{ runner.os }}-${{ env.LIBAOM_SHA }}-v1
+          path: upstream/build
+          key: libaom-${{ runner.os }}-${{ env.LIBAOM_SHA }}-v2
 
-      - name: Build C libaom reference oracle
-        run: bash reference/build.sh
+      - name: Build C libaom oracle (cargo-driven)
+        run: cargo build -p aom-sys-ref
 
       # Deterministically provision the Gate-1 conformance corpus. The workspace
       # conformance test (conformance_corpus.rs) fail-loud-asserts when
       # conformance/data/ is empty — correct (no silent skip), but non-hermetic
       # unless the corpus is actually provisioned. Fetch libaom's own sha1-pinned
-      # intra-scope vectors (name+sha1 from reference/libaom's test-data.sha1
-      # manifest; bytes from storage.googleapis.com/aom-test-data). Cached, keyed
-      # on the manifest, so later runs restore in seconds and re-verify without
-      # re-downloading. Must run AFTER the oracle step (which provides the
-      # manifest — reference/libaom is gitignored/cloned by build.sh).
+      # intra-scope vectors (name+sha1 from the `upstream/` submodule's
+      # test-data.sha1 manifest; bytes from storage.googleapis.com/aom-test-data).
+      # Cached, keyed on the manifest, so later runs restore in seconds and
+      # re-verify without re-downloading.
       - name: Cache conformance corpus
         uses: actions/cache@v6
         with:
           path: conformance/data
-          key: conformance-intra-${{ runner.os }}-${{ hashFiles('reference/libaom/test/test-data.sha1') }}-v1
+          key: conformance-intra-${{ runner.os }}-${{ hashFiles('upstream/test/test-data.sha1') }}-v1
       - name: Provision conformance corpus (intra scope)
         run: python3 xtask/conformance.py --fetch --scope intra
 
@@ -80,24 +85,26 @@ jobs:
       AOM_FORCE_SCALAR: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - name: Install C-oracle build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends nasm cmake ninja-build
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Cache libaom reference oracle
+      - name: Cache libaom oracle build
         uses: actions/cache@v6
         with:
-          path: reference/libaom
-          key: libaom-${{ runner.os }}-${{ env.LIBAOM_SHA }}-v1
-      - name: Build C libaom reference oracle
-        run: bash reference/build.sh
+          path: upstream/build
+          key: libaom-${{ runner.os }}-${{ env.LIBAOM_SHA }}-v2
+      - name: Build C libaom oracle (cargo-driven)
+        run: cargo build -p aom-sys-ref
       - name: Cache conformance corpus
         uses: actions/cache@v6
         with:
           path: conformance/data
-          key: conformance-intra-${{ runner.os }}-${{ hashFiles('reference/libaom/test/test-data.sha1') }}-v1
+          key: conformance-intra-${{ runner.os }}-${{ hashFiles('upstream/test/test-data.sha1') }}-v1
       - name: Provision conformance corpus (intra scope)
         run: python3 xtask/conformance.py --fetch --scope intra
       - name: Test workspace under the scalar pin
