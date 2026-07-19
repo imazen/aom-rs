@@ -161,6 +161,30 @@ pub struct SingleRefCtx {
     pub p6: i32,
 }
 
+impl SingleRefCtx {
+    /// Derive all six contexts from `av1_collect_neighbors_ref_counts`' result
+    /// (`aom_dsp::entropy::partition::collect_neighbors_ref_counts`) — the
+    /// per-block gather C does at the top of `write_ref_frames` /
+    /// `estimate_ref_frame_costs`.
+    ///
+    /// Each `av1_get_pred_context_single_ref_pN` is the already-validated
+    /// count-grouping helper in the entropy crate; this is only the naming map:
+    /// p1 = forward vs backward, p2 = BWDREF/ALTREF2 vs ALTREF, p3 = LAST/LAST2
+    /// vs LAST3/GOLDEN, p4 = LAST vs LAST2, p5 = LAST3 vs GOLDEN,
+    /// p6 = BWDREF vs ALTREF2.
+    pub fn from_neighbor_ref_counts(rc: &[u8; 8]) -> Self {
+        use aom_dsp::entropy::partition as p;
+        SingleRefCtx {
+            p1: p::single_ref_p1_context(rc),
+            p2: p::pred_ctx_brfarf2_or_arf(rc),
+            p3: p::pred_ctx_ll2_or_l3gld(rc),
+            p4: p::pred_ctx_last_or_last2(rc),
+            p5: p::pred_ctx_last3_or_gld(rc),
+            p6: p::pred_ctx_brf_or_arf2(rc),
+        }
+    }
+}
+
 /// `ModeCosts`' inter half (`av1/encoder/block.h`), filled by
 /// `av1_fill_mode_rates` (`rd.c:220-285`) from [`InterFrameCdfs`].
 #[derive(Clone, Debug, PartialEq, Eq)]

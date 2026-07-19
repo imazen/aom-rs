@@ -176,7 +176,6 @@ fn sse_visible(
     src_stride: usize,
     pred: &[u16],
     w: usize,
-    h: usize,
     vis_w: usize,
     vis_h: usize,
 ) -> i64 {
@@ -293,7 +292,7 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
         )?;
 
         let luma_sse = sse_visible(
-            a.src_y, a.off_y, a.stride, &pred_y, bw, bh, vis_w, vis_h,
+            a.src_y, a.off_y, a.stride, &pred_y, bw, vis_w, vis_h,
         );
 
         // --- CHROMA prediction + residual (when this leaf is a chroma ref) ---
@@ -321,7 +320,7 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
                     cw,
                 )?;
                 chroma_sse += sse_visible(
-                    plane_src, a.off_uv, a.stride, &cpred, cw, ch, cw, ch,
+                    plane_src, a.off_uv, a.stride, &cpred, cw, cw, ch,
                 );
             }
         }

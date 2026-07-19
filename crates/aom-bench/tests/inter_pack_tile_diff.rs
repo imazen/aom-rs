@@ -163,7 +163,7 @@ fn tile_limits(mi_cols: i32, mi_rows: i32, mib_size_log2: u32) -> TileInfoHeader
 /// Parse the real 2-frame stream: return frame 1's OBU payload and the exact
 /// bit-length of its frame header, so the tile data can be split off without
 /// hardcoding an offset.
-fn frame1_payload_and_header_bits(stream: &[u8]) -> (Vec<u8>, usize, FrameHeaderObu) {
+fn frame1_payload_and_header_bits(stream: &[u8]) -> (Vec<u8>, usize, FrameHeaderObu, FrameHeaderObu) {
     let obus = walk(stream);
     let seq_payload = obus
         .iter()
@@ -240,7 +240,7 @@ fn frame1_payload_and_header_bits(stream: &[u8]) -> (Vec<u8>, usize, FrameHeader
     let real = read_uncompressed_header(&mut rb, &cfg);
     assert_eq!(real.prefix.frame_type, 1, "frame 1 must be INTER");
     let bits = rb.bit_position();
-    (f1, bits, real)
+    (f1, bits, real, cfg)
 }
 
 /// Encode the §3 zero-MV P tile with the port: one `PARTITION_NONE` 64x64
@@ -361,7 +361,7 @@ fn zero_mv_p_tile_bytes_byte_exact_vs_aomenc() {
     let cell = MultiFrameEncodeCell::translational(&base("zero_mv", w, h, false, cq), 0, 0);
     let stream = cell.c_encode_inter(false, false);
 
-    let (f1, header_bits, real) = frame1_payload_and_header_bits(&stream);
+    let (f1, header_bits, real, _seq_cfg) = frame1_payload_and_header_bits(&stream);
     let header_bytes = header_bits.div_ceil(8);
     assert!(
         header_bytes < f1.len(),
@@ -407,7 +407,7 @@ fn zero_mv_p_is_a_single_skip_block_frame() {
     let (w, h, cq) = (64usize, 64usize, 60i32);
     let cell = MultiFrameEncodeCell::translational(&base("zero_mv", w, h, false, cq), 0, 0);
     let stream = cell.c_encode_inter(false, false);
-    let (f1, header_bits, real) = frame1_payload_and_header_bits(&stream);
+    let (f1, header_bits, real, _seq_cfg) = frame1_payload_and_header_bits(&stream);
     let tile_len = f1.len() - header_bits.div_ceil(8);
     assert_eq!(real.prefix.frame_type, 1);
     assert!(
@@ -434,7 +434,7 @@ fn tile_byte_gate_discriminates_a_wrong_mode() {
     let (w, h, cq) = (64usize, 64usize, 60i32);
     let cell = MultiFrameEncodeCell::translational(&base("zero_mv", w, h, false, cq), 0, 0);
     let stream = cell.c_encode_inter(false, false);
-    let (f1, header_bits, real) = frame1_payload_and_header_bits(&stream);
+    let (f1, header_bits, real, _seq_cfg) = frame1_payload_and_header_bits(&stream);
     let c_tile = &f1[header_bits.div_ceil(8)..];
     assert!(
         c_tile.len() >= 2,
@@ -453,4 +453,252 @@ fn tile_byte_gate_discriminates_a_wrong_mode() {
         wrong, c_tile,
         "GLOBALMV must NOT match — otherwise the gate cannot detect a wrong mode"
     );
+}
+
+/// THE FULL-FRAME GATE: the port assembles frame 1's ENTIRE OBU payload —
+/// derived frame header (sub-step 2a) + the byte-exact tile above — and it must
+/// equal `aomenc`'s frame-1 payload byte for byte.
+///
+/// This composes two independently-verified pieces into one bitstream claim:
+/// `inter_frame::derive_lowdelay_p_frame_header` (landed + gated by
+/// `inter_header_derive_diff.rs`) and `inter_pack::write_inter_leaf_mode_info`
+/// (gated above).
+///
+/// ## HONEST BOOTSTRAP — read before trusting this
+///
+/// Three header fields are RECON-DEPENDENT and are taken from the reference
+/// stream rather than derived, exactly as `LowDelayPHeaderParams` documents:
+/// the loop-filter levels/deltas, the CDEF header, and the frame `interp_filter`
+/// (a per-frame RD decision, not a config constant). Their derivation is a
+/// later sub-step. Everything else — frame type, order hint, primary_ref_frame,
+/// refresh flags, ref_map_idx, allow_high_precision_mv, tx_mode, quant,
+/// segmentation, and the whole tile — is port-derived.
+///
+/// The KEY-frame path bootstraps its header the same way (`port_encode` parses
+/// the reference header), so this is the established shape for the project, not
+/// a new concession. The tile bytes — the part this chunk is about — are
+/// derived from nothing.
+#[test]
+fn zero_mv_p_frame_payload_byte_exact_vs_aomenc() {
+    use aom_encode::inter_frame::{
+        derive_lowdelay_p_frame_header, LowDelayPHeaderParams, TWO_FRAME_P_REF_MAP_IDX,
+        TWO_FRAME_P_REFRESH_FLAGS,
+    };
+    use aom_encode::obu_assemble::assemble_frame_obu_payload_single_tile;
+    use aom_encode::rc::base_qindex_lowdelay_p_from_cq;
+
+    let (w, h, cq) = (64usize, 64usize, 60i32);
+    let cell = MultiFrameEncodeCell::translational(&base("zero_mv", w, h, false, cq), 0, 0);
+    let stream = cell.c_encode_inter(false, false);
+    let (f1, header_bits, real, seq_cfg) = frame1_payload_and_header_bits(&stream);
+
+    // The port's own qindex for this P — DERIVED from the cq, not parsed.
+    let qindex = base_qindex_lowdelay_p_from_cq(cq);
+    assert_eq!(
+        qindex, real.quant.base_qindex,
+        "the port's low-delay P qindex must match the coded one"
+    );
+
+    let p = LowDelayPHeaderParams {
+        base_qindex: qindex,
+        order_hint: 1,
+        refresh_frame_flags: TWO_FRAME_P_REFRESH_FLAGS,
+        ref_map_idx: TWO_FRAME_P_REF_MAP_IDX,
+        disable_cdf_update: real.prefix.disable_cdf_update,
+        reduced_tx_set_used: real.reduced_tx_set_used,
+        // BOOTSTRAPPED (recon-dependent) — see the doc comment.
+        interp_filter: real.interp_filter,
+        loopfilter: real.loopfilter.clone(),
+        cdef: real.cdef.clone(),
+    };
+    let derived = derive_lowdelay_p_frame_header(&seq_cfg, &p);
+
+    let mi_rows = mi_dim(h as i32);
+    let mi_cols = mi_dim(w as i32);
+    let (port_tile, _, _) = port_encode_zero_mv_p_tile(qindex, mi_rows, mi_cols);
+    let port_payload = assemble_frame_obu_payload_single_tile(&derived, 0, &port_tile);
+
+    assert_eq!(
+        port_payload.len(),
+        f1.len(),
+        "frame-1 payload length differs: port {} vs aomenc {} (header_bits {})",
+        port_payload.len(),
+        f1.len(),
+        header_bits
+    );
+    assert_eq!(
+        port_payload, f1,
+        "\nframe-1 OBU payload differs.\n  port:   {:02x?}\n  aomenc: {:02x?}\n",
+        port_payload, f1
+    );
+}
+
+/// MULTI-BLOCK: PINNED OPEN — the two-superblock zero-MV P tile does NOT yet
+/// byte-match, and this test asserts the divergence is **still present** so it
+/// FAILS the moment the port becomes byte-exact (self-promoting pin, the
+/// pattern KB-P29 / KB-12 / KB-13 use in this repo).
+///
+/// It is NOT a weakened gate: the correct end state is byte-identity, and
+/// reaching it breaks this test on purpose, forcing promotion to a real
+/// `assert_eq!`.
+///
+/// ## What IS established here (asserted, positive results)
+///
+/// - The derived P frame header is **byte-exact for a NON-SQUARE 64x128
+///   frame** — extending sub-step 2a's coverage, whose gate only exercised
+///   square {64,128}^2 sizes.
+/// - The neighbour-context derivation is LIVE, not defaulted: superblock 1 sees
+///   `skip_ctx` 0 -> 1, the single-reference contexts p1/p3/p4 1 -> 2, and
+///   `mode_context` 0 -> 51 (measured).
+///
+/// ## The divergence, measured
+///
+/// 64x128 cq60 4:2:0 cpu-0, one tile (cols=rows=1), qindex 240:
+/// `aomenc` tile = `[f2, 24, 80]` (3 bytes), port = `[99, 24]` (2 bytes) — the
+/// port codes FEWER bits. `aomenc`'s frame-1 symbol sequence, read with the
+/// instrumented libaom decoder's accounting, is
+/// `partition, skip, is_inter, ref_frames(3), inter_mode(3)` per block, in that
+/// order, for BOTH blocks — which is exactly what this test writes.
+///
+/// ## Ruled out (do not re-chase)
+///
+/// - **The frame header** — port and `aomenc` headers are byte-identical
+///   (asserted below), so the split point and every header field are right.
+/// - **Block 0** — its symbols are proven byte-exact by
+///   `zero_mv_p_tile_bytes_byte_exact_vs_aomenc` at the same contexts.
+/// - **Symbol ORDER** — confirmed against C (`pack_inter_mode_mvs`) and against
+///   the accounting dump above.
+/// - **Block 1's `mode_context`** — a sweep over every structurally valid
+///   encoding (newmv_ctx < 6, zeromv bit < 2, refmv_ctx < 6; 72 values) found
+///   NO value that reproduces `aomenc`'s tile. So the divergence is not the
+///   inter-mode context alone.
+/// - **A tile-flush padding rule** — `aom_stop_encode` (`aom_dsp/bitwriter.c:21`)
+///   is a plain `od_ec_enc_done` with no padding, so the byte-count difference
+///   is real coded bits, not framing.
+///
+/// ## Next concrete step
+///
+/// Assemble the port's two-SB frame (derived header + `encode_two_sb`'s tile)
+/// into an IVF next to `aomenc`'s frame 0 — `aom-bench`'s `dump_inter_stream`
+/// example shows the wrapping. libaom's decoder REJECTS the port's stream
+/// ("Failed to decode frame"), so the tile genuinely desyncs rather than merely
+/// differing. Run the instrumented decoder
+/// on `aomenc`'s stream and on the port's, and diff the per-symbol accounting
+/// at block 1 — that shows directly whether the port writes a symbol on a
+/// different CDF row (the dominant failure mode on this codebase per
+/// CLAUDE.md's desync note) or omits one. The most likely remaining suspects,
+/// in order: the `skip` CDF row for block 1, the single-reference blob's
+/// per-context row selection once counts are nonzero, and the partition CDF
+/// row after `update_ext_partition_context`.
+#[test]
+fn zero_mv_p_two_superblock_tile_pinned_divergent() {
+    let (w, h, cq) = (64usize, 128usize, 60i32);
+    let cell = MultiFrameEncodeCell::translational(&base("zero_mv_2sb", w, h, false, cq), 0, 0);
+    let stream = cell.c_encode_inter(false, false);
+    let (f1, header_bits, real, seq_cfg) = frame1_payload_and_header_bits(&stream);
+    let c_tile = &f1[header_bits.div_ceil(8)..];
+
+    let qindex = real.quant.base_qindex;
+    let mi_rows = mi_dim(h as i32);
+    let mi_cols = mi_dim(w as i32);
+    assert_eq!(
+        (mi_rows, mi_cols),
+        (32, 16),
+        "64x128 => 32x16 mi, i.e. two stacked SB64 rows — the multi-block shape \
+         this test exists to exercise"
+    );
+    assert_eq!(real.tile_info.cols, 1);
+    assert_eq!(real.tile_info.rows, 1, "must stay a single tile");
+
+    // POSITIVE RESULT (asserted): the derived header is byte-exact on a
+    // NON-SQUARE frame, which sub-step 2a's square-only gate never covered.
+    {
+        use aom_encode::inter_frame::{
+            derive_lowdelay_p_frame_header, LowDelayPHeaderParams, TWO_FRAME_P_REF_MAP_IDX,
+            TWO_FRAME_P_REFRESH_FLAGS,
+        };
+        use aom_encode::obu_assemble::assemble_frame_obu_payload_single_tile;
+        let p = LowDelayPHeaderParams {
+            base_qindex: qindex,
+            order_hint: 1,
+            refresh_frame_flags: TWO_FRAME_P_REFRESH_FLAGS,
+            ref_map_idx: TWO_FRAME_P_REF_MAP_IDX,
+            disable_cdf_update: real.prefix.disable_cdf_update,
+            reduced_tx_set_used: real.reduced_tx_set_used,
+            interp_filter: real.interp_filter,
+            loopfilter: real.loopfilter.clone(),
+            cdef: real.cdef.clone(),
+        };
+        let hdr = derive_lowdelay_p_frame_header(&seq_cfg, &p);
+        let hdr_bytes = assemble_frame_obu_payload_single_tile(&hdr, 0, &[]);
+        assert_eq!(
+            hdr_bytes.as_slice(),
+            &f1[..header_bits.div_ceil(8)],
+            "the derived low-delay P header must be byte-exact on a non-square frame too"
+        );
+    }
+
+    let port_tile = encode_two_sb(qindex, mi_rows, mi_cols, None);
+
+    // THE PIN. Flip to assert_eq! the moment this starts matching.
+    assert_ne!(
+        port_tile.as_slice(),
+        c_tile,
+        "\nTWO-SUPERBLOCK P TILE NOW BYTE-MATCHES — promote this pin to a real \
+         byte-identity gate (assert_eq!) and update INTER-CHUNK2-HANDOFF.md.\n"
+    );
+    eprintln!(
+        "PINNED (expected): two-SB tile port={:02x?} ({}B) vs aomenc={:02x?} ({}B)",
+        port_tile,
+        port_tile.len(),
+        c_tile,
+        c_tile.len()
+    );
+}
+
+/// The two-superblock tile encode, factored so a diagnostic can sweep block 1's
+/// `mode_context`. `force_mc1 = None` uses the derived value.
+fn encode_two_sb(qindex: i32, mi_rows: i32, mi_cols: i32, force_mc1: Option<i32>) -> Vec<u8> {
+    use aom_dsp::entropy::partition::{
+        collect_neighbors_ref_counts, get_partition_subsize, update_ext_partition_context,
+    };
+    let mut kf = KfFrameContext::default_for_qindex(qindex);
+    let mut inter_cdfs = InterFrameCdfs::defaults();
+    let mut enc = OdEcEnc::new();
+    let bsize = BLOCK_64X64;
+    let mut above_pctx = [0i8; 64];
+    for sb in 0..2i32 {
+        let mi_row = sb * 16;
+        let mi_col = 0;
+        let mut left_pctx = [0i8; 64];
+        let pctx = partition_plane_context(&above_pctx, &left_pctx, mi_row as usize, mi_col as usize, bsize);
+        let cdf_len = aom_dsp::entropy::partition::partition_cdf_length(bsize);
+        write_partition(&mut enc, &mut kf.partition[pctx as usize], cdf_len, PARTITION_NONE, true, true, bsize);
+        let has_above = mi_row > 0;
+        let skip_ctx = skip_txfm_context(if has_above { 1 } else { 0 }, 0) as usize;
+        let intra_inter_ctx = get_intra_inter_context(has_above, has_above, false, false);
+        let rc = collect_neighbors_ref_counts(
+            has_above, false, if has_above { LAST_FRAME } else { 0 }, -1, false, false, 0, -1);
+        let single_ref = SingleRefCtx::from_neighbor_ref_counts(&rc);
+        let tile = DvTileBounds { mi_row_start: 0, mi_row_end: mi_rows, mi_col_start: 0, mi_col_end: mi_cols };
+        let grid = |ro: i32, co: i32| -> DvNbr {
+            let (ar, ac) = (mi_row + ro, mi_col + co);
+            if has_above && ro < 0 && ar >= 0 && ar < mi_rows && ac >= 0 && ac < mi_cols {
+                DvNbr { bsize: BLOCK_64X64, ref_frame0: LAST_FRAME, ref_frame1: -1,
+                        use_intrabc: false, mode: NEARESTMV, mv0_row: 0, mv0_col: 0, mv1_row: 0, mv1_col: 0 }
+            } else { DvNbr::default() }
+        };
+        let refs = find_inter_mv_refs(
+            LAST_FRAME, mi_row, mi_col, bsize, PARTITION_NONE as usize, has_above, false,
+            tile, mi_rows, mi_cols, 16, false, (0, 0), 0, [0i8; 8], false, false, grid);
+        let mc = if has_above { force_mc1.unwrap_or(refs.mode_context) } else { refs.mode_context };
+        write_inter_leaf_mode_info(
+            &mut enc, &mut inter_cdfs, &mut kf.skip[skip_ctx],
+            &InterLeafCtx { skip_ctx, intra_inter_ctx, single_ref },
+            &InterLeafSyntax { skip_txfm: 1, is_inter: 1, ref_frame0: LAST_FRAME as i8,
+                               inter_mode: NEARESTMV, mode_context: mc });
+        let subsize = get_partition_subsize(bsize, PARTITION_NONE) as usize;
+        update_ext_partition_context(&mut above_pctx, &mut left_pctx, mi_row, mi_col, subsize, bsize, PARTITION_NONE);
+    }
+    enc.done().to_vec()
 }
