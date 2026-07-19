@@ -809,8 +809,26 @@ fn leaf_pick_sb_modes(
     let is_smooth_luma = |m: Option<i32>| m.is_some_and(|md| (9..=11).contains(&md));
     let luma_edge_filter_type = i32::from(is_smooth_luma(above_mode) || is_smooth_luma(left_mode));
 
-    // skip ctx: every KEY intra neighbour has skip_txfm == 0 => ctx 0.
-    let skip_ctx = 0usize;
+    // `av1_get_skip_txfm_context(xd)` = `above->skip_txfm + left->skip_txfm`.
+    // `pick_sb_modes` zeroes `mbmi->skip_txfm` (partition_search.c:910) and the
+    // intra path never sets it, so on a pure-intra KEY frame every committed
+    // neighbour carries 0 and this is identically ctx 0 — which is why it was
+    // hardcoded. That invariant BREAKS on a screen-content frame: an intrabc
+    // block on the skip arm has `mbmi->skip_txfm = 1` (`set_skip_txfm`,
+    // tx_search.c:254 via `av1_txfm_search`), so its neighbours see ctx 1/2 and
+    // pay the more expensive `skip_txfm_cost[ctx][0]`. Reading the live DV grid
+    // (which already carries the per-mi `skip_txfm` projection) keeps non-screen
+    // frames byte-inert: `dv_at` returns the `use_intrabc=false, skip_txfm=false`
+    // default whenever the grid carries no DV state.
+    let skip_ctx = (if up_available {
+        usize::from(grid.dv_at(mi_row - 1, mi_col).skip_txfm)
+    } else {
+        0
+    }) + (if left_available {
+        usize::from(grid.dv_at(mi_row, mi_col - 1).skip_txfm)
+    } else {
+        0
+    });
     let tx_size_ctx = get_tx_size_context(
         bsize,
         tile.above_tctx[a0],
@@ -1028,7 +1046,22 @@ fn leaf_pick_sb_modes(
                 .map_or(0, |p| i32::from(p.size[0] > 0)),
         ) as usize,
         enable_filter_intra: cfg.enable_filter_intra,
-        allow_intrabc: false,
+        // `intra_mode_info_cost_y`'s tail (intra_mode_search_utils.h:563-564):
+        // `if (av1_allow_intrabc(cm)) total_rate += intrabc_cost[use_intrabc];`
+        // — on an intrabc frame EVERY intra luma candidate pays the
+        // `use_intrabc = 0` flag, because `write_intra_frame_mode_info`
+        // (bitstream.c) writes that flag for every block. Hardcoding `false`
+        // here left every intra leaf's luma rate `intrabc_cost[0]` too CHEAP
+        // (35 units on the 196² screen crop) while the PACK still wrote the
+        // flag — a systematic under-cost of the whole intra side against the
+        // intrabc arm and against every partition assembled from more leaves.
+        // `cfg.intrabc.is_some()` IS `av1_allow_intrabc(cm)`: C derives
+        // `features->allow_intrabc = enable_intrabc && allow_screen_content_
+        // tools && frame_is_intra_only`, exactly this `Option`'s construction
+        // gate, so the two can only disagree in a port-only toggle
+        // configuration that no real C encode produces. `None` (every
+        // non-screen envelope) keeps the term at 0 — byte-inert.
+        allow_intrabc: cfg.intrabc.is_some(),
         pol: cfg.pol,
         source_variance,
         enable_tx64: cfg.enable_tx64,

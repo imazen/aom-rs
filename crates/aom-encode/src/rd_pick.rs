@@ -307,9 +307,79 @@ pub fn rd_pick_intra_mode_sb(
     let outcome = rd_pick_intra_sby_mode_y(y_env, recon_y, sby_cfg, var_cache, best_rd);
     let rd_table = outcome.intra_modes_rd_cost;
     let Some(y) = outcome.best else {
-        // !beat_best_rd => intra_yrd = INT64_MAX >= best_rd => rate INT_MAX.
+        // `intra_yrd >= best_rd` (rdopt.c:3661): C sets `rd_cost->rate =
+        // INT_MAX` and skips the uv search + the assembly — but it does NOT
+        // return. `rd_pick_intrabc_mode_sb` STILL runs (:3688), with `best_rd`
+        // left at the INCOMING budget (the `best_rd = rd_cost->rdcost`
+        // tightening at :3686 is gated on `rate != INT_MAX`), and
+        // `RD_STATS best_rdstats = *rd_stats` (:3491) carries that INT_MAX in
+        // so a winning DV overwrites the whole tuple — the `assert(rd_cost->
+        // rate != INT_MAX)` at :3690 is exactly this rescue. A screen-content
+        // leaf whose intra RD misses the budget is precisely the leaf intrabc
+        // exists for (badly intra-predicted = repeated content), so returning
+        // early here silently dropped those candidates.
+        let mut best = None;
+        if let Some(a) = intrabc {
+            let (ru, rv): (&[u16], &[u16]) = match uv.as_mut() {
+                Some(av) => (&*av.recon_u, &*av.recon_v),
+                None => (&[], &[]),
+            };
+            if let Some(w) =
+                crate::intrabc_search::rd_pick_intrabc_mode_sb(a, &*recon_y, ru, rv, best_rd)
+            {
+                // `rd_pick_intrabc_mode_sb` returns `Some` only for a candidate
+                // that beat the passed-in budget, i.e. C's `< best_rd` at :3689.
+                best = Some(RdPickIntraBest {
+                    // `*mbmi = best_mbmi` (:3622): the intrabc loop set
+                    // DC_PRED / UV_DC_PRED, and there is no luma winner to
+                    // carry — every `y`/`uv` field below is dead state the
+                    // `use_intrabc` projections in `leaf_pick_sb_modes`
+                    // overwrite. `tx_size` is the one live field on the SKIP
+                    // arm: `set_skip_txfm` (tx_search.c:250-253) stamps
+                    // `max_txsize_rect_lookup[bsize]`.
+                    y: IntraSbyBest {
+                        mode: 0,
+                        angle_delta: 0,
+                        tx_size: crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[y_env.bsize],
+                        winners: Vec::new(),
+                        rate: i32::MAX,
+                        rate_tokenonly: 0,
+                        dist: 0,
+                        skippable: false,
+                        best_rd: i64::MAX,
+                        use_filter_intra: false,
+                        filter_intra_mode: 0,
+                        palette_y: None,
+                    },
+                    uv: RdPickUvOutcome::Monochrome,
+                    store_y: false,
+                    reencode: None,
+                    tx_type_map: if w.skip_txfm {
+                        Vec::new()
+                    } else {
+                        w.tx_type_map.clone()
+                    },
+                    rate: w.rate,
+                    dist: w.dist,
+                    rdcost: w.rdcost,
+                    use_intrabc: true,
+                    dv_row: w.dv_row,
+                    dv_col: w.dv_col,
+                    dv_ref_row: w.dv_ref_row,
+                    dv_ref_col: w.dv_ref_col,
+                    skip_txfm: w.skip_txfm,
+                    inter_tx_size: w.inter_tx_size,
+                    is_inter: false,
+                    ref_frame0: 0,
+                    inter_mode: 0,
+                    mv_row: 0,
+                    mv_col: 0,
+                    inter_mode_context: 0,
+                });
+            }
+        }
         return RdPickIntraOutcome {
-            best: None,
+            best,
             intra_modes_rd_cost: rd_table,
         };
     };
