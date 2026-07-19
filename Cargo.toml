@@ -13,7 +13,7 @@ members = [
 version = "0.0.1"
 edition = "2021"
 license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
-repository = "https://github.com/imazen/aom-rs"
+repository = "https://github.com/imazen/zenav1-aom"
 
 # Release + debug symbols, for callgrind/perf profiling of the Gate-3 harness
 # (`cargo build --profile profiling -p aom-bench --bin gate3_profile`).
