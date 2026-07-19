@@ -506,3 +506,210 @@ pub fn mv_bit_cost(
     let mvc = mvjcost[joint] + mvcost0[(MV_MAX + dr) as usize] + mvcost1[(MV_MAX + dc) as usize];
     round_pow2(mvc * weight, 7)
 }
+
+// ===================================================================
+// av1_single_motion_search (motion_search_facade.c:120) — the composition
+// glue: full-pel diamond (intrabc_search::full_pixel_search_inter) then the
+// subpel tree ([`find_best_sub_pixel_tree`]), scored by the coded-MV rate
+// ([`mv_bit_cost`]). Reduced to the §3 first-target config: single-ref,
+// SIMPLE_TRANSLATION motion mode, speed 0, one start-MV candidate (no TPL
+// gather — inert at lag=0), no skip-fullpel-search prune, no second_best_mv /
+// cost_list handoff (the speed-0 SUBPEL_TREE reads neither). Both halves are
+// differential-locked vs real C; this is pure composition.
+// ===================================================================
+
+/// `MV_COST_WEIGHT` (rd.h:46): the NEWMV RD rate weight `av1_single_motion
+/// _search` charges the coded MV.
+pub const MV_COST_WEIGHT: i32 = 108;
+
+/// Inputs to [`single_motion_search`]. `src`/`refb` planes are `u16` bd8. The
+/// reference plane is border-extended; `ref_origin` is its `buf_2d` origin for a
+/// zero full-pel MV (the block's top-left position on the reference frame),
+/// which `get_buf_from_fullmv` / the subpel `get_buf_from_mv` offset by the MV.
+pub struct SingleMotionSearchParams<'a> {
+    pub src: &'a [u16],
+    pub src_off: usize,
+    pub src_stride: usize,
+    pub refb: &'a [u16],
+    pub ref_origin: usize,
+    pub ref_stride: usize,
+    pub w: usize,
+    pub h: usize,
+    /// The predicted MV (1/8-pel) — `av1_get_ref_mv(x, ref_idx)`; for NEWMV the
+    /// selected DRL ref-mv. Both the fullpel `start_mv` (`get_fullmv_from_mv`)
+    /// and the MV-rate reference.
+    pub ref_mv: (i32, i32),
+    /// Inter MV cost tables (`x->mv_costs`) at the frame's precision
+    /// ([`crate::intrabc_search::fill_nmv_costs`] LOW/HIGH).
+    pub dv: &'a crate::intrabc_search::DvCosts,
+    /// `error_per_bit` = `AOMMAX(rdmult >> RD_EPB_SHIFT(6), 1)`.
+    pub error_per_bit: i32,
+    /// `sadperbit` (mvsadcost scaling).
+    pub sad_per_bit: i32,
+    /// The block's full-pel MV limits (`x->mv_limits`, from `av1_set_mv_limits`)
+    /// — the base for both the diamond range (`av1_set_mv_search_range`) and the
+    /// subpel range (`av1_set_subpel_mv_search_range`).
+    pub mv_limits: crate::intrabc_search::FullMvLimits,
+    /// `mv_search_params->mv_step_param` (the NSTEP diamond's first-step size).
+    pub step_param: usize,
+    /// `cm->features.allow_high_precision_mv`.
+    pub allow_hp: bool,
+    /// `cm->features.cur_frame_force_integer_mv`.
+    pub force_integer_mv: bool,
+    /// `subpel_force_stop` (0 = EIGHTH_PEL at speed 0).
+    pub forced_stop: i32,
+    /// `subpel_iters_per_step` (2 at speed 0 SUBPEL_TREE).
+    pub iters_per_step: i32,
+}
+
+/// Output of [`single_motion_search`]: the search MV + its coded-MV rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SingleMotionResult {
+    /// The best MV (1/8-pel). Meaningful iff `valid`.
+    pub best_mv: (i32, i32),
+    /// `av1_mv_bit_cost(best_mv, ref_mv, .., MV_COST_WEIGHT)` — the NEWMV rate.
+    pub rate_mv: i32,
+    /// The full-pel search's returned cost (`bestsme`).
+    pub bestsme: i64,
+    /// The subpel distortion (variance) at `best_mv`.
+    pub distortion: i32,
+    /// The subpel SSE at `best_mv` (`x->pred_sse[ref]`).
+    pub sse: u32,
+    /// False iff the full-pel search returned `INT_MAX` (`INVALID_MV`).
+    pub valid: bool,
+}
+
+/// `av1_set_subpel_mv_search_range` (mcomp.h:341): intersect the block full-pel
+/// limits (promoted to 1/8-pel) with the ±`GET_MV_SUBPEL(MAX_FULL_PEL_VAL)`
+/// window around `ref_mv`, clamped to `MV_LOW+1 .. MV_UPP-1`.
+fn subpel_mv_search_range(
+    full: crate::intrabc_search::FullMvLimits,
+    ref_mv: (i32, i32),
+) -> SubpelMvLimits {
+    const MAX_FULL_PEL_VAL: i32 = (1 << 10) - 1;
+    const MV_LOW: i32 = -(1 << 14);
+    const MV_UPP: i32 = 1 << 14;
+    let max_mv = MAX_FULL_PEL_VAL * 8; // GET_MV_SUBPEL(x) = x << 3
+    let minc = (full.col_min * 8).max(ref_mv.1 - max_mv);
+    let mut maxc = (full.col_max * 8).min(ref_mv.1 + max_mv);
+    let minr = (full.row_min * 8).max(ref_mv.0 - max_mv);
+    let mut maxr = (full.row_max * 8).min(ref_mv.0 + max_mv);
+    maxc = minc.max(maxc);
+    maxr = minr.max(maxr);
+    SubpelMvLimits {
+        col_min: (MV_LOW + 1).max(minc),
+        col_max: (MV_UPP - 1).min(maxc),
+        row_min: (MV_LOW + 1).max(minr),
+        row_max: (MV_UPP - 1).min(maxr),
+    }
+}
+
+/// `av1_single_motion_search` (motion_search_facade.c:120), reduced to single-ref
+/// SIMPLE_TRANSLATION at speed 0 (the §3 first-target config). Runs the full-pel
+/// diamond ([`crate::intrabc_search::full_pixel_search_inter`]) from
+/// `get_fullmv_from_mv(ref_mv)`, then — unless `force_integer_mv` — refines to
+/// 1/8-pel with the subpel tree ([`find_best_sub_pixel_tree`]); the coded-MV rate
+/// is [`mv_bit_cost`] at [`MV_COST_WEIGHT`]. Pure composition of two C-locked
+/// halves; the TPL candidate gather (inert at lag=0), the `skip_fullpel_search
+/// _using_startmv_refmv` prune (speed feature, off at speed 0), and the
+/// second_best_mv / cost_list handoff (unread by the speed-0 SUBPEL_TREE) are not
+/// modelled.
+#[must_use]
+pub fn single_motion_search(p: &SingleMotionSearchParams) -> SingleMotionResult {
+    use crate::intrabc_search::{full_pixel_search_inter, set_mv_search_range};
+
+    // av1_make_default_fullpel_ms_params: set_mv_search_range narrows a copy of
+    // x->mv_limits to ±MAX_FULL_PEL_VAL around ref_mv.
+    let mut full_limits = p.mv_limits;
+    set_mv_search_range(&mut full_limits, p.ref_mv.0, p.ref_mv.1);
+
+    let (bestsme, brow, bcol) = full_pixel_search_inter(
+        p.src,
+        p.src_off,
+        p.src_stride,
+        p.refb,
+        p.ref_origin,
+        p.ref_stride,
+        p.w,
+        p.h,
+        p.ref_mv.0,
+        p.ref_mv.1,
+        p.dv,
+        p.error_per_bit,
+        p.sad_per_bit,
+        full_limits,
+        p.step_param,
+    );
+
+    if bestsme >= i64::from(i32::MAX) {
+        return SingleMotionResult {
+            best_mv: p.ref_mv,
+            rate_mv: 0,
+            bestsme,
+            distortion: 0,
+            sse: 0,
+            valid: false,
+        };
+    }
+
+    // force_integer_mv: convert_fullmv_to_mv(best_mv) and stop (no subpel).
+    if p.force_integer_mv {
+        let best_mv = (brow * 8, bcol * 8);
+        let rate_mv = mv_bit_cost(
+            best_mv,
+            p.ref_mv,
+            &p.dv.joint_mv,
+            &p.dv.dv_costs[0],
+            &p.dv.dv_costs[1],
+            MV_COST_WEIGHT,
+        );
+        return SingleMotionResult {
+            best_mv,
+            rate_mv,
+            bestsme,
+            distortion: 0,
+            sse: 0,
+            valid: true,
+        };
+    }
+
+    // Subpel refine from the fullpel result promoted to 1/8-pel.
+    let subpel_limits = subpel_mv_search_range(p.mv_limits, p.ref_mv);
+    let sp = SubpelSearchParams {
+        src: p.src,
+        src_off: p.src_off,
+        src_stride: p.src_stride,
+        refb: p.refb,
+        ref_origin: p.ref_origin,
+        ref_stride: p.ref_stride,
+        w: p.w,
+        h: p.h,
+        start_mv: (brow * 8, bcol * 8),
+        ref_mv: p.ref_mv,
+        mvjcost: p.dv.joint_mv,
+        mvcost0: &p.dv.dv_costs[0],
+        mvcost1: &p.dv.dv_costs[1],
+        error_per_bit: p.error_per_bit,
+        allow_hp: p.allow_hp,
+        forced_stop: p.forced_stop,
+        iters_per_step: p.iters_per_step,
+        limits: subpel_limits,
+    };
+    let sr = find_best_sub_pixel_tree(&sp);
+    let rate_mv = mv_bit_cost(
+        sr.best_mv,
+        p.ref_mv,
+        &p.dv.joint_mv,
+        &p.dv.dv_costs[0],
+        &p.dv.dv_costs[1],
+        MV_COST_WEIGHT,
+    );
+    SingleMotionResult {
+        best_mv: sr.best_mv,
+        rate_mv,
+        bestsme,
+        distortion: sr.distortion,
+        sse: sr.sse,
+        valid: true,
+    }
+}
