@@ -107,6 +107,100 @@ the existing byte-exact path → decode it to get the RefFrame → encode frame 
 `assemble_obu_frame_single_tile(derived_p_header, 0, tile_bytes)` → concat). `obu_assemble.rs`
 already has `assemble_obu_frame_single_tile`.
 
+## SESSION 2026-07-19c — 2f PACK LANDED: the P-frame payload is BYTE-EXACT (single-block)
+
+**Landed + verified on origin/main this session** (`41ac27f`, `3550c7d`, `9f2d1d5`, `572215b`):
+
+| Piece | Commit | Gate |
+|---|---|---|
+| Inter mode/ref cost tables + `InterFrameCdfs` (P uses DEFAULT CDFs, primary_ref=NONE) | `41ac27f` | `inter_costs` unit tests incl. `default_inter_cdfs_match_libaom` (the port's tables ARE libaom's `default_{newmv,zeromv,refmv,drl}_cdf` inverted) |
+| Inter RD arm `inter_rd::rd_pick_inter_mode_sb` (skip-only, search-free modes) | `3550c7d` | 3 unit tests incl. `high_residual_block_declines` |
+| **`inter_pack::write_inter_leaf_mode_info` + the TILE BYTE GATE** | `9f2d1d5` | **`inter_pack_tile_diff.rs` — the port's tile == aomenc's tile, byte for byte** |
+| **Full frame payload gate + multi-block pin** | `572215b` | header+tile == aomenc's whole frame-1 payload; 2-SB case pinned |
+
+### BYTE-EXACT (asserted, not pinned)
+
+- **`zero_mv_p_tile_bytes_byte_exact_vs_aomenc`** — the port's coded TILE for the §3
+  zero-MV P equals `aomenc`'s, byte for byte. Every prediction context is DERIVED
+  (partition/skip/intra_inter/single-ref) and mode+MV+mode_context come from the port's
+  `find_inter_mv_refs`; nothing is copied from the reference.
+- **`zero_mv_p_frame_payload_byte_exact_vs_aomenc`** — the port assembles frame 1's WHOLE
+  OBU payload (derived header + tile) equal to `aomenc`'s. **Honest bootstrap:** the three
+  recon-dependent header fields (LF levels/deltas, CDEF, frame `interp_filter`) come from
+  the reference, exactly as `LowDelayPHeaderParams` specifies. The tile is derived from nothing.
+- The derived P header is byte-exact on a **NON-SQUARE 64x128** frame too — extends 2a,
+  whose gate only covered square {64,128}².
+- **`tile_byte_gate_discriminates_a_wrong_mode`** — coding GLOBALMV instead of NEARESTMV does
+  NOT match, so the gate can fail (anti-vacuity).
+
+### GROUND TRUTH — measured, not assumed
+
+Read out of `aomenc`'s own stream with the instrumented libaom decoder
+(`/root/aom-inspect/examples/inspect`; the IVF comes from the new `aom-bench`
+`dump_inter_stream` example):
+
+- **64×64 zero-MV P** = ONE `PARTITION_NONE` 64×64 block, **NEARESTMV**, ref `(LAST, NONE)`,
+  `SIMPLE_TRANSLATION`, skip=1, TX_64X64, qindex 240. Frame OBU 18 B, tile 2 B.
+- Per-symbol accounting → the exact syntax is **partition → skip(1) → is_inter(1) →
+  ref_frames(3 binary) → inter_mode(3 binary)**. Nothing else: no cdef, delta-q, DRL, MV,
+  motion-mode, interp-filter, tx-size or coeff symbols.
+
+### TWO CORRECTIONS to this document's earlier sections (verified against C — do not re-trust the old text)
+
+1. **The pack order below ("`write_is_inter(1)` → `write_ref_frames` → `write_inter_mode` →
+   `write_skip(1)`") is WRONG.** Real C (`pack_inter_mode_mvs`, bitstream.c:1092) writes
+   **SKIP BEFORE is_inter**, with `write_cdef` and `write_delta_q_params` between them. The
+   prologue is shape-identical to the KEY writer's; only step 7 onward differs.
+2. **The mode is NEARESTMV**, not "GLOBALMV/NEARESTMV". Measured.
+
+Also better than this doc claimed: the inter symbol layer already has the COMPOSITE writers
+`write_inter_prefix` (partition.rs:2946), `write_inter_mode_drl` (:3187) and
+`write_inter_mode_tail` (:3220) — the pack side was wiring, not new symbol code.
+
+Under the §3 envelope the whole tail writes NOTHING, each by an explicit C gate: no DRL
+(NEARESTMV/GLOBALMV are not in the drl-coded set), no MV (NEW* only), `write_motion_mode`
+collapses at `switchable_motion_mode=0` (bitstream.c:280-287), and `write_mb_interp_filter`
+returns early unless the FRAME filter is SWITCHABLE (bitstream.c:638).
+
+### ALSO USEFUL: the §3 P codes TX_MODE_LARGEST
+
+`derive_lowdelay_p_frame_header` sets `tx_mode_select = false`, verified byte-exact against the
+real header. So `av1_txfm_search` takes the **uniform** `av1_pick_uniform_tx_size_type_yrd`
+arm (tx_search.c:3831), not `av1_pick_recursive_tx_size_type_yrd`. **The KB-15 var-tx blocker
+does NOT apply to this frame config** — worth re-checking before assuming coeff blocks here
+need the var-tx prunes.
+
+### PINNED OPEN — the multi-block (2-superblock) tile
+
+`zero_mv_p_two_superblock_tile_pinned_divergent` asserts the divergence is PRESENT (fails on
+match → promote). 64×128 cq60, one tile, two stacked `PARTITION_NONE` 64×64 SBs, both
+NEARESTMV: **aomenc tile `[f2,24,80]` (3 B) vs port `[99,24]` (2 B)** — the port codes FEWER
+bits. Neighbour-context derivation IS live (SB1: skip_ctx 0→1, single-ref p1/p3/p4 1→2,
+mode_context 0→51).
+
+**RULED OUT — do not re-chase:** the frame header (byte-identical, asserted); block 0 (proven
+byte-exact at the same contexts); symbol ORDER (matches C AND the accounting for both blocks);
+block 1's `mode_context` (a sweep over all 72 structurally valid encodings found NO value that
+reproduces aomenc's tile); a tile-flush padding rule (`aom_stop_encode`, bitwriter.c:21, is a
+plain `od_ec_enc_done` — the byte gap is real coded bits).
+
+**NEXT CONCRETE STEP:** libaom's decoder REJECTS the port's two-SB stream outright, so the tile
+desyncs rather than merely differing. Diff the instrumented decoder's per-symbol accounting
+between aomenc's stream and the port's at block 1 — that shows directly whether a symbol goes
+out on a different CDF row (the dominant failure mode per CLAUDE.md's desync note) or is
+omitted. Suspects in order: the `skip` CDF row for block 1; the single-reference blob's
+per-context row selection once counts are nonzero; the partition CDF row after
+`update_ext_partition_context`.
+
+### STILL MISSING for a port-DRIVEN P frame (state coverage honestly)
+
+The pack and the RD arm exist and are gated, but they are **not yet wired into the partition
+search / `pack_tile`**, so the port does not yet CHOOSE the inter block end-to-end. Remaining:
+`PickFrameCfg::inter` + `InterLeafArgs` construction in `leaf_pick_sb_modes`; the `rd_pick.rs`
+step-6 inter arm; the `encode_b_intra_dry` inter recon arm; the `pack_leaf` inter branch; and
+`MultiFrameEncodeCell::port_encode_inter`. Rungs 2 (NEWMV/subpel) and 3 (real motion search)
+are untouched.
+
 ## PRECISE 2f BUILD PLAN (zero-MV skip-only P — mirror the intrabc skip arm)
 
 The intrabc SKIP arm is the exact template; the inter zero-MV skip arm is a SIMPLER mirror (the

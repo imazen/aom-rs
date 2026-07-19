@@ -1,3 +1,52 @@
+## INTER-ENCODE chunk 2 (2f pack): the P-frame payload is BYTE-EXACT — single-block (2026-07-19, encoder track)
+
+First byte-identity claim on the inter ENCODE side. Commits `41ac27f` (inter cost tables +
+`InterFrameCdfs`), `3550c7d` (`inter_rd` skip-only RD arm), `9f2d1d5` (`inter_pack` +
+the tile byte gate), `572215b` (full frame payload gate + multi-block pin) — all verified on
+origin/main.
+
+**BYTE-EXACT (asserted):** for the INTER-ENCODE-ROADMAP §3 low-delay zero-MV P at 64×64 4:2:0
+cq60 cpu-0, the port's coded TILE and its WHOLE frame-1 OBU payload equal real `aomenc`'s byte
+for byte (`aom-bench/tests/inter_pack_tile_diff.rs`). Every prediction context is DERIVED
+(partition / skip / intra_inter / the six single-reference contexts) and mode+MV+mode_context
+come from the port's `find_inter_mv_refs` — nothing is copied from the reference. The frame
+payload additionally exercises the sub-step 2a header derivation, which is also byte-exact on a
+NON-SQUARE 64×128 frame (extending 2a's square-only gate). Anti-vacuity is asserted: coding
+GLOBALMV instead of NEARESTMV must NOT match, and it does not.
+
+**HONEST BOOTSTRAP on the full-payload gate:** three recon-dependent header fields (LF
+levels/deltas, CDEF, frame `interp_filter`) come from the reference, exactly as
+`LowDelayPHeaderParams` documents; the KEY path bootstraps its header the same way. The TILE is
+derived from nothing.
+
+**Ground truth measured with the instrumented libaom decoder** (`/root/aom-inspect`, driven by
+the new `aom-bench` `dump_inter_stream` example): the zero-MV P is ONE `PARTITION_NONE` 64×64
+block, NEARESTMV, ref (LAST, NONE), SIMPLE_TRANSLATION, skip, TX_64X64, qindex 240; the
+per-symbol accounting gives exactly `partition → skip → is_inter → ref_frames(3) →
+inter_mode(3)`.
+
+**Two corrections to INTER-CHUNK2-HANDOFF.md** (prior-session notes, verified against C rather
+than trusted): the pack order is **skip BEFORE is_inter** (with cdef and delta-q between) per
+`pack_inter_mode_mvs` (bitstream.c:1092) — the handoff's "is_inter → ref → mode → skip" is
+wrong; and the mode is **NEARESTMV**, not the hedged "GLOBALMV/NEARESTMV".
+
+**Also recorded:** the §3 P codes `tx_mode_select = false` (TX_MODE_LARGEST), so
+`av1_txfm_search` takes the UNIFORM tx arm, not the recursive var-tx one — the KB-15 var-tx
+blocker does not apply to this frame config.
+
+**PINNED OPEN (self-promoting):** the two-superblock (64×128) tile does not yet byte-match —
+aomenc `[f2,24,80]` vs port `[99,24]`. Header byte-identical, block 0 proven exact, symbol order
+confirmed, and a sweep of all 72 valid `mode_context` encodings for block 1 reproduces nothing;
+libaom's decoder rejects the port's two-SB stream, so it desyncs rather than merely differs.
+Next step + the ruled-out list are recorded on the test and in INTER-CHUNK2-HANDOFF.md.
+
+**MISSING (stated as a fraction):** rung 1 of 3, and within it the PACK half only. The RD arm
+and pack exist and are gated but are NOT yet wired into the partition search / `pack_tile`, so
+the port does not yet CHOOSE the inter block end-to-end (`PickFrameCfg::inter`, the `rd_pick`
+step-6 arm, the `encode_b_intra_dry` inter recon arm, the `pack_leaf` inter branch, and
+`port_encode_inter` all remain). Rungs 2 (NEWMV/subpel) and 3 (real motion search) are
+untouched. Envelope verified: 339/339 encode+bench tests pass, 0 failures.
+
 # aom-rs status
 
 Reference target: **libaom v3.14.1** (`03087864`). Oracle built from source
