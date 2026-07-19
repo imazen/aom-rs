@@ -51,6 +51,7 @@ pub mod tx_search;
 pub mod var_part;
 pub mod var_tx;
 pub mod tx_split_nn_weights;
+pub mod prune_tx_2d_nn_weights;
 
 use aom_entropy::dec::OdEcDec;
 use aom_entropy::enc::OdEcEnc;
