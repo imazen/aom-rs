@@ -1719,6 +1719,20 @@ pub struct IntrabcBest {
     pub rate: i32,
     pub dist: i64,
     pub rdcost: i64,
+    /// COEFF arm only (`!skip_txfm`): `mbmi->inter_tx_size[16]` from the var-tx
+    /// quadtree ([`crate::var_tx::VarTxResult::inter_tx_size`]). `[0; 16]` on
+    /// the skip arm (dead — no tx-size syntax is written for a skipped inter
+    /// block, bitstream.c:1540 `!(is_inter_tx && skip_txfm)`).
+    pub inter_tx_size: [usize; 16],
+    /// COEFF arm only: `mbmi->tx_size` (the var-tx root size, `inter_tx_size[0]`).
+    pub tx_size: usize,
+    /// COEFF arm only: the block-local luma `xd->tx_type_map` (stride
+    /// `mi_size_wide[bsize]`) the var-tx search wrote — C saves it per winning
+    /// DV (`av1_copy_array(best_tx_type_map, xd->tx_type_map, ..)`,
+    /// rdopt.c:3619) and restores it after the loop (:3624). Chroma reads it
+    /// too, at the subsampling-scaled-back luma position (`av1_get_tx_type`,
+    /// blockd.h:1296-1301).
+    pub tx_type_map: Vec<u8>,
 }
 
 /// `rd_pick_intrabc_mode_sb` (rdopt.c:3427): dv-ref derivation + the
@@ -2032,6 +2046,9 @@ pub fn rd_pick_intrabc_mode_sb(
                 rate: skip_rate,
                 dist: skip_dist,
                 rdcost: this_rd,
+                inter_tx_size: [0; 16],
+                tx_size: 0,
+                tx_type_map: Vec::new(),
             });
         }
     }

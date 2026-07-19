@@ -1422,7 +1422,17 @@ fn leaf_pick_sb_modes(
                 angle_delta_y: if best.use_intrabc { 0 } else { best.y.angle_delta },
                 use_filter_intra: !best.use_intrabc && best.y.use_filter_intra,
                 filter_intra_mode: if best.use_intrabc { 0 } else { best.y.filter_intra_mode },
-                tx_size: best.y.tx_size,
+                // `mbmi->tx_size` — on the intrabc COEFF arm the var-tx search
+                // leaves the quadtree ROOT size here (`inter_tx_size[0]`, the
+                // top-left leaf's chosen size); the intra winner's own size is
+                // dead there. Inert for the intrabc pack (`write_tx_size_vartx`
+                // reads `inter_tx_size`, chroma derives from bsize), carried for
+                // mbmi faithfulness.
+                tx_size: if best.use_intrabc && !best.skip_txfm {
+                    best.inter_tx_size[0]
+                } else {
+                    best.y.tx_size
+                },
                 luma_edge_filter_type,
                 uv_mode: if best.use_intrabc { 0 } else { uv_mode },
                 angle_delta_uv,
@@ -1434,6 +1444,7 @@ fn leaf_pick_sb_modes(
                 palette_uv,
                 skip_txfm: best.use_intrabc && best.skip_txfm,
                 use_intrabc: best.use_intrabc,
+                inter_tx_size: best.inter_tx_size,
                 dv_row: best.dv_row,
                 dv_col: best.dv_col,
                 dv_ref_row: best.dv_ref_row,
@@ -4541,6 +4552,7 @@ fn nonrd_leaf_pick_and_encode(
         tx_type_map: vec![0; mi_w * mi_h], // DCT_DCT
         skip_txfm: false,
         use_intrabc: false,
+        inter_tx_size: [0; 16],
         dv_row: 0,
         dv_col: 0,
         dv_ref_row: 0,

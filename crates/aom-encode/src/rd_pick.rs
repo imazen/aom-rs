@@ -206,6 +206,11 @@ pub struct RdPickIntraBest {
     pub dv_ref_col: i32,
     /// `mbmi->skip_txfm` on the intrabc arm (the min(skip,coeff) winner).
     pub skip_txfm: bool,
+    /// `mbmi->inter_tx_size[16]` when the intrabc COEFF arm won
+    /// (`use_intrabc && !skip_txfm`); `[0; 16]` otherwise. Drives the
+    /// re-encode's `encode_block_inter` recursion + the pack's
+    /// `write_tx_size_vartx`.
+    pub inter_tx_size: [usize; 16],
 }
 
 /// The [`rd_pick_intra_mode_sb`] outcome: `best: None` models the
@@ -423,7 +428,7 @@ pub fn rd_pick_intra_mode_sb(
     // (screen content), run the DV search and, if it beats the assembled intra
     // `rd`, overwrite the winner tuple with the intrabc DV (C's `*mbmi =
     // best_mbmi`, which sets DC_PRED/UV_DC_PRED — the y/uv mode fields go dead).
-    let mut ibc = (false, 0i32, 0i32, 0i32, 0i32, false, rate, dist, rd);
+    let mut ibc: Option<crate::intrabc_search::IntrabcBest> = None;
     if let Some(a) = intrabc {
         // best_rd for the intrabc search = min(caller budget, the intra rd we
         // just assembled), exactly C's `best_rd = rd_cost->rdcost` guard at
@@ -440,22 +445,35 @@ pub fn rd_pick_intra_mode_sb(
             crate::intrabc_search::rd_pick_intrabc_mode_sb(a, &*recon_y, ru, rv, ibc_budget)
         {
             if win.rdcost < rd {
-                ibc = (
-                    true,
-                    win.dv_row,
-                    win.dv_col,
-                    win.dv_ref_row,
-                    win.dv_ref_col,
-                    win.skip_txfm,
-                    win.rate,
-                    win.dist,
-                    win.rdcost,
-                );
+                ibc = Some(win);
             }
         }
     }
-    let (use_intrabc, dv_row, dv_col, dv_ref_row, dv_ref_col, ibc_skip, out_rate, out_dist, out_rd) =
-        ibc;
+    let use_intrabc = ibc.is_some();
+    // C's `*mbmi = best_mbmi` (rdopt.c:3622) — on the intrabc arm the winner
+    // tuple is overwritten wholesale, including the luma `tx_type_map` restore
+    // at :3624 (the var-tx search's map on the COEFF arm; untouched/dead on the
+    // skip arm, which codes no coefficients).
+    let (dv_row, dv_col, dv_ref_row, dv_ref_col, ibc_skip, out_rate, out_dist, out_rd) = match &ibc {
+        Some(w) => (
+            w.dv_row,
+            w.dv_col,
+            w.dv_ref_row,
+            w.dv_ref_col,
+            w.skip_txfm,
+            w.rate,
+            w.dist,
+            w.rdcost,
+        ),
+        None => (0, 0, 0, 0, false, rate, dist, rd),
+    };
+    let inter_tx_size = ibc.as_ref().map_or([0usize; 16], |w| w.inter_tx_size);
+    // The COEFF arm's var-tx tx_type_map replaces the intra winner's (the intra
+    // y/uv mode fields go dead on this arm anyway); the skip arm carries none.
+    let tx_type_map = match &ibc {
+        Some(w) if !w.skip_txfm => w.tx_type_map.clone(),
+        _ => tx_type_map,
+    };
 
     // (7) ctx->mic / ctx->tx_type_map: the returned winner state.
     RdPickIntraOutcome {
@@ -474,6 +492,7 @@ pub fn rd_pick_intra_mode_sb(
             dv_ref_row,
             dv_ref_col,
             skip_txfm: ibc_skip,
+            inter_tx_size,
         }),
         intra_modes_rd_cost: rd_table,
     }

@@ -220,6 +220,16 @@ pub struct LeafWinner {
     /// content only, gated on `allow_intrabc`). When set, `mode`/`uv_mode` are
     /// DC_PRED/UV_DC_PRED (dead) and the block copies from the recon at the DV.
     pub use_intrabc: bool,
+    /// `mbmi->inter_tx_size[16]` — the var-tx quadtree the intrabc COEFF arm
+    /// picked (`av1_pick_recursive_tx_size_type_yrd` →
+    /// [`crate::var_tx::VarTxResult::inter_tx_size`]). Read ONLY when
+    /// `use_intrabc && !skip_txfm`: it drives both the re-encode walk
+    /// (`encode_block_inter`'s recursion, encodemb.c:495-533, which compares
+    /// the walk's `tx_size` against `inter_tx_size[get_txb_size_index(..)]`)
+    /// and the pack's `write_tx_size_vartx` (bitstream.c:1542-1552). Every
+    /// other winner leaves it at `[0; 16]` (dead — the intra path signals a
+    /// UNIFORM `tx_size` instead).
+    pub inter_tx_size: [usize; 16],
     /// `mbmi->mv[0]` (1/8-pel, full-pel multiples of 8): the winning DV.
     pub dv_row: i32,
     pub dv_col: i32,
@@ -267,6 +277,7 @@ impl LeafWinner {
             palette_uv: None,
             skip_txfm: false,
             use_intrabc: false,
+            inter_tx_size: [0; 16],
             dv_row: 0,
             dv_col: 0,
             dv_ref_row: 0,

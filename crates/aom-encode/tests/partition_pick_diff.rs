@@ -491,6 +491,7 @@ impl CPick<'_> {
                     tx_type_map: best.tx_type_map,
                     skip_txfm: false,
                     use_intrabc: false,
+                    inter_tx_size: [0; 16],
                     dv_row: 0,
                     dv_col: 0,
                     dv_ref_row: 0,
