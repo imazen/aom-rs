@@ -13,6 +13,9 @@ name = "aom_decode"
 # Consolidated DSP/entropy kernels (was: aom-cdef/entropy/inter/intra/loopfilter/
 # quant/recon/restore/transform/txb — folded into aom-dsp per GitHub #2).
 zenav1-aom-dsp = { path = "../aom-dsp" }
+# Cooperative cancellation (stop token) — zero-dep, no_std; threaded through the
+# `*_with` decode entries and polled at SB-row / tile / frame boundaries.
+enough = "0.4.4"
 
 [dev-dependencies]
 zenav1-aom-sys-ref = { path = "../aom-sys-ref" }

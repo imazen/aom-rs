@@ -5,6 +5,8 @@
 //! [`DecodeConfig::default`], which preserves the historical behavior: the
 //! hardcoded [`DEFAULT_MAX_DECODE_PIXELS`] pixel ceiling and no width/height cap.
 
+use enough::Stop;
+
 use crate::{DecodeError, LimitKind};
 
 /// The default per-frame pixel ceiling (~268 Mpx) applied when a caller does
@@ -79,16 +81,20 @@ impl DecodeLimits {
 
 /// Configuration for a decode. Passed to the `*_with` entry points; the bare
 /// entries use [`DecodeConfig::default`]. `#[non_exhaustive]` + the builder
-/// methods keep additive growth (allocation mode, stop token) non-breaking.
+/// methods keep additive growth (e.g. an allocation mode) non-breaking.
 #[non_exhaustive]
-#[derive(Debug, Clone, Default)]
-pub struct DecodeConfig {
+#[derive(Clone, Default)]
+pub struct DecodeConfig<'a> {
     /// Resource limits to enforce (default: the hardcoded pixel ceiling only).
     pub limits: DecodeLimits,
+    /// Optional cooperative stop token ([`enough::Stop`]), polled at SB-row /
+    /// tile / frame boundaries. `None` (the default) never cancels — the decode
+    /// runs to completion. Attach one with [`DecodeConfig::with_stop`].
+    pub stop: Option<&'a dyn Stop>,
 }
 
-impl DecodeConfig {
-    /// A config with default limits (the bare-entry behavior).
+impl<'a> DecodeConfig<'a> {
+    /// A config with default limits and no stop token (the bare-entry behavior).
     pub fn new() -> Self {
         DecodeConfig::default()
     }
@@ -97,6 +103,32 @@ impl DecodeConfig {
     pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// Attach a cooperative stop token (builder style). The decode polls it at
+    /// coarse boundaries and returns [`DecodeError::Cancelled`] when it fires.
+    pub fn with_stop(mut self, stop: &'a dyn Stop) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    /// Poll the stop token, if one is set. Returns [`DecodeError::Cancelled`]
+    /// carrying the [`enough::StopReason`] when the token requests a stop, else
+    /// `Ok(())` (no token, or "continue").
+    pub(crate) fn check_stop(&self) -> Result<(), DecodeError> {
+        if let Some(s) = self.stop {
+            s.check()?;
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Debug for DecodeConfig<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DecodeConfig")
+            .field("limits", &self.limits)
+            .field("stop", &if self.stop.is_some() { "<set>" } else { "<none>" })
+            .finish()
     }
 }
 
@@ -156,5 +188,30 @@ mod tests {
         let d = DecodeLimits::default();
         assert!(d.check_dims(-1, -1).is_ok());
         assert!(d.check_dims(i32::MIN, i32::MIN).is_ok());
+    }
+
+    #[test]
+    fn stop_token_check_stop_plumbing() {
+        use enough::{StopReason, Unstoppable};
+
+        // A token that always requests a stop.
+        struct AlwaysStop;
+        impl Stop for AlwaysStop {
+            fn check(&self) -> Result<(), StopReason> {
+                Err(StopReason::Cancelled)
+            }
+        }
+
+        // No token: never cancels.
+        assert!(DecodeConfig::default().check_stop().is_ok());
+        // Unstoppable: never cancels (zero-cost).
+        let u = Unstoppable;
+        assert!(DecodeConfig::new().with_stop(&u).check_stop().is_ok());
+        // Always-stop: check_stop surfaces DecodeError::Cancelled(reason).
+        let s = AlwaysStop;
+        match DecodeConfig::new().with_stop(&s).check_stop() {
+            Err(DecodeError::Cancelled(StopReason::Cancelled)) => {}
+            other => panic!("expected Cancelled(Cancelled), got {other:?}"),
+        }
     }
 }

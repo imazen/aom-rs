@@ -148,6 +148,8 @@ mod error;
 pub use config::{DEFAULT_MAX_DECODE_PIXELS, DecodeConfig, DecodeLimits};
 pub use error::{DecodeError, LimitKind};
 
+use enough::StopReason;
+
 pub mod frame;
 
 /// Byte-exact AV1 film-grain synthesis (post-reconstruction output stage).
@@ -652,6 +654,11 @@ pub struct KfTileDecode {
     /// this into an `Err` and discard the partial reconstruction; `None` on
     /// every conformant in-envelope decode.
     pub corrupt: Option<String>,
+    /// `Some(reason)` when the tile walk was cancelled via the caller's stop
+    /// token (polled per SB row / per tile). The `Result`-returning entry
+    /// points translate this into `DecodeError::Cancelled`; `None` when there
+    /// was no token or it never fired.
+    pub cancelled: Option<StopReason>,
 }
 
 /// A stored reference frame for inter prediction: the FILTERED reconstruction
@@ -1454,6 +1461,8 @@ struct TileKf<'c> {
     /// on every conformant in-envelope stream, so the guard is a
     /// never-taken branch and the decode stays byte-identical.
     corrupt: Option<String>,
+    /// Set when the caller's stop token cancelled the walk (polled per SB row).
+    cancelled: Option<StopReason>,
 }
 
 impl<'c> TileKf<'c> {
@@ -1639,6 +1648,7 @@ impl<'c> TileKf<'c> {
             inter_cdfs: InterCdfs::defaults(),
             recon_scratch: ReconScratch::default(),
             corrupt: None,
+            cancelled: None,
         };
         // Run the same per-tile reset `start_tile` applies to any later tile
         // — for the first (or only) tile this re-touches already-fresh state
@@ -1737,11 +1747,26 @@ impl<'c> TileKf<'c> {
     /// frame's true bottom/right edge ever clips a partial superblock), so a
     /// tile-rooted SB's recursion never needs to distinguish "my tile's edge"
     /// from "the frame's edge" — they coincide whenever it matters.
-    fn decode_one_tile(&mut self, dec: &mut OdEcDec, cdfs: &mut KfFrameContext) {
+    fn decode_one_tile(
+        &mut self,
+        dec: &mut OdEcDec,
+        cdfs: &mut KfFrameContext,
+        stop: Option<&dyn enough::Stop>,
+    ) {
         let sb_size = self.st.sb_size;
         let mib_size = self.st.mib_size;
         let mut mi_row = self.tile.mi_row_start;
         while mi_row < self.tile.mi_row_end {
+            // Cooperative cancellation (`CLAUDE.md` §6): poll the caller's stop
+            // token once per superblock row, so a long decode is cancellable
+            // within bounded work. `None` (Unstoppable) compiles to nothing;
+            // cancellation poisons the walk exactly like the `corrupt` channel.
+            if let Some(s) = stop {
+                if let Err(r) = s.check() {
+                    self.cancelled = Some(r);
+                    return;
+                }
+            }
             self.left_e = [[0; 32]; 3]; // av1_zero_left_context per SB row (all planes)
             self.left_p = [0; 32];
             self.left_t = [TXFM_CTX_INIT; 32]; // ..incl the left txfm-context bytes
@@ -1783,6 +1808,7 @@ impl<'c> TileKf<'c> {
             blocks: self.blocks,
             lr_units: self.lr_units,
             corrupt: self.corrupt,
+            cancelled: self.cancelled,
         }
     }
 
@@ -5392,7 +5418,7 @@ pub fn decode_tile_kf(
     recon_init: u16,
 ) -> KfTileDecode {
     let mut t = TileKf::new(cfg, recon_init);
-    t.decode_one_tile(dec, cdfs);
+    t.decode_one_tile(dec, cdfs, None);
     t.into_decode()
 }
 
@@ -5425,10 +5451,19 @@ pub fn decode_frame_tiles_kf(
     tiles: &[TileBytesKf],
     cfg: &KfTileConfig,
     recon_init: u16,
+    stop: Option<&dyn enough::Stop>,
 ) -> KfTileDecode {
     assert!(!tiles.is_empty(), "at least one tile");
     let mut t = TileKf::new(cfg, recon_init);
     for tb in tiles {
+        // Poll at each tile boundary too (SB-row polling in `decode_one_tile`
+        // gives finer granularity within a tile).
+        if let Some(s) = stop {
+            if let Err(r) = s.check() {
+                t.cancelled = Some(r);
+                break;
+            }
+        }
         let mut dec = OdEcDec::new(tb.bytes);
         // `av1/decoder/decodeframe.c`: `r->allow_update_cdf = allow_update_cdf`
         // where `allow_update_cdf = (!large_scale) && !disable_cdf_update`. The
@@ -5440,7 +5475,7 @@ pub fn decode_frame_tiles_kf(
         dec.allow_update_cdf = !cfg.disable_cdf_update;
         let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
         t.start_tile(tb.bounds);
-        t.decode_one_tile(&mut dec, &mut cdfs);
+        t.decode_one_tile(&mut dec, &mut cdfs, stop);
     }
     t.into_decode()
 }
@@ -5457,16 +5492,23 @@ pub fn decode_frame_tiles_inter(
     cfg: &KfTileConfig,
     inter: &InterFrameCfg,
     recon_init: u16,
+    stop: Option<&dyn enough::Stop>,
 ) -> KfTileDecode {
     assert!(!tiles.is_empty(), "at least one tile");
     let mut t = TileKf::new(cfg, recon_init);
     t.inter = Some(*inter);
     for tb in tiles {
+        if let Some(s) = stop {
+            if let Err(r) = s.check() {
+                t.cancelled = Some(r);
+                break;
+            }
+        }
         let mut dec = OdEcDec::new(tb.bytes);
         dec.allow_update_cdf = !cfg.disable_cdf_update;
         let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
         t.start_tile(tb.bounds);
-        t.decode_one_tile(&mut dec, &mut cdfs);
+        t.decode_one_tile(&mut dec, &mut cdfs, stop);
     }
     t.into_decode()
 }

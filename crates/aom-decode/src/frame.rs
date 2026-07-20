@@ -865,9 +865,9 @@ pub fn decode_frames_with(
                         .ok_or(DecodeError::UnsupportedFeature(
                             "inter frame decoded before any reference frame",
                         ))?;
-                    decode_inter_tile_payload(sh, &header, tile_data, last)?
+                    decode_inter_tile_payload(sh, &header, tile_data, last, config.stop)?
                 } else {
-                    decode_tile_payload(sh, &header, tile_data)?
+                    decode_tile_payload(sh, &header, tile_data, config.stop)?
                 };
                 run_post_filters(&mut t, &cfg, &hdr);
                 // Store the FILTERED reconstruction (pre-crop, pre-film-grain) as
@@ -919,6 +919,7 @@ fn decode_inter_tile_payload(
     p: &FrameHeaderObu,
     tile_data: &[u8],
     last: &crate::RefFrame,
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let cfg = build_tile_cfg(seq, p);
     let inter = crate::InterFrameCfg {
@@ -937,9 +938,12 @@ fn decode_inter_tile_payload(
         order_hint: p.prefix.order_hint,
     };
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
-    let t = crate::decode_frame_tiles_inter(&tiles, &cfg, &inter, 0);
+    let t = crate::decode_frame_tiles_inter(&tiles, &cfg, &inter, 0, stop);
     if let Some(reason) = t.corrupt {
         return Err(reason.into());
+    }
+    if let Some(r) = t.cancelled {
+        return Err(r.into());
     }
     Ok((t, cfg, p.clone()))
 }
@@ -1235,7 +1239,7 @@ pub fn decode_frame_obus_prefilter_with(
                     let off = rb.bytes_read();
                     (header, &payload[off..])
                 };
-                decoded = Some(decode_tile_payload(sh, &header, tile_data)?);
+                decoded = Some(decode_tile_payload(sh, &header, tile_data, config.stop)?);
             }
             5 | 15 => {} // OBU_METADATA | OBU_PADDING — content-neutral
             t => {
@@ -1257,12 +1261,16 @@ fn decode_tile_payload(
     seq: &SequenceHeaderObu,
     p: &FrameHeaderObu,
     tile_data: &[u8],
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let cfg = build_tile_cfg(seq, p);
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
-    let t = decode_frame_tiles_kf(&tiles, &cfg, 0);
+    let t = decode_frame_tiles_kf(&tiles, &cfg, 0, stop);
     if let Some(reason) = t.corrupt {
         return Err(reason.into());
+    }
+    if let Some(r) = t.cancelled {
+        return Err(r.into());
     }
     Ok((t, cfg, p.clone()))
 }

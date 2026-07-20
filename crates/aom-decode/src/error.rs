@@ -14,6 +14,8 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use core::fmt;
 
+use enough::StopReason;
+
 /// Which caller-configured resource limit a [`DecodeError::LimitExceeded`]
 /// refers to. Maps onto the integration layer's limit categories at the seam.
 #[non_exhaustive]
@@ -79,8 +81,9 @@ pub enum DecodeError {
         bytes: usize,
     },
     /// The decode was cancelled at a coarse boundary via the caller's stop
-    /// token. Maps to a "cancelled/stopped" category.
-    Cancelled,
+    /// token, carrying the [`StopReason`]. Maps to a "cancelled/stopped"
+    /// category.
+    Cancelled(StopReason),
     /// A broken internal invariant — a bug in this decoder, not attacker
     /// input. Maps to an "internal" category.
     Internal(&'static str),
@@ -97,7 +100,7 @@ impl DecodeError {
             DecodeError::UnsupportedFeature(_) => "unsupported-feature",
             DecodeError::LimitExceeded { .. } => "limit-exceeded",
             DecodeError::AllocFailed { .. } => "alloc-failed",
-            DecodeError::Cancelled => "cancelled",
+            DecodeError::Cancelled(_) => "cancelled",
             DecodeError::Internal(_) => "internal",
         }
     }
@@ -116,7 +119,7 @@ impl fmt::Display for DecodeError {
             DecodeError::AllocFailed { bytes } => {
                 write!(f, "allocation of {bytes} bytes failed (out of memory)")
             }
-            DecodeError::Cancelled => write!(f, "decode cancelled by stop token"),
+            DecodeError::Cancelled(r) => write!(f, "decode cancelled by stop token: {r}"),
             DecodeError::Internal(m) => write!(f, "internal decoder error: {m}"),
         }
     }
@@ -140,5 +143,13 @@ impl From<&'static str> for DecodeError {
 impl From<String> for DecodeError {
     fn from(s: String) -> Self {
         DecodeError::Malformed(Cow::Owned(s))
+    }
+}
+
+/// A [`StopReason`] from a cancelled decode becomes [`DecodeError::Cancelled`],
+/// so a polled `stop.check()?` propagates cleanly.
+impl From<StopReason> for DecodeError {
+    fn from(r: StopReason) -> Self {
+        DecodeError::Cancelled(r)
     }
 }
