@@ -639,6 +639,12 @@ pub struct KfTileDecode {
     /// (`loop_restoration_read_sb_coeffs`); empty when the plane's frame
     /// restoration type is `RESTORE_NONE`.
     pub lr_units: [Vec<aom_dsp::entropy::lr::LrUnitInfo>; 3],
+    /// `Some(reason)` when the tile walk hit a corrupt-frame / out-of-envelope
+    /// condition on untrusted input (see [`TileKf::corrupt`]). The
+    /// `Result`-returning tile-payload entry points in `frame.rs` translate
+    /// this into an `Err` and discard the partial reconstruction; `None` on
+    /// every conformant in-envelope decode.
+    pub corrupt: Option<String>,
 }
 
 /// A stored reference frame for inter prediction: the FILTERED reconstruction
@@ -1421,6 +1427,16 @@ struct TileKf<'c> {
     /// profile. Contents are fully overwritten on every use, so reuse is
     /// byte-for-byte identical to a fresh allocation.
     recon_scratch: ReconScratch,
+    /// Set when the tile walk hits a corrupt-frame or out-of-envelope
+    /// condition on UNTRUSTED input (a malformed bitstream that libaom would
+    /// reject with `AOM_CODEC_CORRUPT_FRAME`, or a valid-but-unsupported
+    /// feature the current envelope does not decode). Instead of panicking —
+    /// a denial-of-service on the untrusted AVIF decode path — the walk sets
+    /// this reason string and unwinds via the re-entrant `corrupt` guards; the
+    /// `Result`-returning tile-payload entry points surface it as `Err`. `None`
+    /// on every conformant in-envelope stream, so the guard is a
+    /// never-taken branch and the decode stays byte-identical.
+    corrupt: Option<String>,
 }
 
 impl<'c> TileKf<'c> {
@@ -1605,6 +1621,7 @@ impl<'c> TileKf<'c> {
             inter: None,
             inter_cdfs: InterCdfs::defaults(),
             recon_scratch: ReconScratch::default(),
+            corrupt: None,
         };
         // Run the same per-tile reset `start_tile` applies to any later tile
         // — for the first (or only) tile this re-touches already-fresh state
@@ -1613,6 +1630,26 @@ impl<'c> TileKf<'c> {
         let whole_frame = TileBoundsKf::whole_frame(cfg);
         t.start_tile(whole_frame);
         t
+    }
+
+    /// Flag the current frame as corrupt / out-of-envelope and unwind the walk.
+    /// The first reason wins (later re-entrant guards short-circuit before
+    /// reaching a second site). Cold + out-of-line: never taken on a
+    /// conformant in-envelope stream, so the decode of valid input is
+    /// unaffected. See [`TileKf::corrupt`].
+    #[cold]
+    #[inline(never)]
+    fn mark_corrupt(&mut self, reason: impl Into<String>) {
+        if self.corrupt.is_none() {
+            self.corrupt = Some(reason.into());
+        }
+    }
+
+    /// True once [`mark_corrupt`] has fired — the re-entrant walk guards test
+    /// this to stop decoding a poisoned frame.
+    #[inline]
+    fn is_corrupt(&self) -> bool {
+        self.corrupt.is_some()
     }
 
     /// Reset the per-TILE transient state at the start of a new tile's
@@ -1694,6 +1731,9 @@ impl<'c> TileKf<'c> {
             let mut mi_col = self.tile.mi_col_start;
             while mi_col < self.tile.mi_col_end {
                 self.decode_partition(dec, cdfs, mi_row, mi_col, sb_size);
+                if self.is_corrupt() {
+                    return;
+                }
                 mi_col += mib_size;
             }
             mi_row += mib_size;
@@ -1725,6 +1765,7 @@ impl<'c> TileKf<'c> {
             tree: self.tree,
             blocks: self.blocks,
             lr_units: self.lr_units,
+            corrupt: self.corrupt,
         }
     }
 
@@ -2396,19 +2437,30 @@ impl<'c> TileKf<'c> {
         let left_available = mi_col > self.tile.mi_col_start;
 
         // Envelope invariants (STEP-0 census): these pre-mode reads are inert.
-        assert!(!cfg.seg.enabled, "inter skeleton: segmentation off");
-        assert!(!inter.skip_mode_allowed, "inter skeleton: skip_mode off");
-        assert!(!cfg.delta_q_present, "inter skeleton: delta-q off");
+        // Out-of-envelope inter features are rejected as a clean error (not a
+        // panic) so a malformed / unsupported inter frame from untrusted input
+        // returns `Err` instead of aborting the decode.
+        if cfg.seg.enabled {
+            self.mark_corrupt("inter: segmentation not supported in this decode envelope");
+            return;
+        }
+        if inter.skip_mode_allowed {
+            self.mark_corrupt("inter: skip_mode not supported in this decode envelope");
+            return;
+        }
+        if cfg.delta_q_present {
+            self.mark_corrupt("inter: delta-q not supported in this decode envelope");
+            return;
+        }
         // tx_mode is TX_MODE_SELECT for the OBMC target (av1-1-b8-01-size-16x18):
         // inter blocks code a var-tx quadtree (read_tx_size_vartx). The earlier
         // walking-skeleton / ratchet targets were TX_MODE_LARGEST; both are
         // handled below (the var-tx read collapses to the single largest tx when
         // the frame codes LARGEST).
-        assert!(
-            matches!(cfg.tx_mode, TxMode::Largest | TxMode::Select),
-            "inter: unsupported tx_mode {:?}",
-            cfg.tx_mode
-        );
+        if !matches!(cfg.tx_mode, TxMode::Largest | TxMode::Select) {
+            self.mark_corrupt(format!("inter: unsupported tx_mode {:?}", cfg.tx_mode));
+            return;
+        }
 
         // Neighbour projections for the mode-info contexts.
         let (above_mi, left_mi) = self.neighbours(mi_row, mi_col);
@@ -2593,21 +2645,26 @@ impl<'c> TileKf<'c> {
         icdfs.single_ref[ep::pred_ctx_last_or_last2(&rc) as usize][3] = ref_cdfs[13];
         icdfs.single_ref[ep::pred_ctx_last3_or_gld(&rc) as usize][4] = ref_cdfs[14];
         icdfs.single_ref[ep::pred_ctx_brf_or_arf2(&rc) as usize][5] = ref_cdfs[15];
-        assert!(
-            !is_compound && ref0 == 1 && ref1 == -1,
-            "inter ratchet: single LAST reference (compound is a later chunk)"
-        );
+        if is_compound || ref0 != 1 || ref1 != -1 {
+            self.mark_corrupt(
+                "inter: only a single LAST reference is decoded in this envelope \
+                 (compound / non-LAST references unsupported)",
+            );
+            return;
+        }
         // find_inter_mv_refs below hardcodes IDENTITY global motion (base MV (0,0),
         // gm_type 0). A frame whose reference carries non-identity global motion
         // (`global_motion[ref].wmtype > IDENTITY`) needs the real global-MV base +
         // is_global_mv_block gating — a later chunk. Guarded so such a frame pins
         // cleanly here rather than reading a wrong NEWMV base and desyncing (every
         // target through 16x18 is identity-GM; e.g. 16x66 uses global motion).
-        assert!(
-            inter.gm_wmtype[ref0 as usize] == 0,
-            "chunk 5+: non-identity global motion not handled (ref {ref0} wmtype {})",
-            inter.gm_wmtype[ref0 as usize]
-        );
+        if inter.gm_wmtype[ref0 as usize] != 0 {
+            self.mark_corrupt(format!(
+                "inter: non-identity global motion not supported (ref {ref0} wmtype {})",
+                inter.gm_wmtype[ref0 as usize]
+            ));
+            return;
+        }
 
         // find_inter_mv_refs (identity GM, empty temporal field per the census).
         let dv_tile = DvTileBounds {
@@ -2692,7 +2749,10 @@ impl<'c> TileKf<'c> {
                 }
             }
             GLOBALMV => (0, 0), // identity global motion (census: all IDENTITY)
-            _ => panic!("inter skeleton: unexpected single-ref mode {mode}"),
+            _ => {
+                self.mark_corrupt(format!("inter: unsupported single-ref mode {mode}"));
+                return;
+            }
         };
 
         // Inter-intra (decodemv.c:1383-1407 — AFTER assign_mv, BEFORE findSamples /
@@ -2973,10 +3033,12 @@ impl<'c> TileKf<'c> {
         // (collect_vartx_leaves); every block in this target is uniform (guarded),
         // so the uniform residual loop below tiles with `tx_size` = the read size.
         let _ = &vartx_leaf_grid;
-        assert!(
-            !vartx_non_uniform,
-            "chunk 4: non-uniform inter var-tx not yet handled (block {bsize} @ mi({mi_row},{mi_col}))"
-        );
+        if vartx_non_uniform {
+            self.mark_corrupt(format!(
+                "inter: non-uniform var-tx not supported (block {bsize} @ mi({mi_row},{mi_col}))"
+            ));
+            return;
+        }
 
         // --- parse_decode_block tail (decodeframe.c:1219): a SKIP block resets
         // its entropy-context footprint to zero (`av1_reset_entropy_context`,
@@ -3723,6 +3785,9 @@ impl<'c> TileKf<'c> {
         bsize: usize,
         partition: usize,
     ) {
+        if self.is_corrupt() {
+            return;
+        }
         // INTER frame: take the motion-compensation mode-info path. `inter` is
         // `Copy`, so copying it out releases the borrow on `self`.
         if let Some(inter) = self.inter {
@@ -5112,6 +5177,11 @@ impl<'c> TileKf<'c> {
         mi_col: i32,
         bsize: usize,
     ) {
+        // Poison guard: once a corrupt / out-of-envelope condition is flagged,
+        // every subsequent recursion no-ops so the walk unwinds cleanly.
+        if self.is_corrupt() {
+            return;
+        }
         if mi_row >= self.cfg.mi_rows || mi_col >= self.cfg.mi_cols {
             return;
         }
@@ -5150,7 +5220,13 @@ impl<'c> TileKf<'c> {
         };
         self.tree.push(p as i8);
         let subsize = get_partition_subsize(bsize, p as i32) as usize;
-        assert_ne!(subsize, 255, "invalid partition {p} for bsize {bsize}");
+        // A partition value whose subsize is BLOCK_INVALID is a corrupt frame
+        // (a malformed bitstream decoded an out-of-range partition for this
+        // bsize). libaom rejects it; the port must not index tables with it.
+        if subsize == 255 {
+            self.mark_corrupt(format!("corrupt frame: invalid partition {p} for bsize {bsize}"));
+            return;
+        }
         // Conformance (decode_partition, decodeframe.c:1359-1371): a partition
         // whose sub-block subsamples to an invalid chroma block size is a
         // corrupt frame — libaom aborts it with AOM_CODEC_CORRUPT_FRAME BEFORE
@@ -5166,9 +5242,10 @@ impl<'c> TileKf<'c> {
             && self.cfg.subsampling_y == 0
             && get_plane_block_size(subsize, self.cfg.subsampling_x, self.cfg.subsampling_y) == 255
         {
-            panic!(
+            self.mark_corrupt(format!(
                 "4:2:2 corrupt frame: block size index {subsize} invalid with subsampling (1,0)"
-            );
+            ));
+            return;
         }
         let bsize2 = get_partition_subsize(bsize, PARTITION_SPLIT as i32) as usize;
 

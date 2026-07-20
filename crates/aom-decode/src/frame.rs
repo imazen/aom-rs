@@ -850,6 +850,9 @@ fn decode_inter_tile_payload(
     };
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
     let t = crate::decode_frame_tiles_inter(&tiles, &cfg, &inter, 0);
+    if let Some(reason) = t.corrupt {
+        return Err(reason);
+    }
     Ok((t, cfg, p.clone()))
 }
 
@@ -1151,6 +1154,9 @@ fn decode_tile_payload(
     let cfg = build_tile_cfg(seq, p);
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
     let t = decode_frame_tiles_kf(&tiles, &cfg, 0);
+    if let Some(reason) = t.corrupt {
+        return Err(reason);
+    }
     Ok((t, cfg, p.clone()))
 }
 

@@ -1,0 +1,22 @@
+# AV1 OBU framing dictionary for the decode fuzz targets.
+# OBU header byte = forbidden(0) | obu_type(4b) | ext_flag(1b) | has_size(1b) | reserved(1b).
+# Value shown is (obu_type<<3) | (has_size<<1); a size leb128 byte follows.
+
+# OBU_TEMPORAL_DELIMITER (type 2), has_size, zero-length body.
+td_obu="\x12\x00"
+# OBU_SEQUENCE_HEADER (type 1), has_size.
+seq_obu="\x0a"
+# OBU_FRAME_HEADER (type 3), has_size.
+framehdr_obu="\x1a"
+# OBU_TILE_GROUP (type 4), has_size.
+tilegroup_obu="\x22"
+# OBU_METADATA (type 5), has_size.
+metadata_obu="\x2a"
+# OBU_FRAME (type 6, combined header+tile-group), has_size.
+frame_obu="\x32"
+# OBU_PADDING (type 15), has_size.
+padding_obu="\x7a"
+
+# Common leb128 size prefixes.
+size_small="\x0a"
+size_med="\x40"

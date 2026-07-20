@@ -1,0 +1,36 @@
+[package]
+name = "aom-decode-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+
+[dependencies.zenav1-aom-decode]
+path = ".."
+
+# Standalone workspace: keep the fuzz crate OUT of the parent workspace (which
+# lists explicit members and pins edition 2024 on the decoder). cargo-fuzz
+# builds this crate directly.
+[workspace]
+
+# The decoder decodes untrusted AVIF payloads from the web. Malformed input must
+# return Err — never panic (unwrap/expect/OOB index/assert/overflow) or allocate
+# without bound. These targets assert that on the two public OBU entry points.
+[[bin]]
+name = "decode_frames"
+path = "fuzz_targets/decode_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_obus"
+path = "fuzz_targets/decode_obus.rs"
+test = false
+doc = false
+bench = false

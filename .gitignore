@@ -13,3 +13,9 @@ __pycache__/
 # local C-oracle checkout + build (never commit)
 /c-ref/
 /differential/shims/bin/
+
+# cargo-fuzz build artifacts + working corpus/crashes (never commit)
+crates/aom-decode/fuzz/target/
+crates/aom-decode/fuzz/corpus/
+crates/aom-decode/fuzz/artifacts/
+crates/aom-decode/fuzz/coverage/
