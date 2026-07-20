@@ -918,7 +918,17 @@ pub fn inter_ext_tx_cdf(
     reduced_tx_set: bool,
 ) -> &mut [u16] {
     let d = ext_tx_derive(tx_size, true, reduced_tx_set, 0, false, 0, 0);
-    &mut inter_ext_tx[d.eset as usize][d.square as usize]
+    let (eset, square) = (d.eset as usize, d.square as usize);
+    // `square == EXT_TX_SIZES` (TX_64X64 -> TXSIZE_SQR == 4) selects the DCT-only
+    // set, which codes NO tx_type symbol (num == 1) — but a malformed inter block
+    // can reach here with such a tx_size and must not index the [4][4] table OOB.
+    // Return any in-bounds slot (it is never actually read on the DCT-only path);
+    // mirrors the intra path's `ext_tx_dtt4[0][0]` DCT-only fallback above.
+    // Byte-inert on conformant streams (their coded ext-tx tx sizes are 0..=3).
+    if eset >= 4 || square >= 4 {
+        return &mut inter_ext_tx[0][0];
+    }
+    &mut inter_ext_tx[eset][square]
 }
 
 // ---- the driver -----------------------------------------------------------------
@@ -2950,6 +2960,20 @@ impl<'c> TileKf<'c> {
             (inter.interp_filter as usize, inter.interp_filter as usize)
         };
 
+        // The subpel MC kernels in `aom_dsp::inter`/`convolve` implement the
+        // 8-tap/4-tap REGULAR/SMOOTH/SHARP filters (0/1/2) — BILINEAR (3) and any
+        // out-of-range value are not in the decode envelope. A malformed frame
+        // header can code `interp_filter == BILINEAR` (a valid AV1 value the port
+        // does not yet implement), which would reach the kernel lookup and panic.
+        // Reject it here instead. Byte-inert on in-envelope streams (resolved
+        // filters are always 0/1/2 there).
+        if filter_y > 2 || filter_x > 2 {
+            self.mark_corrupt(format!(
+                "inter: unsupported interp filter (y={filter_y}, x={filter_x}) — only REGULAR/SMOOTH/SHARP (0/1/2) in envelope"
+            ));
+            return;
+        }
+
         // tx_size (decodeframe.c:1179-1198, inter path): TX_MODE_SELECT + a
         // signalling block (bsize > BLOCK_4X4) + !skip -> the inter var-tx
         // quadtree (read_tx_size_vartx over txfm_partition_cdf; it stamps the
@@ -3909,7 +3933,12 @@ impl<'c> TileKf<'c> {
                 mib_size,
                 grid,
             );
-            let (dv_row, dv_col) = assign_and_validate_dv(
+            // A non-conformant intrabc block-vector fails `av1_is_dv_valid`
+            // (out of the allowed on-screen/wavefront region) — libaom rejects
+            // the frame (AOM_CODEC_CORRUPT_FRAME). Mark corrupt and unwind the
+            // walk instead of panicking on untrusted input. Byte-inert on
+            // conformant streams (a valid DV always validates).
+            let Some((dv_row, dv_col)) = assign_and_validate_dv(
                 (nearest_r, nearest_c),
                 (near_r, near_c),
                 info.dv_row,
@@ -3925,8 +3954,10 @@ impl<'c> TileKf<'c> {
                 self.st.num_planes,
                 ss_x as i32,
                 ss_y as i32,
-            )
-            .expect("intrabc DV failed validity (non-conformant stream)");
+            ) else {
+                self.mark_corrupt("corrupt frame: intrabc DV failed validity (non-conformant stream)");
+                return;
+            };
             info.dv_row = dv_row;
             info.dv_col = dv_col;
         }

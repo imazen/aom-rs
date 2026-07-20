@@ -598,6 +598,27 @@ fn parse_frame_header_ext(
         return Err("corrupt frame header (bit-reader error / out-of-range syntax value)".into());
     }
 
+    // Film-grain scaling points must have strictly-increasing point_x per plane.
+    // The grain-synthesis LUT builder (`film_grain::init_scaling_function`)
+    // divides by the adjacent-x delta, so a duplicate / non-increasing point_x is
+    // a divide-by-zero on untrusted input (the encoder guarantees monotonicity;
+    // libaom's synthesis assumes it). Count bounds are already enforced upstream
+    // (`rb.error`); this adds the ordering invariant. Byte-inert on conformant
+    // streams. Applies to both the single-frame and multi-frame entries.
+    if p.film_grain_params_present {
+        let fg = &p.film_grain;
+        let monotonic = |pts: &[[i32; 2]], n: i32| -> bool {
+            let n = (n.max(0) as usize).min(pts.len());
+            (1..n).all(|i| pts[i][0] > pts[i - 1][0])
+        };
+        if !monotonic(&fg.scaling_points_y, fg.num_y_points)
+            || !monotonic(&fg.scaling_points_cb, fg.num_cb_points)
+            || !monotonic(&fg.scaling_points_cr, fg.num_cr_points)
+        {
+            return Err("non-monotonic film-grain scaling points (divide-by-zero guard)".into());
+        }
+    }
+
     // --- envelope gates, in bitstream order ---
     if p.prefix.show_existing_frame {
         return Err("show_existing_frame".into());
@@ -663,12 +684,19 @@ fn parse_frame_header_ext(
     // from the value the driver precomputes once. Reject it cleanly.
     if p.segmentation.enabled {
         // KEY frame, no primary ref: the parse forces map+data updates on and
-        // temporal prediction off (setup_segmentation's PRIMARY_REF_NONE arm).
-        debug_assert!(
-            p.segmentation.update_map
-                && p.segmentation.update_data
-                && !p.segmentation.temporal_update
-        );
+        // temporal prediction off (setup_segmentation's PRIMARY_REF_NONE arm). A
+        // conformant in-envelope frame always satisfies this; a malformed /
+        // out-of-envelope one (e.g. a mutated inter header carrying
+        // temporal_update) is rejected here instead of tripping the former
+        // `debug_assert!` on untrusted input. Byte-inert on valid streams.
+        if !(p.segmentation.update_map
+            && p.segmentation.update_data
+            && !p.segmentation.temporal_update)
+        {
+            return Err(
+                "segmentation update flags inconsistent (non-conformant / out of envelope)".into(),
+            );
+        }
         let seg = bridge_segmentation(&p.segmentation);
         let (_, last_active) = crate::calculate_segdata(&seg);
         let plane_deltas_zero = q.y_dc_delta_q == 0
