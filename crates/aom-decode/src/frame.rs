@@ -753,6 +753,31 @@ pub fn decode_frame_obus_with(
     Ok(finish_and_grain(t, &cfg, &header))
 }
 
+/// [`decode_frame_obus_with`], returning a source-located error
+/// ([`whereat::At`]) that links the failure to this crate (+ commit, when the
+/// repository is known) and the decode-boundary location. Behind the default-off
+/// `whereat` feature; the bare / `_with` entries always return the plain
+/// category-bearing [`DecodeError`]. The boundary marker plus the variant's
+/// message identify the failure class; attaching the exact per-error-site origin
+/// is a documented refinement (it would change the error type crate-wide).
+#[cfg(feature = "whereat")]
+pub fn decode_frame_obus_at(
+    data: &[u8],
+    config: &DecodeConfig,
+) -> Result<FrameDecode, whereat::At<DecodeError>> {
+    decode_frame_obus_with(data, config).map_err(|e| whereat::at!(e))
+}
+
+/// [`decode_frames_with`] with a source-located error ([`whereat::At`]). See
+/// [`decode_frame_obus_at`]. Behind the default-off `whereat` feature.
+#[cfg(feature = "whereat")]
+pub fn decode_frames_at(
+    data: &[u8],
+    config: &DecodeConfig,
+) -> Result<Vec<FrameDecode>, whereat::At<DecodeError>> {
+    decode_frames_with(data, config).map_err(|e| whereat::at!(e))
+}
+
 /// Crop the filtered reconstruction to the display planes and apply film grain
 /// (the final post-reconstruction output stage). Shared by [`decode_frame_obus`]
 /// and the multi-frame [`decode_frames`] path.
@@ -1634,4 +1659,23 @@ pub fn apply_cdef(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) 
         t.stride_uv,
         &params,
     );
+}
+
+#[cfg(all(test, feature = "whereat"))]
+mod whereat_tests {
+    use super::*;
+
+    #[test]
+    fn decode_frame_obus_at_returns_located_categorized_error() {
+        // An empty stream fails with "no frame in stream" (Malformed); the
+        // located entry wraps it in `whereat::At` with source location + crate
+        // info, and the inner error is still the categorized `DecodeError`.
+        let err = decode_frame_obus_at(&[], &DecodeConfig::default()).unwrap_err();
+        let inner = err.error();
+        assert_eq!(inner.category(), "malformed");
+        assert!(matches!(inner, DecodeError::Malformed(_)));
+        // The located trace renders without panicking (Display + Debug).
+        let _ = alloc::format!("{err}");
+        let _ = alloc::format!("{err:?}");
+    }
 }

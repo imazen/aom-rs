@@ -150,6 +150,12 @@ pub use error::{DecodeError, LimitKind};
 
 use enough::StopReason;
 
+// Crate-boundary info for `whereat::at!` (repo + commit + module), so the
+// optional `*_at` located-error entries link a `DecodeError` back to this
+// crate. Default-off `whereat` feature; a no-op otherwise.
+#[cfg(feature = "whereat")]
+whereat::define_at_crate_info!();
+
 pub mod frame;
 
 /// Byte-exact AV1 film-grain synthesis (post-reconstruction output stage).

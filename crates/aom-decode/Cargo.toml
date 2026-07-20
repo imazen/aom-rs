@@ -3,6 +3,8 @@ name = "zenav1-aom-decode"
 version = "0.0.1"
 edition = "2024"
 license.workspace = true
+# Inherited so the optional `whereat` feature can link located errors to the repo.
+repository.workspace = true
 description = "Decoder composition layer for aom-rs: KEY-frame luma tile reconstruction driver (partition walk + per-leaf mode-info/coeff decode + intra predict + inverse transform), roundtrip-pinned to the byte-identical-to-C writers."
 
 [lib]
@@ -16,6 +18,16 @@ zenav1-aom-dsp = { path = "../aom-dsp" }
 # Cooperative cancellation (stop token) — zero-dep, no_std; threaded through the
 # `*_with` decode entries and polled at SB-row / tile / frame boundaries.
 enough = "0.4.4"
+# Optional source-location tracking for decode errors (default off). When on,
+# the `*_at` entries return `whereat::At<DecodeError>` linking the failure to
+# this crate + commit + decode-boundary location.
+whereat = { version = "0.1.5", optional = true }
+
+[features]
+# Enable `whereat::At<DecodeError>`-returning `*_at` entries (repo/commit-linked
+# located errors). Off by default — the bare + `_with` entries always return the
+# plain category-bearing `DecodeError`.
+whereat = ["dep:whereat"]
 
 [dev-dependencies]
 zenav1-aom-sys-ref = { path = "../aom-sys-ref" }
