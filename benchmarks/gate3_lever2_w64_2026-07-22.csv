@@ -1,0 +1,7 @@
+metric,cell,baseline_ir,w64_ir,delta_ir,delta_pct,note
+program_total,dec_352x288_q00,510619494,506476248,-4143246,-0.81,"1 C-oracle + 4 port decodes; C side identical across runs so delta is all port"
+program_total,dec_352x288_q32,238921186,238445542,-475644,-0.20,"1 C-oracle + 4 port decodes"
+port_ir_per_decode,dec_352x288_q00,105761982,104726170,-1035811,-0.98,"program_total delta / 4 port decodes"
+port_ir_per_decode,dec_352x288_q32,53674867,53555956,-118911,-0.22,"program_total delta / 4 port decodes"
+fn_refill,dec_352x288_q00,10575564,2135492,-8440072,-79.81,"OdEcDec::refill self-Ir; bulk 8-byte load + halved refill frequency"
+fn_refill,dec_352x288_q32,1229976,248660,-981316,-79.78,"OdEcDec::refill self-Ir"

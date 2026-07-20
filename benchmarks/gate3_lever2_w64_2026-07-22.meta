@@ -1,0 +1,8 @@
+Gate-3 decode Lever 2 (64-bit entropy window) measurement
+git commit (main baseline): ef0b568 + dec.rs 64-bit window (this landing)
+host: dev-32gb / 16 cores / 30Gi RAM
+profile: [profile.profiling] (inherits release; debug=true; overflow-checks/debug-assertions OFF)
+tool: valgrind callgrind 3.26.0, --cache-sim=no --branch-sim=no, nice -n 10
+cmd: ./target/profiling/gate3_profile dec port <cell> 3   (1 C-oracle decode + 4 port decodes)
+cells: dec_352x288_q00 (av1-1-b8-00-quantizer-00, lossless), dec_352x288_q32 (quantizer-32)
+date: 2026-07-22
