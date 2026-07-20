@@ -1319,13 +1319,36 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
        luma are ALL correct; the divergence is the CHROMA MODE RD DECISION alone.
     4. **This is the KB-2/KB-6/#26 chroma-mode near-tie family (as predicted).** The port's chroma
        RD favours CfL where C favours H (and vice-versa) despite identical inputs, so the tip is
-       on either the CfL alpha rate/dist or the directional (H) prediction dist — a <~6-rate-unit
-       delta. **NEXT CONCRETE STEP (the fix): sibling-C instrumented chroma-RD dump at
+       on either the CfL alpha rate/dist or the directional (H) prediction dist.
+       **NEXT CONCRETE STEP (the fix): sibling-C instrumented chroma-RD dump at
        `pick_sb_modes`/`rd_pick_intra_sbuv_mode` for mi(41,25) + mi(41,26)** — dump C's per-uv-mode
        rate+dist (UV_DC/V/H/…/CFL incl. cfl alpha search) and diff vs the port's `intra_uv_rd`
        per-mode RD to find which side's rate or dist diverges. Suspect the H_PRED chroma
        edge-filter / the neighbour `uv_mode`-in-grid stamp for the intrabc siblings feeding the
        directional prediction, since a CfL-buffer/subsample/luma bug is now disproven.
+  - **DEEPER NARROWING 2026-07-20 (port-side per-uv-mode chroma-RD dump; instrument removed).**
+    The port's `rd_pick_intra_sbuv_mode` iterates C's `uv_rd_search_mode_order` (DC, **CFL**, V,
+    **H**, … — CFL is index 1, evaluated BEFORE H), rdmult=291066:
+    - **mi(41,25)** (BLOCK_4X4, luma H): recorded per-mode this_rd `{DC 4372287, CFL 3357235,
+      SMOOTH 4892811, SMOOTH_H 5231194, D203 4886830}`, WIN CFL rate 3708 dist 9760 rd 3357235.
+      **H IS reached (passes every skip gate) but `rd_pick_intra_angle_sbuv` returns None** — its
+      angle_delta=0 `pick_intra_angle_routine_sbuv` exceeds `ref_best_rd = best_rd + best_rd>>3`
+      (= CFL's 3357235 ×1.125 = 3776889), i.e. the port's H rd > 3776889 (>12% worse than the
+      port's CFL). So it is NOT a mode-search-space gap (H is searched) and NOT a sub-6-unit tie —
+      the port's H is *substantially* worse than its CFL here, yet C picks H (so C's H < C's CFL).
+    - **mi(41,26)** (BLOCK_8X4, luma H): per-mode `{DC 5605183, CFL 3942963, H 3484625, PAETH
+      5320274}`, WIN H rd 3484625 (beats CFL 3942963); C picks CFL. So here the port's CFL is the
+      *loser* by ~458k, where C's CFL wins.
+    So the divergence is DIFFERENT-SIGNED at the two blocks (mi41,25: port H too high / CFL too
+    low relative to C; mi41,26: port CFL too high relative to C) — which rules out a single
+    uniform CFL-cost or H-cost bias and makes the sibling-C per-mode rd+dist dump (above) the only
+    way to attribute it. Since ALL prior recon matches C-decode up to mi(41,25) (bits identical),
+    the H prediction READS the same neighbours as C — so a wrong port H **dist** would have to be
+    a chroma-edge-filter / prediction-kernel difference, while a wrong port **CFL rd** would be in
+    the alpha search or the DC-pred; the dump distinguishes them. **Reusable tooling note:** the
+    C DECODE oracle (`decode_frame_obus_prefilter` → `tc.recon_u`/`tc.blocks`) is a cheap
+    ground-truth for recon+decisions and pinned everything above; only the per-candidate *RD
+    scalars* still need sibling-C encoder instrumentation (also required by KB-13).
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 
