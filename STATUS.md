@@ -1,3 +1,19 @@
+## KB-15 root: intrabc SKIP-arm chroma extent was `bw>>ss`, not padded `plane_bsize` (2026-07-20, encoder track)
+
+`encode_b_intra_dry`'s intrabc SKIP arm predicted/wrote the chroma over `(bw>>ss_x, bh>>ss_y)`
+— a 2x4 strip for a 4x8 sub-8x8 intrabc chroma-ref — instead of the padded plane-block
+`BLK_W_B[plane_bsize]` (4x4) that C and the port's COEFF arm use. The right chroma columns
+stayed the unwritten 128 default (the "128 island"), corrupting the CfL DC-pred of the block
+below. Found via a byte-inert instrumented sibling libaom dual-dump (`/root/intra2-instr`,
+removed): at mi(38,25) C reconstructs the full 4x4 chroma but the port wrote only cols 48-49,
+dropping mi(41,25)'s DC-pred 140->137, its CfL dist 17856->9760, flipping CfL/H. One-line fix
+(`crates/aom-encode/src/encode_sb.rs`); intrabc-gated so the non-screen envelope is byte-inert;
+full aom-encode suite 268/268. The search+pack chroma decisions at mi(41,25)(->H)/mi(41,26)(->CfL)
+now match C to the unit. Commit 6cafe36f. The `intrabc_dv_search_pinned` witness STAYS pinned
+(floor 1120 unchanged) — its byte-1120 divergence is the SEPARATE mi(40,28) partition flip
+(C VERT-with-4x8-intrabc-sub vs port HORZ-two-intra-8x4s), a speed-0 partition/mode near-tie;
+next = sibling-C per-candidate partition-RD dump at that node (KB-3/KB-7 method).
+
 ## KB-13 ROOT FOUND: the AB mode cache (`reuse_best_prediction_for_part_ab`) — 24/60 -> 41/60 (2026-07-19, encoder track)
 
 At allintra speed >= 1, C constrains each non-reused AB sub-block's luma mode search to ONE
