@@ -89,8 +89,8 @@
 
 use crate::superres;
 use crate::{
-    DecodeConfig, DecodeError, DecodeLimits, KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE,
-    TileBoundsKf, TileBytesKf, decode_frame_tiles_kf,
+    DecodeConfig, DecodeError, KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE, TileBoundsKf,
+    TileBytesKf, decode_frame_tiles_kf,
 };
 use aom_dsp::entropy::header::{
     CdefHeader, FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
@@ -382,9 +382,9 @@ fn parse_frame_header(
     seq: &SequenceHeaderObu,
     payload: &[u8],
     is_obu_frame: bool,
-    limits: &DecodeLimits,
+    config: &DecodeConfig,
 ) -> Result<ParsedFrame, DecodeError> {
-    parse_frame_header_ext(seq, payload, is_obu_frame, false, limits)
+    parse_frame_header_ext(seq, payload, is_obu_frame, false, config)
 }
 
 /// [`parse_frame_header`] with an `allow_inter` gate. When `false` (the
@@ -399,7 +399,7 @@ fn parse_frame_header_ext(
     payload: &[u8],
     is_obu_frame: bool,
     allow_inter: bool,
-    limits: &DecodeLimits,
+    config: &DecodeConfig,
 ) -> Result<ParsedFrame, DecodeError> {
     let s = &seq.seq_header;
     let c = &seq.color_config;
@@ -416,7 +416,17 @@ fn parse_frame_header_ext(
     // `TileKf::new`). Both the single-frame and multi-frame paths call this, so
     // no decode path can be driven into a multi-gigabyte allocation by a
     // malformed header.
-    limits.check_dims(s.max_frame_width, s.max_frame_height)?;
+    config.limits.check_dims(s.max_frame_width, s.max_frame_height)?;
+    // Pre-flight the peak per-frame allocation (recon luma+chroma u16 + the
+    // mi / segment grids `TileKf::new` builds), estimated generously from the
+    // mi-grid dims (~192 B/mi-cell covers the ~32 B recon-luma + chroma + the
+    // several full mi-grid vectors). In the default `AllocMode::Fallible` a
+    // `try_reserve` probe converts an OOM into `DecodeError::AllocFailed`
+    // instead of aborting; it also enforces `limits.max_memory_bytes`.
+    let est_alloc_bytes = (mi_cols.max(0) as u64)
+        .saturating_mul(mi_rows.max(0) as u64)
+        .saturating_mul(192);
+    config.check_alloc_budget(est_alloc_bytes)?;
 
     let mut cfg = FrameHeaderObu {
         prefix: FrameHeaderPrefix {
@@ -866,13 +876,13 @@ pub fn decode_frames_with(
             }
             3 => {
                 let sh = seq.as_ref().ok_or("frame header before sequence header")?;
-                let pf = parse_frame_header_ext(sh, payload, false, true, &config.limits)?;
+                let pf = parse_frame_header_ext(sh, payload, false, true, config)?;
                 pending_header = Some(pf.header);
             }
             4 | 6 => {
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
-                    let pf = parse_frame_header_ext(sh, payload, true, true, &config.limits)?;
+                    let pf = parse_frame_header_ext(sh, payload, true, true, config)?;
                     let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {
@@ -1238,7 +1248,7 @@ pub fn decode_frame_obus_prefilter_with(
             3 => {
                 // OBU_FRAME_HEADER
                 let sh = seq.as_ref().ok_or("frame header before sequence header")?;
-                let pf = parse_frame_header(sh, payload, false, &config.limits)?;
+                let pf = parse_frame_header(sh, payload, false, config)?;
                 pending_header = Some(pf.header);
             }
             4 | 6 => {
@@ -1250,7 +1260,7 @@ pub fn decode_frame_obus_prefilter_with(
                 }
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
-                    let pf = parse_frame_header(sh, payload, true, &config.limits)?;
+                    let pf = parse_frame_header(sh, payload, true, config)?;
                     let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {

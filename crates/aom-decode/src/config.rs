@@ -79,9 +79,29 @@ impl DecodeLimits {
     }
 }
 
+/// How the decoder treats its frame-sized buffer allocations.
+///
+/// The buffer *contents* are identical either way; the mode only chooses what
+/// happens when the allocation cannot be satisfied.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AllocMode {
+    /// Pre-flight the frame's peak allocation with a fallible reservation and
+    /// return [`DecodeError::AllocFailed`] on failure, instead of letting an
+    /// infallible allocation abort the process. The **default** — an untrusted
+    /// decoder favours a graceful error over an abort (the pixel/dimension
+    /// limits already cap the size; this makes the residual OOM recoverable).
+    #[default]
+    Fallible,
+    /// Allocate directly (one fast `calloc`), aborting on OOM. Opt in for a
+    /// trusted / benchmark caller that never feeds hostile dimensions and wants
+    /// the single-allocation speed.
+    Infallible,
+}
+
 /// Configuration for a decode. Passed to the `*_with` entry points; the bare
 /// entries use [`DecodeConfig::default`]. `#[non_exhaustive]` + the builder
-/// methods keep additive growth (e.g. an allocation mode) non-breaking.
+/// methods keep additive growth non-breaking.
 #[non_exhaustive]
 #[derive(Clone, Default)]
 pub struct DecodeConfig<'a> {
@@ -91,6 +111,10 @@ pub struct DecodeConfig<'a> {
     /// tile / frame boundaries. `None` (the default) never cancels — the decode
     /// runs to completion. Attach one with [`DecodeConfig::with_stop`].
     pub stop: Option<&'a dyn Stop>,
+    /// How frame-sized buffers are allocated ([`AllocMode`]). Default
+    /// [`AllocMode::Fallible`]: a pre-flight reservation gates the decode and
+    /// returns [`DecodeError::AllocFailed`] rather than aborting on OOM.
+    pub alloc: AllocMode,
 }
 
 impl<'a> DecodeConfig<'a> {
@@ -112,6 +136,42 @@ impl<'a> DecodeConfig<'a> {
         self
     }
 
+    /// Set the allocation mode (builder style).
+    pub fn with_alloc(mut self, alloc: AllocMode) -> Self {
+        self.alloc = alloc;
+        self
+    }
+
+    /// Pre-flight the frame's peak allocation of `bytes`, before the recon / mi
+    /// / segment buffers are allocated. Enforces `limits.max_memory_bytes` (a
+    /// [`DecodeError::LimitExceeded`] with [`LimitKind::MemoryBytes`]) always,
+    /// and — in [`AllocMode::Fallible`] — does a `try_reserve` probe so an
+    /// allocation that would abort instead returns [`DecodeError::AllocFailed`].
+    /// A no-op probe in [`AllocMode::Infallible`]. `bytes` is a generous
+    /// header-derived estimate of the dominant (recon + grid) allocation.
+    pub(crate) fn check_alloc_budget(&self, bytes: u64) -> Result<(), DecodeError> {
+        if let Some(max) = self.limits.max_memory_bytes {
+            if bytes > max {
+                return Err(DecodeError::LimitExceeded {
+                    kind: LimitKind::MemoryBytes,
+                    actual: bytes,
+                    max,
+                });
+            }
+        }
+        if self.alloc == AllocMode::Fallible {
+            let n = usize::try_from(bytes).unwrap_or(usize::MAX);
+            let mut probe: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            if probe.try_reserve_exact(n).is_err() {
+                return Err(DecodeError::AllocFailed { bytes: n });
+            }
+            // `probe` drops here, releasing the reservation just before the real
+            // (still infallible) buffers are allocated — a tiny TOCTOU window
+            // the pixel/dimension limits already bound.
+        }
+        Ok(())
+    }
+
     /// Poll the stop token, if one is set. Returns [`DecodeError::Cancelled`]
     /// carrying the [`enough::StopReason`] when the token requests a stop, else
     /// `Ok(())` (no token, or "continue").
@@ -128,6 +188,7 @@ impl core::fmt::Debug for DecodeConfig<'_> {
         f.debug_struct("DecodeConfig")
             .field("limits", &self.limits)
             .field("stop", &if self.stop.is_some() { "<set>" } else { "<none>" })
+            .field("alloc", &self.alloc)
             .finish()
     }
 }
@@ -188,6 +249,32 @@ mod tests {
         let d = DecodeLimits::default();
         assert!(d.check_dims(-1, -1).is_ok());
         assert!(d.check_dims(i32::MIN, i32::MIN).is_ok());
+    }
+
+    #[test]
+    fn alloc_budget_modes_and_memory_limit() {
+        // Infallible: never probes, always Ok (even for an absurd estimate).
+        let inf = DecodeConfig::new().with_alloc(AllocMode::Infallible);
+        assert!(inf.check_alloc_budget(u64::MAX).is_ok());
+        // Fallible (default): a modest estimate reserves fine.
+        assert!(DecodeConfig::default().check_alloc_budget(1024).is_ok());
+        // Fallible: a `usize::MAX`-scale estimate can't be reserved → AllocFailed.
+        match DecodeConfig::default().check_alloc_budget(u64::MAX) {
+            Err(DecodeError::AllocFailed { .. }) => {}
+            other => panic!("expected AllocFailed, got {other:?}"),
+        }
+        // max_memory_bytes is enforced regardless of mode (LimitExceeded).
+        let cfg = DecodeConfig::new()
+            .with_limits(DecodeLimits { max_memory_bytes: Some(1000), ..Default::default() })
+            .with_alloc(AllocMode::Infallible);
+        match cfg.check_alloc_budget(2000) {
+            Err(DecodeError::LimitExceeded { kind: LimitKind::MemoryBytes, actual, max }) => {
+                assert_eq!(actual, 2000);
+                assert_eq!(max, 1000);
+            }
+            other => panic!("expected MemoryBytes LimitExceeded, got {other:?}"),
+        }
+        assert!(cfg.check_alloc_budget(500).is_ok());
     }
 
     #[test]

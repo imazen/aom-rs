@@ -145,7 +145,7 @@ extern crate alloc;
 
 mod config;
 mod error;
-pub use config::{DEFAULT_MAX_DECODE_PIXELS, DecodeConfig, DecodeLimits};
+pub use config::{AllocMode, DEFAULT_MAX_DECODE_PIXELS, DecodeConfig, DecodeLimits};
 pub use error::{DecodeError, LimitKind};
 
 use enough::StopReason;
