@@ -1291,6 +1291,41 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
     `cfl_store_block` and at the chroma-ref sibling's CfL read, both sides; if it differs
     while full-res recon_y matches, the bug is the CfL subsample input offset/stride for the
     intrabc sibling; if it matches, chase the chroma-neighbour cascade one unit earlier.
+  - **DUAL-DUMP DONE 2026-07-20 — ROOT PRECISELY LOCATED + KB's "mi(40,28)" ATTRIBUTION
+    CORRECTED. It is a PURE CHROMA RD NEAR-TIE (CfL-vs-directional), NOT a CfL-buffer/subsample
+    bug.** Method: env-gated port dumps (`intra_uv_rd`/`encode_sb`/`pack`, all removed) vs the
+    C DECODE oracle (`decode_frame_obus_prefilter` gives `tc.recon_u`/`tc.blocks` = ground truth,
+    since the port's bytes match C up to the first diff). Findings, in order:
+    1. **The TRUE first byte-divergence is at `mi(41,25)` (C coding idx 438), NOT `mi(40,28)`
+       (idx 444).** C's BR-32×32 coding order: …438 mi(41,25), 439 mi(40,26), 440 mi(41,26), …
+       444 mi(40,28). mi(40,28)'s VERT/HORZ flip is DOWNSTREAM (its CfL neighbours are the swapped
+       recon below).
+    2. **The port SWAPS the chroma mode between two adjacent sub-8×8 chroma-reference blocks:**
+       `mi(41,25)` (chroma-ref for the 4×4 U at chroma cols 48-51) — **C = UV_H_PRED (uvmode 2),
+       PORT = UV_CFL_PRED (uvmode 13, alpha_idx 16, signs 4)**; `mi(41,26)` (chroma-ref for the
+       4×4 U at cols 52-55) — **C = UV_CFL_PRED (a16,s4), PORT = UV_H_PRED**. The luma (ymode)
+       AND partition are IDENTICAL to C at both; only the chroma mode is swapped. Reconstructions
+       confirm the swap: cols 48-51 port textured / C flat `[135,135,135,135]`; cols 52-55 port
+       flat / C textured `[146,129,151,129]` (both port search-recon AND pack-recon).
+    3. **RULED OUT — do not re-chase.** (a) `intrabc_predict_chroma` is **bit-exact vs C's
+       `av1_convolve_2d_sr`/`_x_sr`/`_y_sr` for bd8** — worked the 2-tap {64,64} bilinear
+       (`av1_intrabc_filter_params`, filter.h:197) through both rounding stages by hand: 2D →
+       `(S+2)>>2`, 1D → `(a+b+1)>>1`, both == C (round_0=3, round_1=11, offset_bits=19 / bits=4).
+       (b) **Luma recon matches C EXACTLY** at both CfL AC sources — mi(40,24) 8×8 (feeds mi 41,25)
+       AND mi(40,26) 8×4 (feeds mi 41,26), all pixels identical to `tc.recon`. (c) `mi(41,26)`'s
+       `recon_buf_q3` is CORRECT: rows 0-1 textured (top intrabc luma), rows 2-3 flat (bottom
+       luma) — exactly what C's textured-top/flat-bottom chroma implies. (d) `cfl_store_block`
+       geometry faithful (cfl.c:421). So the CfL AC source, the DV prediction, the store, and the
+       luma are ALL correct; the divergence is the CHROMA MODE RD DECISION alone.
+    4. **This is the KB-2/KB-6/#26 chroma-mode near-tie family (as predicted).** The port's chroma
+       RD favours CfL where C favours H (and vice-versa) despite identical inputs, so the tip is
+       on either the CfL alpha rate/dist or the directional (H) prediction dist — a <~6-rate-unit
+       delta. **NEXT CONCRETE STEP (the fix): sibling-C instrumented chroma-RD dump at
+       `pick_sb_modes`/`rd_pick_intra_sbuv_mode` for mi(41,25) + mi(41,26)** — dump C's per-uv-mode
+       rate+dist (UV_DC/V/H/…/CFL incl. cfl alpha search) and diff vs the port's `intra_uv_rd`
+       per-mode RD to find which side's rate or dist diverges. Suspect the H_PRED chroma
+       edge-filter / the neighbour `uv_mode`-in-grid stamp for the intrabc siblings feeding the
+       directional prediction, since a CfL-buffer/subsample/luma bug is now disproven.
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 
