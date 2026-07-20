@@ -89,8 +89,8 @@
 
 use crate::superres;
 use crate::{
-    DecodeError, KfTileConfig, KfTileDecode, LimitKind, MI_SIZE_HIGH, MI_SIZE_WIDE, TileBoundsKf,
-    TileBytesKf, decode_frame_tiles_kf,
+    DecodeConfig, DecodeError, DecodeLimits, KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE,
+    TileBoundsKf, TileBytesKf, decode_frame_tiles_kf,
 };
 use aom_dsp::entropy::header::{
     CdefHeader, FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
@@ -221,16 +221,13 @@ fn mi_dim(px: i32) -> i32 {
     ((px + 7) & !7) >> 2
 }
 
-/// Robustness ceiling on decoded frame pixels (`width * height`). A malformed
-/// sequence header can declare dimensions up to 65535x65535 (each `num_bits`-wide
-/// field, `num_bits` up to 16); without a bound the frame-buffer allocations
-/// (`TileKf::new`'s recon vec `stride * aligned_mi_rows * 4` + the mi/seg grids,
-/// all scaling with width*height) would demand tens of gigabytes and OOM the
-/// process on a ~30-byte input. 2^28 px (e.g. 16384x16384) is far above any real
-/// still image yet keeps the largest buffer bounded; every conformance vector +
-/// `real_bitstream` size is orders of magnitude below it. A faithful per-level
-/// `MaxPicSize` gate is the follow-up; this bounds the allocation now.
-const MAX_DECODE_PIXELS: u64 = 1 << 28;
+// The robustness ceiling on decoded frame pixels (`width * height`) now lives
+// in `crate::config` as `DEFAULT_MAX_DECODE_PIXELS`. A malformed sequence
+// header can declare dimensions up to 65535x65535; without a bound the
+// frame-buffer allocations (`TileKf::new`'s recon vec + mi/seg grids, all
+// scaling with width*height) would demand tens of gigabytes and OOM the
+// process on a ~30-byte input. The ceiling — or a caller-supplied override —
+// is applied via `DecodeLimits::check_dims`, threaded from `DecodeConfig`.
 
 /// `read_tile_group_header`'s caller in `obu.c` (`read_one_tile_group_obu` /
 /// the `is_obu_frame` inline in [`parse_frame_header`]): parse the
@@ -385,8 +382,9 @@ fn parse_frame_header(
     seq: &SequenceHeaderObu,
     payload: &[u8],
     is_obu_frame: bool,
+    limits: &DecodeLimits,
 ) -> Result<ParsedFrame, DecodeError> {
-    parse_frame_header_ext(seq, payload, is_obu_frame, false)
+    parse_frame_header_ext(seq, payload, is_obu_frame, false, limits)
 }
 
 /// [`parse_frame_header`] with an `allow_inter` gate. When `false` (the
@@ -401,6 +399,7 @@ fn parse_frame_header_ext(
     payload: &[u8],
     is_obu_frame: bool,
     allow_inter: bool,
+    limits: &DecodeLimits,
 ) -> Result<ParsedFrame, DecodeError> {
     let s = &seq.seq_header;
     let c = &seq.color_config;
@@ -411,21 +410,13 @@ fn parse_frame_header_ext(
     let mi_cols = mi_dim(s.max_frame_width);
     let mi_rows = mi_dim(s.max_frame_height);
 
-    // Robustness (DoS guard): reject frames whose declared pixel count exceeds
-    // the ceiling BEFORE any width*height-scaled buffer is allocated (the recon /
-    // mi / seg grids in `TileKf::new`). Both the single-frame and multi-frame
-    // paths call this, so no decode path can be driven into a multi-gigabyte
-    // allocation by a malformed header.
-    if (s.max_frame_width.max(0) as u64).saturating_mul(s.max_frame_height.max(0) as u64)
-        > MAX_DECODE_PIXELS
-    {
-        return Err(DecodeError::LimitExceeded {
-            kind: LimitKind::Pixels,
-            actual: (s.max_frame_width.max(0) as u64)
-                .saturating_mul(s.max_frame_height.max(0) as u64),
-            max: MAX_DECODE_PIXELS,
-        });
-    }
+    // Robustness (DoS guard): reject frames whose declared dimensions exceed
+    // the caller's limits (or the default pixel ceiling) BEFORE any
+    // width*height-scaled buffer is allocated (the recon / mi / seg grids in
+    // `TileKf::new`). Both the single-frame and multi-frame paths call this, so
+    // no decode path can be driven into a multi-gigabyte allocation by a
+    // malformed header.
+    limits.check_dims(s.max_frame_width, s.max_frame_height)?;
 
     let mut cfg = FrameHeaderObu {
         prefix: FrameHeaderPrefix {
@@ -747,7 +738,17 @@ fn parse_frame_header_ext(
 /// aomenc / `aom_codec_av1_cx`: temporal delimiter + sequence header + frame)
 /// to cropped planes. Hard-errors on anything outside the documented envelope.
 pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, DecodeError> {
-    let (mut t, cfg, header) = decode_frame_obus_prefilter(data)?;
+    decode_frame_obus_with(data, &DecodeConfig::default())
+}
+
+/// [`decode_frame_obus`] with a caller-supplied [`DecodeConfig`] (resource
+/// limits — `CLAUDE.md` §1). The bare entry applies `DecodeConfig::default()`,
+/// which preserves the historical default pixel ceiling.
+pub fn decode_frame_obus_with(
+    data: &[u8],
+    config: &DecodeConfig,
+) -> Result<FrameDecode, DecodeError> {
+    let (mut t, cfg, header) = decode_frame_obus_prefilter_with(data, config)?;
     run_post_filters(&mut t, &cfg, &header);
     Ok(finish_and_grain(t, &cfg, &header))
 }
@@ -791,6 +792,14 @@ fn finish_and_grain(t: KfTileDecode, cfg: &KfTileConfig, header: &FrameHeaderObu
 /// frames that follow (`primary_ref = NONE`, single reference, no forward CDF
 /// chain). The single-KEY-frame [`decode_frame_obus`] is unchanged.
 pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, DecodeError> {
+    decode_frames_with(data, &DecodeConfig::default())
+}
+
+/// [`decode_frames`] with a caller-supplied [`DecodeConfig`] (resource limits).
+pub fn decode_frames_with(
+    data: &[u8],
+    config: &DecodeConfig,
+) -> Result<Vec<FrameDecode>, DecodeError> {
     let mut pos = 0usize;
     let mut seq: Option<SequenceHeaderObu> = None;
     let mut pending_header: Option<FrameHeaderObu> = None;
@@ -832,13 +841,13 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, DecodeError> {
             }
             3 => {
                 let sh = seq.as_ref().ok_or("frame header before sequence header")?;
-                let pf = parse_frame_header_ext(sh, payload, false, true)?;
+                let pf = parse_frame_header_ext(sh, payload, false, true, &config.limits)?;
                 pending_header = Some(pf.header);
             }
             4 | 6 => {
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
-                    let pf = parse_frame_header_ext(sh, payload, true, true)?;
+                    let pf = parse_frame_header_ext(sh, payload, true, true, &config.limits)?;
                     let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {
@@ -1140,6 +1149,14 @@ pub(crate) fn run_post_filters(t: &mut KfTileDecode, cfg: &KfTileConfig, header:
 pub fn decode_frame_obus_prefilter(
     data: &[u8],
 ) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
+    decode_frame_obus_prefilter_with(data, &DecodeConfig::default())
+}
+
+/// [`decode_frame_obus_prefilter`] with a caller-supplied [`DecodeConfig`].
+pub fn decode_frame_obus_prefilter_with(
+    data: &[u8],
+    config: &DecodeConfig,
+) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let mut pos = 0usize;
     let mut seq: Option<SequenceHeaderObu> = None;
     let mut pending_header: Option<FrameHeaderObu> = None;
@@ -1192,7 +1209,7 @@ pub fn decode_frame_obus_prefilter(
             3 => {
                 // OBU_FRAME_HEADER
                 let sh = seq.as_ref().ok_or("frame header before sequence header")?;
-                let pf = parse_frame_header(sh, payload, false)?;
+                let pf = parse_frame_header(sh, payload, false, &config.limits)?;
                 pending_header = Some(pf.header);
             }
             4 | 6 => {
@@ -1204,7 +1221,7 @@ pub fn decode_frame_obus_prefilter(
                 }
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
-                    let pf = parse_frame_header(sh, payload, true)?;
+                    let pf = parse_frame_header(sh, payload, true, &config.limits)?;
                     let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {
