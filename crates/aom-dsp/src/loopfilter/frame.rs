@@ -140,6 +140,7 @@ const SEG_LVL_LF_LUT: [[usize; 2]; 3] = [[0, 1], [2, 2], [3, 3]];
 const DELTA_LF_ID_LUT: [[usize; 2]; 3] = [[0, 1], [2, 2], [3, 3]];
 
 /// `av1_get_adjusted_tx_size` (blockd.h:1366): 64-dim transforms clamp to 32.
+#[inline(always)]
 fn adjusted_tx_size(tx: usize) -> usize {
     match tx {
         4 | 12 | 11 => 3, // TX_64X64 / TX_64X32 / TX_32X64 -> TX_32X32
@@ -150,11 +151,13 @@ fn adjusted_tx_size(tx: usize) -> usize {
 }
 
 /// `get_plane_block_size` (blockd.h): `av1_ss_size_lookup[bsize][ss_x][ss_y]`.
+#[inline(always)]
 fn get_plane_block_size(bsize: usize, ss_x: usize, ss_y: usize) -> u8 {
     SS_SIZE_LOOKUP[bsize][ss_x][ss_y]
 }
 
 /// `av1_get_max_uv_txsize` (blockd.h:1377).
+#[inline(always)]
 fn max_uv_txsize(bsize: usize, ss_x: usize, ss_y: usize) -> usize {
     let plane_bsize = get_plane_block_size(bsize, ss_x, ss_y);
     debug_assert_ne!(plane_bsize, BLOCK_INVALID, "invalid chroma block size");
@@ -339,6 +342,7 @@ pub fn lf_frame_init(p: &LfParams, plane_start: usize, plane_end: usize) -> LfIn
 // ---- per-edge derivation ---------------------------------------------------------
 
 /// `get_filter_level` (av1_loopfilter.c:68-108).
+#[inline(always)]
 fn get_filter_level(p: &LfParams, lfi: &LfInfo, dir_idx: usize, plane: usize, mi: &LfMi) -> u8 {
     let segment_id = mi.segment_id as usize;
     if p.delta_lf_present {
@@ -373,6 +377,7 @@ fn get_filter_level(p: &LfParams, lfi: &LfInfo, dir_idx: usize, plane: usize, mi
 
 /// `get_transform_size` (av1_loopfilter.c:196-218), flattened per the
 /// [`LfMi::tx_size`] contract.
+#[inline(always)]
 fn get_transform_size(p: &LfParams, mi: &LfMi, plane: usize, ss_x: usize, ss_y: usize) -> usize {
     if p.lossless[mi.segment_id as usize] {
         return TX_4X4;
@@ -389,6 +394,7 @@ const VERT_EDGE: usize = 0;
 /// `set_lpf_parameters` (av1_loopfilter.c:224-328) → `(tx_size, filter_length,
 /// level)`; `filter_length == 0` means no filtering at this position. `x`/`y`
 /// are plane-pixel coordinates; `plane_w`/`plane_h` the plane's CROP dims.
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn set_lpf_parameters(
     grid: &LfMiGrid,
