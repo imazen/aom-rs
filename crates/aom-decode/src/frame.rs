@@ -563,6 +563,16 @@ fn parse_frame_header_ext(
         None => (probe, rb),
     };
 
+    // A bit-reader overread past the OBU payload, or an out-of-range syntax
+    // value flagged during the header parse (e.g. a film-grain scaling-point
+    // count exceeding its spec maximum), sets `rb.error`. libaom rejects such
+    // streams (aom_internal_error); surface it as a clean Err instead of
+    // decoding a corrupt header. Byte-inert on valid input — the reader never
+    // overruns a conformant header, and every syntax value stays in range.
+    if rb.error {
+        return Err("corrupt frame header (bit-reader error / out-of-range syntax value)".into());
+    }
+
     // --- envelope gates, in bitstream order ---
     if p.prefix.show_existing_frame {
         return Err("show_existing_frame".into());

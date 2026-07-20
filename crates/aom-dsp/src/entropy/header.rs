@@ -2565,6 +2565,14 @@ pub fn read_film_grain_params(
         return p;
     }
     p.num_y_points = rb.read_literal(4);
+    // Spec constraint: num_y_points <= 14 (scaling_points_y length). A 4-bit
+    // field can code up to 15; libaom rejects a larger value
+    // (aom_internal_error). Mark the reader corrupt and bail so the frame
+    // header parse returns Err rather than indexing out of bounds.
+    if p.num_y_points as usize > p.scaling_points_y.len() {
+        rb.error = true;
+        return p;
+    }
     for i in 0..p.num_y_points as usize {
         p.scaling_points_y[i] = [rb.read_literal(8), rb.read_literal(8)];
     }
@@ -2576,10 +2584,22 @@ pub fn read_film_grain_params(
         || (subsampling_x == 1 && subsampling_y == 1 && p.num_y_points == 0);
     if !chroma_absent {
         p.num_cb_points = rb.read_literal(4);
+        // Spec: num_cb_points <= 10 (scaling_points_cb length); libaom rejects
+        // a larger value.
+        if p.num_cb_points as usize > p.scaling_points_cb.len() {
+            rb.error = true;
+            return p;
+        }
         for i in 0..p.num_cb_points as usize {
             p.scaling_points_cb[i] = [rb.read_literal(8), rb.read_literal(8)];
         }
         p.num_cr_points = rb.read_literal(4);
+        // Spec: num_cr_points <= 10 (scaling_points_cr length); libaom rejects
+        // a larger value.
+        if p.num_cr_points as usize > p.scaling_points_cr.len() {
+            rb.error = true;
+            return p;
+        }
         for i in 0..p.num_cr_points as usize {
             p.scaling_points_cr[i] = [rb.read_literal(8), rb.read_literal(8)];
         }
