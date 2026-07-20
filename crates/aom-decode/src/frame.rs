@@ -89,8 +89,8 @@
 
 use crate::superres;
 use crate::{
-    KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE, TileBoundsKf, TileBytesKf,
-    decode_frame_tiles_kf,
+    DecodeError, KfTileConfig, KfTileDecode, LimitKind, MI_SIZE_HIGH, MI_SIZE_WIDE, TileBoundsKf,
+    TileBytesKf, decode_frame_tiles_kf,
 };
 use aom_dsp::entropy::header::{
     CdefHeader, FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
@@ -244,7 +244,7 @@ const MAX_DECODE_PIXELS: u64 = 1 << 28;
 /// MORE THAN ONE tile-group OBU (`--num-tile-groups>1`) is out of envelope —
 /// aomenc only emits that when explicitly configured; the default (and every
 /// stream this driver's own oracle produces) is one tile group per frame.
-fn read_full_tile_group(rb: &mut ReadBitBuffer, ti: &TileInfoHeader) -> Result<(), String> {
+fn read_full_tile_group(rb: &mut ReadBitBuffer, ti: &TileInfoHeader) -> Result<(), DecodeError> {
     let num_tiles = ti.cols as i32 * ti.rows as i32;
     let tiles_log2 = ti.log2_cols + ti.log2_rows;
     let (ts, te, present) = read_tile_group_header(rb, tiles_log2);
@@ -254,9 +254,8 @@ fn read_full_tile_group(rb: &mut ReadBitBuffer, ti: &TileInfoHeader) -> Result<(
         (0, num_tiles - 1)
     };
     if (start_tile, end_tile) != (0, num_tiles - 1) {
-        return Err(format!(
-            "partial tile group [{start_tile}..={end_tile}] of {num_tiles} tiles \
-             (multiple tile groups per frame not supported)"
+        return Err(DecodeError::UnsupportedFeature(
+            "partial tile group (multiple tile groups per frame not supported)",
         ));
     }
     rb.byte_align();
@@ -286,7 +285,7 @@ fn split_tiles<'a>(
     tile_data: &'a [u8],
     ti: &TileInfoHeader,
     tile_size_bytes: i32,
-) -> Result<Vec<TileBytesKf<'a>>, String> {
+) -> Result<Vec<TileBytesKf<'a>>, DecodeError> {
     let num_tiles = ti.cols * ti.rows;
     let n = tile_size_bytes as usize;
     let mut out = Vec::with_capacity(num_tiles);
@@ -305,14 +304,14 @@ fn split_tiles<'a>(
                 data.len()
             } else {
                 if data.len() < n {
-                    return Err("truncated tile-size prefix".into());
+                    return Err(DecodeError::Truncated("truncated tile-size prefix"));
                 }
                 let sz = mem_get_varsize(data, n) + 1; // AV1_MIN_TILE_SIZE_BYTES
                 data = &data[n..];
                 sz
             };
             if data.len() < size {
-                return Err("truncated tile payload".into());
+                return Err(DecodeError::Truncated("truncated tile payload"));
             }
             let (bytes, rest) = data.split_at(size);
             out.push(TileBytesKf { bytes, bounds });
@@ -386,7 +385,7 @@ fn parse_frame_header(
     seq: &SequenceHeaderObu,
     payload: &[u8],
     is_obu_frame: bool,
-) -> Result<ParsedFrame, String> {
+) -> Result<ParsedFrame, DecodeError> {
     parse_frame_header_ext(seq, payload, is_obu_frame, false)
 }
 
@@ -402,7 +401,7 @@ fn parse_frame_header_ext(
     payload: &[u8],
     is_obu_frame: bool,
     allow_inter: bool,
-) -> Result<ParsedFrame, String> {
+) -> Result<ParsedFrame, DecodeError> {
     let s = &seq.seq_header;
     let c = &seq.color_config;
     let num_planes = if c.monochrome { 1 } else { 3 };
@@ -420,10 +419,12 @@ fn parse_frame_header_ext(
     if (s.max_frame_width.max(0) as u64).saturating_mul(s.max_frame_height.max(0) as u64)
         > MAX_DECODE_PIXELS
     {
-        return Err(format!(
-            "frame {}x{} exceeds decode pixel ceiling {MAX_DECODE_PIXELS} (DoS guard)",
-            s.max_frame_width, s.max_frame_height
-        ));
+        return Err(DecodeError::LimitExceeded {
+            kind: LimitKind::Pixels,
+            actual: (s.max_frame_width.max(0) as u64)
+                .saturating_mul(s.max_frame_height.max(0) as u64),
+            max: MAX_DECODE_PIXELS,
+        });
     }
 
     let mut cfg = FrameHeaderObu {
@@ -621,16 +622,18 @@ fn parse_frame_header_ext(
 
     // --- envelope gates, in bitstream order ---
     if p.prefix.show_existing_frame {
-        return Err("show_existing_frame".into());
+        return Err(DecodeError::UnsupportedFeature("show_existing_frame"));
     }
     // frame_type: 0=KEY, 1=INTER, 2=INTRA_ONLY, 3=SWITCH. The single-frame path
     // accepts only KEY; the multi-frame path additionally accepts INTER (the
     // inter walking-skeleton envelope).
     if p.prefix.frame_type != 0 && !(allow_inter && p.prefix.frame_type == 1) {
-        return Err(format!("frame_type {} (unsupported)", p.prefix.frame_type));
+        return Err(DecodeError::UnsupportedType(
+            format!("frame_type {} (unsupported)", p.prefix.frame_type).into(),
+        ));
     }
     if !p.prefix.show_frame {
-        return Err("unshown frame".into());
+        return Err(DecodeError::UnsupportedFeature("unshown frame"));
     }
     // `disable_cdf_update` IS in the envelope: when set (the encoder's
     // `cdf_update_mode == 0`, and forced on by `error_resilient_mode` for
@@ -654,7 +657,9 @@ fn parse_frame_header_ext(
     if p.frame_size.superres_upscaled_width != s.max_frame_width
         || p.frame_size.superres_upscaled_height != s.max_frame_height
     {
-        return Err("frame_size_override (frame != sequence max dims)".into());
+        return Err(DecodeError::UnsupportedFeature(
+            "frame_size_override (frame != sequence max dims)",
+        ));
     }
     // Superres (SuperresDenom in [9,16]) IS in the envelope: the frame is coded
     // at a reduced width and upscaled back to the full UpscaledWidth
@@ -664,7 +669,7 @@ fn parse_frame_header_ext(
     // path is single-tile; multi-tile superres would need the per-tile-column
     // convolve loop (`av1_upscale_normative_rows`'s tile walk).
     if superres::superres_scaled(p.frame_size.scale_denominator) && p.tile_info.cols > 1 {
-        return Err("multi-tile superres (out of envelope)".into());
+        return Err(DecodeError::UnsupportedFeature("multi-tile superres (out of envelope)"));
     }
     // Quantization matrices (`using_qmatrix`): each 2-D-transform coefficient is
     // dequantized with a per-position inverse-QM weight
@@ -710,7 +715,9 @@ fn parse_frame_header_ext(
         let any_reachable_lossless = plane_deltas_zero
             && (0..=last_active as usize).any(|i| av1_get_qindex(&seg, i, q.base_qindex) == 0);
         if any_reachable_lossless && !coded_lossless {
-            return Err("mixed lossless/non-lossless segments (out of envelope)".into());
+            return Err(DecodeError::UnsupportedFeature(
+                "mixed lossless/non-lossless segments (out of envelope)",
+            ));
         }
     }
     // 4:2:2 chroma deblocking IS in the envelope. libaom's
@@ -739,7 +746,7 @@ fn parse_frame_header_ext(
 /// Decode a full AV1 KEY-frame bitstream (a temporal unit as emitted by
 /// aomenc / `aom_codec_av1_cx`: temporal delimiter + sequence header + frame)
 /// to cropped planes. Hard-errors on anything outside the documented envelope.
-pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, String> {
+pub fn decode_frame_obus(data: &[u8]) -> Result<FrameDecode, DecodeError> {
     let (mut t, cfg, header) = decode_frame_obus_prefilter(data)?;
     run_post_filters(&mut t, &cfg, &header);
     Ok(finish_and_grain(t, &cfg, &header))
@@ -783,7 +790,7 @@ fn finish_and_grain(t: KfTileDecode, cfg: &KfTileConfig, header: &FrameHeaderObu
 /// filtered reconstruction becomes the single `LAST` reference for the inter
 /// frames that follow (`primary_ref = NONE`, single reference, no forward CDF
 /// chain). The single-KEY-frame [`decode_frame_obus`] is unchanged.
-pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, String> {
+pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, DecodeError> {
     let mut pos = 0usize;
     let mut seq: Option<SequenceHeaderObu> = None;
     let mut pending_header: Option<FrameHeaderObu> = None;
@@ -798,11 +805,12 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, String> {
             return Err("OBU without size field".into());
         }
         let (size, size_len) =
-            uleb_decode(&data[pos + h.header_len..]).ok_or("bad OBU size leb128")?;
+            uleb_decode(&data[pos + h.header_len..])
+                .ok_or(DecodeError::Truncated("bad OBU size leb128"))?;
         let body = pos + h.header_len + size_len;
         let end = body + size as usize;
         if end > data.len() {
-            return Err("OBU size past end of data".into());
+            return Err(DecodeError::Truncated("OBU size past end of data"));
         }
         let payload = &data[body..end];
 
@@ -815,7 +823,9 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, String> {
                 if !cc.monochrome {
                     let ss = (cc.subsampling_x, cc.subsampling_y);
                     if !matches!(ss, (0, 0) | (1, 0) | (1, 1)) {
-                        return Err(format!("unsupported subsampling {ss:?}"));
+                        return Err(DecodeError::UnsupportedType(
+                            format!("unsupported subsampling {ss:?}").into(),
+                        ));
                     }
                 }
                 seq = Some(sh);
@@ -829,7 +839,7 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, String> {
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
                     let pf = parse_frame_header_ext(sh, payload, true, true)?;
-                    let off = pf.tile_data_off.unwrap();
+                    let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {
                     let header = pending_header
@@ -843,7 +853,9 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, String> {
                 let (mut t, cfg, hdr) = if header.prefix.frame_type == 1 {
                     let last = last_ref
                         .as_ref()
-                        .ok_or("inter frame decoded before any reference frame")?;
+                        .ok_or(DecodeError::UnsupportedFeature(
+                            "inter frame decoded before any reference frame",
+                        ))?;
                     decode_inter_tile_payload(sh, &header, tile_data, last)?
                 } else {
                     decode_tile_payload(sh, &header, tile_data)?
@@ -875,7 +887,11 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<FrameDecode>, String> {
                 out.push(finish_and_grain(t, &cfg, &hdr));
             }
             5 | 15 => {} // OBU_METADATA | OBU_PADDING
-            t => return Err(format!("unsupported OBU type {t}")),
+            t => {
+                return Err(DecodeError::UnsupportedType(
+                    format!("unsupported OBU type {t}").into(),
+                ));
+            }
         }
         pos = end;
     }
@@ -894,7 +910,7 @@ fn decode_inter_tile_payload(
     p: &FrameHeaderObu,
     tile_data: &[u8],
     last: &crate::RefFrame,
-) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), String> {
+) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let cfg = build_tile_cfg(seq, p);
     let inter = crate::InterFrameCfg {
         last,
@@ -914,7 +930,7 @@ fn decode_inter_tile_payload(
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
     let t = crate::decode_frame_tiles_inter(&tiles, &cfg, &inter, 0);
     if let Some(reason) = t.corrupt {
-        return Err(reason);
+        return Err(reason.into());
     }
     Ok((t, cfg, p.clone()))
 }
@@ -1123,7 +1139,7 @@ pub(crate) fn run_post_filters(t: &mut KfTileDecode, cfg: &KfTileConfig, header:
 #[allow(clippy::type_complexity)]
 pub fn decode_frame_obus_prefilter(
     data: &[u8],
-) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), String> {
+) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let mut pos = 0usize;
     let mut seq: Option<SequenceHeaderObu> = None;
     let mut pending_header: Option<FrameHeaderObu> = None;
@@ -1135,11 +1151,12 @@ pub fn decode_frame_obus_prefilter(
             return Err("OBU without size field".into());
         }
         let (size, size_len) =
-            uleb_decode(&data[pos + h.header_len..]).ok_or("bad OBU size leb128")?;
+            uleb_decode(&data[pos + h.header_len..])
+                .ok_or(DecodeError::Truncated("bad OBU size leb128"))?;
         let body = pos + h.header_len + size_len;
         let end = body + size as usize;
         if end > data.len() {
-            return Err("OBU size past end of data".into());
+            return Err(DecodeError::Truncated("OBU size past end of data"));
         }
         let payload = &data[body..end];
 
@@ -1157,13 +1174,17 @@ pub fn decode_frame_obus_prefilter(
                 // [`decode_frame_obus`]). Gated by
                 // `film_grain_streams_decode_byte_identical_to_c`.
                 if s.force_screen_content_tools == 1 {
-                    return Err("screen content tools forced on (sequence)".into());
+                    return Err(DecodeError::UnsupportedFeature(
+                        "screen content tools forced on (sequence)",
+                    ));
                 }
                 let c = &sh.color_config;
                 if !c.monochrome {
                     let ss = (c.subsampling_x, c.subsampling_y);
                     if !matches!(ss, (0, 0) | (1, 0) | (1, 1)) {
-                        return Err(format!("unsupported subsampling {ss:?}"));
+                        return Err(DecodeError::UnsupportedType(
+                            format!("unsupported subsampling {ss:?}").into(),
+                        ));
                     }
                 }
                 seq = Some(sh);
@@ -1177,12 +1198,14 @@ pub fn decode_frame_obus_prefilter(
             4 | 6 => {
                 // OBU_TILE_GROUP | OBU_FRAME
                 if decoded.is_some() {
-                    return Err("second frame in stream (single KEY frame only)".into());
+                    return Err(DecodeError::UnsupportedFeature(
+                        "second frame in stream (single KEY frame only)",
+                    ));
                 }
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
                     let pf = parse_frame_header(sh, payload, true)?;
-                    let off = pf.tile_data_off.unwrap();
+                    let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {
                     let header = pending_header
@@ -1198,7 +1221,11 @@ pub fn decode_frame_obus_prefilter(
                 decoded = Some(decode_tile_payload(sh, &header, tile_data)?);
             }
             5 | 15 => {} // OBU_METADATA | OBU_PADDING — content-neutral
-            t => return Err(format!("unsupported OBU type {t}")),
+            t => {
+                return Err(DecodeError::UnsupportedType(
+                    format!("unsupported OBU type {t}").into(),
+                ));
+            }
         }
         pos = end;
     }
@@ -1213,12 +1240,12 @@ fn decode_tile_payload(
     seq: &SequenceHeaderObu,
     p: &FrameHeaderObu,
     tile_data: &[u8],
-) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), String> {
+) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let cfg = build_tile_cfg(seq, p);
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
     let t = decode_frame_tiles_kf(&tiles, &cfg, 0);
     if let Some(reason) = t.corrupt {
-        return Err(reason);
+        return Err(reason.into());
     }
     Ok((t, cfg, p.clone()))
 }

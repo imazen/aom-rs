@@ -141,6 +141,11 @@
 
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+mod error;
+pub use error::{DecodeError, LimitKind};
+
 pub mod frame;
 
 /// Byte-exact AV1 film-grain synthesis (post-reconstruction output stage).

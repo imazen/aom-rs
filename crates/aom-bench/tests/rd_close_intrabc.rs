@@ -183,7 +183,9 @@ fn intrabc_dv_search_pinned() {
                 aom_decode::frame::decode_frame_obus_prefilter(&port_stream)
             });
             std::panic::set_hook(prev_hook);
-            match decoded.unwrap_or_else(|_| Err(Default::default())) {
+            match decoded
+                .unwrap_or_else(|_| Err(aom_decode::DecodeError::Internal("port stream decode panicked")))
+            {
                 Ok((tp, _, _)) => {
                     let (tc, _, _) = aom_decode::frame::decode_frame_obus_prefilter(&c_on)
                         .expect("C stream decodes");
