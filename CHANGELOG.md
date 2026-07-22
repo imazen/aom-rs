@@ -4,6 +4,25 @@
 
 ### [Unreleased]
 
+### Fixed
+
+- **Encoder intrabc (screen content): DV search + var-tx cost now match libaom to
+  the unit at the KB-15 witness leaf mi(40,28)** — three independent roots, each
+  localized by a byte-inert instrumented sibling-C dump (0cd64bf):
+  1. the DV-search `error_per_bit` used the frame rdmult instead of the per-block
+     `x->rdmult` (per-SB `intra_sb_rdmult_modifier` fold) — now
+     `av1_set_error_per_bit(env.rdmult)`;
+  2. the intrabc pixel search modelled NSTEP (12-point tangent stages) where
+     libaom uses NSTEP_8PT (16 stages, 8-point, `tan=radius`) — the diamond is now
+     parameterized by an `eight_pt` flag, intrabc passing NSTEP_8PT;
+  3. the intrabc var-tx `txfm_partition_cost` was a frame constant instead of the
+     per-SB (INTERNAL_COST_UPD_SB) value from the adapting `txfm_partition` CDF —
+     `txfm_partition_costs` added to `RealCosts`/`SbEncodeEnv`.
+  The port now finds C's exact `dv=(-816,-888)` and flips mi(40,28) to
+  PARTITION_VERT matching C. Intrabc-only / per-SB-additive: intra envelope
+  byte-inert (aom-encode+aom-bench 340/340). The witness stays PINNED (first-diff
+  floor 1120) — the remaining byte-1120 divergence is a separate PACK-side residual.
+
 ### QUEUED BREAKING CHANGES
 
 - **`zenav1-aom-decode` public entry points now return `Result<_, DecodeError>`

@@ -1371,6 +1371,57 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
     bsize C=1 vs port=2)**, a speed-0 partition/mode near-tie in the KB-2/KB-6 family. NEXT for the
     witness: sibling-C per-candidate PARTITION-RD dump at the mi(40,28) BLOCK_16X8/8X8 node (the
     KB-3/KB-7 method) — the sibling-C tooling is already built and byte-inert.
+  - **THREE ROOTS FOUND + FIXED 2026-07-22 (`0cd64bf`) — the mi(40,28) VERT sub0 (a 4×8
+    coeff-arm intrabc block, dv=(-816,-888)) SEARCH now matches C to the unit; partition flips
+    HORZ→VERT matching C.** Method: byte-inert instrumented sibling-C (`/root/intra3-instr`,
+    throwaway) per-candidate dumps at the mi(40,28) BLOCK_8X8 node — partition RD, the 4×8
+    intrabc DV search internals, the var-tx leaf/node cost decomposition. The port's 4×8 VERT
+    sub0 was picking PAETH intra (rd 32594350) where C picks intrabc dv=(-816,-888) (rd 26166279);
+    three independent bugs stacked:
+    1. **`error_per_bit` used the FRAME rdmult, not the per-SB `x->rdmult`.** The DV-search
+       variance-metric MV cost (`mv_err_cost`, `full_pixel_diamond`'s var_cost pick) took
+       `error_per_bit` from the frame-init `ibc.error_per_bit` (465664>>6 = 7276), but C recomputes
+       it per block from `x->rdmult`, which carries the per-SB `intra_sb_rdmult_modifier` fold
+       (partition_search.c:5710) — on SB(2,1) that scaled 465664→291065, so C's is 291065>>6 =
+       4547. Proven by a fixed-point probe: the variance kernel is byte-identical (port==C at every
+       mv); only the err_cost term differed, by exactly the epb ratio. Fix: `error_per_bit:
+       av1_set_error_per_bit(env.rdmult)` at the `IntrabcLeafArgs` site (`partition_pick.rs`).
+       `sad_per_bit` is qindex-based (unaffected) — the mesh already matched.
+    2. **NSTEP vs NSTEP_8PT.** The intrabc pixel search uses **NSTEP_8PT** (`av1_get_default_mv_
+       search_method` → method 2; sibling-C `search_site` dump: `num_search_steps = 16`, every
+       stage 8 points, `tan_radius = radius`), but the port's diamond modelled **NSTEP** (level 0:
+       15 stages, 12-point tangent stages `tan = (int)(0.41*radius)` for radius>5). The extra
+       tangent points let the port's diamond reach a lower-SAD local optimum (-103,-95) that C's
+       8-point search never visits — so the port kept a recon-flavoured DV over C's (-102,-111).
+       Fix: parameterize `nstep_stage_sites`/`diamond_search_sad`/`full_pixel_diamond` by an
+       `eight_pt` flag + a 16-stage `NSTEP_8PT_RADII`; the intrabc call passes NSTEP_8PT, the inter
+       call keeps NSTEP (`intrabc_search.rs`). After this the port's diamond+mesh find C's exact
+       (-102,-111) → dv=(-816,-888), which wins the leaf.
+    3. **The var-tx `txfm_partition_cost` was a FRAME CONSTANT, not the per-SB adapted value.**
+       Even with the DV matching, the intrabc coeff-arm var-tx RD came out 47 rate units low
+       (16335 vs C's 16382, same partition/tx_types/recon). Decomposed to the var-tx ROOT
+       split-flag cost: both compute ctx 19, but `txfm_partition_cost[19][1]` is port **850** vs C
+       **897** — C refreshes it at every INTERNAL_COST_UPD_SB from the *adapting* `txfm_partition`
+       CDF (screen frames code split flags as intrabc coeff-arm blocks land), while the port used
+       the frame-init `ibc.txfm_partition_costs`. Fix: add `txfm_partition_costs` to
+       `RealCosts`/`derive_real_costs` (from `kf.txfm_partition`) and to `SbEncodeEnv` (the per-SB
+       refresh); the intrabc leaf reads `env.txfm_partition_costs`. After this the intrabc leaf RD
+       is **26166279 == C to the unit** and mi(40,28) picks **VERT** matching C.
+    All three are intrabc-only / per-SB-cost-additive, so the intra envelope is byte-inert: full
+    aom-encode+aom-bench suite **340/340** (KB-6 30/30 real content, KB-13 speed1-4, speed 0-9
+    gates, palette, lossless, bd10, LR, multitile all unchanged; the SbEncodeEnv field is zeroed on
+    non-intrabc paths where the var-tx never runs).
+  - **REMAINING RESIDUAL (witness still PINNED, floor stays 1120) — PACK-side, NOT the search.**
+    With the search now C-exact at mi(40,28), the witness is **port 1886B vs c 1891B (delta -5),
+    first-diff still 1120** — output-inert to root 3 (decision-inert: VERT wins either way) and
+    unchanged by re-verifying with the clean vs instrumented C. So the byte-1120 divergence is now
+    a SEPARATE PACK-side (or adjacent-intrabc-block) coding residual: the port codes the intrabc
+    block into FEWER bytes than C despite the SEARCH picking C's exact partition + DV + var-tx tree
+    (2×TX_4X4, tx_types [7,0], dist 93973 all == C). NEXT: decode-both / pack-side dump of the
+    mi(40,28) VERT-sub0 intrabc block's CODED symbols (eob, tx_type, split flags) vs the search's
+    chosen tree — a search-vs-pack consistency check on the intrabc var-tx re-encode, since the
+    RD/search is now proven C-faithful. Do NOT re-chase the DV search, the epb, the NSTEP pattern,
+    or the txfm_partition cost — all three are closed and unit-verified.
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 
