@@ -198,6 +198,21 @@ fn reconstruct_txb_wht(
     aom_dsp::transform::inv_txfm2d::av1_highbd_iwht4x4_add(&dqcoeff, dst, stride, eob, bd);
 }
 
+/// bd8 lowbd twin of [`reconstruct_txb_wht`]: the same dequant (bd fixed at 8)
+/// feeding the byte-identity-proven u8 WHT add
+/// ([`aom_dsp::transform::inv_txfm2d::av1_iwht4x4_add_u8`]).
+fn reconstruct_txb_wht_u8(
+    dst: &mut [u8],
+    stride: usize,
+    qcoeff: &[i32],
+    dequant: [i16; 2],
+    eob: usize,
+) {
+    let mut dqcoeff = [0i32; 16];
+    aom_dsp::txb::dequant_txb(qcoeff, &mut dqcoeff, TX_4X4_IDX, dequant, None, 8);
+    aom_dsp::transform::inv_txfm2d::av1_iwht4x4_add_u8(&dqcoeff, dst, stride, eob);
+}
+
 /// Run an intra-prediction kernel that reads the neighbour APRON of the block
 /// at `off` — the top-left corner, the above row (`n_top + max(n_tr, 0)` px
 /// from `off - stride`), and the left column (`n_left + max(n_bl, 0)` px from
@@ -320,7 +335,8 @@ use aom_dsp::entropy::partition::{
     txfm_partition_context, txfm_partition_update, update_ext_partition_context,
 };
 use aom_dsp::intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
-use aom_dsp::intra::predict_intra_high;
+use aom_dsp::intra::{predict_intra_high, predict_intra_u8};
+use aom_dsp::recon::reconstruct_txb_u8_into;
 use aom_dsp::quant::{
     MAX_SEGMENTS, SEG_LVL_MAX, SEG_LVL_SKIP, Segmentation, av1_ac_quant_qtx, av1_dc_quant_qtx,
     av1_get_qindex,
@@ -1428,6 +1444,69 @@ fn intrabc_chroma_predict(
         }
         (true, true) => {
             // both half-pel: (a00 + a01 + a10 + a11 + 2) >> 2
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                for c in 0..w {
+                    let a00 = src_plane[s + c] as i32;
+                    let a01 = src_plane[s + c + 1] as i32;
+                    let a10 = src_plane[s + c + stride] as i32;
+                    let a11 = src_plane[s + c + stride + 1] as i32;
+                    dst[d + c] = clip((a00 + a01 + a10 + a11 + 2) >> 2);
+                }
+            }
+        }
+    }
+}
+
+/// bd8 lowbd twin of [`intrabc_chroma_predict`]: identical closed forms on
+/// `u8` samples. Byte-identical at bd8 — the 2-tap averages of `0..=255`
+/// inputs stay `<= 255` before the (now-vacuous) clamp, exactly the values the
+/// u16 kernel clamps to `(1 << 8) - 1`.
+#[allow(clippy::too_many_arguments)]
+fn intrabc_chroma_predict_u8(
+    src_plane: &[u8],
+    src_off: usize,
+    stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    w: usize,
+    h: usize,
+    subpel_x: i32,
+    subpel_y: i32,
+) {
+    let clip = |v: i32| v.clamp(0, 255) as u8;
+    match (subpel_x != 0, subpel_y != 0) {
+        (false, false) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                dst[d..d + w].copy_from_slice(&src_plane[s..s + w]);
+            }
+        }
+        (true, false) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                for c in 0..w {
+                    let a = src_plane[s + c] as i32;
+                    let b = src_plane[s + c + 1] as i32;
+                    dst[d + c] = clip((a + b + 1) >> 1);
+                }
+            }
+        }
+        (false, true) => {
+            for r in 0..h {
+                let s = src_off + r * stride;
+                let d = r * dst_stride;
+                for c in 0..w {
+                    let a = src_plane[s + c] as i32;
+                    let b = src_plane[s + c + stride] as i32;
+                    dst[d + c] = clip((a + b + 1) >> 1);
+                }
+            }
+        }
+        (true, true) => {
             for r in 0..h {
                 let s = src_off + r * stride;
                 let d = r * dst_stride;
@@ -3905,20 +3984,29 @@ impl<'c> TileKf<'c> {
                             + blk_col * 4;
                         let iqm = qm::iqmatrix(self.block_qm_level[0], 0, tx_size, tt);
                         let dequant = self.dequants[0];
-                        let scratch = &mut self.recon_scratch;
-                        self.recon.with_wide_rect(
-                            off,
-                            self.stride,
-                            TX_SIZE_WIDE[tx_size],
-                            TX_SIZE_HIGH[tx_size],
-                            &mut self.wide_rect,
-                            |dst, stride| {
-                                reconstruct_txb_into(
-                                    dst, stride, tx_size, tt, &tcoeff, dequant, iqm, cfg.bd,
-                                    scratch,
-                                );
-                            },
-                        );
+                        match &mut self.recon {
+                            ReconPlane::HighBd(p) => reconstruct_txb_into(
+                                &mut p[off..],
+                                self.stride,
+                                tx_size,
+                                tt,
+                                &tcoeff,
+                                dequant,
+                                iqm,
+                                cfg.bd,
+                                &mut self.recon_scratch,
+                            ),
+                            ReconPlane::LowBd(p) => reconstruct_txb_u8_into(
+                                &mut p[off..],
+                                self.stride,
+                                tx_size,
+                                tt,
+                                &tcoeff,
+                                dequant,
+                                iqm,
+                                &mut self.recon_scratch,
+                            ),
+                        }
                     }
                     blk_col += txw;
                 }
@@ -4007,20 +4095,29 @@ impl<'c> TileKf<'c> {
                                     &mut self.recon_v
                                 };
                                 let dequant = self.dequants[plane];
-                                let scratch = &mut self.recon_scratch;
-                                dst.with_wide_rect(
-                                    off,
-                                    self.stride_uv,
-                                    TX_SIZE_WIDE[uv_tx],
-                                    TX_SIZE_HIGH[uv_tx],
-                                    &mut self.wide_rect,
-                                    |d, stride| {
-                                        reconstruct_txb_into(
-                                            d, stride, uv_tx, tt_uv, &tcoeff_uv, dequant, iqm,
-                                            cfg.bd, scratch,
-                                        );
-                                    },
-                                );
+                                match dst {
+                                    ReconPlane::HighBd(p) => reconstruct_txb_into(
+                                        &mut p[off..],
+                                        self.stride_uv,
+                                        uv_tx,
+                                        tt_uv,
+                                        &tcoeff_uv,
+                                        dequant,
+                                        iqm,
+                                        cfg.bd,
+                                        &mut self.recon_scratch,
+                                    ),
+                                    ReconPlane::LowBd(p) => reconstruct_txb_u8_into(
+                                        &mut p[off..],
+                                        self.stride_uv,
+                                        uv_tx,
+                                        tt_uv,
+                                        &tcoeff_uv,
+                                        dequant,
+                                        iqm,
+                                        &mut self.recon_scratch,
+                                    ),
+                                }
                             }
                             blk_col += uv_txw;
                         }
@@ -4680,6 +4777,13 @@ impl<'c> TileKf<'c> {
         let area = txb_wide(tx_size) * txb_high(tx_size);
         let mut tcoeff = vec![0i32; area];
         let mut scratch = vec![0u16; txwpx * txhpx];
+        // bd8 lowbd: prediction goes through a u8 scratch + the *_u8 kernels
+        // (Phase B — the widen/narrow delegation is gone on this path).
+        let mut scratch8 = if self.recon.is_lowbd() {
+            vec![0u8; txwpx * txhpx]
+        } else {
+            Vec::new()
+        };
         let mut txbs = Vec::new();
 
         // Non-uniform intrabc var-tx: the reconstruction phase
@@ -4714,6 +4818,11 @@ impl<'c> TileKf<'c> {
             }
             let mut nu_tcoeff = vec![0i32; txb_wide(max_tx) * txb_high(max_tx)];
             let mut nu_scratch = vec![0u16; TX_SIZE_WIDE[max_tx] * TX_SIZE_HIGH[max_tx]];
+            let mut nu_scratch8 = if self.recon.is_lowbd() {
+                vec![0u8; TX_SIZE_WIDE[max_tx] * TX_SIZE_HIGH[max_tx]]
+            } else {
+                Vec::new()
+            };
             for &(blk_row, blk_col, cur_tx) in &leaves {
                 let (ltxw, ltxh) = (TX_SIZE_WIDE_UNIT[cur_tx], TX_SIZE_HIGH_UNIT[cur_tx]);
                 let (ltxwpx, ltxhpx) = (TX_SIZE_WIDE[cur_tx], TX_SIZE_HIGH[cur_tx]);
@@ -4790,40 +4899,58 @@ impl<'c> TileKf<'c> {
                 let src = (off as i32
                     + (info.dv_row >> 3) * self.stride as i32
                     + (info.dv_col >> 3)) as usize;
-                for r in 0..ltxhpx {
-                    let s = src + r * self.stride;
-                    self.recon
-                        .copy_row_wide(s, &mut nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]);
-                }
-                for r in 0..ltxhpx {
-                    let d = off + r * self.stride;
-                    self.recon
-                        .store_row(d, &nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]);
+                match &mut self.recon {
+                    ReconPlane::HighBd(p) => {
+                        for r in 0..ltxhpx {
+                            let s = src + r * self.stride;
+                            nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]
+                                .copy_from_slice(&p[s..s + ltxwpx]);
+                        }
+                        for r in 0..ltxhpx {
+                            let d = off + r * self.stride;
+                            p[d..d + ltxwpx]
+                                .copy_from_slice(&nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]);
+                        }
+                    }
+                    ReconPlane::LowBd(p) => {
+                        for r in 0..ltxhpx {
+                            let s = src + r * self.stride;
+                            nu_scratch8[r * ltxwpx..(r + 1) * ltxwpx]
+                                .copy_from_slice(&p[s..s + ltxwpx]);
+                        }
+                        for r in 0..ltxhpx {
+                            let d = off + r * self.stride;
+                            p[d..d + ltxwpx]
+                                .copy_from_slice(&nu_scratch8[r * ltxwpx..(r + 1) * ltxwpx]);
+                        }
+                    }
                 }
                 if info.skip == 0 && eob > 0 {
                     let iqm = qm::iqmatrix(self.block_qm_level[0], 0, cur_tx, tx_type);
                     let dequant = self.dequants[0];
-                    let scratch = &mut self.recon_scratch;
-                    self.recon.with_wide_rect(
-                        off,
-                        self.stride,
-                        TX_SIZE_WIDE[cur_tx],
-                        TX_SIZE_HIGH[cur_tx],
-                        &mut self.wide_rect,
-                        |dst, stride| {
-                            reconstruct_txb_into(
-                                dst,
-                                stride,
-                                cur_tx,
-                                tx_type,
-                                &nu_tcoeff[..larea],
-                                dequant,
-                                iqm,
-                                cfg.bd,
-                                scratch,
-                            );
-                        },
-                    );
+                    match &mut self.recon {
+                        ReconPlane::HighBd(p) => reconstruct_txb_into(
+                            &mut p[off..],
+                            self.stride,
+                            cur_tx,
+                            tx_type,
+                            &nu_tcoeff[..larea],
+                            dequant,
+                            iqm,
+                            cfg.bd,
+                            &mut self.recon_scratch,
+                        ),
+                        ReconPlane::LowBd(p) => reconstruct_txb_u8_into(
+                            &mut p[off..],
+                            self.stride,
+                            cur_tx,
+                            tx_type,
+                            &nu_tcoeff[..larea],
+                            dequant,
+                            iqm,
+                            &mut self.recon_scratch,
+                        ),
+                    }
                 }
                 txbs.push((eob, tx_type));
             }
@@ -4985,10 +5112,21 @@ impl<'c> TileKf<'c> {
                                 + (info.dv_row >> 3) * self.stride as i32
                                 + (info.dv_col >> 3))
                                 as usize;
-                            for r in 0..txhpx {
-                                let s = src + r * self.stride;
-                                self.recon
-                                    .copy_row_wide(s, &mut scratch[r * txwpx..(r + 1) * txwpx]);
+                            match &self.recon {
+                                ReconPlane::HighBd(p) => {
+                                    for r in 0..txhpx {
+                                        let s = src + r * self.stride;
+                                        scratch[r * txwpx..(r + 1) * txwpx]
+                                            .copy_from_slice(&p[s..s + txwpx]);
+                                    }
+                                }
+                                ReconPlane::LowBd(p) => {
+                                    for r in 0..txhpx {
+                                        let s = src + r * self.stride;
+                                        scratch8[r * txwpx..(r + 1) * txwpx]
+                                            .copy_from_slice(&p[s..s + txwpx]);
+                                    }
+                                }
                             }
                         } else if info.palette_size[0] > 0 {
                             // av1_predict_intra_block's palette branch (reconintra.c): pixels
@@ -5000,10 +5138,18 @@ impl<'c> TileKf<'c> {
                             // pixel sub-rectangle.
                             let map_w = BLOCK_SIZE_WIDE[bsize] as usize;
                             let (x0, y0) = (blk_col * 4, blk_row * 4);
+                            let lowbd = self.recon.is_lowbd();
                             for r in 0..txhpx {
                                 for c in 0..txwpx {
                                     let idx = color_map_y[(y0 + r) * map_w + x0 + c] as usize;
-                                    scratch[r * txwpx + c] = info.palette_colors[idx];
+                                    if lowbd {
+                                        // bd8 palette colours are <= 255 on conformant
+                                        // input; hostile input truncates like the C
+                                        // lowbd (uint8_t) store (see `plane`).
+                                        scratch8[r * txwpx + c] = info.palette_colors[idx] as u8;
+                                    } else {
+                                        scratch[r * txwpx + c] = info.palette_colors[idx];
+                                    }
                                 }
                             }
                         } else {
@@ -5011,42 +5157,63 @@ impl<'c> TileKf<'c> {
                                 usize::try_from(n_top).expect("n_top_px must be non-negative");
                             let n_left_u =
                                 usize::try_from(n_left).expect("n_left_px must be non-negative");
-                            with_wide_apron(
-                                &self.recon,
-                                off,
-                                self.stride,
-                                n_top_u,
-                                n_tr,
-                                n_left_u,
-                                n_bl,
-                                &mut self.wide_apron,
-                                |src, roff, rstride| {
-                                    predict_intra_high(
-                                        src,
-                                        roff,
-                                        rstride,
-                                        &mut scratch,
-                                        txwpx,
-                                        info.y_mode as usize,
-                                        info.angle_delta_y * ANGLE_STEP,
-                                        info.use_filter_intra != 0,
-                                        info.filter_intra_mode as usize,
-                                        cfg.disable_edge_filter,
-                                        filt_type,
-                                        tx_size,
-                                        n_top_u,
-                                        n_tr,
-                                        n_left_u,
-                                        n_bl,
-                                        cfg.bd,
-                                    );
-                                },
-                            );
+                            match &self.recon {
+                                ReconPlane::HighBd(p) => predict_intra_high(
+                                    p,
+                                    off,
+                                    self.stride,
+                                    &mut scratch,
+                                    txwpx,
+                                    info.y_mode as usize,
+                                    info.angle_delta_y * ANGLE_STEP,
+                                    info.use_filter_intra != 0,
+                                    info.filter_intra_mode as usize,
+                                    cfg.disable_edge_filter,
+                                    filt_type,
+                                    tx_size,
+                                    n_top_u,
+                                    n_tr,
+                                    n_left_u,
+                                    n_bl,
+                                    cfg.bd,
+                                ),
+                                // bd8 lowbd: the byte-identity-proven u8 intra family
+                                // reads the u8 plane directly (Phase B).
+                                ReconPlane::LowBd(p) => predict_intra_u8(
+                                    p,
+                                    off,
+                                    self.stride,
+                                    &mut scratch8,
+                                    txwpx,
+                                    info.y_mode as usize,
+                                    info.angle_delta_y * ANGLE_STEP,
+                                    info.use_filter_intra != 0,
+                                    info.filter_intra_mode as usize,
+                                    cfg.disable_edge_filter,
+                                    filt_type,
+                                    tx_size,
+                                    n_top_u,
+                                    n_tr,
+                                    n_left_u,
+                                    n_bl,
+                                ),
+                            }
                         }
-                        for r in 0..txhpx {
-                            let d = off + r * self.stride;
-                            self.recon
-                                .store_row(d, &scratch[r * txwpx..(r + 1) * txwpx]);
+                        match &mut self.recon {
+                            ReconPlane::HighBd(p) => {
+                                for r in 0..txhpx {
+                                    let d = off + r * self.stride;
+                                    p[d..d + txwpx]
+                                        .copy_from_slice(&scratch[r * txwpx..(r + 1) * txwpx]);
+                                }
+                            }
+                            ReconPlane::LowBd(p) => {
+                                for r in 0..txhpx {
+                                    let d = off + r * self.stride;
+                                    p[d..d + txwpx]
+                                        .copy_from_slice(&scratch8[r * txwpx..(r + 1) * txwpx]);
+                                }
+                            }
                         }
 
                         // (3) dequant + inverse transform + add (only when residual
@@ -5055,34 +5222,48 @@ impl<'c> TileKf<'c> {
                             let dequant = self.dequants[0];
                             if self.st.coded_lossless {
                                 // lossless: TX_4X4 + WHT with the qindex-0 dequant.
-                                self.recon.with_wide_rect(
-                                    off,
-                                    self.stride,
-                                    TX_SIZE_WIDE[TX_4X4_IDX],
-                                    TX_SIZE_HIGH[TX_4X4_IDX],
-                                    &mut self.wide_rect,
-                                    |dst, stride| {
-                                        reconstruct_txb_wht(
-                                            dst, stride, &tcoeff, dequant, eob, cfg.bd,
-                                        );
-                                    },
-                                );
+                                match &mut self.recon {
+                                    ReconPlane::HighBd(p) => reconstruct_txb_wht(
+                                        &mut p[off..],
+                                        self.stride,
+                                        &tcoeff,
+                                        dequant,
+                                        eob,
+                                        cfg.bd,
+                                    ),
+                                    ReconPlane::LowBd(p) => reconstruct_txb_wht_u8(
+                                        &mut p[off..],
+                                        self.stride,
+                                        &tcoeff,
+                                        dequant,
+                                        eob,
+                                    ),
+                                }
                             } else {
                                 let iqm = qm::iqmatrix(self.block_qm_level[0], 0, tx_size, tx_type);
-                                let scratch2 = &mut self.recon_scratch;
-                                self.recon.with_wide_rect(
-                                    off,
-                                    self.stride,
-                                    TX_SIZE_WIDE[tx_size],
-                                    TX_SIZE_HIGH[tx_size],
-                                    &mut self.wide_rect,
-                                    |dst, stride| {
-                                        reconstruct_txb_into(
-                                            dst, stride, tx_size, tx_type, &tcoeff, dequant, iqm,
-                                            cfg.bd, scratch2,
-                                        );
-                                    },
-                                );
+                                match &mut self.recon {
+                                    ReconPlane::HighBd(p) => reconstruct_txb_into(
+                                        &mut p[off..],
+                                        self.stride,
+                                        tx_size,
+                                        tx_type,
+                                        &tcoeff,
+                                        dequant,
+                                        iqm,
+                                        cfg.bd,
+                                        &mut self.recon_scratch,
+                                    ),
+                                    ReconPlane::LowBd(p) => reconstruct_txb_u8_into(
+                                        &mut p[off..],
+                                        self.stride,
+                                        tx_size,
+                                        tx_type,
+                                        &tcoeff,
+                                        dequant,
+                                        iqm,
+                                        &mut self.recon_scratch,
+                                    ),
+                                }
                             }
                         }
                         // (4) CfL luma store (predict_and_reconstruct_intra_block tail,
@@ -5186,6 +5367,16 @@ impl<'c> TileKf<'c> {
                     let uv_area = txb_wide(uv_tx) * txb_high(uv_tx);
                     let mut tcoeff_uv = vec![0i32; uv_area];
                     let mut scratch_uv = vec![0u16; uv_txwpx * uv_txhpx];
+                    // bd8 lowbd non-CfL chroma predicts through a u8 scratch +
+                    // the *_u8 kernels; a CfL block keeps the u16 scratch (the
+                    // CfL AC add is a u16 kernel) via widen/narrow delegation.
+                    let use_cfl = info.uv_mode == UV_CFL_PRED && info.use_intrabc == 0;
+                    let lowbd_uv = self.recon_u.is_lowbd();
+                    let mut scratch8_uv = if lowbd_uv && !use_cfl {
+                        vec![0u8; uv_txwpx * uv_txhpx]
+                    } else {
+                        Vec::new()
+                    };
                     let mut no_ext: [u16; 0] = [];
 
                     for plane in 1..=2usize {
@@ -5317,31 +5508,31 @@ impl<'c> TileKf<'c> {
                                     } else {
                                         &self.recon_v
                                     };
-                                    // The 2-tap bilinear reads one extra column/row
-                                    // on a half-pel axis — widen exactly that extent.
-                                    let read_w = uv_txwpx + usize::from(mvq4_col & 15 != 0);
-                                    let read_h = uv_txhpx + usize::from(mvq4_row & 15 != 0);
-                                    plane_recon.with_wide_rect_ro(
-                                        src,
-                                        self.stride_uv,
-                                        read_w,
-                                        read_h,
-                                        &mut self.wide_rect,
-                                        |s, stride| {
-                                            intrabc_chroma_predict(
-                                                s,
-                                                0,
-                                                stride,
-                                                &mut scratch_uv,
-                                                uv_txwpx,
-                                                uv_txwpx,
-                                                uv_txhpx,
-                                                mvq4_col & 15,
-                                                mvq4_row & 15,
-                                                cfg.bd,
-                                            );
-                                        },
-                                    );
+                                    match plane_recon {
+                                        ReconPlane::HighBd(p) => intrabc_chroma_predict(
+                                            p,
+                                            src,
+                                            self.stride_uv,
+                                            &mut scratch_uv,
+                                            uv_txwpx,
+                                            uv_txwpx,
+                                            uv_txhpx,
+                                            mvq4_col & 15,
+                                            mvq4_row & 15,
+                                            cfg.bd,
+                                        ),
+                                        ReconPlane::LowBd(p) => intrabc_chroma_predict_u8(
+                                            p,
+                                            src,
+                                            self.stride_uv,
+                                            &mut scratch8_uv,
+                                            uv_txwpx,
+                                            uv_txwpx,
+                                            uv_txhpx,
+                                            mvq4_col & 15,
+                                            mvq4_row & 15,
+                                        ),
+                                    }
                                 } else if info.palette_size[1] > 0 {
                                     // av1_predict_intra_block's palette branch, chroma: ONE
                                     // shared colour-index map for U and V (uv_map_wpx-strided,
@@ -5355,8 +5546,13 @@ impl<'c> TileKf<'c> {
                                         for c in 0..uv_txwpx {
                                             let idx = color_map_uv[(y0 + r) * uv_map_wpx + x0 + c]
                                                 as usize;
-                                            scratch_uv[r * uv_txwpx + c] =
-                                                info.palette_colors[pal_base + idx];
+                                            if lowbd_uv {
+                                                scratch8_uv[r * uv_txwpx + c] =
+                                                    info.palette_colors[pal_base + idx] as u8;
+                                            } else {
+                                                scratch_uv[r * uv_txwpx + c] =
+                                                    info.palette_colors[pal_base + idx];
+                                            }
                                         }
                                     }
                                 } else {
@@ -5369,37 +5565,62 @@ impl<'c> TileKf<'c> {
                                         .expect("n_top_px must be non-negative");
                                     let n_left_u = usize::try_from(n_left)
                                         .expect("n_left_px must be non-negative");
-                                    with_wide_apron(
-                                        plane_recon,
-                                        off_uv,
-                                        self.stride_uv,
-                                        n_top_u,
-                                        n_tr,
-                                        n_left_u,
-                                        n_bl,
-                                        &mut self.wide_apron,
-                                        |src, roff, rstride| {
-                                            predict_intra_high(
-                                                src,
-                                                roff,
-                                                rstride,
-                                                &mut scratch_uv,
-                                                uv_txwpx,
-                                                mode_uv,
-                                                info.angle_delta_uv * ANGLE_STEP,
-                                                false,
-                                                0,
-                                                cfg.disable_edge_filter,
-                                                filt_type_uv,
-                                                uv_tx,
-                                                n_top_u,
-                                                n_tr,
-                                                n_left_u,
-                                                n_bl,
-                                                cfg.bd,
-                                            );
-                                        },
-                                    );
+                                    match plane_recon {
+                                        // A CfL block's DC prediction must land in the
+                                        // u16 scratch for the (u16) CfL AC add — the
+                                        // lowbd plane delegates via the widened apron
+                                        // (byte-identical); a non-CfL lowbd block
+                                        // predicts directly through the u8 family.
+                                        ReconPlane::LowBd(p) if !use_cfl => predict_intra_u8(
+                                            p,
+                                            off_uv,
+                                            self.stride_uv,
+                                            &mut scratch8_uv,
+                                            uv_txwpx,
+                                            mode_uv,
+                                            info.angle_delta_uv * ANGLE_STEP,
+                                            false,
+                                            0,
+                                            cfg.disable_edge_filter,
+                                            filt_type_uv,
+                                            uv_tx,
+                                            n_top_u,
+                                            n_tr,
+                                            n_left_u,
+                                            n_bl,
+                                        ),
+                                        plane_recon => with_wide_apron(
+                                            plane_recon,
+                                            off_uv,
+                                            self.stride_uv,
+                                            n_top_u,
+                                            n_tr,
+                                            n_left_u,
+                                            n_bl,
+                                            &mut self.wide_apron,
+                                            |src, roff, rstride| {
+                                                predict_intra_high(
+                                                    src,
+                                                    roff,
+                                                    rstride,
+                                                    &mut scratch_uv,
+                                                    uv_txwpx,
+                                                    mode_uv,
+                                                    info.angle_delta_uv * ANGLE_STEP,
+                                                    false,
+                                                    0,
+                                                    cfg.disable_edge_filter,
+                                                    filt_type_uv,
+                                                    uv_tx,
+                                                    n_top_u,
+                                                    n_tr,
+                                                    n_left_u,
+                                                    n_bl,
+                                                    cfg.bd,
+                                                );
+                                            },
+                                        ),
+                                    }
                                 }
                                 if info.uv_mode == UV_CFL_PRED && info.use_intrabc == 0 {
                                     cfl_predict_block(
@@ -5420,12 +5641,34 @@ impl<'c> TileKf<'c> {
                                     } else {
                                         &mut self.recon_v
                                     };
-                                    for r in 0..uv_txhpx {
-                                        let d = off_uv + r * self.stride_uv;
-                                        plane_recon.store_row(
-                                            d,
-                                            &scratch_uv[r * uv_txwpx..(r + 1) * uv_txwpx],
-                                        );
+                                    match plane_recon {
+                                        ReconPlane::HighBd(p) => {
+                                            for r in 0..uv_txhpx {
+                                                let d = off_uv + r * self.stride_uv;
+                                                p[d..d + uv_txwpx].copy_from_slice(
+                                                    &scratch_uv[r * uv_txwpx..(r + 1) * uv_txwpx],
+                                                );
+                                            }
+                                        }
+                                        ReconPlane::LowBd(_) if use_cfl => {
+                                            // CfL prediction lives in the u16 scratch;
+                                            // narrow-store it (bit-exact — clamped <= 255).
+                                            for r in 0..uv_txhpx {
+                                                let d = off_uv + r * self.stride_uv;
+                                                plane_recon.store_row(
+                                                    d,
+                                                    &scratch_uv[r * uv_txwpx..(r + 1) * uv_txwpx],
+                                                );
+                                            }
+                                        }
+                                        ReconPlane::LowBd(p) => {
+                                            for r in 0..uv_txhpx {
+                                                let d = off_uv + r * self.stride_uv;
+                                                p[d..d + uv_txwpx].copy_from_slice(
+                                                    &scratch8_uv[r * uv_txwpx..(r + 1) * uv_txwpx],
+                                                );
+                                            }
+                                        }
                                     }
                                     // (3) dequant + inverse transform + add — the
                                     // block-effective dequant row of this plane.
@@ -5433,19 +5676,23 @@ impl<'c> TileKf<'c> {
                                         let dequant = self.dequants[plane];
                                         if self.st.coded_lossless {
                                             // lossless: TX_4X4 + WHT, this plane's qindex-0 dequant.
-                                            plane_recon.with_wide_rect(
-                                                off_uv,
-                                                self.stride_uv,
-                                                TX_SIZE_WIDE[TX_4X4_IDX],
-                                                TX_SIZE_HIGH[TX_4X4_IDX],
-                                                &mut self.wide_rect,
-                                                |dst, stride| {
-                                                    reconstruct_txb_wht(
-                                                        dst, stride, &tcoeff_uv, dequant, eob,
-                                                        cfg.bd,
-                                                    );
-                                                },
-                                            );
+                                            match plane_recon {
+                                                ReconPlane::HighBd(p) => reconstruct_txb_wht(
+                                                    &mut p[off_uv..],
+                                                    self.stride_uv,
+                                                    &tcoeff_uv,
+                                                    dequant,
+                                                    eob,
+                                                    cfg.bd,
+                                                ),
+                                                ReconPlane::LowBd(p) => reconstruct_txb_wht_u8(
+                                                    &mut p[off_uv..],
+                                                    self.stride_uv,
+                                                    &tcoeff_uv,
+                                                    dequant,
+                                                    eob,
+                                                ),
+                                            }
                                         } else {
                                             let iqm = qm::iqmatrix(
                                                 self.block_qm_level[plane],
@@ -5453,27 +5700,29 @@ impl<'c> TileKf<'c> {
                                                 uv_tx,
                                                 tt_uv_eff,
                                             );
-                                            let scratch2 = &mut self.recon_scratch;
-                                            plane_recon.with_wide_rect(
-                                                off_uv,
-                                                self.stride_uv,
-                                                TX_SIZE_WIDE[uv_tx],
-                                                TX_SIZE_HIGH[uv_tx],
-                                                &mut self.wide_rect,
-                                                |dst, stride| {
-                                                    reconstruct_txb_into(
-                                                        dst,
-                                                        stride,
-                                                        uv_tx,
-                                                        tt_uv_eff,
-                                                        &tcoeff_uv,
-                                                        dequant,
-                                                        iqm,
-                                                        cfg.bd,
-                                                        scratch2,
-                                                    );
-                                                },
-                                            );
+                                            match plane_recon {
+                                                ReconPlane::HighBd(p) => reconstruct_txb_into(
+                                                    &mut p[off_uv..],
+                                                    self.stride_uv,
+                                                    uv_tx,
+                                                    tt_uv_eff,
+                                                    &tcoeff_uv,
+                                                    dequant,
+                                                    iqm,
+                                                    cfg.bd,
+                                                    &mut self.recon_scratch,
+                                                ),
+                                                ReconPlane::LowBd(p) => reconstruct_txb_u8_into(
+                                                    &mut p[off_uv..],
+                                                    self.stride_uv,
+                                                    uv_tx,
+                                                    tt_uv_eff,
+                                                    &tcoeff_uv,
+                                                    dequant,
+                                                    iqm,
+                                                    &mut self.recon_scratch,
+                                                ),
+                                            }
                                         }
                                     }
                                 }

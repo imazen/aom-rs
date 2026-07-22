@@ -56,6 +56,11 @@ impl ReconPlane {
         }
     }
 
+    /// True when this plane holds `u8` (bd8 lowbd) samples.
+    pub fn is_lowbd(&self) -> bool {
+        matches!(self, ReconPlane::LowBd(_))
+    }
+
     /// Number of samples.
     pub fn len(&self) -> usize {
         match self {
@@ -179,32 +184,4 @@ impl ReconPlane {
         }
     }
 
-    /// Read-only twin of [`ReconPlane::with_wide_rect`]: widen the `w x h`
-    /// rectangle at `off` into `tmp` (compact stride `w`) and hand it to `f`.
-    pub(crate) fn with_wide_rect_ro<R>(
-        &self,
-        off: usize,
-        stride: usize,
-        w: usize,
-        h: usize,
-        tmp: &mut Vec<u16>,
-        f: impl FnOnce(&[u16], usize) -> R,
-    ) -> R {
-        match self {
-            ReconPlane::HighBd(p) => f(&p[off..], stride),
-            ReconPlane::LowBd(p) => {
-                let need = w * h;
-                if tmp.len() < need {
-                    tmp.resize(need, 0);
-                }
-                for r in 0..h {
-                    let s = off + r * stride;
-                    for (d, &v) in tmp[r * w..r * w + w].iter_mut().zip(&p[s..s + w]) {
-                        *d = v as u16;
-                    }
-                }
-                f(&tmp[..need], w)
-            }
-        }
-    }
 }
