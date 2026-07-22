@@ -1109,21 +1109,25 @@ fn lf_derived_vs_real_on_real_recon(
             src_v[r * STRIDE..r * STRIDE + cw].copy_from_slice(&v[r * cw..r * cw + cw]);
         }
     }
-    // Real's pre-filter reconstruction, re-strided to share STRIDE with src.
+    // Real's pre-filter reconstruction, re-strided to share STRIDE with src
+    // (`to_u16` widens a bd8 LowBd plane bit-exactly).
+    let t_recon = t_real.recon.to_u16();
     let mut ry = vec![0u16; STRIDE * (t_real.height + 4)];
     for r in 0..t_real.height {
         ry[r * STRIDE..r * STRIDE + t_real.width]
-            .copy_from_slice(&t_real.recon[r * t_real.stride..r * t_real.stride + t_real.width]);
+            .copy_from_slice(&t_recon[r * t_real.stride..r * t_real.stride + t_real.width]);
     }
     let mut ru = vec![0u16; STRIDE * (t_real.height_uv + 4).max(1)];
     let mut rv = vec![0u16; STRIDE * (t_real.height_uv + 4).max(1)];
     if !mono {
+        let t_recon_u = t_real.recon_u.to_u16();
+        let t_recon_v = t_real.recon_v.to_u16();
         for r in 0..t_real.height_uv {
             ru[r * STRIDE..r * STRIDE + t_real.width_uv].copy_from_slice(
-                &t_real.recon_u[r * t_real.stride_uv..r * t_real.stride_uv + t_real.width_uv],
+                &t_recon_u[r * t_real.stride_uv..r * t_real.stride_uv + t_real.width_uv],
             );
             rv[r * STRIDE..r * STRIDE + t_real.width_uv].copy_from_slice(
-                &t_real.recon_v[r * t_real.stride_uv..r * t_real.stride_uv + t_real.width_uv],
+                &t_recon_v[r * t_real.stride_uv..r * t_real.stride_uv + t_real.width_uv],
             );
         }
     }

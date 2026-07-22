@@ -1840,10 +1840,12 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         assert_eq!(g, w, "{what}: block {i}");
     }
     // (b) byte-identical reconstruction over the frame crop, all planes
+    // (`to_u16` widens a bd8 LowBd plane bit-exactly for the comparison).
     assert_eq!(got.stride, stride, "{what}: stride");
+    let got_y = got.recon.to_u16();
     for row in 0..got.height {
         assert_eq!(
-            got.recon[row * stride..row * stride + got.width],
+            got_y[row * stride..row * stride + got.width],
             mirror.recon[row * stride..row * stride + got.width],
             "{what}: recon row {row}"
         );
@@ -1858,15 +1860,17 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
             got.height_uv,
             (cfg.mi_rows as usize * 4) >> cfg.subsampling_y
         );
+        let got_u = got.recon_u.to_u16();
+        let got_v = got.recon_v.to_u16();
         for row in 0..got.height_uv {
             let s = row * stride_uv;
             assert_eq!(
-                got.recon_u[s..s + got.width_uv],
+                got_u[s..s + got.width_uv],
                 mirror.recon_u[s..s + got.width_uv],
                 "{what}: recon U row {row}"
             );
             assert_eq!(
-                got.recon_v[s..s + got.width_uv],
+                got_v[s..s + got.width_uv],
                 mirror.recon_v[s..s + got.width_uv],
                 "{what}: recon V row {row}"
             );

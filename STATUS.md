@@ -1,3 +1,33 @@
+## bd8 lowbd Phase A: `ReconPlane` u8/u16 plane carrier threaded through the whole decoder, byte-identical (2026-07-22, decoder track)
+
+The enabling refactor for the bd8 lowbd pipeline (`aom_dsp::lowbd` contract): the
+reconstruction planes of the tile driver (`TileKf`) and its result (`KfTileDecode.recon/
+recon_u/recon_v`) are now `ReconPlane { LowBd(Vec<u8>), HighBd(Vec<u16>) }` (new
+`aom-decode/src/plane.rs`). Routing key: `bd == 8` (plus `recon_init <= 255`, keeping the
+roundtrip tests' out-of-range availability-canary fills on u16). **NO u8 kernel is wired
+(that is Phase B)** — every kernel call site on a `LowBd` plane DELEGATES to the unchanged
+highbd kernel by widening exactly the touched region u8→u16, running it with `bd = 8`, and
+narrowing back, which is byte-identical by construction (bd8 samples round-trip losslessly;
+every kernel output is clamped ≤ 255). Threaded through ALL of the tile driver's plane
+touches — intra predict (a compact widened neighbour-APRON mirroring `assemble_dir_edges`/
+`assemble_nd_edges`' exact gated read set), intrabc luma/chroma copies (+1 col/row for the
+half-pel bilinear), palette stores, WHT + `reconstruct_txb_into` (rect delegation), CfL
+store (embedded-rect layout preserving the `(row,col)` offset arithmetic), inter MC
+(`build_inter_predictor`/`warp_affine`/OBMC blends/inter-intra `combine_interintra`) — and
+the post-recon stages in `frame.rs` (deblock / CDEF / LR take-wide→run→put-wide per stage;
+superres rebuilds through `put_wide`; the `FrameDecode` crop and `RefFrame::from_filtered`
+widen at the boundary, so the public `FrameDecode`/`RefFrame` surfaces stay `u16`).
+**Verified:** full `zenav1-aom-decode` suite (62 tests incl. the 240-vector conformance
+corpus byte-identity + golden MD5, real_bitstream, sb128, multi-tile, superres, film-grain,
+inter ratchet/real-frame) green in BOTH default and `AOM_FORCE_SCALAR=1` dispatch; bd10/12
+keep `HighBd` untouched. One found-and-fixed interaction: the initial narrow debug-assert
+fired on HOSTILE input (corrupt bd8 palette colour literals > 255 reach the plane store
+before the corrupt guards unwind) — narrowing now truncates like C lowbd's `(uint8_t)`
+stores, keeping the task-#60 no-panic property (`fuzz_sweep` green). Phase A accepts a
+temporary bd8 conversion cost; Phase B replaces each `LowBd` delegation arm with the
+already-landed `*_u8` kernels (`predict_intra_u8`, `reconstruct_txb_u8_into`,
+`av1_inv_txfm2d_add_u8`, `cdef_frame_u8`, the bd8 deblock walk) and removes it.
+
 ## KB-15 root: intrabc SKIP-arm chroma extent was `bw>>ss`, not padded `plane_bsize` (2026-07-20, encoder track)
 
 `encode_b_intra_dry`'s intrabc SKIP arm predicted/wrote the chroma over `(bw>>ss_x, bh>>ss_y)`

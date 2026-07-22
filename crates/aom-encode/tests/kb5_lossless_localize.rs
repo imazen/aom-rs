@@ -597,8 +597,8 @@ fn localize_lossless(w: usize, h: usize, mono: bool) -> bool {
     let mut recon_div: Option<(usize, usize, u16, u16)> = None;
     'rec: for row in 0..t_real.height.min(t_ours.height) {
         for col in 0..t_real.width.min(t_ours.width) {
-            let rv = t_real.recon[row * t_real.stride + col];
-            let ovv = t_ours.recon[row * t_ours.stride + col];
+            let rv = t_real.recon.px(row * t_real.stride + col);
+            let ovv = t_ours.recon.px(row * t_ours.stride + col);
             if rv != ovv {
                 recon_div = Some((row, col, rv, ovv));
                 break 'rec;
@@ -644,8 +644,8 @@ fn localize_lossless(w: usize, h: usize, mono: bool) -> bool {
         for cc in col.saturating_sub(2)..(col + 4).min(w) {
             let src = y[row * w + cc];
             let pack = recon_y[row * stride + cc];
-            let dp = t_ours.recon[row * t_ours.stride + cc];
-            let dr = t_real.recon[row * t_real.stride + cc];
+            let dp = t_ours.recon.px(row * t_ours.stride + cc);
+            let dr = t_real.recon.px(row * t_real.stride + cc);
             eprintln!(
                 "    col {cc}: source={src} pack_recon={pack} decoded_ours={dp} decoded_real={dr}"
             );

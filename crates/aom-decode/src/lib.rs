@@ -160,7 +160,10 @@ pub mod frame;
 
 /// Byte-exact AV1 film-grain synthesis (post-reconstruction output stage).
 pub mod film_grain;
+pub mod plane;
 pub mod superres;
+
+pub use plane::ReconPlane;
 
 // `pub` (doc-hidden) so the encoder's forward-QM path can REUSE the inverse-QM
 // selector + `iwt_matrix_ref` bases instead of committing a duplicate ~459KB
@@ -193,6 +196,114 @@ fn reconstruct_txb_wht(
     let mut dqcoeff = [0i32; 16];
     aom_dsp::txb::dequant_txb(qcoeff, &mut dqcoeff, TX_4X4_IDX, dequant, None, bd);
     aom_dsp::transform::inv_txfm2d::av1_highbd_iwht4x4_add(&dqcoeff, dst, stride, eob, bd);
+}
+
+/// Run an intra-prediction kernel that reads the neighbour APRON of the block
+/// at `off` — the top-left corner, the above row (`n_top + max(n_tr, 0)` px
+/// from `off - stride`), and the left column (`n_left + max(n_bl, 0)` px from
+/// `off - 1`) — against a [`ReconPlane`]. `HighBd`: the kernel reads the plane
+/// directly (structurally the pre-refactor call). `LowBd` (Phase A
+/// delegation): exactly the apron's read set is widened into a compact
+/// `(1 + left_extent) x (1 + top_extent)` rectangle whose origin is the corner
+/// pixel, and the kernel runs on it with `ref_off = W + 1` — every index the
+/// intra edge assembly can touch (`assemble_dir_edges` / `assemble_nd_edges`:
+/// all plane reads are gated on `n_top > 0` / `n_left > 0`) maps into the
+/// copied set, so the prediction is byte-identical.
+fn with_wide_apron<R>(
+    plane: &ReconPlane,
+    off: usize,
+    stride: usize,
+    n_top: usize,
+    n_tr: i32,
+    n_left: usize,
+    n_bl: i32,
+    tmp: &mut Vec<u16>,
+    f: impl FnOnce(&[u16], usize, usize) -> R,
+) -> R {
+    match plane {
+        ReconPlane::HighBd(p) => f(p, off, stride),
+        ReconPlane::LowBd(p) => {
+            let w = 1 + n_top + n_tr.max(0) as usize;
+            let h = 1 + n_left + n_bl.max(0) as usize;
+            let need = (w * h).max(w + 2);
+            if tmp.len() < need {
+                tmp.resize(need, 0);
+            }
+            if n_top > 0 {
+                let aoff = off - stride;
+                for (d, &v) in tmp[1..w].iter_mut().zip(&p[aoff..aoff + w - 1]) {
+                    *d = v as u16;
+                }
+            }
+            if n_left > 0 {
+                let loff = off - 1;
+                for i in 0..h - 1 {
+                    tmp[(i + 1) * w] = p[loff + i * stride] as u16;
+                }
+            }
+            if n_top > 0 && n_left > 0 {
+                tmp[0] = p[off - stride - 1] as u16;
+            }
+            f(&tmp[..need], w + 1, w)
+        }
+    }
+}
+
+/// [`cfl_store_tx`] against a [`ReconPlane`] luma plane. `HighBd`: direct.
+/// `LowBd` (Phase A delegation): the tx block's `w x h` luma rectangle — the
+/// store's exact read set (`cfl_store` reads `TX_W x TX_H` at
+/// `block_off + ((row * stride + col) << 2)`) — is widened into `tmp` laid out
+/// so the same `(row, col)` offset arithmetic lands on it with `block_off = 0`
+/// and `stride = w`; the store (subsample + surface tracking) then runs
+/// unchanged, byte-identical.
+#[allow(clippy::too_many_arguments)]
+fn cfl_store_tx_any(
+    cfl: &mut CflCtx,
+    luma: &ReconPlane,
+    block_off: usize,
+    stride: usize,
+    row: i32,
+    col: i32,
+    tx_size: usize,
+    bsize: usize,
+    mi_row: i32,
+    mi_col: i32,
+    tmp: &mut Vec<u16>,
+) {
+    match luma {
+        ReconPlane::HighBd(p) => cfl_store_tx(
+            cfl, p, block_off, stride, row, col, tx_size, bsize, mi_row, mi_col,
+        ),
+        ReconPlane::LowBd(p) => {
+            let w = TX_SIZE_WIDE[tx_size];
+            let h = TX_SIZE_HIGH[tx_size];
+            let in_off = block_off + ((row as usize * stride + col as usize) << 2);
+            let in_off_tmp = (row as usize * w + col as usize) << 2;
+            let need = in_off_tmp + h * w;
+            if tmp.len() < need {
+                tmp.resize(need, 0);
+            }
+            for r in 0..h {
+                let s = in_off + r * stride;
+                let d = in_off_tmp + r * w;
+                for (dst, &v) in tmp[d..d + w].iter_mut().zip(&p[s..s + w]) {
+                    *dst = v as u16;
+                }
+            }
+            cfl_store_tx(
+                cfl,
+                &tmp[..need],
+                0,
+                w,
+                row,
+                col,
+                tx_size,
+                bsize,
+                mi_row,
+                mi_col,
+            );
+        }
+    }
 }
 use aom_dsp::entropy::dec::OdEcDec;
 use aom_dsp::entropy::dv_ref::{
@@ -638,12 +749,15 @@ pub struct DecodedBlockKf {
 /// records. The chroma planes are empty for monochrome.
 #[derive(Clone, Debug)]
 pub struct KfTileDecode {
-    pub recon: Vec<u16>,
+    /// Luma reconstruction: `u8` samples at bd8, `u16` at bd10/12 — see
+    /// [`ReconPlane`]. [`ReconPlane::to_u16`] widens bit-exactly for `u16`
+    /// consumers.
+    pub recon: ReconPlane,
     pub stride: usize,
     pub width: usize,
     pub height: usize,
-    pub recon_u: Vec<u16>,
-    pub recon_v: Vec<u16>,
+    pub recon_u: ReconPlane,
+    pub recon_v: ReconPlane,
     pub stride_uv: usize,
     pub width_uv: usize,
     pub height_uv: usize,
@@ -712,9 +826,11 @@ impl RefFrame {
         crop_h_uv: usize,
     ) -> Self {
         RefFrame {
-            y: t.recon.clone(),
-            u: t.recon_u.clone(),
-            v: t.recon_v.clone(),
+            // Phase A: the reference planes stay `u16`; a bd8 (`LowBd`) recon
+            // widens bit-exactly here. The lowbd Phase B may narrow these.
+            y: t.recon.to_u16(),
+            u: t.recon_u.to_u16(),
+            v: t.recon_v.to_u16(),
             stride: t.stride,
             stride_uv: t.stride_uv,
             width: crop_w,
@@ -1330,13 +1446,21 @@ fn intrabc_chroma_predict(
 struct TileKf<'c> {
     cfg: &'c KfTileConfig,
     /// Luma reconstruction plane, SB-aligned, `stride` = aligned width in px.
-    recon: Vec<u16>,
+    /// `u8` samples at bd8, `u16` at bd10/12 ([`ReconPlane`]).
+    recon: ReconPlane,
     stride: usize,
     /// Chroma reconstruction planes (`stride_uv = stride >> ss_x`); empty when
     /// monochrome.
-    recon_u: Vec<u16>,
-    recon_v: Vec<u16>,
+    recon_u: ReconPlane,
+    recon_v: ReconPlane,
     stride_uv: usize,
+    /// Phase A lowbd-delegation scratch: the widened `u16` copy of the plane
+    /// rectangle a highbd kernel runs on when the plane is `LowBd`
+    /// ([`ReconPlane::with_wide_rect`]). Unused (never grown) on highbd planes.
+    wide_rect: Vec<u16>,
+    /// Phase A lowbd-delegation scratch for the intra-prediction neighbour
+    /// apron ([`with_wide_apron`]).
+    wide_apron: Vec<u16>,
     /// Per-plane coefficient entropy contexts (`xd->above_entropy_context[plane]`
     /// / `xd->left_entropy_context[plane]`): above spans the aligned tile width
     /// (one i8 per mi col, zeroed once per tile; chroma planes index it at
@@ -1591,13 +1715,22 @@ impl<'c> TileKf<'c> {
             xd_delta_lf: [0; 4],
             xd_delta_lf_from_base: 0,
         };
+        // The lowbd (u8) plane representation routing key: bit depth 8. The
+        // `recon_init <= 255` guard keeps the availability-canary roundtrip
+        // tests (which fill planes with out-of-range u16 patterns on purpose)
+        // on the u16 representation; every real bd8 decode (init 0) is LowBd.
+        // Phase A: LowBd planes DELEGATE every kernel to the highbd path via
+        // widen/narrow (see `plane`), byte-identical by construction.
+        let lowbd = cfg.bd == 8 && recon_init <= 0xFF;
         let mut t = TileKf {
             cfg,
-            recon: vec![recon_init; stride * aligned_mi_rows * 4],
+            recon: ReconPlane::filled(lowbd, stride * aligned_mi_rows * 4, recon_init),
             stride,
-            recon_u: vec![recon_init; uv_len],
-            recon_v: vec![recon_init; uv_len],
+            recon_u: ReconPlane::filled(lowbd, uv_len, recon_init),
+            recon_v: ReconPlane::filled(lowbd, uv_len, recon_init),
             stride_uv,
+            wide_rect: Vec::new(),
+            wide_apron: Vec::new(),
             above_e: [
                 vec![0; aligned_mi_cols],
                 vec![0; aligned_mi_cols],
@@ -2250,16 +2383,25 @@ impl<'c> TileKf<'c> {
             let plane_col = (rel_mi_col * 4) as usize;
             let dst_off = (mi_row * 4) as usize * self.stride + (mi_col * 4) as usize + plane_col;
             let mask = aom_dsp::inter::get_obmc_mask(overlap as usize);
-            aom_dsp::inter::blend_a64_vmask(
-                &mut self.recon,
+            self.recon.with_wide_rect(
                 dst_off,
                 self.stride,
-                &scratch,
-                0,
-                bw,
-                mask,
                 bw,
                 overlap as usize,
+                &mut self.wide_rect,
+                |dst, stride| {
+                    aom_dsp::inter::blend_a64_vmask(
+                        dst,
+                        0,
+                        stride,
+                        &scratch,
+                        0,
+                        bw,
+                        mask,
+                        bw,
+                        overlap as usize,
+                    );
+                },
             );
             // Chroma above-OBMC (build_obmc_inter_pred_above, U then V). Strip MC
             // dims (decodeframe.c:726): bw_c = (op_mi_size*4)>>ss_x, bh_c =
@@ -2307,9 +2449,17 @@ impl<'c> TileKf<'c> {
                         nb_filter_x,
                         nb_filter_y,
                     );
-                    aom_dsp::inter::blend_a64_vmask(
-                        dst, dst_off_c, self.stride_uv, &scratch_c, 0, bw_c, mask_c, bw_c,
+                    dst.with_wide_rect(
+                        dst_off_c,
+                        self.stride_uv,
+                        bw_c,
                         overlap_c,
+                        &mut self.wide_rect,
+                        |d, stride| {
+                            aom_dsp::inter::blend_a64_vmask(
+                                d, 0, stride, &scratch_c, 0, bw_c, mask_c, bw_c, overlap_c,
+                            );
+                        },
                     );
                 }
             }
@@ -2384,16 +2534,25 @@ impl<'c> TileKf<'c> {
             let plane_row = (rel_mi_row * 4) as usize;
             let dst_off = ((mi_row * 4) as usize + plane_row) * self.stride + (mi_col * 4) as usize;
             let mask = aom_dsp::inter::get_obmc_mask(overlap as usize);
-            aom_dsp::inter::blend_a64_hmask(
-                &mut self.recon,
+            self.recon.with_wide_rect(
                 dst_off,
                 self.stride,
-                &scratch,
-                0,
-                bw,
-                mask,
                 overlap as usize,
                 bh,
+                &mut self.wide_rect,
+                |dst, stride| {
+                    aom_dsp::inter::blend_a64_hmask(
+                        dst,
+                        0,
+                        stride,
+                        &scratch,
+                        0,
+                        bw,
+                        mask,
+                        overlap as usize,
+                        bh,
+                    );
+                },
             );
             // Chroma left-OBMC (build_obmc_inter_pred_left, U then V). Strip MC dims
             // (decodeframe.c:781): bw_c = clamp(bsize_wide>>(ss_x+1), 4, 64>>(ss_x+1)),
@@ -2441,9 +2600,17 @@ impl<'c> TileKf<'c> {
                         nb_filter_x,
                         nb_filter_y,
                     );
-                    aom_dsp::inter::blend_a64_hmask(
-                        dst, dst_off_c, self.stride_uv, &scratch_c, 0, bw_c, mask_c, overlap_c,
+                    dst.with_wide_rect(
+                        dst_off_c,
+                        self.stride_uv,
+                        overlap_c,
                         bh_c,
+                        &mut self.wide_rect,
+                        |d, stride| {
+                            aom_dsp::inter::blend_a64_hmask(
+                                d, 0, stride, &scratch_c, 0, bw_c, mask_c, overlap_c, bh_c,
+                            );
+                        },
                     );
                 }
             }
@@ -3165,45 +3332,63 @@ impl<'c> TileKf<'c> {
         // blend runs after, below). Luma block is always >= 8 -> passes
         // av1_init_warp_params' per-plane size gate.
         if let Some(wm) = warp_luma {
-            aom_dsp::inter::warp::warp_affine(
-                &wm.wmmat,
-                &last.y,
-                last.width,
-                last.height,
-                last.stride,
-                &mut self.recon,
+            self.recon.with_wide_rect(
                 dst_off,
                 self.stride,
-                blk_x as i32,
-                blk_y as i32,
                 bw_px,
                 bh_px,
-                0,
-                0,
-                wm.alpha,
-                wm.beta,
-                wm.gamma,
-                wm.delta,
+                &mut self.wide_rect,
+                |dst, stride| {
+                    aom_dsp::inter::warp::warp_affine(
+                        &wm.wmmat,
+                        &last.y,
+                        last.width,
+                        last.height,
+                        last.stride,
+                        dst,
+                        0,
+                        stride,
+                        blk_x as i32,
+                        blk_y as i32,
+                        bw_px,
+                        bh_px,
+                        0,
+                        0,
+                        wm.alpha,
+                        wm.beta,
+                        wm.gamma,
+                        wm.delta,
+                    );
+                },
             );
         } else {
-            aom_dsp::inter::build_inter_predictor(
-                &last.y,
-                last.stride,
-                last.width,
-                last.height,
-                &mut self.recon,
+            self.recon.with_wide_rect(
                 dst_off,
                 self.stride,
-                blk_x,
-                blk_y,
                 bw_px,
                 bh_px,
-                cmv_row,
-                cmv_col,
-                0,
-                0,
-                filter_x,
-                filter_y,
+                &mut self.wide_rect,
+                |dst, stride| {
+                    aom_dsp::inter::build_inter_predictor(
+                        &last.y,
+                        last.stride,
+                        last.width,
+                        last.height,
+                        dst,
+                        0,
+                        stride,
+                        blk_x,
+                        blk_y,
+                        bw_px,
+                        bh_px,
+                        cmv_row,
+                        cmv_col,
+                        0,
+                        0,
+                        filter_x,
+                        filter_y,
+                    );
+                },
             );
         }
         // Chroma prediction only at the chroma-reference block (sub-8x8 members
@@ -3275,24 +3460,33 @@ impl<'c> TileKf<'c> {
                         for (dst, src) in
                             [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)]
                         {
-                            aom_dsp::inter::build_inter_predictor(
-                                src,
-                                last.stride_uv,
-                                last.width_uv,
-                                last.height_uv,
-                                dst,
+                            dst.with_wide_rect(
                                 doff,
                                 self.stride_uv,
-                                bxu,
-                                byu,
                                 b4_w,
                                 b4_h,
-                                smv_r,
-                                smv_c,
-                                ss_x,
-                                ss_y,
-                                filter_x,
-                                filter_y,
+                                &mut self.wide_rect,
+                                |d, stride| {
+                                    aom_dsp::inter::build_inter_predictor(
+                                        src,
+                                        last.stride_uv,
+                                        last.width_uv,
+                                        last.height_uv,
+                                        d,
+                                        0,
+                                        stride,
+                                        bxu,
+                                        byu,
+                                        b4_w,
+                                        b4_h,
+                                        smv_r,
+                                        smv_c,
+                                        ss_x,
+                                        ss_y,
+                                        filter_x,
+                                        filter_y,
+                                    );
+                                },
                             );
                         }
                         x += b4_w;
@@ -3327,25 +3521,34 @@ impl<'c> TileKf<'c> {
                 let warp_chroma = warp_luma.filter(|_| bw_uv >= 8 && bh_uv >= 8);
                 if let Some(wm) = warp_chroma {
                     for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
-                        aom_dsp::inter::warp::warp_affine(
-                            &wm.wmmat,
-                            src,
-                            last.width_uv,
-                            last.height_uv,
-                            last.stride_uv,
-                            dst,
+                        dst.with_wide_rect(
                             doff,
                             self.stride_uv,
-                            uv_org_x as i32,
-                            uv_org_y as i32,
                             bw_uv,
                             bh_uv,
-                            ss_x,
-                            ss_y,
-                            wm.alpha,
-                            wm.beta,
-                            wm.gamma,
-                            wm.delta,
+                            &mut self.wide_rect,
+                            |d, stride| {
+                                aom_dsp::inter::warp::warp_affine(
+                                    &wm.wmmat,
+                                    src,
+                                    last.width_uv,
+                                    last.height_uv,
+                                    last.stride_uv,
+                                    d,
+                                    0,
+                                    stride,
+                                    uv_org_x as i32,
+                                    uv_org_y as i32,
+                                    bw_uv,
+                                    bh_uv,
+                                    ss_x,
+                                    ss_y,
+                                    wm.alpha,
+                                    wm.beta,
+                                    wm.gamma,
+                                    wm.delta,
+                                );
+                            },
                         );
                     }
                 } else {
@@ -3353,24 +3556,33 @@ impl<'c> TileKf<'c> {
                     // (cmv_*_uv), not the luma-clamped cmv_* — see the
                     // clamp_mv_to_umv_border_plane call above.
                     for (dst, src) in [(&mut self.recon_u, &last.u), (&mut self.recon_v, &last.v)] {
-                        aom_dsp::inter::build_inter_predictor(
-                            src,
-                            last.stride_uv,
-                            last.width_uv,
-                            last.height_uv,
-                            dst,
+                        dst.with_wide_rect(
                             doff,
                             self.stride_uv,
-                            uv_org_x,
-                            uv_org_y,
                             bw_uv,
                             bh_uv,
-                            cmv_row_uv,
-                            cmv_col_uv,
-                            ss_x,
-                            ss_y,
-                            filter_x,
-                            filter_y,
+                            &mut self.wide_rect,
+                            |d, stride| {
+                                aom_dsp::inter::build_inter_predictor(
+                                    src,
+                                    last.stride_uv,
+                                    last.width_uv,
+                                    last.height_uv,
+                                    d,
+                                    0,
+                                    stride,
+                                    uv_org_x,
+                                    uv_org_y,
+                                    bw_uv,
+                                    bh_uv,
+                                    cmv_row_uv,
+                                    cmv_col_uv,
+                                    ss_x,
+                                    ss_y,
+                                    filter_x,
+                                    filter_y,
+                                );
+                            },
                         );
                     }
                 }
@@ -3428,24 +3640,38 @@ impl<'c> TileKf<'c> {
                 false,
             );
             let mut intra_pred = vec![0u16; bw_px * bh_px];
-            predict_intra_high(
+            let n_top_u = usize::try_from(n_top).expect("n_top_px must be non-negative");
+            let n_left_u = usize::try_from(n_left).expect("n_left_px must be non-negative");
+            with_wide_apron(
                 &self.recon,
                 dst_off,
                 self.stride,
-                &mut intra_pred,
-                bw_px,
-                ii_intra_mode,
-                0,
-                false,
-                0,
-                cfg.disable_edge_filter,
-                filt_type,
-                ii_tx,
-                usize::try_from(n_top).expect("n_top_px must be non-negative"),
+                n_top_u,
                 n_tr,
-                usize::try_from(n_left).expect("n_left_px must be non-negative"),
+                n_left_u,
                 n_bl,
-                cfg.bd,
+                &mut self.wide_apron,
+                |src, roff, rstride| {
+                    predict_intra_high(
+                        src,
+                        roff,
+                        rstride,
+                        &mut intra_pred,
+                        bw_px,
+                        ii_intra_mode,
+                        0,
+                        false,
+                        0,
+                        cfg.disable_edge_filter,
+                        filt_type,
+                        ii_tx,
+                        n_top_u,
+                        n_tr,
+                        n_left_u,
+                        n_bl,
+                        cfg.bd,
+                    );
+                },
             );
             // C blends in place (`comppred == interpred`). Every output pixel is a
             // function of the SAME position in both sources, so lifting the inter
@@ -3454,20 +3680,30 @@ impl<'c> TileKf<'c> {
             let mut inter_pred = vec![0u16; bw_px * bh_px];
             for r in 0..bh_px {
                 let s = dst_off + r * self.stride;
-                inter_pred[r * bw_px..(r + 1) * bw_px].copy_from_slice(&self.recon[s..s + bw_px]);
+                self.recon
+                    .copy_row_wide(s, &mut inter_pred[r * bw_px..(r + 1) * bw_px]);
             }
-            aom_dsp::inter::interintra::combine_interintra(
-                ii_mode as usize,
-                ii_use_wedge != 0,
-                ii_wedge_idx as usize,
-                bsize,
-                bsize,
-                &mut self.recon[dst_off..],
+            self.recon.with_wide_rect(
+                dst_off,
                 self.stride,
-                &inter_pred,
                 bw_px,
-                &intra_pred,
-                bw_px,
+                bh_px,
+                &mut self.wide_rect,
+                |dst, stride| {
+                    aom_dsp::inter::interintra::combine_interintra(
+                        ii_mode as usize,
+                        ii_use_wedge != 0,
+                        ii_wedge_idx as usize,
+                        bsize,
+                        bsize,
+                        dst,
+                        stride,
+                        &inter_pred,
+                        bw_px,
+                        &intra_pred,
+                        bw_px,
+                    );
+                },
             );
 
             // Chroma. `is_chroma_ref` is always true for an inter-intra bsize
@@ -3510,53 +3746,75 @@ impl<'c> TileKf<'c> {
                 );
                 let mut intra_uv = vec![0u16; uw * uh];
                 let mut inter_uv = vec![0u16; uw * uh];
+                let n_top_u = usize::try_from(n_top).expect("n_top_px must be non-negative");
+                let n_left_u = usize::try_from(n_left).expect("n_left_px must be non-negative");
                 for plane in 1..=2 {
-                    let src_plane: &[u16] = if plane == 1 {
+                    let src_plane: &ReconPlane = if plane == 1 {
                         &self.recon_u
                     } else {
                         &self.recon_v
                     };
-                    predict_intra_high(
+                    with_wide_apron(
                         src_plane,
                         uv_off,
                         self.stride_uv,
-                        &mut intra_uv,
-                        uw,
-                        ii_intra_mode,
-                        0,
-                        false,
-                        0,
-                        cfg.disable_edge_filter,
-                        filt_type,
-                        uv_tx,
-                        usize::try_from(n_top).expect("n_top_px must be non-negative"),
+                        n_top_u,
                         n_tr,
-                        usize::try_from(n_left).expect("n_left_px must be non-negative"),
+                        n_left_u,
                         n_bl,
-                        cfg.bd,
+                        &mut self.wide_apron,
+                        |src, roff, rstride| {
+                            predict_intra_high(
+                                src,
+                                roff,
+                                rstride,
+                                &mut intra_uv,
+                                uw,
+                                ii_intra_mode,
+                                0,
+                                false,
+                                0,
+                                cfg.disable_edge_filter,
+                                filt_type,
+                                uv_tx,
+                                n_top_u,
+                                n_tr,
+                                n_left_u,
+                                n_bl,
+                                cfg.bd,
+                            );
+                        },
                     );
                     for r in 0..uh {
                         let s = uv_off + r * self.stride_uv;
-                        inter_uv[r * uw..(r + 1) * uw]
-                            .copy_from_slice(&src_plane[s..s + uw]);
+                        src_plane.copy_row_wide(s, &mut inter_uv[r * uw..(r + 1) * uw]);
                     }
-                    let dst_plane: &mut [u16] = if plane == 1 {
+                    let dst_plane: &mut ReconPlane = if plane == 1 {
                         &mut self.recon_u
                     } else {
                         &mut self.recon_v
                     };
-                    aom_dsp::inter::interintra::combine_interintra(
-                        ii_mode as usize,
-                        ii_use_wedge != 0,
-                        ii_wedge_idx as usize,
-                        bsize,
-                        plane_bsize,
-                        &mut dst_plane[uv_off..],
+                    dst_plane.with_wide_rect(
+                        uv_off,
                         self.stride_uv,
-                        &inter_uv,
                         uw,
-                        &intra_uv,
-                        uw,
+                        uh,
+                        &mut self.wide_rect,
+                        |dst, stride| {
+                            aom_dsp::inter::interintra::combine_interintra(
+                                ii_mode as usize,
+                                ii_use_wedge != 0,
+                                ii_wedge_idx as usize,
+                                bsize,
+                                plane_bsize,
+                                dst,
+                                stride,
+                                &inter_uv,
+                                uw,
+                                &intra_uv,
+                                uw,
+                            );
+                        },
                     );
                 }
             }
@@ -3646,16 +3904,20 @@ impl<'c> TileKf<'c> {
                             + (mi_col * 4) as usize
                             + blk_col * 4;
                         let iqm = qm::iqmatrix(self.block_qm_level[0], 0, tx_size, tt);
-                        reconstruct_txb_into(
-                            &mut self.recon[off..],
+                        let dequant = self.dequants[0];
+                        let scratch = &mut self.recon_scratch;
+                        self.recon.with_wide_rect(
+                            off,
                             self.stride,
-                            tx_size,
-                            tt,
-                            &tcoeff,
-                            self.dequants[0],
-                            iqm,
-                            cfg.bd,
-                            &mut self.recon_scratch,
+                            TX_SIZE_WIDE[tx_size],
+                            TX_SIZE_HIGH[tx_size],
+                            &mut self.wide_rect,
+                            |dst, stride| {
+                                reconstruct_txb_into(
+                                    dst, stride, tx_size, tt, &tcoeff, dequant, iqm, cfg.bd,
+                                    scratch,
+                                );
+                            },
                         );
                     }
                     blk_col += txw;
@@ -3744,16 +4006,20 @@ impl<'c> TileKf<'c> {
                                 } else {
                                     &mut self.recon_v
                                 };
-                                reconstruct_txb_into(
-                                    &mut dst[off..],
+                                let dequant = self.dequants[plane];
+                                let scratch = &mut self.recon_scratch;
+                                dst.with_wide_rect(
+                                    off,
                                     self.stride_uv,
-                                    uv_tx,
-                                    tt_uv,
-                                    &tcoeff_uv,
-                                    self.dequants[plane],
-                                    iqm,
-                                    cfg.bd,
-                                    &mut self.recon_scratch,
+                                    TX_SIZE_WIDE[uv_tx],
+                                    TX_SIZE_HIGH[uv_tx],
+                                    &mut self.wide_rect,
+                                    |d, stride| {
+                                        reconstruct_txb_into(
+                                            d, stride, uv_tx, tt_uv, &tcoeff_uv, dequant, iqm,
+                                            cfg.bd, scratch,
+                                        );
+                                    },
                                 );
                             }
                             blk_col += uv_txw;
@@ -4526,26 +4792,37 @@ impl<'c> TileKf<'c> {
                     + (info.dv_col >> 3)) as usize;
                 for r in 0..ltxhpx {
                     let s = src + r * self.stride;
-                    nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]
-                        .copy_from_slice(&self.recon[s..s + ltxwpx]);
+                    self.recon
+                        .copy_row_wide(s, &mut nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]);
                 }
                 for r in 0..ltxhpx {
                     let d = off + r * self.stride;
-                    self.recon[d..d + ltxwpx]
-                        .copy_from_slice(&nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]);
+                    self.recon
+                        .store_row(d, &nu_scratch[r * ltxwpx..(r + 1) * ltxwpx]);
                 }
                 if info.skip == 0 && eob > 0 {
                     let iqm = qm::iqmatrix(self.block_qm_level[0], 0, cur_tx, tx_type);
-                    reconstruct_txb_into(
-                        &mut self.recon[off..],
+                    let dequant = self.dequants[0];
+                    let scratch = &mut self.recon_scratch;
+                    self.recon.with_wide_rect(
+                        off,
                         self.stride,
-                        cur_tx,
-                        tx_type,
-                        &nu_tcoeff[..larea],
-                        self.dequants[0],
-                        iqm,
-                        cfg.bd,
-                        &mut self.recon_scratch,
+                        TX_SIZE_WIDE[cur_tx],
+                        TX_SIZE_HIGH[cur_tx],
+                        &mut self.wide_rect,
+                        |dst, stride| {
+                            reconstruct_txb_into(
+                                dst,
+                                stride,
+                                cur_tx,
+                                tx_type,
+                                &nu_tcoeff[..larea],
+                                dequant,
+                                iqm,
+                                cfg.bd,
+                                scratch,
+                            );
+                        },
                     );
                 }
                 txbs.push((eob, tx_type));
@@ -4710,8 +4987,8 @@ impl<'c> TileKf<'c> {
                                 as usize;
                             for r in 0..txhpx {
                                 let s = src + r * self.stride;
-                                scratch[r * txwpx..(r + 1) * txwpx]
-                                    .copy_from_slice(&self.recon[s..s + txwpx]);
+                                self.recon
+                                    .copy_row_wide(s, &mut scratch[r * txwpx..(r + 1) * txwpx]);
                             }
                         } else if info.palette_size[0] > 0 {
                             // av1_predict_intra_block's palette branch (reconintra.c): pixels
@@ -4730,57 +5007,81 @@ impl<'c> TileKf<'c> {
                                 }
                             }
                         } else {
-                            predict_intra_high(
+                            let n_top_u =
+                                usize::try_from(n_top).expect("n_top_px must be non-negative");
+                            let n_left_u =
+                                usize::try_from(n_left).expect("n_left_px must be non-negative");
+                            with_wide_apron(
                                 &self.recon,
                                 off,
                                 self.stride,
-                                &mut scratch,
-                                txwpx,
-                                info.y_mode as usize,
-                                info.angle_delta_y * ANGLE_STEP,
-                                info.use_filter_intra != 0,
-                                info.filter_intra_mode as usize,
-                                cfg.disable_edge_filter,
-                                filt_type,
-                                tx_size,
-                                usize::try_from(n_top).expect("n_top_px must be non-negative"),
+                                n_top_u,
                                 n_tr,
-                                usize::try_from(n_left).expect("n_left_px must be non-negative"),
+                                n_left_u,
                                 n_bl,
-                                cfg.bd,
+                                &mut self.wide_apron,
+                                |src, roff, rstride| {
+                                    predict_intra_high(
+                                        src,
+                                        roff,
+                                        rstride,
+                                        &mut scratch,
+                                        txwpx,
+                                        info.y_mode as usize,
+                                        info.angle_delta_y * ANGLE_STEP,
+                                        info.use_filter_intra != 0,
+                                        info.filter_intra_mode as usize,
+                                        cfg.disable_edge_filter,
+                                        filt_type,
+                                        tx_size,
+                                        n_top_u,
+                                        n_tr,
+                                        n_left_u,
+                                        n_bl,
+                                        cfg.bd,
+                                    );
+                                },
                             );
                         }
                         for r in 0..txhpx {
                             let d = off + r * self.stride;
-                            self.recon[d..d + txwpx]
-                                .copy_from_slice(&scratch[r * txwpx..(r + 1) * txwpx]);
+                            self.recon
+                                .store_row(d, &scratch[r * txwpx..(r + 1) * txwpx]);
                         }
 
                         // (3) dequant + inverse transform + add (only when residual
                         // exists) — the block-effective luma dequant row.
                         if info.skip == 0 && eob > 0 {
+                            let dequant = self.dequants[0];
                             if self.st.coded_lossless {
                                 // lossless: TX_4X4 + WHT with the qindex-0 dequant.
-                                reconstruct_txb_wht(
-                                    &mut self.recon[off..],
+                                self.recon.with_wide_rect(
+                                    off,
                                     self.stride,
-                                    &tcoeff,
-                                    self.dequants[0],
-                                    eob,
-                                    cfg.bd,
+                                    TX_SIZE_WIDE[TX_4X4_IDX],
+                                    TX_SIZE_HIGH[TX_4X4_IDX],
+                                    &mut self.wide_rect,
+                                    |dst, stride| {
+                                        reconstruct_txb_wht(
+                                            dst, stride, &tcoeff, dequant, eob, cfg.bd,
+                                        );
+                                    },
                                 );
                             } else {
                                 let iqm = qm::iqmatrix(self.block_qm_level[0], 0, tx_size, tx_type);
-                                reconstruct_txb_into(
-                                    &mut self.recon[off..],
+                                let scratch2 = &mut self.recon_scratch;
+                                self.recon.with_wide_rect(
+                                    off,
                                     self.stride,
-                                    tx_size,
-                                    tx_type,
-                                    &tcoeff,
-                                    self.dequants[0],
-                                    iqm,
-                                    cfg.bd,
-                                    &mut self.recon_scratch,
+                                    TX_SIZE_WIDE[tx_size],
+                                    TX_SIZE_HIGH[tx_size],
+                                    &mut self.wide_rect,
+                                    |dst, stride| {
+                                        reconstruct_txb_into(
+                                            dst, stride, tx_size, tx_type, &tcoeff, dequant, iqm,
+                                            cfg.bd, scratch2,
+                                        );
+                                    },
                                 );
                             }
                         }
@@ -4792,7 +5093,7 @@ impl<'c> TileKf<'c> {
                         if !cfg.monochrome && (!chroma_ref || info.uv_mode == UV_CFL_PRED) {
                             let block_off =
                                 (mi_row * 4) as usize * self.stride + (mi_col * 4) as usize;
-                            cfl_store_tx(
+                            cfl_store_tx_any(
                                 &mut self.cfl,
                                 &self.recon,
                                 block_off,
@@ -4803,6 +5104,7 @@ impl<'c> TileKf<'c> {
                                 bsize,
                                 mi_row,
                                 mi_col,
+                                &mut self.wide_rect,
                             );
                         }
                         txbs.push((eob, tx_type));
@@ -5015,17 +5317,30 @@ impl<'c> TileKf<'c> {
                                     } else {
                                         &self.recon_v
                                     };
-                                    intrabc_chroma_predict(
-                                        plane_recon,
+                                    // The 2-tap bilinear reads one extra column/row
+                                    // on a half-pel axis — widen exactly that extent.
+                                    let read_w = uv_txwpx + usize::from(mvq4_col & 15 != 0);
+                                    let read_h = uv_txhpx + usize::from(mvq4_row & 15 != 0);
+                                    plane_recon.with_wide_rect_ro(
                                         src,
                                         self.stride_uv,
-                                        &mut scratch_uv,
-                                        uv_txwpx,
-                                        uv_txwpx,
-                                        uv_txhpx,
-                                        mvq4_col & 15,
-                                        mvq4_row & 15,
-                                        cfg.bd,
+                                        read_w,
+                                        read_h,
+                                        &mut self.wide_rect,
+                                        |s, stride| {
+                                            intrabc_chroma_predict(
+                                                s,
+                                                0,
+                                                stride,
+                                                &mut scratch_uv,
+                                                uv_txwpx,
+                                                uv_txwpx,
+                                                uv_txhpx,
+                                                mvq4_col & 15,
+                                                mvq4_row & 15,
+                                                cfg.bd,
+                                            );
+                                        },
                                     );
                                 } else if info.palette_size[1] > 0 {
                                     // av1_predict_intra_block's palette branch, chroma: ONE
@@ -5050,26 +5365,40 @@ impl<'c> TileKf<'c> {
                                     } else {
                                         &self.recon_v
                                     };
-                                    predict_intra_high(
+                                    let n_top_u = usize::try_from(n_top)
+                                        .expect("n_top_px must be non-negative");
+                                    let n_left_u = usize::try_from(n_left)
+                                        .expect("n_left_px must be non-negative");
+                                    with_wide_apron(
                                         plane_recon,
                                         off_uv,
                                         self.stride_uv,
-                                        &mut scratch_uv,
-                                        uv_txwpx,
-                                        mode_uv,
-                                        info.angle_delta_uv * ANGLE_STEP,
-                                        false,
-                                        0,
-                                        cfg.disable_edge_filter,
-                                        filt_type_uv,
-                                        uv_tx,
-                                        usize::try_from(n_top)
-                                            .expect("n_top_px must be non-negative"),
+                                        n_top_u,
                                         n_tr,
-                                        usize::try_from(n_left)
-                                            .expect("n_left_px must be non-negative"),
+                                        n_left_u,
                                         n_bl,
-                                        cfg.bd,
+                                        &mut self.wide_apron,
+                                        |src, roff, rstride| {
+                                            predict_intra_high(
+                                                src,
+                                                roff,
+                                                rstride,
+                                                &mut scratch_uv,
+                                                uv_txwpx,
+                                                mode_uv,
+                                                info.angle_delta_uv * ANGLE_STEP,
+                                                false,
+                                                0,
+                                                cfg.disable_edge_filter,
+                                                filt_type_uv,
+                                                uv_tx,
+                                                n_top_u,
+                                                n_tr,
+                                                n_left_u,
+                                                n_bl,
+                                                cfg.bd,
+                                            );
+                                        },
                                     );
                                 }
                                 if info.uv_mode == UV_CFL_PRED && info.use_intrabc == 0 {
@@ -5093,22 +5422,29 @@ impl<'c> TileKf<'c> {
                                     };
                                     for r in 0..uv_txhpx {
                                         let d = off_uv + r * self.stride_uv;
-                                        plane_recon[d..d + uv_txwpx].copy_from_slice(
+                                        plane_recon.store_row(
+                                            d,
                                             &scratch_uv[r * uv_txwpx..(r + 1) * uv_txwpx],
                                         );
                                     }
                                     // (3) dequant + inverse transform + add — the
                                     // block-effective dequant row of this plane.
                                     if info.skip == 0 && eob > 0 {
+                                        let dequant = self.dequants[plane];
                                         if self.st.coded_lossless {
                                             // lossless: TX_4X4 + WHT, this plane's qindex-0 dequant.
-                                            reconstruct_txb_wht(
-                                                &mut plane_recon[off_uv..],
+                                            plane_recon.with_wide_rect(
+                                                off_uv,
                                                 self.stride_uv,
-                                                &tcoeff_uv,
-                                                self.dequants[plane],
-                                                eob,
-                                                cfg.bd,
+                                                TX_SIZE_WIDE[TX_4X4_IDX],
+                                                TX_SIZE_HIGH[TX_4X4_IDX],
+                                                &mut self.wide_rect,
+                                                |dst, stride| {
+                                                    reconstruct_txb_wht(
+                                                        dst, stride, &tcoeff_uv, dequant, eob,
+                                                        cfg.bd,
+                                                    );
+                                                },
                                             );
                                         } else {
                                             let iqm = qm::iqmatrix(
@@ -5117,16 +5453,26 @@ impl<'c> TileKf<'c> {
                                                 uv_tx,
                                                 tt_uv_eff,
                                             );
-                                            reconstruct_txb_into(
-                                                &mut plane_recon[off_uv..],
+                                            let scratch2 = &mut self.recon_scratch;
+                                            plane_recon.with_wide_rect(
+                                                off_uv,
                                                 self.stride_uv,
-                                                uv_tx,
-                                                tt_uv_eff,
-                                                &tcoeff_uv,
-                                                self.dequants[plane],
-                                                iqm,
-                                                cfg.bd,
-                                                &mut self.recon_scratch,
+                                                TX_SIZE_WIDE[uv_tx],
+                                                TX_SIZE_HIGH[uv_tx],
+                                                &mut self.wide_rect,
+                                                |dst, stride| {
+                                                    reconstruct_txb_into(
+                                                        dst,
+                                                        stride,
+                                                        uv_tx,
+                                                        tt_uv_eff,
+                                                        &tcoeff_uv,
+                                                        dequant,
+                                                        iqm,
+                                                        cfg.bd,
+                                                        scratch2,
+                                                    );
+                                                },
                                             );
                                         }
                                     }

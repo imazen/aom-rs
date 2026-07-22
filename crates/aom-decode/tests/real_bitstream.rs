@@ -314,7 +314,8 @@ fn run_config(cfg: &Cfg) -> RunFacts {
         if header.loopfilter.filter_level != [0, 0] {
             apply_deblock(&mut t, &tcfg, &header);
         }
-        let pre_cdef = cdef_gated.then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
+        let pre_cdef =
+            cdef_gated.then(|| (t.recon.to_u16(), t.recon_u.to_u16(), t.recon_v.to_u16()));
         if cdef_gated {
             apply_cdef(&mut t, &tcfg, &header);
         }
@@ -1179,7 +1180,7 @@ fn deblocked_422_chroma_byte_identical_to_c() {
         let pre_u = t.recon_u.clone();
         let pre_v = t.recon_v.clone();
         let distinct_u = {
-            let mut s = pre_u.clone();
+            let mut s = pre_u.to_u16();
             s.sort_unstable();
             s.dedup();
             s.len()

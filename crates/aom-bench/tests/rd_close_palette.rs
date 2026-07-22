@@ -613,8 +613,8 @@ fn localize_palette_cell(cell: &EncodeCell) -> bool {
     ] {
         for row in 0..rh.min(oh) {
             for col in 0..rw.min(ow) {
-                let rv = rr[row * rstride + col];
-                let ov = orr[row * ostride + col];
+                let rv = rr.px(row * rstride + col);
+                let ov = orr.px(row * ostride + col);
                 if rv != ov {
                     eprintln!(
                         ">>> FIRST {name} RECON DIVERGENCE at (row={row}, col={col}): real={rv} ours={ov}"

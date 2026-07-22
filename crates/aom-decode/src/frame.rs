@@ -999,22 +999,27 @@ pub fn apply_restoration(
     use aom_dsp::restore::frame::{LrPlaneInput, loop_restoration_filter_frame};
     let empty: (Vec<u16>, Vec<u16>, Vec<u16>) = (Vec::new(), Vec::new(), Vec::new());
     let (dy, du, dv) = pre_cdef.unwrap_or(&empty);
+    // Phase A: run the (unchanged) highbd LR stage on widened working planes;
+    // bd8 (`LowBd`) narrows back bit-exactly (see `crate::plane`).
+    let mut wy = t.recon.take_wide();
+    let mut wu = t.recon_u.take_wide();
+    let mut wv = t.recon_v.take_wide();
     let mut planes = Vec::new();
     planes.push(LrPlaneInput {
-        cur: &mut t.recon,
+        cur: &mut wy,
         deblocked: dy,
         stride: t.stride,
         units: &t.lr_units[0],
     });
     if !cfg.monochrome {
         planes.push(LrPlaneInput {
-            cur: &mut t.recon_u,
+            cur: &mut wu,
             deblocked: du,
             stride: t.stride_uv,
             units: &t.lr_units[1],
         });
         planes.push(LrPlaneInput {
-            cur: &mut t.recon_v,
+            cur: &mut wv,
             deblocked: dv,
             stride: t.stride_uv,
             units: &t.lr_units[2],
@@ -1028,6 +1033,9 @@ pub fn apply_restoration(
         cfg.bd,
         optimized_lr,
     );
+    t.recon.put_wide(wy);
+    t.recon_u.put_wide(wu);
+    t.recon_v.put_wide(wv);
 }
 
 /// Upscale a downscaled `(y, u, v)` plane triplet horizontally to the full
@@ -1112,19 +1120,21 @@ pub fn superres_upscale_planes(
 /// run on the result. Hidden: harness entry so tests can drive the stage.
 #[doc(hidden)]
 pub fn apply_superres(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) {
+    // Phase A: upscale on widened working planes; `put_wide` narrows a bd8
+    // (`LowBd`) result back bit-exactly and accepts the new (upscaled) length.
     let (y, s, u, v, s_uv) = superres_upscale_planes(
-        &t.recon,
-        &t.recon_u,
-        &t.recon_v,
+        &t.recon.take_wide(),
+        &t.recon_u.take_wide(),
+        &t.recon_v.take_wide(),
         t.stride,
         t.stride_uv,
         cfg,
         p,
     );
-    t.recon = y;
+    t.recon.put_wide(y);
     t.stride = s;
-    t.recon_u = u;
-    t.recon_v = v;
+    t.recon_u.put_wide(u);
+    t.recon_v.put_wide(v);
     t.stride_uv = s_uv;
 }
 
@@ -1153,8 +1163,8 @@ pub(crate) fn run_post_filters(t: &mut KfTileDecode, cfg: &KfTileConfig, header:
     // rows are the context). Superres ALWAYS takes the non-optimized arm (even
     // with CDEF off) because the boundary rows must be upscaled.
     let optimized_lr = !do_cdef && !do_superres;
-    let mut pre_cdef =
-        (do_lr && !optimized_lr).then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
+    let mut pre_cdef = (do_lr && !optimized_lr)
+        .then(|| (t.recon.to_u16(), t.recon_u.to_u16(), t.recon_v.to_u16()));
     if do_cdef {
         apply_cdef(t, cfg, header);
     }
@@ -1392,7 +1402,10 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
 
     let mut y = vec![0u16; width * height];
     for r in 0..height {
-        y[r * width..(r + 1) * width].copy_from_slice(&t.recon[r * t.stride..r * t.stride + width]);
+        // Widening crop: the `FrameDecode` output surface stays `u16`; a bd8
+        // (`LowBd`) plane widens bit-exactly here (see `crate::plane`).
+        t.recon
+            .copy_row_wide(r * t.stride, &mut y[r * width..(r + 1) * width]);
     }
     let (width_uv, height_uv) = if cfg.monochrome {
         (0, 0)
@@ -1402,10 +1415,10 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
     let mut u = vec![0u16; width_uv * height_uv];
     let mut v = vec![0u16; width_uv * height_uv];
     for r in 0..height_uv {
-        u[r * width_uv..(r + 1) * width_uv]
-            .copy_from_slice(&t.recon_u[r * t.stride_uv..r * t.stride_uv + width_uv]);
-        v[r * width_uv..(r + 1) * width_uv]
-            .copy_from_slice(&t.recon_v[r * t.stride_uv..r * t.stride_uv + width_uv]);
+        t.recon_u
+            .copy_row_wide(r * t.stride_uv, &mut u[r * width_uv..(r + 1) * width_uv]);
+        t.recon_v
+            .copy_row_wide(r * t.stride_uv, &mut v[r * width_uv..(r + 1) * width_uv]);
     }
 
     FrameDecode {
@@ -1575,11 +1588,16 @@ pub fn apply_deblock(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderOb
         mi_cols: cfg.mi_cols,
     };
     let num_planes = if cfg.monochrome { 1 } else { 3 };
+    // Phase A: run the (unchanged) highbd deblock on widened working planes;
+    // bd8 (`LowBd`) narrows back bit-exactly (see `crate::plane`).
+    let mut wy = t.recon.take_wide();
+    let mut wu = t.recon_u.take_wide();
+    let mut wv = t.recon_v.take_wide();
     let mut buf = LfFrameBuf {
-        y: &mut t.recon,
+        y: &mut wy,
         y_stride: t.stride,
-        u: &mut t.recon_u,
-        v: &mut t.recon_v,
+        u: &mut wu,
+        v: &mut wv,
         uv_stride: t.stride_uv,
         // CROP dims (dst.width/height in C — set_lpf_parameters skips edges
         // at/past them). Deblock runs in the CODED (downscaled) domain, BEFORE
@@ -1598,6 +1616,9 @@ pub fn apply_deblock(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderOb
         bd: cfg.bd,
     };
     loop_filter_frame(&mut buf, &grid, &params, 0, num_planes);
+    t.recon.put_wide(wy);
+    t.recon_u.put_wide(wu);
+    t.recon_v.put_wide(wv);
 }
 
 /// Run [`aom_dsp::cdef::frame::cdef_frame`] over the (mi-aligned, deblocked)
@@ -1661,14 +1682,15 @@ pub fn apply_cdef(t: &mut KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) 
         skip_txfm: &skip,
         unit_strength: &unit_strength,
     };
-    cdef_frame(
-        &mut t.recon,
-        t.stride,
-        &mut t.recon_u,
-        &mut t.recon_v,
-        t.stride_uv,
-        &params,
-    );
+    // Phase A: run the (unchanged) highbd CDEF on widened working planes;
+    // bd8 (`LowBd`) narrows back bit-exactly (see `crate::plane`).
+    let mut wy = t.recon.take_wide();
+    let mut wu = t.recon_u.take_wide();
+    let mut wv = t.recon_v.take_wide();
+    cdef_frame(&mut wy, t.stride, &mut wu, &mut wv, t.stride_uv, &params);
+    t.recon.put_wide(wy);
+    t.recon_u.put_wide(wu);
+    t.recon_v.put_wide(wv);
 }
 
 #[cfg(all(test, feature = "whereat"))]

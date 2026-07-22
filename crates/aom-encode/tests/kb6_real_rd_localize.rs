@@ -729,8 +729,8 @@ fn localize_real_speed(
     let mut recon_div: Option<(usize, usize, u16, u16)> = None;
     'rec: for row in 0..t_real.height.min(t_ours.height) {
         for col in 0..t_real.width.min(t_ours.width) {
-            let rv = t_real.recon[row * t_real.stride + col];
-            let ovv = t_ours.recon[row * t_ours.stride + col];
+            let rv = t_real.recon.px(row * t_real.stride + col);
+            let ovv = t_ours.recon.px(row * t_ours.stride + col);
             if rv != ovv {
                 recon_div = Some((row, col, rv, ovv));
                 break 'rec;

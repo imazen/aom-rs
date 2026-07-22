@@ -443,28 +443,30 @@ fn ungrained_planes(
     let do_cdef = cd.cdef_bits != 0 || cd.cdef_strengths[0] != 0 || cd.cdef_uv_strengths[0] != 0;
     let do_lr = cfg.lr.any_enabled();
     let optimized_lr = !do_cdef;
-    let pre_cdef =
-        (do_lr && !optimized_lr).then(|| (t.recon.clone(), t.recon_u.clone(), t.recon_v.clone()));
+    let pre_cdef = (do_lr && !optimized_lr)
+        .then(|| (t.recon.to_u16(), t.recon_u.to_u16(), t.recon_v.to_u16()));
     if do_cdef {
         apply_cdef(&mut t, &cfg, &header);
     }
     if do_lr {
         apply_restoration(&mut t, &cfg, pre_cdef.as_ref(), optimized_lr);
     }
+    let ry = t.recon.to_u16();
     let mut y = vec![0u16; w * h];
     for r in 0..h {
-        y[r * w..(r + 1) * w].copy_from_slice(&t.recon[r * t.stride..r * t.stride + w]);
+        y[r * w..(r + 1) * w].copy_from_slice(&ry[r * t.stride..r * t.stride + w]);
     }
     if mono {
         return (y, Vec::new(), Vec::new());
     }
     let cw = (w + ss_x as usize) >> ss_x;
     let ch = (h + ss_y as usize) >> ss_y;
+    let (ru, rv) = (t.recon_u.to_u16(), t.recon_v.to_u16());
     let mut u = vec![0u16; cw * ch];
     let mut v = vec![0u16; cw * ch];
     for r in 0..ch {
-        u[r * cw..(r + 1) * cw].copy_from_slice(&t.recon_u[r * t.stride_uv..r * t.stride_uv + cw]);
-        v[r * cw..(r + 1) * cw].copy_from_slice(&t.recon_v[r * t.stride_uv..r * t.stride_uv + cw]);
+        u[r * cw..(r + 1) * cw].copy_from_slice(&ru[r * t.stride_uv..r * t.stride_uv + cw]);
+        v[r * cw..(r + 1) * cw].copy_from_slice(&rv[r * t.stride_uv..r * t.stride_uv + cw]);
     }
     (y, u, v)
 }
