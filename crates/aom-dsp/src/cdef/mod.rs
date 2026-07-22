@@ -267,6 +267,63 @@ pub fn cdef_filter_block_16(
     );
 }
 
+/// bd8 lowbd counterpart of [`cdef_filter_block_16`]: the `cdef_filter_8_*`
+/// path — identical filter math, `(uint8_t)y` store to a `u8` destination
+/// plane. `in_buf` stays `u16` (the CDEF work buffer holds the
+/// [`CDEF_VERY_LARGE`] sentinel at every bit depth, exactly as C's 16-bit
+/// `src`); only the OUTPUT plane narrows.
+///
+/// Reuses the whole [`cdef_filter_block_16`] SIMD+scalar dispatch verbatim by
+/// filtering into a per-block `u16` scratch (a CDEF block is at most 8x8), then
+/// narrows to `u8`. Byte-identical to the C lowbd store: C computes the SAME
+/// i32 `y` and stores `(uint8_t)y` (low byte); the port's `y as u16` scratch
+/// then `as u8` takes the same low byte. For a valid bd8 CDEF result
+/// (in `[0, 255]` — see [`cdef_filter_block_16`]) the narrowing is the identity;
+/// even out of range it matches C bit-for-bit. Pinned by `cdef_lowbd_diff.rs`.
+#[allow(clippy::too_many_arguments)]
+pub fn cdef_filter_block_u8(
+    dst: &mut [u8],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_width: usize,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    let mut scratch = [0u16; 64]; // max CDEF block is 8x8 luma
+    let n = block_width * block_height;
+    cdef_filter_block_16(
+        &mut scratch[..n],
+        0,
+        block_width,
+        in_buf,
+        in_off,
+        pri_strength,
+        sec_strength,
+        dir,
+        pri_damping,
+        sec_damping,
+        coeff_shift,
+        block_width,
+        block_height,
+        enable_primary,
+        enable_secondary,
+    );
+    for i in 0..block_height {
+        for j in 0..block_width {
+            dst[dst_off + i * dstride + j] = scratch[i * block_width + j] as u8;
+        }
+    }
+}
+
 /// The scalar core with the u16 store, NEVER SIMD-routed — the reference
 /// side of the SIMD-vs-scalar differential (`cdef_filter_simd_diff.rs`).
 /// Same contract as [`cdef_filter_block_16`].

@@ -40,7 +40,134 @@
 //! influence output, a property cdef_frame_diff.rs pins by giving the two
 //! sides DIFFERENT padding).
 
-use crate::cdef::{cdef_filter_block_16, cdef_find_dir, CDEF_BSTRIDE, CDEF_VERY_LARGE};
+use crate::cdef::{
+    cdef_filter_block_16, cdef_filter_block_u8, cdef_find_dir, CDEF_BSTRIDE, CDEF_VERY_LARGE,
+};
+
+/// Plane element type for the CDEF walk. The internal work buffers
+/// (`src` / `linebuf` / `colbuf`) are ALWAYS `u16` — the CDEF domain needs the
+/// [`CDEF_VERY_LARGE`] sentinel and the taps accumulate in i32/i16 regardless
+/// of bit depth, exactly as C's 16-bit `src`. ONLY the reconstruction plane
+/// differs between the highbd (`u16`, bd 8/10/12) and lowbd (`u8`, bd8) paths:
+/// a plane sample is widened to `u16` on the way IN (line-buffer + `src`
+/// priming), and the filtered result is narrowed on the way OUT. The two
+/// monomorphizations (`u16` = highbd, `u8` = lowbd) share the entire walk; the
+/// `u16` one is behaviour-identical to the pre-lowbd code and is pinned by
+/// `cdef_frame_diff.rs` + the conformance corpus.
+pub trait CdefPixel: Copy {
+    /// Widen one `h`-element plane row into the u16 work buffer.
+    fn widen_row(dst: &mut [u16], src: &[Self]);
+    /// Filter one block from the u16 `src` work buffer into this plane type —
+    /// the pixel-touching store (the shared i32/i16 filter math is reused).
+    #[allow(clippy::too_many_arguments)]
+    fn filter_block(
+        dst: &mut [Self],
+        dst_off: usize,
+        dstride: usize,
+        in_buf: &[u16],
+        in_off: usize,
+        pri_strength: i32,
+        sec_strength: i32,
+        dir: i32,
+        pri_damping: i32,
+        sec_damping: i32,
+        coeff_shift: i32,
+        block_width: usize,
+        block_height: usize,
+        enable_primary: bool,
+        enable_secondary: bool,
+    );
+}
+
+impl CdefPixel for u16 {
+    #[inline]
+    fn widen_row(dst: &mut [u16], src: &[u16]) {
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn filter_block(
+        dst: &mut [u16],
+        dst_off: usize,
+        dstride: usize,
+        in_buf: &[u16],
+        in_off: usize,
+        pri_strength: i32,
+        sec_strength: i32,
+        dir: i32,
+        pri_damping: i32,
+        sec_damping: i32,
+        coeff_shift: i32,
+        block_width: usize,
+        block_height: usize,
+        enable_primary: bool,
+        enable_secondary: bool,
+    ) {
+        cdef_filter_block_16(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_width,
+            block_height,
+            enable_primary,
+            enable_secondary,
+        );
+    }
+}
+
+impl CdefPixel for u8 {
+    #[inline]
+    fn widen_row(dst: &mut [u16], src: &[u8]) {
+        for (d, s) in dst.iter_mut().zip(src) {
+            *d = *s as u16;
+        }
+    }
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn filter_block(
+        dst: &mut [u8],
+        dst_off: usize,
+        dstride: usize,
+        in_buf: &[u16],
+        in_off: usize,
+        pri_strength: i32,
+        sec_strength: i32,
+        dir: i32,
+        pri_damping: i32,
+        sec_damping: i32,
+        coeff_shift: i32,
+        block_width: usize,
+        block_height: usize,
+        enable_primary: bool,
+        enable_secondary: bool,
+    ) {
+        cdef_filter_block_u8(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_width,
+            block_height,
+            enable_primary,
+            enable_secondary,
+        );
+    }
+}
 
 pub const CDEF_SEC_STRENGTHS: i32 = 4;
 const MI_SIZE_64X64: i32 = 16;
@@ -81,16 +208,16 @@ fn align16(v: i32) -> i32 {
     (v + 15) & !15
 }
 
-struct Planes<'p> {
-    y: &'p mut [u16],
+struct Planes<'p, P> {
+    y: &'p mut [P],
     y_stride: usize,
-    u: &'p mut [u16],
-    v: &'p mut [u16],
+    u: &'p mut [P],
+    v: &'p mut [P],
     uv_stride: usize,
 }
 
-impl Planes<'_> {
-    fn get(&mut self, plane: usize) -> (&mut [u16], usize) {
+impl<P> Planes<'_, P> {
+    fn get(&mut self, plane: usize) -> (&mut [P], usize) {
         match plane {
             0 => (&mut *self.y, self.y_stride),
             1 => (&mut *self.u, self.uv_stride),
@@ -119,6 +246,29 @@ fn copy_rect(
 fn fill_rect(dst: &mut [u16], off: usize, dstride: usize, v: usize, h: usize, x: u16) {
     for i in 0..v {
         dst[off + i * dstride..off + i * dstride + h].fill(x);
+    }
+}
+
+/// [`copy_rect`] shape but the source is a pixel plane of `P`, widened to the
+/// u16 work-buffer domain. The ONLY plane-touching read the walk performs
+/// (line-buffer saves + the `src` "current superblock" prime). For `P = u16`
+/// each row is a `copy_from_slice`, byte-identical to [`copy_rect`].
+#[allow(clippy::too_many_arguments)]
+fn copy_plane_widen<P: CdefPixel>(
+    dst: &mut [u16],
+    doff: usize,
+    dstride: usize,
+    src: &[P],
+    soff: usize,
+    sstride: usize,
+    v: usize,
+    h: usize,
+) {
+    for i in 0..v {
+        P::widen_row(
+            &mut dst[doff + i * dstride..doff + i * dstride + h],
+            &src[soff + i * sstride..soff + i * sstride + h],
+        );
     }
 }
 
@@ -186,9 +336,9 @@ fn compute_sb_list(p: &CdefFrameParams, fbr: i32, fbc: i32, fb: &mut FbInfo) -> 
 /// dir/var reset, and the ping-pong top/bottom line-buffer copies (saved
 /// PRE-filter pixels of the last/first 2 rows around the next fb row).
 #[allow(clippy::too_many_arguments)]
-fn init_fb_row(
+fn init_fb_row<P: CdefPixel>(
     p: &CdefFrameParams,
-    planes: &mut Planes,
+    planes: &mut Planes<P>,
     linebuf: &mut [Vec<u16>; 3],
     fb: &mut FbInfo,
     fbr: i32,
@@ -221,7 +371,7 @@ fn init_fb_row(
         fb.bot_off[plane] = 2 * VB * stride;
         if fbr != nvfb - 1 {
             // top line buffer copy (last 2 rows of the current fb row).
-            copy_rect(
+            copy_plane_widen(
                 &mut linebuf[plane],
                 write_top,
                 stride,
@@ -233,7 +383,7 @@ fn init_fb_row(
             );
             // bottom line buffer copy (first 2 rows of the next fb row).
             let bot = fb.bot_off[plane];
-            copy_rect(
+            copy_plane_widen(
                 &mut linebuf[plane],
                 bot,
                 stride,
@@ -263,9 +413,9 @@ struct ColInfo {
 /// borders (8 left/right, 2 top/bottom) from frame / linebuf / colbuf, with
 /// CDEF_VERY_LARGE at frame edges. Saves this fb's right columns into colbuf.
 #[allow(clippy::too_many_arguments)]
-fn prepare_fb(
+fn prepare_fb<P: CdefPixel>(
     p: &CdefFrameParams,
-    planes: &mut Planes,
+    planes: &mut Planes<P>,
     linebuf: &[Vec<u16>; 3],
     colbuf: &mut [Vec<u16>; 3],
     src: &mut [u16],
@@ -296,8 +446,9 @@ fn prepare_fb(
 
     let (buf, pstride) = planes.get(plane);
     // Current superblock pixels (and the unfiltered right border; the left
-    // border too when the left fb was NOT filtered).
-    copy_rect(
+    // border too when the left fb was NOT filtered). The one plane->work-buffer
+    // read: widened to u16 for the lowbd (u8) plane, a memcpy for u16.
+    copy_plane_widen(
         src,
         uz((VB * CDEF_BSTRIDE + HB) as i32 + cstart),
         CDEF_BSTRIDE,
@@ -443,8 +594,8 @@ fn adjust_strength(strength: i32, var: i32) -> i32 {
 /// origin (`in` in C) sits at `VB*CDEF_BSTRIDE + HB` and the filter taps
 /// reach backwards from it into the borders.
 #[allow(clippy::too_many_arguments)]
-fn filter_fb(
-    dst: &mut [u16],
+fn filter_fb<P: CdefPixel>(
+    dst: &mut [P],
     dst_off: usize,
     dstride: usize,
     src: &[u16],
@@ -495,7 +646,7 @@ fn filter_fb(
         //   0: pri+sec, 1: pri only, 2: sec only, 3: neither.
         let enable_primary = t != 0;
         let enable_secondary = sec_strength != 0;
-        cdef_filter_block_16(
+        P::filter_block(
             dst,
             dst_off + (by << bh_log2) * dstride + (bx << bw_log2),
             dstride,
@@ -518,9 +669,9 @@ fn filter_fb(
 /// `cdef_fb_col`: strength selection, skip-list, then per-plane
 /// prepare+filter. Updates `cdef_left` per plane.
 #[allow(clippy::too_many_arguments)]
-fn fb_col(
+fn fb_col<P: CdefPixel>(
     p: &CdefFrameParams,
-    planes: &mut Planes,
+    planes: &mut Planes<P>,
     linebuf: &[Vec<u16>; 3],
     colbuf: &mut [Vec<u16>; 3],
     src: &mut [u16],
@@ -614,17 +765,50 @@ fn fb_col(
     }
 }
 
-/// `av1_cdef_frame` — apply CDEF to the (deblocked) frame planes in place.
-///
-/// `y`/`u`/`v` are the mi-aligned reconstruction planes (u16 at every bit
-/// depth); `u`/`v` are ignored when `num_planes == 1`. Buffer requirements
-/// (asserted): `y_stride >= align16(mi_cols * 4)`, `uv_stride >= align16(
-/// mi_cols * 4) >> ss_x`, with at least `mi_rows * 4` (>> ss_y) rows.
+/// `av1_cdef_frame` — apply CDEF to the (deblocked) frame planes in place, the
+/// HIGHBD (`u16`) entry (bd 8/10/12). The mi-aligned recon planes are `u16`;
+/// `u`/`v` are ignored when `num_planes == 1`. Buffer requirements (asserted):
+/// `y_stride >= align16(mi_cols * 4)`, `uv_stride >= align16(mi_cols * 4) >>
+/// ss_x`, with at least `mi_rows * 4` (>> ss_y) rows.
 pub fn cdef_frame(
     y: &mut [u16],
     y_stride: usize,
     u: &mut [u16],
     v: &mut [u16],
+    uv_stride: usize,
+    p: &CdefFrameParams,
+) {
+    cdef_frame_generic(y, y_stride, u, v, uv_stride, p);
+}
+
+/// bd8 LOWBD (`u8`) counterpart of [`cdef_frame`]. The recon planes are `u8`
+/// (the second, parallel 8-bit reconstruction path — see [`crate::lowbd`]);
+/// the CDEF work buffers stay `u16` (the domain needs [`CDEF_VERY_LARGE`]), so
+/// the walk is the same and only the plane read (widen `u8 -> u16`) and the
+/// filter store (narrow `u16 -> u8`, the `cdef_filter_8_*` path) differ.
+/// Byte-identical to running [`cdef_frame`] on the same pixels held as `u16`
+/// AND to the C lowbd `av1_cdef_frame` — pinned by `cdef_lowbd_diff.rs`.
+/// `p.bit_depth` must be 8 (`coeff_shift == 0`). Same buffer requirements as
+/// [`cdef_frame`].
+pub fn cdef_frame_u8(
+    y: &mut [u8],
+    y_stride: usize,
+    u: &mut [u8],
+    v: &mut [u8],
+    uv_stride: usize,
+    p: &CdefFrameParams,
+) {
+    debug_assert_eq!(p.bit_depth, 8, "cdef_frame_u8 is the bd8 lowbd path");
+    cdef_frame_generic(y, y_stride, u, v, uv_stride, p);
+}
+
+/// The pixel-type-generic CDEF frame walk backing both [`cdef_frame`] (`u16`,
+/// highbd) and [`cdef_frame_u8`] (`u8`, lowbd bd8). See [`CdefPixel`].
+fn cdef_frame_generic<P: CdefPixel>(
+    y: &mut [P],
+    y_stride: usize,
+    u: &mut [P],
+    v: &mut [P],
     uv_stride: usize,
     p: &CdefFrameParams,
 ) {
