@@ -25,6 +25,12 @@
 
 ### QUEUED BREAKING CHANGES
 
+- **`zenav1-aom-decode`: `KfTileDecode.recon/recon_u/recon_v` are now
+  `ReconPlane { LowBd(Vec<u8>), HighBd(Vec<u16>) }` instead of `Vec<u16>`**
+  (bd8 frames store `u8` planes; `ReconPlane::to_u16()`/`px()` widen
+  bit-exactly). `FrameDecode` and `RefFrame` stay `u16` — only consumers
+  reading the pre-filter tile planes directly must migrate. (5336e65)
+
 - **`zenav1-aom-decode` public entry points now return `Result<_, DecodeError>`
   instead of `Result<_, String>`.** `decode_frame_obus` / `decode_frames` (and
   the parse helpers) carry a structured, category-bearing `DecodeError` enum
@@ -53,6 +59,13 @@
   limits / stop / whereat / alloc all default to unchanged behavior).
 
 ### Changed
+
+- **Decoder bd8 recon planes are stored as `u8` (`ReconPlane::LowBd`), Phase A
+  of the lowbd pipeline** — every kernel still runs the unchanged highbd path
+  via byte-identical widen/narrow delegation (no u8 kernel wired yet), so
+  decoded output is bit-identical at every bit depth (full decode suite green
+  in default + `AOM_FORCE_SCALAR=1`); bd10/12 keep `u16` planes untouched.
+  Phase B swaps the delegation arms for the landed `*_u8` kernels. (5336e65)
 
 - **Consolidated the 13 DSP/entropy kernel crates into one `zenav1-aom-dsp`**
   (transform, quant, txb, cdef, restore, intra, loopfilter, dist, inter,
