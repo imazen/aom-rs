@@ -790,6 +790,22 @@ pub fn cdef_frame(
 /// AND to the C lowbd `av1_cdef_frame` — pinned by `cdef_lowbd_diff.rs`.
 /// `p.bit_depth` must be 8 (`coeff_shift == 0`). Same buffer requirements as
 /// [`cdef_frame`].
+///
+/// # Performance (MEASURED, benchmarks/cdef_lowbd_ir_2026-07-22.md)
+///
+/// Unlike the inverse transform, CDEF gets **no lowbd speed-up**: its filter
+/// works in `u16` (the [`CDEF_VERY_LARGE`] sentinel forbids narrowing), and
+/// that filter is ~72% of a filter-heavy pass — identical work at every plane
+/// type. So the u8 plane only saves the plane<->buffer conversions, which are a
+/// small fraction. Callgrind (q32-shaped 3-frame workload): `cdef_frame_u8` is
+/// **6.6% MORE Ir** than DELEGATING (widen the whole `u8` plane to `u16`, run
+/// [`cdef_frame`], narrow back) — the u8 narrow store cannot vectorise as well
+/// as the `u16` vector store (magetypes has no `u16 -> u8` pack), and the per-fb
+/// widen costs more than delegation's amortised whole-plane widen + memcpy
+/// prime. **At the tile-plane flip, prefer delegating CDEF** to using this
+/// entry; it exists as the byte-identical reference and for callers that must
+/// avoid the transient `u16` plane allocation. (This IS a real improvement over
+/// a naive per-block-`u16`-scratch store, which was 23% slower than delegation.)
 pub fn cdef_frame_u8(
     y: &mut [u8],
     y_stride: usize,

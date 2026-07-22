@@ -459,3 +459,402 @@ fn cdef_filter_16_w8_impl(
     }
 }
 
+// ===== bd8 lowbd (u8) direct-store variants =====
+//
+// Byte-for-byte the SAME i16-domain filter math as the `cdef_filter_16_*`
+// kernels above (loads still come from the u16 `in_buf` work buffer); ONLY the
+// destination store narrows the i16 result to `u8` — the `cdef_filter_8_*`
+// path. Mirrors the exemplar `transform::simd::try_inv_col_pass_u8` (share the
+// math, duplicate only the pixel store). Pinned byte-identical to the u16
+// kernels AND to C lowbd by `cdef_lowbd_diff.rs`. Avoids the per-block u16
+// scratch round-trip the first `cdef_filter_block_u8` used (measured 582M Ir /
+// ~19% of a filter-heavy CDEF pass, benchmarks/cdef_lowbd_ir_2026-07-22.md).
+
+/// Width-8 u8-store dispatch entry, used by [`crate::cdef::cdef_filter_block_u8`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cdef_filter_8_w8(
+    dst: &mut [u8],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    let _ = crate::dispatch::scalar_forced(); // one-time AOM_FORCE_SCALAR pin
+    incant!(
+        cdef_filter_8_w8_impl(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_height,
+            enable_primary,
+            enable_secondary
+        ),
+        [v3, neon, wasm128, scalar]
+    )
+}
+
+/// Scalar tier = the transcribed core, verbatim (width-8 u8 store shape).
+#[allow(clippy::too_many_arguments)]
+fn cdef_filter_8_w8_impl_scalar(
+    _t: archmage::ScalarToken,
+    dst: &mut [u8],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    crate::cdef::cdef_filter_block_core(
+        in_buf,
+        in_off,
+        pri_strength,
+        sec_strength,
+        dir,
+        pri_damping,
+        sec_damping,
+        coeff_shift,
+        8,
+        block_height,
+        enable_primary,
+        enable_secondary,
+        |i, j, y| dst[dst_off + i * dstride + j] = y as u8,
+    );
+}
+
+/// Width-4 u8-store dispatch entry (two rows per 8-lane vector; even height).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cdef_filter_8_w4(
+    dst: &mut [u8],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    let _ = crate::dispatch::scalar_forced(); // one-time AOM_FORCE_SCALAR pin
+    incant!(
+        cdef_filter_8_w4_impl(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_height,
+            enable_primary,
+            enable_secondary
+        ),
+        [v3, neon, wasm128, scalar]
+    )
+}
+
+/// Scalar tier = the transcribed core, verbatim (width-4 u8 store shape).
+#[allow(clippy::too_many_arguments)]
+fn cdef_filter_8_w4_impl_scalar(
+    _t: archmage::ScalarToken,
+    dst: &mut [u8],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    crate::cdef::cdef_filter_block_core(
+        in_buf,
+        in_off,
+        pri_strength,
+        sec_strength,
+        dir,
+        pri_damping,
+        sec_damping,
+        coeff_shift,
+        4,
+        block_height,
+        enable_primary,
+        enable_secondary,
+        |i, j, y| dst[dst_off + i * dstride + j] = y as u8,
+    );
+}
+
+#[magetypes(define(i16x8, u16x8), v3, neon, wasm128, -scalar)]
+#[allow(clippy::too_many_arguments)]
+fn cdef_filter_8_w4_impl(
+    token: Token,
+    dst: &mut [u8],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    assert!(block_height % 2 == 0, "caller routes odd heights to scalar");
+    let clipping_required = enable_primary && enable_secondary;
+    let s = CDEF_BSTRIDE as i32;
+    let pri_taps = &PRI_TAPS[((pri_strength >> coeff_shift) & 1) as usize];
+    let sec_taps = &SEC_TAPS;
+    let pri_shift = if pri_strength != 0 {
+        (pri_damping - get_msb(pri_strength as u32)).max(0)
+    } else {
+        0
+    };
+    let sec_shift = if sec_strength != 0 {
+        (sec_damping - get_msb(sec_strength as u32)).max(0)
+    } else {
+        0
+    };
+
+    let zero = i16x8::zero(token);
+    let eight = i16x8::splat(token, 8);
+    let vl = i16x8::splat(token, CDEF_VERY_LARGE as i16);
+    let pri_t = i16x8::splat(token, pri_strength as i16);
+    let sec_t = i16x8::splat(token, sec_strength as i16);
+
+    let constrain_v = |d: i16x8, thr: i16x8, shift: i32| -> i16x8 {
+        let m = d.shr_arithmetic_const::<15>();
+        let a = (d ^ m) - m;
+        let c = (thr - shr_by!(a, shift)).clamp(zero, a);
+        (c ^ m) - m
+    };
+
+    let load2 = |idx: i32| -> i16x8 {
+        let a = idx as usize;
+        let b = (idx + s) as usize;
+        let mut arr = [0u16; 8];
+        arr[..4].copy_from_slice(&in_buf[a..a + 4]);
+        arr[4..].copy_from_slice(&in_buf[b..b + 4]);
+        u16x8::from_array(token, arr).bitcast_i16x8()
+    };
+
+    let mut i = 0i32;
+    while (i as usize) < block_height {
+        let base = in_off as i32 + i * s;
+        let x = load2(base);
+        let mut sum = zero;
+        let mut maxv = x;
+        let mut minv = x;
+        for k in 0..2usize {
+            if enable_primary {
+                let off = cdef_dir(dir, k);
+                let p0 = load2(base + off);
+                let p1 = load2(base - off);
+                if pri_strength != 0 {
+                    let tap = i16x8::splat(token, pri_taps[k] as i16);
+                    sum = sum + tap * constrain_v(p0 - x, pri_t, pri_shift);
+                    sum = sum + tap * constrain_v(p1 - x, pri_t, pri_shift);
+                }
+                if clipping_required {
+                    maxv = maxv.max(i16x8::blend(p0.simd_eq(vl), zero, p0));
+                    maxv = maxv.max(i16x8::blend(p1.simd_eq(vl), zero, p1));
+                    minv = minv.min(p0);
+                    minv = minv.min(p1);
+                }
+            }
+            if enable_secondary {
+                let o0 = cdef_dir(dir + 2, k);
+                let o1 = cdef_dir(dir - 2, k);
+                let s0 = load2(base + o0);
+                let s1 = load2(base - o0);
+                let s2 = load2(base + o1);
+                let s3 = load2(base - o1);
+                if clipping_required {
+                    maxv = maxv.max(i16x8::blend(s0.simd_eq(vl), zero, s0));
+                    maxv = maxv.max(i16x8::blend(s1.simd_eq(vl), zero, s1));
+                    maxv = maxv.max(i16x8::blend(s2.simd_eq(vl), zero, s2));
+                    maxv = maxv.max(i16x8::blend(s3.simd_eq(vl), zero, s3));
+                    minv = minv.min(s0).min(s1).min(s2).min(s3);
+                }
+                if sec_strength != 0 {
+                    let tap = i16x8::splat(token, sec_taps[k] as i16);
+                    sum = sum + tap * constrain_v(s0 - x, sec_t, sec_shift);
+                    sum = sum + tap * constrain_v(s1 - x, sec_t, sec_shift);
+                    sum = sum + tap * constrain_v(s2 - x, sec_t, sec_shift);
+                    sum = sum + tap * constrain_v(s3 - x, sec_t, sec_shift);
+                }
+            }
+        }
+        let m = sum.shr_arithmetic_const::<15>();
+        let adj = (sum + m + eight).shr_arithmetic_const::<4>();
+        let mut y = x + adj;
+        if clipping_required {
+            y = y.max(minv).min(maxv);
+        }
+        // ONLY difference from cdef_filter_16_w4_impl: narrow the i16 result to
+        // u8 (low byte == the C lowbd `(uint8_t)y` store for an in-domain result).
+        let out = y.bitcast_u16x8().to_array();
+        let r0 = dst_off + i as usize * dstride;
+        let r1 = dst_off + (i as usize + 1) * dstride;
+        for j in 0..4 {
+            dst[r0 + j] = out[j] as u8;
+            dst[r1 + j] = out[4 + j] as u8;
+        }
+        i += 2;
+    }
+}
+
+#[magetypes(define(i16x8, u16x8), v3, neon, wasm128, -scalar)]
+#[allow(clippy::too_many_arguments)]
+fn cdef_filter_8_w8_impl(
+    token: Token,
+    dst: &mut [u8],
+    dst_off: usize,
+    dstride: usize,
+    in_buf: &[u16],
+    in_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: i32,
+    pri_damping: i32,
+    sec_damping: i32,
+    coeff_shift: i32,
+    block_height: usize,
+    enable_primary: bool,
+    enable_secondary: bool,
+) {
+    let clipping_required = enable_primary && enable_secondary;
+    let s = CDEF_BSTRIDE as i32;
+    let pri_taps = &PRI_TAPS[((pri_strength >> coeff_shift) & 1) as usize];
+    let sec_taps = &SEC_TAPS;
+    let pri_shift = if pri_strength != 0 {
+        (pri_damping - get_msb(pri_strength as u32)).max(0)
+    } else {
+        0
+    };
+    let sec_shift = if sec_strength != 0 {
+        (sec_damping - get_msb(sec_strength as u32)).max(0)
+    } else {
+        0
+    };
+
+    let zero = i16x8::zero(token);
+    let eight = i16x8::splat(token, 8);
+    let vl = i16x8::splat(token, CDEF_VERY_LARGE as i16);
+    let pri_t = i16x8::splat(token, pri_strength as i16);
+    let sec_t = i16x8::splat(token, sec_strength as i16);
+
+    let constrain_v = |d: i16x8, thr: i16x8, shift: i32| -> i16x8 {
+        let m = d.shr_arithmetic_const::<15>();
+        let a = (d ^ m) - m;
+        let c = (thr - shr_by!(a, shift)).clamp(zero, a);
+        (c ^ m) - m
+    };
+
+    let load = |idx: i32| -> i16x8 {
+        u16x8::from_slice(token, &in_buf[idx as usize..idx as usize + 8]).bitcast_i16x8()
+    };
+
+    for i in 0..block_height as i32 {
+        let base = in_off as i32 + i * s;
+        let x = load(base);
+        let mut sum = zero;
+        let mut maxv = x;
+        let mut minv = x;
+        for k in 0..2usize {
+            if enable_primary {
+                let off = cdef_dir(dir, k);
+                let p0 = load(base + off);
+                let p1 = load(base - off);
+                if pri_strength != 0 {
+                    let tap = i16x8::splat(token, pri_taps[k] as i16);
+                    sum = sum + tap * constrain_v(p0 - x, pri_t, pri_shift);
+                    sum = sum + tap * constrain_v(p1 - x, pri_t, pri_shift);
+                }
+                if clipping_required {
+                    maxv = maxv.max(i16x8::blend(p0.simd_eq(vl), zero, p0));
+                    maxv = maxv.max(i16x8::blend(p1.simd_eq(vl), zero, p1));
+                    minv = minv.min(p0);
+                    minv = minv.min(p1);
+                }
+            }
+            if enable_secondary {
+                let o0 = cdef_dir(dir + 2, k);
+                let o1 = cdef_dir(dir - 2, k);
+                let s0 = load(base + o0);
+                let s1 = load(base - o0);
+                let s2 = load(base + o1);
+                let s3 = load(base - o1);
+                if clipping_required {
+                    maxv = maxv.max(i16x8::blend(s0.simd_eq(vl), zero, s0));
+                    maxv = maxv.max(i16x8::blend(s1.simd_eq(vl), zero, s1));
+                    maxv = maxv.max(i16x8::blend(s2.simd_eq(vl), zero, s2));
+                    maxv = maxv.max(i16x8::blend(s3.simd_eq(vl), zero, s3));
+                    minv = minv.min(s0).min(s1).min(s2).min(s3);
+                }
+                if sec_strength != 0 {
+                    let tap = i16x8::splat(token, sec_taps[k] as i16);
+                    sum = sum + tap * constrain_v(s0 - x, sec_t, sec_shift);
+                    sum = sum + tap * constrain_v(s1 - x, sec_t, sec_shift);
+                    sum = sum + tap * constrain_v(s2 - x, sec_t, sec_shift);
+                    sum = sum + tap * constrain_v(s3 - x, sec_t, sec_shift);
+                }
+            }
+        }
+        let m = sum.shr_arithmetic_const::<15>();
+        let adj = (sum + m + eight).shr_arithmetic_const::<4>();
+        let mut y = x + adj;
+        if clipping_required {
+            y = y.max(minv).min(maxv);
+        }
+        // ONLY difference from cdef_filter_16_w8_impl: narrow the i16 result to
+        // u8 (low byte == the C lowbd `(uint8_t)y` store for an in-domain result).
+        let out = y.bitcast_u16x8().to_array();
+        let row = dst_off + i as usize * dstride;
+        for j in 0..8 {
+            dst[row + j] = out[j] as u8;
+        }
+    }
+}
+

@@ -273,13 +273,16 @@ pub fn cdef_filter_block_16(
 /// [`CDEF_VERY_LARGE`] sentinel at every bit depth, exactly as C's 16-bit
 /// `src`); only the OUTPUT plane narrows.
 ///
-/// Reuses the whole [`cdef_filter_block_16`] SIMD+scalar dispatch verbatim by
-/// filtering into a per-block `u16` scratch (a CDEF block is at most 8x8), then
-/// narrows to `u8`. Byte-identical to the C lowbd store: C computes the SAME
-/// i32 `y` and stores `(uint8_t)y` (low byte); the port's `y as u16` scratch
-/// then `as u8` takes the same low byte. For a valid bd8 CDEF result
-/// (in `[0, 255]` — see [`cdef_filter_block_16`]) the narrowing is the identity;
-/// even out of range it matches C bit-for-bit. Pinned by `cdef_lowbd_diff.rs`.
+/// Dispatch mirrors [`cdef_filter_block_16`] lane-for-lane: width-8 (the luma
+/// 8x8 bulk of CDEF cost) and even-height width-4 blocks take the SIMD row
+/// kernels — the SAME i16-domain math with a narrowed `u8` store
+/// (`simd::cdef_filter_8_w8` / `_w4`, the "share the math, duplicate only the
+/// store" exemplar pattern); other shapes take the scalar core with a `u8`
+/// store. Byte-identical to the C lowbd store: C computes the SAME i32 `y` and
+/// stores `(uint8_t)y` (low byte); the port takes the same low byte. For a
+/// valid bd8 CDEF result (in `[0, 255]` — see [`cdef_filter_block_16`]) the
+/// narrowing is the identity; even out of range it matches C bit-for-bit.
+/// Pinned by `cdef_lowbd_diff.rs`.
 #[allow(clippy::too_many_arguments)]
 pub fn cdef_filter_block_u8(
     dst: &mut [u8],
@@ -298,12 +301,45 @@ pub fn cdef_filter_block_u8(
     enable_primary: bool,
     enable_secondary: bool,
 ) {
-    let mut scratch = [0u16; 64]; // max CDEF block is 8x8 luma
-    let n = block_width * block_height;
-    cdef_filter_block_16(
-        &mut scratch[..n],
-        0,
-        block_width,
+    if block_width == 8 {
+        simd::cdef_filter_8_w8(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_height,
+            enable_primary,
+            enable_secondary,
+        );
+        return;
+    }
+    if block_width == 4 && block_height % 2 == 0 {
+        simd::cdef_filter_8_w4(
+            dst,
+            dst_off,
+            dstride,
+            in_buf,
+            in_off,
+            pri_strength,
+            sec_strength,
+            dir,
+            pri_damping,
+            sec_damping,
+            coeff_shift,
+            block_height,
+            enable_primary,
+            enable_secondary,
+        );
+        return;
+    }
+    cdef_filter_block_core(
         in_buf,
         in_off,
         pri_strength,
@@ -316,12 +352,8 @@ pub fn cdef_filter_block_u8(
         block_height,
         enable_primary,
         enable_secondary,
+        |i, j, y| dst[dst_off + i * dstride + j] = y as u8,
     );
-    for i in 0..block_height {
-        for j in 0..block_width {
-            dst[dst_off + i * dstride + j] = scratch[i * block_width + j] as u8;
-        }
-    }
 }
 
 /// The scalar core with the u16 store, NEVER SIMD-routed — the reference
