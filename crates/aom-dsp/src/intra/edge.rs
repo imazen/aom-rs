@@ -129,6 +129,19 @@ pub fn upsample_intra_edge(buf: &mut [u8], off: usize, sz: usize) {
     }
 }
 
+/// `filter_intra_edge_corner` (reconintra.c): the lowbd (8-bit) twin of
+/// [`filter_corner_high`] — a 3-tap blend of the top-left corner with the first
+/// above and left samples, written to both corners. The weights sum to 16 and
+/// the inputs are 8-bit, so the rounded `>> 4` result is always `<= 255`; the
+/// `as u8` store is exact and byte-identical to `filter_corner_high` at bd8.
+pub fn filter_corner(above: &mut [u8], left: &mut [u8]) {
+    // s = left_col[0]*5 + above_row[-1]*6 + above_row[0]*5, rounded >> 4.
+    let s = left[1] as i32 * 5 + above[0] as i32 * 6 + above[1] as i32 * 5;
+    let s = ((s + 8) >> 4) as u8;
+    above[0] = s;
+    left[0] = s;
+}
+
 /// `highbd_filter_intra_edge_corner` (reconintra.c): 3-tap blend of the top-left
 /// corner with the first above and left samples, written to both corners.
 /// `above`/`left` are `[-1..]` views — index 0 is the corner (`above_row[-1]` /

@@ -1196,3 +1196,584 @@ pub fn build_filter_intra_high(
         bd,
     );
 }
+
+// ===========================================================================
+// bd8 LOWBD (u8 pixel) intra prediction — the second, parallel 8-bit path
+// ===========================================================================
+//
+// `predict_intra_u8` mirrors `predict_intra_high` for `bd == 8` exactly, but
+// reads the reconstructed neighbours as `u8`, conditions the reference edges in
+// `u8`, and stores the predicted block as `u8`. Every intermediate is
+// byte-identical to the highbd (`u16`) bd8 path: the reference edges hold
+// in-range 8-bit samples, the directional two-tap interpolation `(v + 16) >> 5`
+// and the edge filter / upsample `(s + 8) >> 4` stay `<= 255`, and the
+// smooth / paeth / DC arithmetic runs in `i32` exactly as the u16 path. Built
+// entirely on the already-C-verified lowbd leaf kernels ([`dir::z1`] / [`dir::z2`]
+// / [`dir::z3`], [`edge::filter_intra_edge`] / [`edge::upsample_intra_edge`] /
+// [`edge::filter_corner`], the non-directional [`predict`]).
+// `tests/intra_lowbd_diff.rs` asserts `u8_out as u16 == C(bd8)` AND
+// `== predict_intra_high(bd8)` over the full input space (every mode /
+// angle-delta / filter-intra / tx size / availability combo), SIMD and
+// `AOM_FORCE_SCALAR=1`. The highbd path above is byte-untouched (additive only),
+// so bd10/bd12 and the conformance corpus cannot regress.
+
+/// bd8 lowbd twin of [`assemble_nd_edges`]: reads `recon` as `u8`, writes `u8`
+/// reference edges. `base == 128` at bd8, so `base±1 == 127/129` fit `u8`.
+fn assemble_nd_edges_u8(recon: &[u8], g: &NdEdge, above_row: &mut [u8], left_col: &mut [u8]) {
+    let NdEdge {
+        ref_off,
+        ref_stride,
+        av1_mode,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_left_px,
+        base,
+    } = *g;
+
+    let lo = (base + 1) as u8;
+    for e in left_col[..1 + txhpx].iter_mut() {
+        *e = lo;
+    }
+    if n_left_px > 0 {
+        let loff = ref_off - 1;
+        for i in 0..n_left_px {
+            left_col[1 + i] = recon[loff + i * ref_stride];
+        }
+        let last = left_col[n_left_px];
+        for e in left_col[1 + n_left_px..1 + txhpx].iter_mut() {
+            *e = last;
+        }
+    } else if n_top_px > 0 {
+        let a0 = recon[ref_off - ref_stride];
+        for e in left_col[1..1 + txhpx].iter_mut() {
+            *e = a0;
+        }
+    }
+
+    let ao = (base - 1) as u8;
+    for e in above_row[..1 + txwpx].iter_mut() {
+        *e = ao;
+    }
+    if n_top_px > 0 {
+        let aoff = ref_off - ref_stride;
+        above_row[1..1 + n_top_px].copy_from_slice(&recon[aoff..aoff + n_top_px]);
+        let last = above_row[n_top_px];
+        for e in above_row[1 + n_top_px..1 + txwpx].iter_mut() {
+            *e = last;
+        }
+    } else if n_left_px > 0 {
+        let l0 = recon[ref_off - 1];
+        for e in above_row[1..1 + txwpx].iter_mut() {
+            *e = l0;
+        }
+    }
+
+    if av1_mode == 12 {
+        let corner = if n_top_px > 0 && n_left_px > 0 {
+            recon[ref_off - ref_stride - 1]
+        } else if n_top_px > 0 {
+            recon[ref_off - ref_stride]
+        } else if n_left_px > 0 {
+            recon[ref_off - 1]
+        } else {
+            base as u8
+        };
+        above_row[0] = corner;
+        left_col[0] = corner;
+    }
+}
+
+/// bd8 lowbd twin of [`build_non_directional_intra_high`] (DC / SMOOTH* / PAETH).
+/// Assembles `u8` edges then runs the C-verified non-directional [`predict`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_non_directional_intra_u8(
+    recon: &[u8],
+    ref_off: usize,
+    ref_stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    av1_mode: usize,
+    tx_size: usize,
+    n_top_px: usize,
+    n_left_px: usize,
+) {
+    let txwpx = TX_W[tx_size];
+    let txhpx = TX_H[tx_size];
+    let base = 128i32; // 128 << (bd - 8) at bd == 8
+
+    let mut above_buf = [0u8; 1 + 64];
+    let mut left_buf = [0u8; 1 + 64];
+    let g = NdEdge {
+        ref_off,
+        ref_stride,
+        av1_mode,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_left_px,
+        base,
+    };
+    assemble_nd_edges_u8(
+        recon,
+        &g,
+        &mut above_buf[..1 + txwpx],
+        &mut left_buf[..1 + txhpx],
+    );
+
+    let pmode = match av1_mode {
+        0 => match (n_left_px > 0, n_top_px > 0) {
+            (true, true) => DC,
+            (false, true) => DC_TOP,
+            (true, false) => DC_LEFT,
+            (false, false) => DC_128,
+        },
+        9 => SMOOTH,
+        10 => SMOOTH_V,
+        11 => SMOOTH_H,
+        12 => PAETH,
+        _ => unreachable!("build_non_directional_intra_u8: non-directional modes only"),
+    };
+
+    let above = AboveRef(&above_buf[..1 + txwpx]);
+    predict(
+        pmode,
+        dst,
+        dst_stride,
+        txwpx,
+        txhpx,
+        &above,
+        &left_buf[1..1 + txhpx],
+    );
+}
+
+/// bd8 lowbd twin of [`dr_predict_high`]: dispatch the `u8` directional predictor
+/// by angle. `bd` is fixed at 8 (unused by the two-tap kernels — in-range).
+#[allow(clippy::too_many_arguments)]
+fn dr_predict_u8(
+    dst: &mut [u8],
+    dst_stride: usize,
+    tx_size: usize,
+    above_data: &[u8],
+    left_data: &[u8],
+    pad: usize,
+    upsample_above: i32,
+    upsample_left: i32,
+    angle: i32,
+) {
+    let (bw, bh) = (TX_W[tx_size], TX_H[tx_size]);
+    let dx = dir::get_dx(angle);
+    let dy = dir::get_dy(angle);
+    if angle > 0 && angle < 90 {
+        let above = dir::EdgeRef::new(above_data, pad);
+        dir::z1(dst, dst_stride, bw, bh, &above, upsample_above, dx);
+    } else if angle > 90 && angle < 180 {
+        let above = dir::EdgeRef::new(above_data, pad);
+        let left = dir::EdgeRef::new(left_data, pad);
+        dir::z2(
+            dst,
+            dst_stride,
+            bw,
+            bh,
+            &above,
+            &left,
+            upsample_above,
+            upsample_left,
+            dx,
+            dy,
+        );
+    } else if angle > 180 && angle < 270 {
+        let left = dir::EdgeRef::new(left_data, pad);
+        dir::z3(dst, dst_stride, bw, bh, &left, upsample_left, dy);
+    } else if angle == 90 {
+        let above = AboveRef(&above_data[pad - 1..]);
+        predict(V, dst, dst_stride, bw, bh, &above, &left_data[pad..pad + bh]);
+    } else if angle == 180 {
+        let above = AboveRef(&above_data[pad - 1..]);
+        predict(H, dst, dst_stride, bw, bh, &above, &left_data[pad..pad + bh]);
+    }
+}
+
+/// bd8 lowbd twin of [`assemble_dir_edges`]: reads `recon` as `u8`, writes `u8`
+/// reference edges (edge origin at [`DIR_PAD`]). `base == 128` at bd8.
+fn assemble_dir_edges_u8(recon: &[u8], g: &DirEdge, above_data: &mut [u8], left_data: &mut [u8]) {
+    let DirEdge {
+        ref_off,
+        ref_stride,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
+        need_above,
+        need_left,
+        need_above_left,
+        base,
+    } = *g;
+    const P: usize = DIR_PAD;
+
+    let ao = (base - 1) as u8;
+    let lo = (base + 1) as u8;
+    for e in above_data.iter_mut() {
+        *e = ao;
+    }
+    for e in left_data.iter_mut() {
+        *e = lo;
+    }
+
+    if need_left {
+        let num_left = txhpx + if n_bottomleft_px >= 0 { txwpx } else { 0 };
+        if n_left_px > 0 {
+            let loff = ref_off - 1;
+            for i in 0..n_left_px {
+                left_data[P + i] = recon[loff + i * ref_stride];
+            }
+            let mut i = n_left_px;
+            if n_bottomleft_px > 0 {
+                for k in txhpx..txhpx + n_bottomleft_px as usize {
+                    left_data[P + k] = recon[loff + k * ref_stride];
+                }
+                i = txhpx + n_bottomleft_px as usize;
+            }
+            if i < num_left {
+                let last = left_data[P + i - 1];
+                for e in left_data[P + i..P + num_left].iter_mut() {
+                    *e = last;
+                }
+            }
+        } else if n_top_px > 0 {
+            let a0 = recon[ref_off - ref_stride];
+            for e in left_data[P..P + num_left].iter_mut() {
+                *e = a0;
+            }
+        }
+    }
+
+    if need_above {
+        let num_top = txwpx + if n_topright_px >= 0 { txhpx } else { 0 };
+        if n_top_px > 0 {
+            let aoff = ref_off - ref_stride;
+            above_data[P..P + n_top_px].copy_from_slice(&recon[aoff..aoff + n_top_px]);
+            let mut i = n_top_px;
+            if n_topright_px > 0 {
+                let s = aoff + txwpx;
+                above_data[P + txwpx..P + txwpx + n_topright_px as usize]
+                    .copy_from_slice(&recon[s..s + n_topright_px as usize]);
+                i += n_topright_px as usize;
+            }
+            if i < num_top {
+                let last = above_data[P + i - 1];
+                for e in above_data[P + i..P + num_top].iter_mut() {
+                    *e = last;
+                }
+            }
+        } else if n_left_px > 0 {
+            let l0 = recon[ref_off - 1];
+            for e in above_data[P..P + num_top].iter_mut() {
+                *e = l0;
+            }
+        }
+    }
+
+    if need_above_left {
+        let corner = if n_top_px > 0 && n_left_px > 0 {
+            recon[ref_off - ref_stride - 1]
+        } else if n_top_px > 0 {
+            recon[ref_off - ref_stride]
+        } else if n_left_px > 0 {
+            recon[ref_off - 1]
+        } else {
+            base as u8
+        };
+        above_data[P - 1] = corner;
+        left_data[P - 1] = corner;
+    }
+}
+
+/// bd8 lowbd twin of [`build_directional_intra_high`]. Conditions `u8` reference
+/// edges (corner filter / edge low-pass / upsample) then dispatches through
+/// [`dr_predict_u8`]. `bd` fixed at 8.
+#[allow(clippy::too_many_arguments)]
+pub fn build_directional_intra_u8(
+    recon: &[u8],
+    ref_off: usize,
+    ref_stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    p_angle: i32,
+    disable_edge_filter: bool,
+    filter_type: i32,
+    tx_size: usize,
+    n_top_px: usize,
+    n_topright_px: i32,
+    n_left_px: usize,
+    n_bottomleft_px: i32,
+) {
+    let txwpx = TX_W[tx_size];
+    let txhpx = TX_H[tx_size];
+    let base = 128i32; // 128 << (bd - 8) at bd == 8
+
+    let (need_above, need_left, need_above_left) = if p_angle <= 90 {
+        (true, false, true)
+    } else if p_angle < 180 {
+        (true, true, true)
+    } else {
+        (false, true, true)
+    };
+
+    if (!need_above && n_left_px == 0) || (!need_left && n_top_px == 0) {
+        let val = if need_left {
+            if n_top_px > 0 {
+                recon[ref_off - ref_stride]
+            } else {
+                (base + 1) as u8
+            }
+        } else if n_left_px > 0 {
+            recon[ref_off - 1]
+        } else {
+            (base - 1) as u8
+        };
+        for r in 0..txhpx {
+            for e in dst[r * dst_stride..r * dst_stride + txwpx].iter_mut() {
+                *e = val;
+            }
+        }
+        return;
+    }
+
+    let mut above_data = [0u8; NUM_INTRA_NEIGHBOUR_PIXELS];
+    let mut left_data = [0u8; NUM_INTRA_NEIGHBOUR_PIXELS];
+    let g = DirEdge {
+        ref_off,
+        ref_stride,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
+        need_above,
+        need_left,
+        need_above_left,
+        base,
+    };
+    assemble_dir_edges_u8(recon, &g, &mut above_data, &mut left_data);
+
+    let mut upsample_above = 0;
+    let mut upsample_left = 0;
+    if !disable_edge_filter {
+        let need_right = p_angle < 90;
+        let need_bottom = p_angle > 180;
+        if p_angle != 90 && p_angle != 180 {
+            if need_above && need_left && txwpx + txhpx >= 24 {
+                edge::filter_corner(
+                    &mut above_data[DIR_PAD - 1..],
+                    &mut left_data[DIR_PAD - 1..],
+                );
+            }
+            if need_above && n_top_px > 0 {
+                let strength = edge::edge_filter_strength(
+                    txwpx as i32,
+                    txhpx as i32,
+                    p_angle - 90,
+                    filter_type,
+                );
+                let n_px = n_top_px + 1 + if need_right { txhpx } else { 0 };
+                edge::filter_intra_edge(&mut above_data[DIR_PAD - 1..DIR_PAD - 1 + n_px], n_px, strength);
+            }
+            if need_left && n_left_px > 0 {
+                let strength = edge::edge_filter_strength(
+                    txhpx as i32,
+                    txwpx as i32,
+                    p_angle - 180,
+                    filter_type,
+                );
+                let n_px = n_left_px + 1 + if need_bottom { txwpx } else { 0 };
+                edge::filter_intra_edge(&mut left_data[DIR_PAD - 1..DIR_PAD - 1 + n_px], n_px, strength);
+            }
+        }
+        upsample_above = edge::use_upsample(txwpx as i32, txhpx as i32, p_angle - 90, filter_type);
+        if need_above && upsample_above != 0 {
+            let n_px = txwpx + if need_right { txhpx } else { 0 };
+            edge::upsample_intra_edge(&mut above_data, DIR_PAD, n_px);
+        }
+        upsample_left = edge::use_upsample(txhpx as i32, txwpx as i32, p_angle - 180, filter_type);
+        if need_left && upsample_left != 0 {
+            let n_px = txhpx + if need_bottom { txwpx } else { 0 };
+            edge::upsample_intra_edge(&mut left_data, DIR_PAD, n_px);
+        }
+    }
+
+    dr_predict_u8(
+        dst,
+        dst_stride,
+        tx_size,
+        &above_data,
+        &left_data,
+        DIR_PAD,
+        upsample_above,
+        upsample_left,
+        p_angle,
+    );
+}
+
+/// bd8 lowbd twin of [`filter_intra_predict_high`]: the recursive filter-intra
+/// predictor on `u8`. The output clamps to `[0, 255]` (the bd8 `max_v`), so the
+/// `u8` buffer holds every intermediate byte-identically.
+fn filter_intra_predict_u8(
+    dst: &mut [u8],
+    dst_stride: usize,
+    tx_size: usize,
+    above: &[u8],
+    left: &[u8],
+    mode: usize,
+) {
+    let (bw, bh) = (TX_W[tx_size], TX_H[tx_size]);
+    debug_assert!(bw <= 32 && bh <= 32);
+    let mut buf = [[0u8; 33]; 33];
+    for r in 0..bh {
+        buf[r + 1][0] = left[r];
+    }
+    buf[0][..bw + 1].copy_from_slice(&above[..bw + 1]);
+
+    let mut r = 1;
+    while r < bh + 1 {
+        let mut c = 1;
+        while c < bw + 1 {
+            let p = [
+                buf[r - 1][c - 1] as i32,
+                buf[r - 1][c] as i32,
+                buf[r - 1][c + 1] as i32,
+                buf[r - 1][c + 2] as i32,
+                buf[r - 1][c + 3] as i32,
+                buf[r][c - 1] as i32,
+                buf[r + 1][c - 1] as i32,
+            ];
+            for k in 0..8 {
+                let taps = &FILTER_INTRA_TAPS[mode][k];
+                let mut pr = 0i32;
+                for j in 0..7 {
+                    pr += taps[j] as i32 * p[j];
+                }
+                let v = ((pr + 8) >> 4).clamp(0, 255) as u8;
+                buf[r + (k >> 2)][c + (k & 3)] = v;
+            }
+            c += 4;
+        }
+        r += 2;
+    }
+
+    for r in 0..bh {
+        dst[r * dst_stride..r * dst_stride + bw].copy_from_slice(&buf[r + 1][1..bw + 1]);
+    }
+}
+
+/// bd8 lowbd twin of [`build_filter_intra_high`]. Assembles `u8` edges (above,
+/// left and corner all needed) then runs [`filter_intra_predict_u8`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_filter_intra_u8(
+    recon: &[u8],
+    ref_off: usize,
+    ref_stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    filter_intra_mode: usize,
+    tx_size: usize,
+    n_top_px: usize,
+    n_topright_px: i32,
+    n_left_px: usize,
+    n_bottomleft_px: i32,
+) {
+    let txwpx = TX_W[tx_size];
+    let txhpx = TX_H[tx_size];
+    let base = 128i32; // 128 << (bd - 8) at bd == 8
+    let mut above_data = [0u8; NUM_INTRA_NEIGHBOUR_PIXELS];
+    let mut left_data = [0u8; NUM_INTRA_NEIGHBOUR_PIXELS];
+    let g = DirEdge {
+        ref_off,
+        ref_stride,
+        txwpx,
+        txhpx,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
+        need_above: true,
+        need_left: true,
+        need_above_left: true,
+        base,
+    };
+    assemble_dir_edges_u8(recon, &g, &mut above_data, &mut left_data);
+    filter_intra_predict_u8(
+        dst,
+        dst_stride,
+        tx_size,
+        &above_data[DIR_PAD - 1..],
+        &left_data[DIR_PAD..DIR_PAD + txhpx],
+        filter_intra_mode,
+    );
+}
+
+/// bd8 lowbd twin of [`predict_intra_high`] — the per-block intra predict step of
+/// `av1_predict_intra_block` (mode routing + `p_angle` derivation, minus palette /
+/// CfL) for the 8-bit `u8` reconstruction plane. Byte-identical to
+/// `predict_intra_high` at `bd == 8`; the caller passes the same
+/// neighbour-availability counts. `bd` is fixed at 8 (dropped from the signature).
+#[allow(clippy::too_many_arguments)]
+pub fn predict_intra_u8(
+    recon: &[u8],
+    ref_off: usize,
+    ref_stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    mode: usize,
+    angle_delta: i32,
+    use_filter_intra: bool,
+    filter_intra_mode: usize,
+    disable_edge_filter: bool,
+    filter_type: i32,
+    tx_size: usize,
+    n_top_px: usize,
+    n_topright_px: i32,
+    n_left_px: usize,
+    n_bottomleft_px: i32,
+) {
+    let is_dr = (1..=8).contains(&mode); // V_PRED..=D67_PRED
+    if use_filter_intra {
+        build_filter_intra_u8(
+            recon,
+            ref_off,
+            ref_stride,
+            dst,
+            dst_stride,
+            filter_intra_mode,
+            tx_size,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+        );
+    } else if !is_dr {
+        build_non_directional_intra_u8(
+            recon, ref_off, ref_stride, dst, dst_stride, mode, tx_size, n_top_px, n_left_px,
+        );
+    } else {
+        let p_angle = MODE_TO_ANGLE[mode] + angle_delta;
+        build_directional_intra_u8(
+            recon,
+            ref_off,
+            ref_stride,
+            dst,
+            dst_stride,
+            p_angle,
+            disable_edge_filter,
+            filter_type,
+            tx_size,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+        );
+    }
+}
