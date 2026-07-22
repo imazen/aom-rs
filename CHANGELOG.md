@@ -60,6 +60,15 @@
 
 ### Changed
 
+- **Decoder bd8 lowbd Phase B: the u8 kernels are LIVE** — bd8 frames now
+  decode through `predict_intra_u8`, `reconstruct_txb_u8_into`,
+  `av1_iwht4x4_add_u8`, u8 intrabc/palette stores (43b7d60), and the salvaged
+  `loop_filter_frame_u8` deblock walk (3ca1495, 1ae33ee). CDEF stays on the
+  byte-identical widen/narrow delegation by measurement (direct-u8 is +6.61%
+  Ir worse); LR/superres/inter-MC/CfL keep delegation (no u8 kernels).
+  Output bit-identical at every bit depth (full decode suite, default +
+  `AOM_FORCE_SCALAR=1`).
+
 - **Decoder bd8 recon planes are stored as `u8` (`ReconPlane::LowBd`), Phase A
   of the lowbd pipeline** — every kernel still runs the unchanged highbd path
   via byte-identical widen/narrow delegation (no u8 kernel wired yet), so

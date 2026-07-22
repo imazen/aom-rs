@@ -1,3 +1,36 @@
+## bd8 lowbd Phase B: u8 kernels LIVE in the decoder — intra/recon/transform/WHT/deblock wired, CDEF stays delegate-by-measurement (2026-07-22, decoder track)
+
+Blueprint step 2 of `benchmarks/bd8_pipeline_2026-07-22.md`, on top of the Phase A carrier:
+the `LowBd` arms of the tile driver now call the byte-identity-proven u8 leaf kernels
+directly (43b7d603): `predict_intra_u8` (luma + non-CfL chroma, reading the u8 plane —
+the widened-apron delegation is gone on these paths), `reconstruct_txb_u8_into` (all five
+reconstruct sites: intra luma/chroma, inter luma/uv, intrabc var-tx), a new
+`reconstruct_txb_wht_u8` (dequant + `av1_iwht4x4_add_u8`) at both lossless WHT sites,
+u8 intrabc block copies + a u8 twin of the 2-tap intrabc chroma bilinear, and direct-u8
+palette stores. **SALVAGED:** the bd8 deblock u8 kernel + `loop_filter_frame_u8` frame walk
+(measured −5.6% Ir standalone) had been landed as an ORPHANED head (never on main — the
+`jj git push --change` class of loss); rebased onto the stack as 3ca14956 with its
+differentials green (`loopfilter_lowbd_diff`, `lpf_simd_diff`, `lf_apply_diff`) and wired
+into `apply_deblock`'s LowBd arm (1ae33eed). **Still DELEGATED (deliberate):** CDEF —
+direct-u8 measured +6.61% Ir WORSE than delegation (`cdef_lowbd_ir_2026-07-22.md`;
+`cdef_frame_u8` stays the byte-identical reference); LR / superres (no u8 walk); inter
+MC/OBMC/inter-intra + the CfL store + CfL-chroma prediction (u16 kernels — the CfL AC add
+is intrinsically u16). **Verified:** full decode suite 62/62 in BOTH default and
+`AOM_FORCE_SCALAR=1` + full aom-dsp 352/352; bd10/12 byte-untouched.
+**MEASURED (`benchmarks/bd8_lowbd_wired_2026-07-22.md`):** Gate-3 4K wall headline
+**1.45x → 1.286x (cq20) / 1.39x → 1.250x (cq40)** — port −18.3% / −7.6% wall on
+byte-identically regenerated mosaic streams (the u8-plane bandwidth win is real); Ir
+q00 −5.19% (1.186x → 1.125x, cleanly attributed — both endpoints measured with only
+Phases A+B in between), q32 −0.42% (CDEF delegation dominates that cell). Gate-3
+≤1.20x NOT yet met; the next named lever is the i16 SIMD-lane transform narrowing
+(`lowbd_txfm_foundation_2026-07-22.md` "second phase" — byte-identity-safe per
+`av1_gen_inv_stage_range` opt_range==16 at bd8, ~2x lane throughput, a separate kernel
+program: both 1-D passes on i16 lanes with i32 multiply accumulate, per-family
+differentials vs the C `_c` reference), then the 2K-regime profile. The gitignored
+mosaic bench vectors were REGENERATED after the 2026-07-20 corpus wipe with proven
+faithfulness (2K y4m byte-identical to the surviving original; payload sizes match the
+recorded ones exactly) — sources backed up at `/root/mosaic-sources/`.
+
 ## bd8 lowbd Phase A: `ReconPlane` u8/u16 plane carrier threaded through the whole decoder, byte-identical (2026-07-22, decoder track)
 
 The enabling refactor for the bd8 lowbd pipeline (`aom_dsp::lowbd` contract): the

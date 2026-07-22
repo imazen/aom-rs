@@ -1,0 +1,21 @@
+measurement: bd8 lowbd pipeline (Phases A+B) wired — Gate-3 Ir + wall re-measure.
+git commit (measured): 1ae33eed (origin/main at capture — the Phase B stack tip).
+date: 2026-07-22 (UTC ~10:45-11:45Z)
+host: dedicated aom-rs workstation.
+oracle: upstream/ submodule libaom v3.14.1 @ 03087864.
+commands:
+  cargo build --profile profiling -p zenav1-aom-bench --bin gate3_profile
+  AOM_CONFORMANCE_DIR=/root/aom-rs/conformance/data valgrind --tool=callgrind \
+    --callgrind-out-file=/tmp/g3cg/cg_<cell>.out \
+    ./target/profiling/gate3_profile dec port dec_352x288_q00 3   # and _q32 12
+  callgrind_annotate --inclusive=yes → decode_frame_obus/(iters+1) vs shim_decode_av1_kf/1
+  AOM_CONFORMANCE_DIR=/root/aom-rs/conformance/data \
+    cargo bench -p zenav1-aom-bench --bench gate3 -- --group=dec
+mosaic regeneration (the gitignored 2K/4K vectors were lost in the 2026-07-20
+  corpus wipe): benchmarks/mk_mosaic_y4m.rs (on main) over
+  /root/work/codec-corpus/gb82 -> mosaic_{2k,4k}.y4m; 2K y4m verified
+  BYTE-IDENTICAL to the surviving /tmp original; encodes via the pinned
+  upstream/build/aomenc with the exact decode_4way_2026-07-17.meta command;
+  payload sizes match the recorded ones exactly (148127/54108/956186/322294 B).
+  Sources + vectors backed up: /root/mosaic-sources/, /root/conformance-backup/.
+no -C target-cpu=native anywhere. Measured, not extrapolated.

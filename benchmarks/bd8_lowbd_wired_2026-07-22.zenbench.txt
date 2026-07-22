@@ -1,0 +1,169 @@
+warning: unused doc comment
+    --> crates/aom-sys-ref/src/lib.rs:9849:1
+     |
+9849 | / /// Oracle for `av1/encoder/ml.c` `av1_nn_predict_c` (+ `av1_nn_output_prec_reduce`
+9850 | | /// when `reduce_prec`). `hidden_nodes` gives the per-hidden-layer node counts;
+9851 | | /// `weights_flat`/`bias_flat` are the per-layer weight/bias tables concatenated
+9852 | | /// in NN_CONFIG order (`weights[l][node*num_in + i]`, `bias[l][node]`; the final
+9853 | | /// entry is the linear output layer). Returns the `num_outputs` logits.
+     | |________________________________________________________________________^
+9854 | / unsafe extern "C" {
+9855 | |     fn shim_prune_tx_2D(
+9856 | |         diff: *const i16,
+9857 | |         diff_stride: i32,
+...    |
+9864 | |     );
+9865 | | }
+     | |_- rustdoc does not generate documentation for extern blocks
+     |
+     = help: use `//` for a plain comment
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: `zenav1-aom-sys-ref` (lib) generated 1 warning
+warning: unused import: `constrain`
+  --> crates/aom-dsp/src/cdef/simd.rs:45:80
+   |
+45 | use crate::cdef::{CDEF_BSTRIDE, CDEF_VERY_LARGE, PRI_TAPS, SEC_TAPS, cdef_dir, constrain, get_msb};
+   |                                                                                ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `archmage::prelude`
+  --> crates/aom-dsp/src/restore/wiener.rs:20:5
+   |
+20 | use archmage::prelude::*;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: `zenav1-aom-dsp` (lib) generated 2 warnings (run `cargo fix --lib -p zenav1-aom-dsp` to apply 1 suggestion)
+warning: value assigned to `bestsme` is never read
+    --> crates/aom-encode/src/intrabc_search.rs:2007:17
+     |
+2007 |                 bestsme = sme;
+     |                 ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mb_to_right`
+   --> crates/aom-encode/src/pack.rs:603:30
+    |
+603 |         let (max_bw, max_bh, mb_to_right, mb_to_bottom) = crate::tx_search::max_block_units(
+    |                              ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mb_to_right`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mb_to_bottom`
+   --> crates/aom-encode/src/pack.rs:603:43
+    |
+603 |         let (max_bw, max_bh, mb_to_right, mb_to_bottom) = crate::tx_search::max_block_units(
+    |                                           ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mb_to_bottom`
+
+warning: constant `MAX_MVSEARCH_STEPS` is never used
+    --> crates/aom-encode/src/intrabc_search.rs:1164:7
+     |
+1164 | const MAX_MVSEARCH_STEPS: usize = 11;
+     |       ^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `check_stop` is never used
+   --> crates/aom-decode/src/config.rs:178:19
+    |
+120 | impl<'a> DecodeConfig<'a> {
+    | ------------------------- method in this implementation
+...
+178 |     pub(crate) fn check_stop(&self) -> Result<(), DecodeError> {
+    |                   ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `zenav1-aom-encode` (lib) generated 4 warnings (run `cargo fix --lib -p zenav1-aom-encode` to apply 2 suggestions)
+warning: `zenav1-aom-decode` (lib) generated 1 warning
+    Finished `bench` profile [optimized] target(s) in 0.06s
+     Running benches/gate3.rs (target/release/deps/gate3-bbd34f3238721464)
+[zenbench] calibration: int=0.27ns/iter mem_bw=64.7GiB/s mem_lat=14.7ns
+[zenbench] timer resolution: 20ns, loop overhead: 0.27ns/iter, TSC: unavailable (using Instant)
+[zenbench] results → /tmp/zenbench/zenbench-1784718845-147110.txt
+
+═══════════════════════════════════════════════════════════════
+  zenbench  1784718845-147110
+═══════════════════════════════════════════════════════════════
+
+  dec_64x64  4 rounds × 37 calls ⚠ only 4 rounds
+                 mean ±mad µs  95% CI vs base      px/s
+  ├─ c_oracle    91.2 ±1.4µs  [88.3–95.7]µs      44.9M
+  ╰─ port       145.2 ±6.9µs  [+51.3%–+67.3%]    28.2M
+
+  c_oracle  █████████████████████████████████████████████████████████ 44.9 Mpx/s
+  port      ████████████████████████████████████ 28.2 Mpx/s
+
+  dec_196x196  4 rounds × 5 calls ⚠ only 4 rounds
+                  mean ±mad µs  95% CI vs base        px/s
+  ├─ c_oracle    412.2 ±5.3µs  [407.6–416.9]µs      93.2M
+  ╰─ port       980.2 ±10.7µs  [+136.1%–+139.3%]    39.2M [1]
+
+  c_oracle  █████████████████████████████████████████████████████████ 93.2 Mpx/s
+  port      ████████████████████████ 39.2 Mpx/s
+  [1] drift r=-0.60 — later rounds faster
+
+  dec_352x288_q00  4 rounds × 1 calls ⚠ only 4 rounds
+               mean ±mad ms  95% CI vs base      px/s
+  ├─ c_oracle    9.1 ±0.1ms  [8.9–9.2]ms        11.1M
+  ╰─ port       11.2 ±0.3ms  [+18.9%–+27.6%]    9.05M
+
+  c_oracle  █████████████████████████████████████████████████████████ 11.1 Mpx/s
+  port      ██████████████████████████████████████████████ 9.05 Mpx/s
+
+  dec_352x288_q32  4 rounds × 1 calls ⚠ only 4 rounds
+               mean ±mad ms  95% CI vs base      px/s
+  ├─ c_oracle   2.5 ±0.1ms  [2.4–2.5]ms        41.1M
+  ╰─ port       4.6 ±0.1ms  [+88.3%–+90.7%]    21.9M
+
+  c_oracle  █████████████████████████████████████████████████████████ 41.1 Mpx/s
+  port      ██████████████████████████████ 21.9 Mpx/s
+
+  dec_352x288_q63  4 rounds × 2 calls ⚠ only 4 rounds
+                   mean ±mad µs  95% CI vs base        px/s
+  ├─ c_oracle    616.2 ±25.5µs  [590.5–642.8]µs       165M
+  ╰─ port       1574.8 ±30.8µs  [+151.0%–+162.1%]    64.4M
+
+  c_oracle  █████████████████████████████████████████████████████████ 165 Mpx/s
+  port      ██████████████████████ 64.4 Mpx/s
+
+  dec_mosaic_2k_cq20  4 rounds × 1 calls ⚠ only 4 rounds
+               mean ±mad ms  95% CI vs base      px/s
+  ├─ c_oracle   33.2 ±1.6ms  [32.1–34.3]ms      62.4M
+  ╰─ port       55.6 ±0.4ms  [+63.2%–+71.5%]    37.3M [1]
+
+  c_oracle  █████████████████████████████████████████████████████████ 62.4 Mpx/s
+  port      ██████████████████████████████████ 37.3 Mpx/s
+  [1] drift r=1.00 — later rounds slower
+
+  dec_mosaic_2k_cq40  4 rounds × 1 calls ⚠ only 4 rounds
+               mean ±mad ms  95% CI vs base       px/s
+  ├─ c_oracle   19.0 ±0.5ms  [18.7–19.3]ms        109M
+  ╰─ port       36.4 ±1.1ms  [+84.6%–+103.5%]    57.0M
+
+  c_oracle  █████████████████████████████████████████████████████████ 109 Mpx/s
+  port      ██████████████████████████████ 57.0 Mpx/s
+
+  dec_mosaic_4k_cq20  4 rounds × 1 calls ⚠ only 4 rounds
+                mean ±mad ms  95% CI vs base      px/s
+  ├─ c_oracle   216.2 ±0.7ms  [214.8–218.5]ms    38.4M
+  ╰─ port       278.1 ±2.6ms  [+27.1%–+30.2%]    29.8M [1]
+
+  c_oracle  █████████████████████████████████████████████████████████ 38.4 Mpx/s
+  port      ████████████████████████████████████████████ 29.8 Mpx/s
+  [1] drift r=0.80 — later rounds slower
+
+  dec_mosaic_4k_cq40  4 rounds × 1 calls ⚠ only 4 rounds
+                mean ±mad ms  95% CI vs base      px/s
+  ├─ c_oracle   141.0 ±4.3ms  [137.5–144.4]ms    58.8M
+  ╰─ port       176.2 ±3.3ms  [+21.9%–+28.7%]    47.1M
+
+  c_oracle  █████████████████████████████████████████████████████████ 58.8 Mpx/s
+  port      ██████████████████████████████████████████████ 47.1 Mpx/s
+
+  total: 1102.0s  (1080 noisy rounds)
+═══════════════════════════════════════════════════════════════
+  filter: cargo bench -- --group=NAME  format: --format=llm|csv|md|json
