@@ -1,0 +1,46 @@
+measurement: Gate-3 FILTER-CELLS lever — fresh filter-share ranking on current
+  main (post Phases A+B lowbd wiring AND Phase-C i16 transform). Establishes:
+  (1) the 2K/4K mosaic gate cells contain NO CDEF / NO LR / NO superres —
+  deblock is the ONLY post-recon filter there (run_post_filters == apply_deblock
+  inclusive); (2) deblock residual is a stable 1.73-1.77x vs C (+174M/+169M per
+  4K decode, 15-17% of each 4K cell's gap), kernel-dominated (516 Ir/call over
+  533k calls, scalar tap gathers/scatters = 37.5% of kernel Ir); (3) q32 filter
+  ranking is LR/wiener 9.25x (kernel 11.3x vs C avx2), CDEF 4.11x (scalar
+  find_dir + u16 filter kernel), deblock 1.68x; the LR delegation widen/narrow
+  copies are only 0.25M/dec at 352x288 (delegation-copy hypothesis REFUTED at
+  this size — the kernel shape is the gap).
+git commit (measured): 1616a1ae (origin/main at capture; jj workspace
+  zenav1-aom--g3filters, no code changes at capture).
+git commit (landing): the commit this .meta lands in.
+date: 2026-07-22/23 UTC (profiles captured ~20:25Z 07-22, analyzed 07-23).
+host: dedicated aom-rs workstation (container).
+oracle: upstream/ submodule libaom v3.14.1 @ 03087864, Release, SIMD on,
+  linked in-process via aom-sys-ref shim_decode_av1_kf.
+
+COMMANDS (exact):
+  cargo build --profile profiling -p zenav1-aom-bench --bin gate3_profile
+  for cell/iters in dec_352x288_q32/12 dec_mosaic_2k_cq20/3 dec_mosaic_2k_cq40/3 \
+      dec_mosaic_4k_cq20/3 dec_mosaic_4k_cq40/3:
+    AOM_CONFORMANCE_DIR=/root/aom-rs/conformance/data valgrind --tool=callgrind \
+      --callgrind-out-file=/tmp/g3cg/cg_<cell>.out \
+      ./target/profiling/gate3_profile dec port <cell> <iters>
+  callgrind_annotate --inclusive=yes [--threshold=100] /tmp/g3cg/cg_<cell>.out
+  callgrind_annotate --auto=yes --threshold=99   (kernel line attribution)
+
+RATIO METHOD: port = inclusive Ir of aom_decode::frame::decode_frame_obus /
+  (iters+1) port decodes; C = inclusive Ir of shim_decode_av1_kf (1 decode,
+  includes codec init+destroy, which slightly UNDERSTATES port/C). Ir is
+  deterministic and load-independent. Every cell byte-verified in the harness
+  setup before profiling.
+
+HONEST LIMITS:
+- Ir only; NO wall-clock this pass (a concurrent transform agent makes wall
+  noisy; the coordinator runs the final wall measurement).
+- Superres cost is NOT measured (no superres stream in the bench cell set);
+  its share is unknown, not zero.
+- The q32 C LR figure excludes av1_loop_restoration_filter_frame_init (251,485
+  Ir); including it the LR ratio is 7.49x instead of 9.25x — still the top
+  q32 item either way.
+- The C module symbols (av1_loop_filter_frame_mt etc.) are entry-inclusive
+  within the C decode subtree; libc leaf attribution differences vs the port
+  module rollup are the same caveat as gate3_decode_profile_2026-07-19.md.
