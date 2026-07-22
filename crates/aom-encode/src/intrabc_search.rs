@@ -826,19 +826,19 @@ mod tests {
         assert_eq!(NSTEP_RADII, [1, 2, 3, 5, 8, 12, 18, 27, 41, 62, 93, 140, 210, 210, 210]);
 
         // Stage 0 (R=1 <= 5): 8 pts, tan = 1; the 4 axis + 4 diagonal sites.
-        let (s0, p0) = nstep_stage_sites(1);
+        let (s0, p0) = nstep_stage_sites(1, false);
         assert_eq!(p0, 8);
         assert_eq!(&s0[..9], &[(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)]);
         // Stage 4 (R=8 > 5): 12 pts, tan = (int)(0.41*8) = 3.
-        let (s4, p4) = nstep_stage_sites(8);
+        let (s4, p4) = nstep_stage_sites(8, false);
         assert_eq!(p4, 12);
         assert_eq!(s4[1], (-8, 0));
         assert_eq!(s4[5], (-8, -3));
         assert_eq!(s4[7], (-3, 8));
         assert_eq!(s4[12], (-3, -8));
         // tan truncation spot-checks.
-        assert_eq!(nstep_stage_sites(12).0[5], (-12, -4));
-        assert_eq!(nstep_stage_sites(210).0[5], (-210, -86));
+        assert_eq!(nstep_stage_sites(12, false).0[5], (-12, -4));
+        assert_eq!(nstep_stage_sites(210, false).0[5], (-210, -86));
     }
 
     /// `av1_init_search_range` (mcomp.c:263) via the frame-level derivation:
@@ -919,7 +919,7 @@ mod tests {
             sad_per_bit: 1,
         };
         // start at (0,0); the exact match is at fullmv (row=-16, col=0).
-        let (sme, r, c) = full_pixel_diamond(&sr, 0, 0, 4);
+        let (sme, r, c) = full_pixel_diamond(&sr, 0, 0, 4, false);
         assert_eq!((r, c), (-16, 0), "diamond must land on the exact-repeat MV");
         // variance at the match is 0 (+ mv cost, which is 0 with zero tables).
         assert_eq!(sme, 0);
@@ -1165,14 +1165,37 @@ const MAX_MVSEARCH_STEPS: usize = 11;
 /// The NSTEP config's per-stage radius (`init_motion_compensation_nstep`,
 /// mcomp.c:479, level 0 — 15 stages, `radius = max(radius*1.5+0.5, radius+1)`
 /// truncated, frozen at stage 12).
+/// NSTEP (level 0) radii — 15 stages (`init_motion_compensation_nstep`,
+/// mcomp.c:481, `num_stages = 15`).
 const NSTEP_RADII: [i32; 15] = [1, 2, 3, 5, 8, 12, 18, 27, 41, 62, 93, 140, 210, 210, 210];
 
+/// NSTEP_8PT (level 1) radii — 16 stages (`init_motion_compensation_nstep`
+/// with `level > 0 → num_stages = 16`). Identical growth to NSTEP but one
+/// extra terminal `210` stage. The intrabc DV search uses NSTEP_8PT
+/// (`av1_get_default_mv_search_method` → method 2, verified by sibling-C dump:
+/// `num_search_steps = 16`, every stage 8 points, `radius[0..] =
+/// 1,2,3,5,8,12,18,...`).
+const NSTEP_8PT_RADII: [i32; 16] =
+    [1, 2, 3, 5, 8, 12, 18, 27, 41, 62, 93, 140, 210, 210, 210, 210];
+
+/// The stage radii for the chosen NSTEP variant.
+#[inline]
+fn nstep_radii(eight_pt: bool) -> &'static [i32] {
+    if eight_pt {
+        &NSTEP_8PT_RADII
+    } else {
+        &NSTEP_RADII
+    }
+}
+
 /// One NSTEP stage's search sites (`search_site_mvs[13]`, mcomp.c:493): center
-/// + 4 axis + up to 8 tangents. `radius <= 5` → 8 pts (tan = radius), else 12
-/// pts (`tan = (int)(0.41*radius)`). Returns `(sites[(row,col); 13],
+/// + 4 axis + up to 8 tangents. For NSTEP (`eight_pt = false`): `radius <= 5`
+/// → 8 pts (tan = radius), else 12 pts (`tan = (int)(0.41*radius)`). For
+/// NSTEP_8PT (`eight_pt = true`, mcomp.c:491-494, the `level > 0` arm): ALWAYS
+/// 8 pts with `tan = radius` at every radius. Returns `(sites[(row,col); 13],
 /// num_search_pts)`.
-fn nstep_stage_sites(radius: i32) -> ([(i32, i32); 13], usize) {
-    let (tan, pts) = if radius <= 5 {
+fn nstep_stage_sites(radius: i32, eight_pt: bool) -> ([(i32, i32); 13], usize) {
+    let (tan, pts) = if eight_pt || radius <= 5 {
         (radius, 8usize)
     } else {
         (((0.41f64 * radius as f64) as i32).max(1), 12usize)
@@ -1294,8 +1317,10 @@ fn diamond_search_sad(
     start_col: i32,
     start_sad: u32,
     search_step: usize,
+    eight_pt: bool,
 ) -> (u32, i32, i32, i32) {
-    let tot_steps = NSTEP_RADII.len() - search_step;
+    let radii = nstep_radii(eight_pt);
+    let tot_steps = radii.len() - search_step;
     let mut best_row = start_row;
     let mut best_col = start_col;
     let mut bestsad = start_sad;
@@ -1304,8 +1329,8 @@ fn diamond_search_sad(
 
     let mut step = tot_steps as i32 - 1;
     while step >= 0 {
-        let radius = NSTEP_RADII[step as usize];
-        let (site, num_searches) = nstep_stage_sites(radius);
+        let radius = radii[step as usize];
+        let (site, num_searches) = nstep_stage_sites(radius, eight_pt);
         let mut best_site = 0usize;
 
         // Trap: whole ±radius cross inside limits (mcomp.c:1400-1405) — then the
@@ -1341,11 +1366,11 @@ fn diamond_search_sad(
             num_center_steps += 1;
         }
         if best_site == 0 && step > 2 {
-            let mut next = NSTEP_RADII[(step - 1) as usize];
-            while next == NSTEP_RADII[step as usize] && step > 2 {
+            let mut next = radii[(step - 1) as usize];
+            while next == radii[step as usize] && step > 2 {
                 num_center_steps += 1;
                 step -= 1;
-                next = NSTEP_RADII[(step - 1) as usize];
+                next = radii[(step - 1) as usize];
             }
         }
         step -= 1;
@@ -1355,20 +1380,26 @@ fn diamond_search_sad(
 
 /// `full_pixel_diamond` (mcomp.c:1481, single-ref, no cost_list / second_best).
 /// Returns `(bestsme_var_cost, best_row, best_col)`.
-fn full_pixel_diamond(s: &FullPelSearch, start_row: i32, start_col: i32, step_param: usize) -> (i64, i32, i32) {
+fn full_pixel_diamond(
+    s: &FullPelSearch,
+    start_row: i32,
+    start_col: i32,
+    step_param: usize,
+    eight_pt: bool,
+) -> (i64, i32, i32) {
     let (start_row, start_col) = s.clamp(start_row, start_col);
     let start_sad = s.sad_mv_cost(start_row, start_col) + s.sad(start_row, start_col);
 
     let (_sad0, mut best_row, mut best_col, n0) =
-        diamond_search_sad(s, start_row, start_col, start_sad, step_param);
+        diamond_search_sad(s, start_row, start_col, start_sad, step_param, eight_pt);
     let mut bestsme = s.var_cost(best_row, best_col);
 
-    let further_steps = NSTEP_RADII.len() as i32 - 1 - step_param as i32;
+    let further_steps = nstep_radii(eight_pt).len() as i32 - 1 - step_param as i32;
     let mut n = n0;
     while n < further_steps {
         n += 1;
         let (_sad, tr, tc, num00) =
-            diamond_search_sad(s, start_row, start_col, start_sad, step_param + n as usize);
+            diamond_search_sad(s, start_row, start_col, start_sad, step_param + n as usize, eight_pt);
         let thissme = s.var_cost(tr, tc);
         if thissme < bestsme {
             bestsme = thissme;
@@ -1525,7 +1556,7 @@ pub fn full_pixel_search_inter(
         error_per_bit,
         sad_per_bit,
     };
-    full_pixel_diamond(&s, full_ref_row, full_ref_col, step_param)
+    full_pixel_diamond(&s, full_ref_row, full_ref_col, step_param, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1957,7 +1988,7 @@ pub fn rd_pick_intrabc_mode_sb(
         };
         {
             let (mut sme, mut pr, mut pc) =
-                full_pixel_diamond(&s, ref_r >> 3, ref_c >> 3, a.mv_step_param);
+                full_pixel_diamond(&s, ref_r >> 3, ref_c >> 3, a.mv_step_param, true);
             // Mesh gate (mcomp.c:1827): `var > (force_mesh_thresh >> (10 -
             // (w_log2 + h_log2)))`. force_mesh_thresh = exhaustive_searches_thresh
             // = 1<<20 (screen content). is_intra_mode ⇒ no prune gate.

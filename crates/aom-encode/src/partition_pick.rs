@@ -1371,13 +1371,24 @@ fn leaf_pick_sb_modes(
             rdmult: env.rdmult,
             qindex: cfg.qindex,
             reduced_tx_set_used: env.reduced_tx_set_used,
-            error_per_bit: ibc.error_per_bit,
+            // `av1_set_error_per_bit(x->rdmult)` — C recomputes the DV-search MV
+            // cost's `error_per_bit` PER BLOCK from `x->rdmult`, which carries
+            // the per-SB `intra_sb_rdmult_modifier` fold (partition_search.c:
+            // 5710). The frame-constant `ibc.error_per_bit` ignores that fold
+            // (it is the UNmodified frame rdmult >> 6), so on any SB whose
+            // modifier != 128 the DV search's variance-metric MV cost was
+            // scaled wrong — perturbing `full_pixel_diamond`'s var_cost pick
+            // across step sizes and the final RD compare. `env.rdmult` is the
+            // SB-modified value the coeff arm already uses. Intrabc-only
+            // (non-screen frames construct no `IntrabcLeafArgs`), so the
+            // envelope is structurally untouched.
+            error_per_bit: crate::rd::av1_set_error_per_bit(env.rdmult),
             sad_per_bit: ibc.sad_per_bit,
             mv_step_param: ibc.mv_step_param,
             intrabc_cost: &cfg.mode_costs.intrabc_cost,
             skip_costs: cfg.skip_costs,
             skip_ctx,
-            txfm_partition_costs: &ibc.txfm_partition_costs,
+            txfm_partition_costs: &env.txfm_partition_costs,
             rows_y: env.rows_y,
             rows_u: env.rows_u,
             rows_v: env.rows_v,

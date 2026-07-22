@@ -423,6 +423,7 @@ fn run_and_localize(cq_level: i32, mono: bool) -> bool {
         use_chroma_trellis_rd_mult: allintra,
         coeff_costs_y: &real.coeff_costs_y,
         coeff_costs_uv: &real.coeff_costs_uv,
+        txfm_partition_costs: [[0i32; 2]; 21],
         tx_type_costs: &real.tx_type_costs_y,
         qm_levels: None,
         tune: Default::default(),

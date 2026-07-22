@@ -1453,6 +1453,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
             use_chroma_trellis_rd_mult: use_chroma_tbl,
             coeff_costs_y: &coeff_costs_y,
             coeff_costs_uv: &coeff_costs_uv,
+            txfm_partition_costs: [[0i32; 2]; 21],
             tx_type_costs: &ttc_dummy,
             qm_levels: None,
             tune: Default::default(),

@@ -64,6 +64,15 @@ pub struct RealCosts {
     /// can't reproduce — so the raw CDF is kept alongside for the edge override.
     pub partition_cdf: [[u16; EXT_PARTITION_TYPES + 1]; PARTITION_CONTEXTS],
     pub skip_costs: [[i32; 2]; SKIP_CONTEXTS],
+    /// `txfm_partition_cost[TXFM_PARTITION_CONTEXTS][2]` (`av1_fill_mode_rates`,
+    /// rd.c) — the var-tx split-flag costs, derived from the LIVE (per-SB
+    /// adapting) `txfm_partition_cdf`. Read by the inter/intrabc var-tx recursion
+    /// (`crate::var_tx`). C refreshes this at every INTERNAL_COST_UPD_SB boundary,
+    /// so on a screen-content frame it drifts from the frame-init table as
+    /// intrabc coeff-arm blocks code split flags — this must track that drift
+    /// (KB-15). Zero on non-screen frames' consumers (var-tx runs only for
+    /// inter/intrabc), so the intra envelope is byte-inert.
+    pub txfm_partition_costs: [[i32; 2]; 21],
     /// The REAL per-`(txs_ctx, eob_multi_size)` luma coefficient-coding cost
     /// tables (`av1_fill_coeff_costs`'s `plane == PLANE_TYPE_Y` slice).
     pub coeff_costs_y: CoeffCostSet,
@@ -178,6 +187,11 @@ pub fn derive_real_costs(kf: &KfFrameContext, enable_filter_intra: bool) -> Real
     let skip_cdf: Vec<u16> = kf.skip.iter().flatten().copied().collect();
     fill_skip_costs(&mut skip_costs, &skip_cdf);
 
+    // `txfm_partition_cost` from the LIVE txfm_partition CDF (adapts per-SB on a
+    // screen-content frame as intrabc coeff-arm blocks code split flags).
+    let txfm_partition_costs =
+        crate::intrabc_search::fill_txfm_partition_costs(&kf.txfm_partition);
+
     // av1_fill_coeff_costs: the full per-(txs_ctx, eob_multi_size) real
     // LV_MAP_COEFF_COST / LV_MAP_EOB_COST tables, one CoeffCostSet per plane
     // type, sliced directly from the live coefficient-CDF arena (the SAME
@@ -204,6 +218,7 @@ pub fn derive_real_costs(kf: &KfFrameContext, enable_filter_intra: bool) -> Real
         partition_costs,
         partition_cdf,
         skip_costs,
+        txfm_partition_costs,
         coeff_costs_y,
         coeff_costs_uv,
         palette_costs,

@@ -399,6 +399,11 @@ pub struct SbEncodeEnv<'a> {
     /// at each construction site that knows the txb's actual tx_size.
     pub coeff_costs_y: &'a CoeffCostSet,
     pub coeff_costs_uv: &'a CoeffCostSet,
+    /// `txfm_partition_cost` for the per-SB (INTERNAL_COST_UPD_SB) refresh —
+    /// the var-tx split-flag costs from the LIVE txfm_partition CDF. Read only
+    /// by the intrabc COEFF-arm var-tx (`IntrabcLeafArgs.txfm_partition_costs`);
+    /// zeroed on the intra envelope where the var-tx never runs (byte-inert).
+    pub txfm_partition_costs: [[i32; 2]; 21],
     /// UV tx-type cost tables — REQUIRED by [`UvRdEnv`] but never read by
     /// the encode arm (chroma codes no tx-type bits); zeroed tables are
     /// fine.
