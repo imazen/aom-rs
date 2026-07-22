@@ -1,0 +1,13 @@
+metric,scope,baseline_7b972e5,phase_c_1d29acaf,delta_pct,c_side,notes
+ir_incl,microbench av1_inv_txfm2d_add_u8_into,1695097484,1433681703,-15.42,,lowbd_txfm_profile u8 200; same env both sides
+ir_incl,microbench u8 column pass (arcane i32 + i16),855800916,585909372,-31.54,,phase C = 382238484 (i32 iadst/identity) + 203670888 (i16 DCT)
+ir_incl,microbench DCT columns only,473562432,203670888,-56.99,,baseline share = 855800916 - 382238484 (unchanged i32 arm)
+ir_incl,microbench u16 highbd control av1_inv_txfm2d_add_into,1683395100,1683395100,0.00,,method stability: reproduces foundation doc to the digit
+ir_per_decode,dec_352x288_q00,98769685,98769692,0.00,87572528,lossless WHT-only cell - Phase C structurally inert (+7 Ir)
+ir_per_decode,dec_352x288_q32,52842935,52713297,-0.25,24223496,C identical to the digit both sides
+ir_per_decode,dec_mosaic_4k_cq20,2720315015,2684460257,-1.32,1507323689,C identical to the digit both sides
+ir_per_decode,dec_mosaic_4k_cq40,1868062048,1820303428,-2.56,845651396,C identical to the digit both sides
+ir_ratio,dec_mosaic_4k_cq20,1.805,1.781,,,port/C instruction ratio
+ir_ratio,dec_mosaic_4k_cq40,2.209,2.153,,,port/C instruction ratio
+wall_ratio,dec_mosaic_4k_cq20,1.286,not_measured,,,phase C wall not cleanly measurable (box contention); Phase-B value stands as latest measurement
+wall_ratio,dec_mosaic_4k_cq40,1.250,not_measured,,,phase C wall not cleanly measurable (box contention); Phase-B value stands as latest measurement

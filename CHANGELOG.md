@@ -39,6 +39,15 @@
 
 ### Added
 
+- **bd8 decode Phase C: i16-lane inverse-transform column pass** — the u8
+  column pass runs idct4/8/16/32/64 on `i16x16` lanes (16 columns per AVX2
+  vector; two-domain design keeps the unclamped butterfly transients in exact
+  i32 pairs so it is byte-identical to the scalar port, NOT the libaom lowbd
+  saturate-early shape). iadst/identity columns stay i32 (audited not
+  i16-safe: `xtask/audit_i16_safety.py`). Measured: DCT columns −57% Ir,
+  whole column pass −31.5%, 4K decode −1.3%/−2.6% Ir; see
+  `benchmarks/bd8_i16_transform_2026-07-22.md`. (1d29acaf)
+
 - **`zenav1-aom-decode` production-hardening surface** (deliberate API additions
   for the untrusted-input / zenavif decode path):
   - `DecodeConfig` / `DecodeLimits` threaded through `decode_frame_obus_with` /

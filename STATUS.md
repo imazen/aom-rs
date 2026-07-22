@@ -1,3 +1,37 @@
+## bd8 lowbd Phase C: i16-lane inverse-transform COLUMN pass — idct4/8/16/32/64 narrowed, iadst/identity audited-out (2026-07-22, decoder track)
+
+The "second phase" transform lever (1d29acaf): the u8 column pass runs the five DCT
+column kernels on `i16x16` lanes (16 columns per AVX2 vector). **Byte-identity design
+(deliberately NOT libaom's lowbd shape, which saturate-packs after every butterfly and
+diverges from the scalar `_c` on hostile inputs):** two value domains, statically tracked
+by the new `transpile_txfm1d.py --lanes16` mode — i16 values (inputs + `clamp_value`
+outputs) in i16 lanes where saturating add/sub IS `clamp_value(_,16)`; the UNCLAMPED
+`half_btf` outputs (17-bit transients) as exact i32 pairs in unpack order, packed only at
+the scalar kernel's clamp sites. `madd` butterflies exact (|w|<=4095 x |in|<=2^15 —
+no wrap either side); `round_shift(_,4)` == `mulhrs(v, 2^11)` proven for all i16.
+**Coverage: 5 of 12 column kernels narrowed.** `xtask/audit_i16_safety.py` (mechanical
+domain audit of the generated scalar kernels) PROVES the five DCT kernels safe and
+REJECTS the rest: iadst8/16 (terminal unclamped negations can hit +32768 + raw 17-bit
+transients feed the round-shift), iadst4 + identity4/8/16/32 (no internal clamps at all)
+— those stay on the byte-identical i32x8 pass. Row pass untouched (shared i32).
+**Gates (all green, BOTH default and AOM_FORCE_SCALAR=1):** new
+`inv1d_i16_bit_identical_to_scalar_at_every_tier` (full i16 domain + saturation-boundary
+patterns, every token permutation), `inv_txfm2d_lowbd_diff` (u8 == real C == highbd
+port), full aom-dsp 353/353, decode conformance 62/62 (244-vector corpus + golden MD5,
+bd8/bd10/bd12). **MEASURED (`benchmarks/bd8_i16_transform_2026-07-22.md`,
+same-environment paired, C-side identical to the digit):** microbench DCT columns
+473.6M -> 203.7M Ir (**-57.0%**), whole u8 column pass -31.5%, transform entry -15.4%
+(u8 is now -14.8% vs the u16 path, was +0.7% worse); whole-decode Ir 4K cq20 **-1.32%**
+(ratio 1.805x -> 1.781x), 4K cq40 **-2.56%** (2.209x -> 2.153x), q32 -0.25%. Honest
+finding: `dec_352x288_q00` is the LOSSLESS vector (100% WHT recon — the DCT column pass
+never runs there); Phase C is structurally inert on it (+7 Ir = no-regression control) —
+q00 is NOT a transform-lever cell despite the earlier docs' framing. Wall: NOT cleanly
+measurable this session (box contention — concurrent coordinator conformance run;
+zenbench rejected the rounds; run killed rather than report fouled numbers) — the
+Phase-B 1.286x/1.250x stands as the latest clean wall measurement. Next levers: the 2K
+entropy-dominated regime; row-pass i16 narrowing (audit machinery now exists — row
+clamp is bd+8, needs its own audit).
+
 ## bd8 lowbd Phase B: u8 kernels LIVE in the decoder — intra/recon/transform/WHT/deblock wired, CDEF stays delegate-by-measurement (2026-07-22, decoder track)
 
 Blueprint step 2 of `benchmarks/bd8_pipeline_2026-07-22.md`, on top of the Phase A carrier:

@@ -1,0 +1,60 @@
+measurement: bd8 lowbd Phase C — i16-lane inverse-transform COLUMN pass
+  (idct4/8/16/32/64 on i16x16 lanes; iadst/identity stay i32). Attribution is
+  SAME-ENVIRONMENT paired: baseline 7b972e5 and Phase C 1d29acaf were BOTH
+  built and callgrind-measured in the same workspace, same toolchain, same
+  prebuilt C oracle (upstream/build/libaom.a, submodule pin 03087864, shared
+  via symlink). The C-side Ir is identical to the digit on every decode cell
+  (q32/4kcq20/4kcq40) and the u16 microbench control reproduces
+  lowbd_txfm_foundation_2026-07-22.md to the digit (1,683,395,100 /
+  840,844,104) — live method-stability checks.
+git commit (baseline): 7b972e509cb6 (origin/main, Phases A+B measured)
+git commit (measured): 1d29acaff6d4 (origin/main, the Phase C landing)
+git commit (landing):  the commit this .meta lands in
+date: 2026-07-22 (UTC ~19:20-20:30Z)
+host: dedicated aom-rs workstation
+oracle: upstream/ libaom v3.14.1 @ 03087864, Release, SIMD on, in-process
+  shim_decode_av1_kf
+
+COMMANDS (exact):
+  # microbench (fixed workload, every valid (tx_type, tx_size) x4, 200 iters)
+  cargo build --profile profiling -p zenav1-aom-bench --bin lowbd_txfm_profile
+  valgrind --tool=callgrind --collect-atstart=yes \
+    --callgrind-out-file=/tmp/g3cg/cg_txfm_<u8|u16>[_base].out \
+    ./target/profiling/lowbd_txfm_profile <u8|u16> 200
+  # decode cells (port Ir/decode = decode_frame_obus inclusive / (iters+1);
+  # C = shim_decode_av1_kf inclusive / 1 — method identical to
+  # bd8_pipeline_2026-07-22.meta)
+  cargo build --profile profiling -p zenav1-aom-bench --bin gate3_profile
+  AOM_CONFORMANCE_DIR=/root/aom-rs/conformance/data valgrind --tool=callgrind \
+    --callgrind-out-file=/tmp/g3cg/cg_<cell>_<side>.out \
+    ./target/profiling/gate3_profile dec port <cell> <iters>
+    iters: dec_352x288_q00 = 3; dec_352x288_q32 = 12; dec_mosaic_4k_cq20 = 3;
+           dec_mosaic_4k_cq40 = 3
+  # baseline side: jj new 7b972e50 (throwaway working-copy change, abandoned
+  # after), rebuild, identical commands
+  # wall (paired zenbench, no -C target-cpu=native)
+  cargo bench -p zenav1-aom-bench --bench gate3 -- --group=dec
+
+HONEST LIMITS:
+- The RECORDED q00/q32 baselines (98,500,470 / 52,911,892, measured in the
+  primary checkout) differ from the same-cells-rebuilt-here baselines
+  (98,769,685 / 52,842,935) by ~±0.3% — a build-environment artifact (same
+  source, different build dir; the C oracle differs only +209). Every delta
+  reported here is same-environment paired; cross-environment numbers are
+  never mixed inside one delta.
+- dec_352x288_q00 is the LOSSLESS (qindex 0) vector: its recon is 100%
+  4x4 WHT, the DCT column pass never runs, so Phase C is structurally inert
+  there (measured: +7 Ir per decode = 0.000%). The q00 cell is kept as a
+  no-regression control, NOT as a transform-lever cell.
+- The DCT-columns-only microbench attribution (473.6M -> 203.7M, -57.0%)
+  derives the baseline DCT share by subtracting the Phase-C i32 arm
+  (iadst/identity, code-identical to baseline) from the baseline total —
+  valid because the workload is fixed and the i32 arm is byte-identical
+  code; it is not a direct single-counter measurement.
+- Wall-clock: NO Phase-C wall number is reported. The zenbench run was
+  fouled by concurrent box load (the coordinator's independent conformance
+  verification + a foreign trace job; zenbench kept rejecting noisy rounds)
+  and was killed on coordinator direction before the 4K cells completed.
+  The Phase-B wall headline (1.286x/1.250x) stands as the latest clean wall
+  measurement. Ir numbers are load-independent and are the Phase-C evidence.
+- Nothing extrapolated; every number was measured on this box this session.
