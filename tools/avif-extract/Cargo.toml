@@ -1,0 +1,15 @@
+# Standalone extractor: pull per-frame AV1 temporal units out of animated
+# AVIF vectors for the inter-decode differential harness. Deliberately OUTSIDE
+# the main workspace (own lockfile) so zenavif-parse's dep tree never touches
+# the port workspace.
+[package]
+name = "avif-extract"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+zenavif-parse = "0.6.2"
+enough = { version = "0.4.3", features = ["std"] }
