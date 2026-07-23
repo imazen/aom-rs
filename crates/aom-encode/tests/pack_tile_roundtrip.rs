@@ -675,6 +675,7 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
         let rdmult = 4000 + rng.range(0, 1 << 16);
 
         let env = SbEncodeEnv {
+            ref_frame: None,
             sb_size: SB,
             mi_rows,
             mi_cols,
@@ -730,6 +731,7 @@ fn run_pack_roundtrip_case(ss_x: usize, ss_y: usize, allintra: bool, qindex: usi
             deltaq: None,
         };
         let pick_cfg = PickFrameCfg {
+            inter: None,
             intrabc: None,
             intra_tools: Default::default(),
             mode_costs: &mode_costs,
@@ -1166,6 +1168,7 @@ fn pack_tile_roundtrips_with_real_costs() {
         let rdmult = 4000 + rng.range(0, 1 << 16);
 
         let env = SbEncodeEnv {
+            ref_frame: None,
             sb_size: SB,
             mi_rows,
             mi_cols,
@@ -1203,6 +1206,7 @@ fn pack_tile_roundtrips_with_real_costs() {
             deltaq: None,
         };
         let pick_cfg = PickFrameCfg {
+            inter: None,
             intrabc: None,
             intra_tools: Default::default(),
             mode_costs: &real.mode_costs,

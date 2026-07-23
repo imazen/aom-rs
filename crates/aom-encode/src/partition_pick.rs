@@ -593,10 +593,43 @@ pub struct PickFrameCfg<'a> {
     /// arm needs. `None` = every non-screen envelope, byte-stable by
     /// construction (the step-6 arm never runs).
     pub intrabc: Option<IntrabcFrameCfg<'a>>,
+    /// The INTER leaf-search frame state (INTER-ENCODE chunk 2) — `Some` on a
+    /// P/B frame, making every leaf run the step-6 inter RD arm
+    /// ([`crate::inter_rd::rd_pick_inter_mode_sb`]) against the intra winner.
+    /// `None` = every KEY/intra envelope, byte-stable by construction (the
+    /// arm never runs; no `InterLeafArgs` is built). Mutually exclusive with
+    /// `intrabc` (an intra-frame-only tool). The reference frame itself rides
+    /// on [`SbEncodeEnv::ref_frame`].
+    pub inter: Option<InterSearchCfg<'a>>,
     /// CLI intra-tool toggles (`oxcf.intra_mode_cfg` → the LUMA
     /// candidate-loop `enable_*` gates; [`IntraToolCfg`]). `Default` = the
     /// aomenc defaults (all enabled) = the pre-toggle behavior exactly.
     pub intra_tools: IntraToolCfg,
+}
+
+/// Frame-constant inputs for the INTER leaf search (the parts of
+/// [`crate::inter_rd::InterLeafArgs`] that don't vary per leaf), reduced to
+/// the INTER-ENCODE-ROADMAP §3 single-reference envelope. Built once per
+/// frame; the mode/ref cost tables are refreshed per SB by `pack_tile`'s
+/// INTERNAL_COST_UPD_SB refresh exactly like the intra tables.
+#[derive(Clone, Copy)]
+pub struct InterSearchCfg<'a> {
+    /// The inter mode/ref/is_inter cost tables
+    /// ([`crate::inter_costs::derive_inter_mode_costs`] over the CURRENT
+    /// adapting inter CDFs — `av1_fill_mode_rates`' inter arm).
+    pub costs: &'a crate::inter_costs::InterModeCosts,
+    /// Frame header `allow_high_precision_mv`.
+    pub allow_high_precision_mv: bool,
+    /// Frame header `cur_frame_force_integer_mv`.
+    pub is_integer_mv: bool,
+    /// `cm->ref_frame_sign_bias` — all 0 in the forward-only low-delay clip.
+    pub sign_bias: [i8; 8],
+    /// `allow_ref_frame_mvs` — false in the §3 envelope (temporal MV off).
+    pub allow_ref_frame_mvs: bool,
+    /// Identity global motion: `gm_get_motion_vector` = `(0, 0)`, wmtype
+    /// IDENTITY (`--enable-global-motion=0`).
+    pub global_mv: (i32, i32),
+    pub gm_wmtype: i32,
 }
 
 /// Frame-constant inputs for the intrabc leaf search (the parts of
@@ -1437,6 +1470,102 @@ fn leaf_pick_sb_modes(
         }
     });
 
+    // INTER leaf-search args (Some only on a P/B frame — INTER-ENCODE chunk
+    // 2). The ref-MV scan runs HERE, where the neighbour grid is live; its
+    // `mode_context` + candidate MVs are frozen onto the winner so the pack
+    // writes on the same CDF context slices the RD priced.
+    let inter_args = cfg.inter.as_ref().map(|ic| {
+        let rf = env
+            .ref_frame
+            .expect("PickFrameCfg::inter requires SbEncodeEnv::ref_frame");
+        // Neighbour projections from the live DV grid (`dv_at` returns the
+        // intra default on never-stamped positions).
+        let above_dv = up_available.then(|| grid.dv_at(mi_row - 1, mi_col));
+        let left_dv = left_available.then(|| grid.dv_at(mi_row, mi_col - 1));
+        let nbr_is_inter = |d: &Option<crate::intrabc_search::DvCell>| {
+            d.as_ref().is_some_and(|d| d.use_intrabc || d.ref_frame0 > 0)
+        };
+        // `av1_get_intra_inter_context(xd)`.
+        let intra_inter_ctx = aom_dsp::entropy::partition::get_intra_inter_context(
+            up_available,
+            nbr_is_inter(&above_dv),
+            left_available,
+            nbr_is_inter(&left_dv),
+        );
+        // `av1_collect_neighbors_ref_counts(xd)` → the six single-ref ctxs.
+        let rc = aom_dsp::entropy::partition::collect_neighbors_ref_counts(
+            up_available,
+            above_dv.as_ref().is_some_and(|d| d.use_intrabc),
+            above_dv.as_ref().map_or(0, |d| i32::from(d.ref_frame0)),
+            above_dv.as_ref().map_or(-1, |d| i32::from(d.ref_frame1)),
+            left_available,
+            left_dv.as_ref().is_some_and(|d| d.use_intrabc),
+            left_dv.as_ref().map_or(0, |d| i32::from(d.ref_frame0)),
+            left_dv.as_ref().map_or(-1, |d| i32::from(d.ref_frame1)),
+        );
+        let single_ref_ctx = crate::inter_costs::SingleRefCtx::from_neighbor_ref_counts(&rc);
+        // The ref-MV scan (`find_inter_mv_refs`, byte-exact vs C). Tile ends
+        // clamped to the frame exactly as the intrabc args below (C's
+        // av1_tile_set_row/col clamp; env carries unclamped sentinels).
+        let refs = aom_dsp::entropy::dv_ref::find_inter_mv_refs(
+            crate::inter_costs::LAST_FRAME,
+            mi_row,
+            mi_col,
+            bsize,
+            partition,
+            up_available,
+            left_available,
+            aom_dsp::entropy::dv_ref::DvTileBounds {
+                mi_row_start: env.tile_row_start,
+                mi_row_end: env.mi_rows.min(env.tile_row_end),
+                mi_col_start: env.tile_col_start,
+                mi_col_end: env.mi_cols.min(env.tile_col_end),
+            },
+            env.mi_rows,
+            env.mi_cols,
+            MI_SIZE_WIDE_B[env.sb_size] as i32,
+            ic.allow_ref_frame_mvs,
+            ic.global_mv,
+            ic.gm_wmtype,
+            ic.sign_bias,
+            ic.allow_high_precision_mv,
+            ic.is_integer_mv,
+            |rr: i32, rc: i32| grid.dv_at(mi_row + rr, mi_col + rc).to_nbr(),
+        );
+        crate::inter_rd::InterLeafArgs {
+            bsize,
+            mi_row,
+            mi_col,
+            mi_rows: env.mi_rows,
+            mi_cols: env.mi_cols,
+            monochrome: env.monochrome,
+            is_chroma_ref,
+            ss_x: env.ss_x,
+            ss_y: env.ss_y,
+            bd: env.bd,
+            stride: env.stride,
+            src_y: env.src_y,
+            src_u: env.src_u,
+            src_v: env.src_v,
+            off_y: ref_off_y,
+            off_uv: ref_off_uv,
+            ref_frame: rf,
+            mode_context: refs.mode_context,
+            nearest_mv: refs.nearest,
+            near_mv: refs.near,
+            global_mv: refs.global_mv,
+            ref_mv_count: i32::from(refs.ref_mv_count),
+            rdmult: env.rdmult,
+            qindex: cfg.qindex,
+            reduced_tx_set_used: env.reduced_tx_set_used,
+            costs: ic.costs,
+            skip_costs: cfg.skip_costs,
+            skip_ctx,
+            intra_inter_ctx,
+            single_ref_ctx,
+        }
+    });
+
     let outcome = {
         let uv_args = if env.monochrome {
             None
@@ -1484,6 +1613,7 @@ fn leaf_pick_sb_modes(
             re,
             uv_args,
             ibc_args.as_ref(),
+            inter_args.as_ref(),
         )
     };
 
@@ -1518,29 +1648,35 @@ fn leaf_pick_sb_modes(
             // An intrabc winner codes DC_PRED / UV_DC_PRED (C's `*mbmi =
             // best_mbmi`, rdopt.c:3595-3596) — the y/uv mode fields go dead, and
             // the neighbour mode context (ModeGrid / MiNbrKf) must see DC_PRED.
+            // An INTER winner likewise codes DC_PRED/UV_DC_PRED dead intra
+            // fields (C's `*mbmi = best_mbmi`); keeping DC in the grid also
+            // keeps the intra-ctx machinery (13-entry `intra_mode_context`
+            // lookups) in range next to inter neighbours.
+            let non_intra = best.use_intrabc || best.is_inter;
             let winner = LeafWinner {
                 bsize,
-                mode: if best.use_intrabc { 0 } else { best.y.mode },
-                angle_delta_y: if best.use_intrabc { 0 } else { best.y.angle_delta },
-                use_filter_intra: !best.use_intrabc && best.y.use_filter_intra,
-                filter_intra_mode: if best.use_intrabc { 0 } else { best.y.filter_intra_mode },
+                mode: if non_intra { 0 } else { best.y.mode },
+                angle_delta_y: if non_intra { 0 } else { best.y.angle_delta },
+                use_filter_intra: !non_intra && best.y.use_filter_intra,
+                filter_intra_mode: if non_intra { 0 } else { best.y.filter_intra_mode },
                 // `mbmi->tx_size` — on the intrabc COEFF arm the var-tx search
                 // leaves the quadtree ROOT size here (`inter_tx_size[0]`, the
                 // top-left leaf's chosen size); the intra winner's own size is
                 // dead there. Inert for the intrabc pack (`write_tx_size_vartx`
                 // reads `inter_tx_size`, chroma derives from bsize), carried for
                 // mbmi faithfulness.
-                tx_size: match (best.use_intrabc, best.skip_txfm) {
+                tx_size: match (non_intra, best.skip_txfm) {
                     (true, false) => best.inter_tx_size[0],
                     // `set_skip_txfm` (tx_search.c:250-253) stamps
                     // `mbmi->tx_size = max_txsize_rect_lookup[bsize]` on the
-                    // skip arm — the intra winner's own size is dead there.
-                    // Read by `cfl_store_block`'s edge alignment.
+                    // skip arm (intrabc AND inter) — the intra winner's own
+                    // size is dead there. Read by `cfl_store_block`'s edge
+                    // alignment.
                     (true, true) => crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[bsize],
                     (false, _) => best.y.tx_size,
                 },
                 luma_edge_filter_type,
-                uv_mode: if best.use_intrabc { 0 } else { uv_mode },
+                uv_mode: if non_intra { 0 } else { uv_mode },
                 angle_delta_uv,
                 cfl_alpha_idx,
                 cfl_alpha_signs,
@@ -1548,7 +1684,7 @@ fn leaf_pick_sb_modes(
                 tx_type_map: best.tx_type_map,
                 palette_y: best.y.palette_y.clone(),
                 palette_uv,
-                skip_txfm: best.use_intrabc && best.skip_txfm,
+                skip_txfm: non_intra && best.skip_txfm,
                 use_intrabc: best.use_intrabc,
                 inter_tx_size: best.inter_tx_size,
                 dv_row: best.dv_row,

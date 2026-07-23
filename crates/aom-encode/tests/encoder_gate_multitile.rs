@@ -366,6 +366,7 @@ fn attempt_multitile_case(
             let n_sb_cols = ti.col_start_sb[tcol + 1] - ti.col_start_sb[tcol];
 
             let env = SbEncodeEnv {
+            ref_frame: None,
                 sb_size: SB,
                 mi_rows,
                 mi_cols,
@@ -409,6 +410,7 @@ fn attempt_multitile_case(
                 deltaq: None,
             };
             let pick_cfg = PickFrameCfg {
+            inter: None,
                 intrabc: None,
                 intra_tools: Default::default(),
                 mode_costs: &real.mode_costs,

@@ -393,6 +393,7 @@ fn localize_lossless(w: usize, h: usize, mono: bool) -> bool {
     let speed = 0i32;
     let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -434,6 +435,7 @@ fn localize_lossless(w: usize, h: usize, mono: bool) -> bool {
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

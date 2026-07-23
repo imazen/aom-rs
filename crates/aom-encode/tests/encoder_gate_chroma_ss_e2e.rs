@@ -554,6 +554,7 @@ fn run_case_ext(
     let speed = 0i32;
     let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
     let mut env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -595,6 +596,7 @@ fn run_case_ext(
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

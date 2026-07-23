@@ -368,6 +368,7 @@ fn localize_mono(
     let src_v_strided = vec![0u16; stride * (h + 4)];
 
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -409,6 +410,7 @@ fn localize_mono(
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

@@ -473,6 +473,7 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
     let src_v_strided = vec![0u16; STRIDE * (h + 4)];
 
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -514,6 +515,7 @@ fn run_one(name: &str, content: impl Fn(usize, usize) -> u8) {
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

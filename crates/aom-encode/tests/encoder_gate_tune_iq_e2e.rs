@@ -529,6 +529,7 @@ fn run_tune_case(
         .tx_type_search_policy(false, port.sharpness)
         .with_tune_knobs(tune);
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -580,6 +581,7 @@ fn run_tune_case(
         tune,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         mode_costs: &real.mode_costs,
         tx_size_costs: &real.tx_size_costs,
         skip_costs: &real.skip_costs,

@@ -1373,6 +1373,7 @@ impl EncodeCell {
                 0
             };
         let env = SbEncodeEnv {
+            ref_frame: None,
             sb_size: sb_block,
             mi_rows,
             mi_cols,
@@ -1527,6 +1528,7 @@ impl EncodeCell {
         };
 
         let pick_cfg = PickFrameCfg {
+            inter: None,
             intra_tools: aom_encode::partition_pick::IntraToolCfg {
                 enable_diagonal_intra: knobs.enable_diagonal_intra,
                 enable_directional_intra: knobs.enable_directional_intra,
@@ -1903,6 +1905,7 @@ impl EncodeCell {
                     sb_mi,
                     sb_block,
                     Some(&lr_pack),
+                    None,
                 );
                 assert_eq!(
                     trees2.len(),
@@ -2050,6 +2053,284 @@ impl MultiFrameEncodeCell {
         )
     }
 
+    /// INTER-ENCODE chunk 2f/2g — encode frame 1 (the §3 low-delay zero-MV P)
+    /// with the port's OWN search + pack, returning the frame-1 OBU payload
+    /// (derived header + tile), the exact shape [`EncodeCell::port_encode`]
+    /// returns for a KEY frame.
+    ///
+    /// The port CHOOSES the inter blocks: `pack_tile` runs the real partition
+    /// search with `PickFrameCfg::inter` live, every leaf competes the inter
+    /// SKIP arm ([`aom_encode::inter_rd::rd_pick_inter_mode_sb`]) against the
+    /// intra winner, and the winning tree is packed through `pack_leaf`'s
+    /// inter branch. Nothing block-level is copied from the reference stream.
+    ///
+    /// ## HONEST BOOTSTRAP (same contract as the KEY `port_encode`)
+    ///
+    /// - The sequence template + the three RECON-DEPENDENT frame-header fields
+    ///   (loop-filter levels/deltas, CDEF, the frame `interp_filter` — a
+    ///   per-frame RD decision) come from `bootstrap` (the real `aomenc`
+    ///   2-frame stream), exactly as `LowDelayPHeaderParams` documents.
+    /// - The REFERENCE frame is frame 0's decoded (filtered) recon, obtained
+    ///   by decoding `bootstrap`'s frame 0 with the port's own byte-exact
+    ///   decoder. Callers should separately assert the port's KEY encode of
+    ///   frame 0 byte-matches (`frame0_cell().port_encode(..)`), which makes
+    ///   the two frame-0 payloads — and hence this reference — identical.
+    /// - `base_qindex` is DERIVED (`rc::base_qindex_lowdelay_p_from_cq`) and
+    ///   cross-checked against the coded header.
+    pub fn port_encode_inter_p(&self, bootstrap: &[u8]) -> Vec<u8> {
+        use aom_encode::inter_frame::{
+            LowDelayPHeaderParams, RefFrame, TWO_FRAME_P_REF_MAP_IDX, TWO_FRAME_P_REFRESH_FLAGS,
+            derive_lowdelay_p_frame_header,
+        };
+        assert_eq!(self.frames.len(), 2, "2-frame [KEY, P] cell");
+        assert_eq!(self.speed, 0, "the inter-encode skeleton is speed-0 scoped");
+        let r = parse_inter_2frame_reference(bootstrap);
+        let real = &r.real_f1;
+        let (w, h, mono, ss_x, ss_y, bd) =
+            (self.w, self.h, self.mono, self.ss_x, self.ss_y, self.bd);
+
+        // The port's own P qindex — derived, then cross-checked.
+        let qindex = aom_encode::rc::base_qindex_lowdelay_p_from_cq(self.cq_level);
+        assert_eq!(
+            qindex, real.quant.base_qindex,
+            "{}: derived low-delay P qindex must match the coded header",
+            self.label
+        );
+        assert!(
+            !real.tx_mode_select,
+            "{}: the §3 P codes TX_MODE_LARGEST",
+            self.label
+        );
+        assert!(!real.cdef.enable_cdef || real.cdef.cdef_bits == 0);
+
+        // --- the reference: frame 0's decoded, filtered recon ---
+        let decoded =
+            aom_decode::frame::decode_frames(bootstrap).expect("bootstrap stream must decode");
+        assert!(decoded.len() >= 2, "2-frame stream");
+        let f0 = &decoded[0];
+        let ref_frame = RefFrame::new(
+            f0.y.clone(),
+            f0.u.clone(),
+            f0.v.clone(),
+            f0.width,
+            f0.width_uv,
+            f0.width,
+            f0.height,
+            f0.width_uv,
+            f0.height_uv,
+            0,
+        );
+
+        // --- frame-1 source planes, strided + edge-extended (the KEY recipe) ---
+        let mi_cols = mi_dim(w as i32);
+        let mi_rows = mi_dim(h as i32);
+        let sb_block = 12usize; // BLOCK_64X64 (the §3 shim codes SB64)
+        let sb_mi = 16i32;
+        let sb_px = 64usize;
+        let (cw, ch) = if mono {
+            (0, 0)
+        } else {
+            ((w + ss_x) >> ss_x, (h + ss_y) >> ss_y)
+        };
+        let n_sb_x = ((mi_cols + sb_mi - 1) / sb_mi).max(1);
+        let n_sb_y = ((mi_rows + sb_mi - 1) / sb_mi).max(1);
+        let sb_px_w = n_sb_x as usize * sb_px;
+        let sb_px_h = n_sb_y as usize * sb_px;
+        let stride = 320.max(sb_px_w + 4);
+        let buf_h = (sb_px_h + 4).max(h + 4);
+        let f1 = &self.frames[1];
+        let extend_plane = |dst: &mut [u16], pw: usize, ph: usize| {
+            for row in 0..ph {
+                let edge = dst[row * stride + pw - 1];
+                for col in pw..stride {
+                    dst[row * stride + col] = edge;
+                }
+            }
+            for row in ph..buf_h {
+                dst.copy_within((ph - 1) * stride..ph * stride, row * stride);
+            }
+        };
+        let mut src_y_strided = vec![0u16; stride * buf_h];
+        for row in 0..h {
+            src_y_strided[row * stride..row * stride + w]
+                .copy_from_slice(&f1.y[row * w..row * w + w]);
+        }
+        extend_plane(&mut src_y_strided, w, h);
+        let mut src_u_strided = vec![0u16; stride * buf_h];
+        let mut src_v_strided = vec![0u16; stride * buf_h];
+        if !mono {
+            for row in 0..ch {
+                src_u_strided[row * stride..row * stride + cw]
+                    .copy_from_slice(&f1.u[row * cw..row * cw + cw]);
+                src_v_strided[row * stride..row * stride + cw]
+                    .copy_from_slice(&f1.v[row * cw..row * cw + cw]);
+            }
+            extend_plane(&mut src_u_strided, cw, ch);
+            extend_plane(&mut src_v_strided, cw, ch);
+        }
+
+        // --- quantizer / costs / rdmult (P = LF_UPDATE, GOOD mode) ---
+        let mut quants = Quants::zeroed();
+        let mut deq = Dequants::zeroed();
+        av1_build_quantizer(bd, 0, 0, 0, 0, 0, &mut quants, &mut deq, 0);
+        let rows_y = set_q_index(&quants, &deq, qindex as usize, 0);
+        let rows_u = set_q_index(&quants, &deq, qindex as usize, 1);
+        let rows_v = set_q_index(&quants, &deq, qindex as usize, 2);
+        let mut kf_write = KfFrameContext::default_for_qindex(qindex);
+        let enable_filter_intra = r.enable_filter_intra;
+        let frame_real = derive_real_costs(&kf_write, enable_filter_intra);
+        let rdmult = av1_compute_rd_mult_based_on_qindex(
+            bd,
+            FrameUpdateType::Lf,
+            qindex,
+            TuneMetric::Psnr,
+            EncMode::Good,
+        );
+
+        // Inter CDFs start at the spec defaults (primary_ref_frame = NONE) and
+        // ADAPT through the pack; the frame-init cost tables derive from them
+        // (pack_tile refreshes both per SB, INTERNAL_COST_UPD_SB).
+        let mut inter_cdfs = aom_encode::inter_costs::InterFrameCdfs::defaults();
+        let frame_inter_costs = aom_encode::inter_costs::derive_inter_mode_costs(&inter_cdfs);
+
+        let sf = SpeedFeatures::set_allintra(0, false, bd > 8);
+        let pol = sf.tx_type_search_policy(false, 0);
+        let uv_lp = UvLoopPolicy::speed0_allintra();
+        let env = SbEncodeEnv {
+            ref_frame: Some(&ref_frame),
+            sb_size: sb_block,
+            mi_rows,
+            mi_cols,
+            tile_row_start: 0,
+            tile_col_start: 0,
+            tile_row_end: 1 << 16,
+            tile_col_end: 1 << 16,
+            monochrome: mono,
+            ss_x,
+            ss_y,
+            bd,
+            lossless: false,
+            reduced_tx_set_used: real.reduced_tx_set_used,
+            disable_edge_filter: !r.enable_intra_edge_filter,
+            filter_type: 0,
+            stride,
+            src_y: &src_y_strided,
+            src_u: &src_u_strided,
+            src_v: &src_v_strided,
+            base_y: 0,
+            base_uv: 0,
+            rows_y: &rows_y,
+            rows_u: &rows_u,
+            rows_v: &rows_v,
+            rdmult,
+            sharpness: 0,
+            enable_optimize_b: trellis_opt_of_knob(3),
+            qm_levels: None,
+            tune: Default::default(),
+            deltaq: None,
+            use_chroma_trellis_rd_mult: false,
+            coeff_costs_y: &frame_real.coeff_costs_y,
+            coeff_costs_uv: &frame_real.coeff_costs_uv,
+            txfm_partition_costs: [[0i32; 2]; 21],
+            tx_type_costs: &frame_real.tx_type_costs_y,
+        };
+        let pick_cfg = PickFrameCfg {
+            inter: Some(aom_encode::partition_pick::InterSearchCfg {
+                costs: &frame_inter_costs,
+                allow_high_precision_mv: real.allow_high_precision_mv,
+                is_integer_mv: real.cur_frame_force_integer_mv,
+                sign_bias: [0i8; 8],
+                allow_ref_frame_mvs: real.allow_ref_frame_mvs,
+                global_mv: (0, 0),
+                gm_wmtype: 0,
+            }),
+            intra_tools: Default::default(),
+            mode_costs: &frame_real.mode_costs,
+            tx_size_costs: &frame_real.tx_size_costs,
+            skip_costs: &frame_real.skip_costs,
+            tx_type_costs_y: &frame_real.tx_type_costs_y,
+            pol: &pol,
+            uv_lp: &uv_lp,
+            intra_uv_mode_cost: &frame_real.mode_costs.intra_uv_mode_cost,
+            cfl_costs: &frame_real.cfl_costs,
+            partition_costs: &frame_real.partition_costs,
+            partition_cdfs: &frame_real.partition_cdf,
+            allintra: false,
+            speed: 0,
+            qindex,
+            enable_filter_intra,
+            enable_tx64: true,
+            enable_rect_tx: true,
+            intra_pruning_with_hog: true,
+            enable_rect_partitions: true,
+            less_rectangular_check_level: 0,
+            max_partition_size: sb_block,
+            min_partition_size: 0,
+            enable_1to4_partitions: true,
+            enable_ab_partitions: true,
+            allow_screen_content_tools: false,
+            qm_levels: None,
+            palette_costs: None,
+            intrabc: None,
+        };
+        let pack_cfg = aom_encode::pack::PackCfg {
+            enable_filter_intra,
+            tx_mode_is_select: false, // TX_MODE_LARGEST (asserted above)
+            signal_gate: qindex > 0,
+            allow_update_cdf: !real.prefix.disable_cdf_update,
+            base_qindex: qindex,
+            delta_q_present: false,
+            delta_q_res: 0,
+            allow_screen_content_tools: false,
+            allow_intrabc: false,
+        };
+
+        let mut recon_y = src_y_strided.clone();
+        let mut recon_u = src_u_strided.clone();
+        let mut recon_v = src_v_strided.clone();
+        let mut enc = OdEcEnc::new();
+        let trees = pack_tile_lr(
+            &mut enc,
+            &env,
+            &pick_cfg,
+            &pack_cfg,
+            &mut kf_write,
+            &mut recon_y,
+            &mut recon_u,
+            &mut recon_v,
+            0,
+            0,
+            n_sb_y,
+            n_sb_x,
+            sb_mi,
+            sb_block,
+            None,
+            Some(&mut inter_cdfs),
+        );
+        assert_eq!(
+            trees.len(),
+            (n_sb_x * n_sb_y) as usize,
+            "{}: P pack_tile must walk every SB",
+            self.label
+        );
+        let tile_bytes = enc.done().to_vec();
+
+        // --- the derived P header (recon-dependent tail bootstrapped) ---
+        let p = LowDelayPHeaderParams {
+            base_qindex: qindex,
+            order_hint: 1,
+            refresh_frame_flags: TWO_FRAME_P_REFRESH_FLAGS,
+            ref_map_idx: TWO_FRAME_P_REF_MAP_IDX,
+            disable_cdf_update: real.prefix.disable_cdf_update,
+            reduced_tx_set_used: real.reduced_tx_set_used,
+            interp_filter: real.interp_filter,
+            loopfilter: real.loopfilter.clone(),
+            cdef: real.cdef.clone(),
+        };
+        let derived = derive_lowdelay_p_frame_header(&r.seq_cfg, &p);
+        assemble_frame_obu_payload_single_tile(&derived, 0, &tile_bytes)
+    }
+
     /// Frame 0 (the KEY source) as a single-frame [`EncodeCell`] (usage = GOOD,
     /// the inter context) — for a KEY-only cross-check or, in chunk 2, the
     /// port's KEY encode of frame 0. Reuses the whole `EncodeCell` machinery.
@@ -2070,6 +2351,118 @@ impl MultiFrameEncodeCell {
             u: f0.u.clone(),
             v: f0.v.clone(),
         }
+    }
+}
+
+/// The parsed reference facts of a 2-frame `[KEY, P]` `aomenc` stream
+/// ([`MultiFrameEncodeCell::c_encode_inter`]'s output): frame 1's OBU payload
+/// + exact header bit length, the parsed frame-1 header, and the
+/// sequence-derived [`FrameHeaderObu`] template the derive/parse paths share.
+pub struct Inter2FrameRef {
+    /// Frame 1's whole OBU payload (header + tile bytes).
+    pub f1_payload: Vec<u8>,
+    /// Frame 0's whole OBU payload.
+    pub f0_payload: Vec<u8>,
+    /// Bit length of frame 1's uncompressed header (the header/tile split).
+    pub header_bits: usize,
+    /// The parsed frame-1 header.
+    pub real_f1: FrameHeaderObu,
+    /// The sequence-derived header template (`read_uncompressed_header`'s cfg).
+    pub seq_cfg: FrameHeaderObu,
+    /// Sequence-header tool bits the port search threads.
+    pub enable_filter_intra: bool,
+    pub enable_intra_edge_filter: bool,
+}
+
+/// Parse a real 2-frame `[KEY, P]` stream into [`Inter2FrameRef`] — the shared
+/// front half of the inter-encode gates (the same construction
+/// `inter_pack_tile_diff.rs` proved byte-faithful).
+pub fn parse_inter_2frame_reference(stream: &[u8]) -> Inter2FrameRef {
+    let obus = walk_obus(stream);
+    let seq_payload = obus
+        .iter()
+        .find(|(t, _)| *t == OBU_SEQUENCE_HEADER)
+        .map(|(_, p)| *p)
+        .expect("sequence header OBU");
+    let mut seq_rb = ReadBitBuffer::new(seq_payload);
+    let seq = read_sequence_header_obu(&mut seq_rb);
+    let s = &seq.seq_header;
+    let c = &seq.color_config;
+    let num_planes = if c.monochrome { 1 } else { 3 };
+    let mib_size_log2 = if s.sb_size_128 { 5u32 } else { 4u32 };
+    let mi_cols = mi_dim(s.max_frame_width);
+    let mi_rows = mi_dim(s.max_frame_height);
+
+    let mut cfg = FrameHeaderObu {
+        prefix: FrameHeaderPrefix {
+            reduced_still_picture_hdr: seq.reduced_still_picture_hdr,
+            decoder_model_info_present_flag: seq.decoder_model_info_present_flag,
+            equal_picture_interval: seq.timing_info.equal_picture_interval,
+            frame_presentation_time_length: seq.decoder_model_info.frame_presentation_time_length
+                as u32,
+            frame_id_numbers_present_flag: s.frame_id_numbers_present_flag,
+            frame_id_length: s.frame_id_length as u32,
+            force_screen_content_tools: s.force_screen_content_tools,
+            force_integer_mv: s.force_integer_mv,
+            max_frame_width: s.max_frame_width,
+            max_frame_height: s.max_frame_height,
+            enable_order_hint: s.enable_order_hint,
+            order_hint_bits_minus_1: s.order_hint_bits_minus_1,
+            operating_points_cnt_minus_1: seq.operating_points_cnt_minus_1,
+            operating_point_idc: seq.operating_point_idc,
+            op_decoder_model_param_present: seq.op_decoder_model_param_present,
+            buffer_removal_time_length: seq.decoder_model_info.buffer_removal_time_length as u32,
+            ..Default::default()
+        },
+        frame_size: FrameSizeHeader {
+            num_bits_width: s.num_bits_width,
+            num_bits_height: s.num_bits_height,
+            superres_upscaled_width: s.max_frame_width,
+            superres_upscaled_height: s.max_frame_height,
+            enable_superres: s.enable_superres,
+            ..Default::default()
+        },
+        tile_info: tile_limits(mi_cols, mi_rows, mib_size_log2),
+        num_planes,
+        separate_uv_delta_q: c.separate_uv_delta_q,
+        loopfilter: LoopfilterHeader {
+            last_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
+            last_mode_deltas: [0, 0],
+            ..Default::default()
+        },
+        cdef: CdefHeader {
+            enable_cdef: s.enable_cdef,
+            ..Default::default()
+        },
+        restoration: RestorationHeader {
+            enable_restoration: s.enable_restoration,
+            sb_size_128: s.sb_size_128,
+            subsampling_x: c.subsampling_x,
+            subsampling_y: c.subsampling_y,
+            ..Default::default()
+        },
+        film_grain_params_present: seq.film_grain_params_present,
+        ..Default::default()
+    };
+    cfg.might_allow_ref_frame_mvs = s.enable_ref_frame_mvs && s.enable_order_hint;
+    cfg.might_allow_warped_motion = s.enable_warped_motion;
+
+    let frames: Vec<&(u32, &[u8])> = obus.iter().filter(|(t, _)| *t == OBU_FRAME).collect();
+    assert_eq!(frames.len(), 2, "expected [KEY, P] frame OBUs");
+    let f0_payload = frames[0].1.to_vec();
+    let f1_payload = frames[1].1.to_vec();
+    let mut rb = ReadBitBuffer::new(&f1_payload);
+    let real_f1 = read_uncompressed_header(&mut rb, &cfg);
+    assert_eq!(real_f1.prefix.frame_type, 1, "frame 1 must be INTER");
+    let header_bits = rb.bit_position();
+    Inter2FrameRef {
+        f1_payload,
+        f0_payload,
+        header_bits,
+        real_f1,
+        seq_cfg: cfg,
+        enable_filter_intra: s.enable_filter_intra,
+        enable_intra_edge_filter: s.enable_intra_edge_filter,
     }
 }
 

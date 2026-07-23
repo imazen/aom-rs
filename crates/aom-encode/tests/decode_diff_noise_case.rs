@@ -407,6 +407,7 @@ fn decode_diff_pseudo_random_noise_case() {
     let src_v_strided = vec![0u16; STRIDE * (h + 4)];
 
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -448,6 +449,7 @@ fn decode_diff_pseudo_random_noise_case() {
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

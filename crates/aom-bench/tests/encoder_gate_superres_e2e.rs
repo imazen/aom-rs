@@ -463,6 +463,7 @@ fn port_encode_superres(cell: &EncodeCell, denom: i32, bootstrap: &[u8]) -> Vec<
     let speed = 0i32;
     let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -500,6 +501,7 @@ fn port_encode_superres(cell: &EncodeCell, denom: i32, bootstrap: &[u8]) -> Vec<
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

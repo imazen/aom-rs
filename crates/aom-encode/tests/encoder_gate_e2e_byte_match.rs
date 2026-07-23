@@ -590,6 +590,7 @@ fn attempt_case_content_uv_sep(
     // speed-0 policy (the GOOD setter is out of the all-intra slice).
     let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -631,6 +632,7 @@ fn attempt_case_content_uv_sep(
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

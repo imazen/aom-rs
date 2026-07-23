@@ -302,7 +302,15 @@ pub fn rd_pick_intra_mode_sb(
     re: ReencodeParams,
     mut uv: Option<RdPickUvArgs>,
     intrabc: Option<&crate::intrabc_search::IntrabcLeafArgs>,
+    inter: Option<&crate::inter_rd::InterLeafArgs>,
 ) -> RdPickIntraOutcome {
+    // A leaf is either a KEY/intra-frame leaf (may carry intrabc) or a P-frame
+    // leaf (carries the inter arm) — never both (`allow_intrabc` is an
+    // intra-frame-only header bit).
+    debug_assert!(
+        intrabc.is_none() || inter.is_none(),
+        "intrabc and inter arms are mutually exclusive by frame type"
+    );
     // (2) the luma search.
     let outcome = rd_pick_intra_sby_mode_y(y_env, recon_y, sby_cfg, var_cache, best_rd);
     let rd_table = outcome.intra_modes_rd_cost;
@@ -375,6 +383,54 @@ pub fn rd_pick_intra_mode_sb(
                     mv_row: 0,
                     mv_col: 0,
                     inter_mode_context: 0,
+                });
+            }
+        }
+        // The P-frame mirror of the intrabc rescue: C's inter-frame search
+        // (`av1_rd_pick_inter_mode_sb`) evaluates the inter modes regardless of
+        // whether any intra candidate fit the budget — an intra miss must not
+        // drop the inter candidates.
+        if let Some(a) = inter {
+            if let Some(w) = crate::inter_rd::rd_pick_inter_mode_sb(a, best_rd) {
+                best = Some(RdPickIntraBest {
+                    // Dead intra state (C's `*mbmi = best_mbmi` overwrites the
+                    // y/uv modes); `tx_size` is the one live field on the SKIP
+                    // arm: `set_skip_txfm` (tx_search.c:250-253) stamps
+                    // `max_txsize_rect_lookup[bsize]`.
+                    y: IntraSbyBest {
+                        mode: 0,
+                        angle_delta: 0,
+                        tx_size: crate::tx_search::MAX_TXSIZE_RECT_LOOKUP[y_env.bsize],
+                        winners: Vec::new(),
+                        rate: i32::MAX,
+                        rate_tokenonly: 0,
+                        dist: 0,
+                        skippable: false,
+                        best_rd: i64::MAX,
+                        use_filter_intra: false,
+                        filter_intra_mode: 0,
+                        palette_y: None,
+                    },
+                    uv: RdPickUvOutcome::Monochrome,
+                    store_y: false,
+                    reencode: None,
+                    tx_type_map: Vec::new(),
+                    rate: w.rate,
+                    dist: w.dist,
+                    rdcost: w.rdcost,
+                    use_intrabc: false,
+                    dv_row: 0,
+                    dv_col: 0,
+                    dv_ref_row: 0,
+                    dv_ref_col: 0,
+                    skip_txfm: w.skip_txfm,
+                    inter_tx_size: [0; 16],
+                    is_inter: true,
+                    ref_frame0: w.ref_frame0,
+                    inter_mode: w.mode,
+                    mv_row: w.mv_row,
+                    mv_col: w.mv_col,
+                    inter_mode_context: w.mode_context,
                 });
             }
         }
@@ -506,8 +562,16 @@ pub fn rd_pick_intra_mode_sb(
         }
     };
 
-    // (5) assembly: intra is always coded non-skip.
-    let rate = y.rate + uv_outcome.rate() + y_env.skip_costs[y_env.skip_ctx][0];
+    // (5) assembly: intra is always coded non-skip. In a P frame the intra
+    // candidate additionally pays `ref_costs_single[INTRA_FRAME]` — the
+    // `is_inter == 0` symbol (`estimate_ref_frame_costs`, rdopt.c:1009; added
+    // to the intra candidate's rate in `handle_intra_mode`). KEY frames code
+    // no is_inter symbol, so the term is inter-frame-only.
+    let mut rate = y.rate + uv_outcome.rate() + y_env.skip_costs[y_env.skip_ctx][0];
+    if let Some(a) = inter {
+        rate += crate::inter_costs::ref_cost_intra_in_inter(a.costs, a.intra_inter_ctx);
+    }
+    let rate = rate;
     let dist = y.dist + uv_outcome.dist();
     let rd = rdcost(y_env.rdmult, rate, dist);
 
@@ -562,6 +626,34 @@ pub fn rd_pick_intra_mode_sb(
         _ => tx_type_map,
     };
 
+    // (6b) the INTER arm (P/B frames — INTER-ENCODE chunk 2): the sibling of
+    // the intrabc arm. C's `av1_rd_pick_inter_mode_sb` evaluated the inter
+    // modes BEFORE its intra candidates (`av1_default_mode_order`) and a later
+    // intra candidate replaces the incumbent only when STRICTLY better — so
+    // the port's later-run inter arm takes the leaf on an exact RD tie (`<=`).
+    // The search budget stays the CALLER's `best_rd` (not min with the intra
+    // rd) so a tying candidate isn't pruned by the arm's internal strict-`<`
+    // budget check.
+    let mut inter_win: Option<crate::inter_rd::InterBest> = None;
+    if let Some(a) = inter {
+        if let Some(w) = crate::inter_rd::rd_pick_inter_mode_sb(a, best_rd) {
+            if w.rdcost <= rd {
+                inter_win = Some(w);
+            }
+        }
+    }
+    let (is_inter, ifields, out_rate, out_dist, out_rd, out_skip) = match &inter_win {
+        Some(w) => (
+            true,
+            (w.ref_frame0, w.mode, w.mv_row, w.mv_col, w.mode_context),
+            w.rate,
+            w.dist,
+            w.rdcost,
+            w.skip_txfm,
+        ),
+        None => (false, (0, 0, 0, 0, 0), out_rate, out_dist, out_rd, ibc_skip),
+    };
+
     // (7) ctx->mic / ctx->tx_type_map: the returned winner state.
     RdPickIntraOutcome {
         best: Some(RdPickIntraBest {
@@ -569,7 +661,9 @@ pub fn rd_pick_intra_mode_sb(
             uv: uv_outcome,
             store_y,
             reencode,
-            tx_type_map,
+            // An inter-SKIP winner codes no coefficients — the intra winner's
+            // map is dead state (C's `*mbmi = best_mbmi` overwrite).
+            tx_type_map: if is_inter { Vec::new() } else { tx_type_map },
             rate: out_rate,
             dist: out_dist,
             rdcost: out_rd,
@@ -578,16 +672,14 @@ pub fn rd_pick_intra_mode_sb(
             dv_col,
             dv_ref_row,
             dv_ref_col,
-            skip_txfm: ibc_skip,
+            skip_txfm: out_skip,
             inter_tx_size,
-            // INTER-ENCODE chunk 2: the step-6 inter arm is wired in a
-            // follow-up; a KEY/intra frame never sets these.
-            is_inter: false,
-            ref_frame0: 0,
-            inter_mode: 0,
-            mv_row: 0,
-            mv_col: 0,
-            inter_mode_context: 0,
+            is_inter,
+            ref_frame0: ifields.0,
+            inter_mode: ifields.1,
+            mv_row: ifields.2,
+            mv_col: ifields.3,
+            inter_mode_context: ifields.4,
         }),
         intra_modes_rd_cost: rd_table,
     }

@@ -457,6 +457,7 @@ impl CPick<'_> {
                 })
             },
             None, // intrabc: this differential is a non-screen envelope
+            None, // inter: KEY-frame differential envelope
         );
         match outcome.best {
             None => (PartRdStats::invalid(), None),
@@ -1423,6 +1424,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
         let tile0 = tile.clone();
 
         let env = SbEncodeEnv {
+            ref_frame: None,
             sb_size: sb,
             mi_rows: 512,
             mi_cols: 512,
@@ -1460,6 +1462,7 @@ fn rd_pick_partition_real_matches_c_recursion() {
             deltaq: None,
         };
         let cfg = PickFrameCfg {
+            inter: None,
             intrabc: None,
             intra_tools: Default::default(),
             mode_costs: &mode_costs,

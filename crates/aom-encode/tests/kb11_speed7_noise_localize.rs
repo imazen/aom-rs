@@ -389,6 +389,7 @@ fn run_and_localize(cq_level: i32, mono: bool) -> bool {
 
     let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -430,6 +431,7 @@ fn run_and_localize(cq_level: i32, mono: bool) -> bool {
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

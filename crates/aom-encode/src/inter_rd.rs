@@ -133,15 +133,16 @@ fn rdcost(rdmult: i32, rate: i32, dist: i64) -> i64 {
 
 /// Copy the co-located reference block into `dst` — the degenerate zero-MV
 /// inter predictor. A full-pel MV of (0,0) makes
-/// `av1_enc_build_inter_predictor` a plain block copy: no subpel filter taps,
-/// no edge extension inside the frame, so this is exact rather than an
+/// `av1_enc_build_inter_predictor` a plain block copy: no subpel filter taps
+/// and no interior edge extension, so this is exact rather than an
 /// approximation of the MC path.
 ///
-/// Returns `None` when the block reaches outside the reference plane, which the
-/// caller treats as "no inter candidate" (it cannot happen for an in-frame
-/// block against a same-size reference, and is a guard rather than a policy).
+/// Reads past the reference CROP are coordinate-clamped (edge replication) —
+/// exactly what C's border-extended reference buffer contains there
+/// (`aom_extend_frame_borders` replicates edge pixels), so a padded sub-8x8
+/// chroma tail or an edge block reads the same values C's MC reads.
 #[allow(clippy::too_many_arguments)]
-fn copy_colocated(
+pub(crate) fn copy_colocated(
     refp: &[u16],
     ref_stride: usize,
     ref_w: usize,
@@ -154,16 +155,16 @@ fn copy_colocated(
     // `dst`'s row stride — the FULL block width, which differs from `w`
     // whenever the block is partly outside the frame.
     dst_stride: usize,
-) -> Option<()> {
-    if x + w > ref_w || y + h > ref_h {
-        return None;
-    }
+) {
+    debug_assert!(ref_w > 0 && ref_h > 0, "empty reference plane");
     for r in 0..h {
-        let s = (y + r) * ref_stride + x;
+        let sy = (y + r).min(ref_h - 1);
+        let s = sy * ref_stride;
         let d = r * dst_stride;
-        dst.get_mut(d..d + w)?.copy_from_slice(refp.get(s..s + w)?);
+        for c in 0..w {
+            dst[d + c] = refp[s + (x + c).min(ref_w - 1)];
+        }
     }
-    Some(())
 }
 
 /// Sum of squared error between a strided source region and a tight prediction,
@@ -249,16 +250,17 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
     // The reference cost is mode-independent (single reference, LAST only).
     let ref_rate = ref_cost_single_last(a.costs, a.intra_inter_ctx, &a.single_ref_ctx);
 
-    // Candidate modes that need NO motion search. NEARMV is only available
-    // when the scan produced a second stack entry (C's `ref_mv_count`
-    // gate in `handle_inter_mode`'s DRL setup).
-    let mut cands: Vec<(i32, (i32, i32))> = vec![
-        (NEARESTMV, a.nearest_mv),
-        (GLOBALMV, a.global_mv),
-    ];
+    // Candidate modes that need NO motion search, in C's evaluation order
+    // (`av1_default_mode_order`, rdopt.c:111: NEARESTMV → [NEWMV] → NEARMV →
+    // GLOBALMV) so a strict-`<` best keeps the same winner C's loop keeps on
+    // an exact RD tie. NEARMV is only available when the scan produced a
+    // second stack entry (C's `ref_mv_count` gate in `handle_inter_mode`'s
+    // DRL setup).
+    let mut cands: Vec<(i32, (i32, i32))> = vec![(NEARESTMV, a.nearest_mv)];
     if a.ref_mv_count > 1 {
         cands.push((NEARMV, a.near_mv));
     }
+    cands.push((GLOBALMV, a.global_mv));
 
     let px_x = a.mi_col as usize * 4;
     let px_y = a.mi_row as usize * 4;
@@ -273,10 +275,10 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
         }
 
         // --- LUMA prediction ---
-        // Only the VISIBLE extent is read: the invisible tail of an edge block
-        // has no source to difference against, so it contributes neither
-        // distortion nor residual. `pred_y` stays zero there, matching
-        // `av1_subtract_plane`'s zero-filled tail.
+        // Only the VISIBLE extent is differenced: C's `set_skip_txfm` sse and
+        // the residual clip to `max_block_wide/high` at frame edges. `pred_y`
+        // stays zero in the invisible tail, matching `av1_subtract_plane`'s
+        // zero-filled tail.
         let mut pred_y = vec![0u16; bw * bh];
         copy_colocated(
             &a.ref_frame.y,
@@ -289,24 +291,50 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
             vis_h,
             &mut pred_y,
             bw,
-        )?;
+        );
 
         let luma_sse = sse_visible(
             a.src_y, a.off_y, a.stride, &pred_y, bw, vis_w, vis_h,
         );
 
-        // --- CHROMA prediction + residual (when this leaf is a chroma ref) ---
+        // --- CHROMA prediction + sse (when this leaf is a chroma ref) ---
+        // C (`set_skip_txfm`, tx_search.c:245-281) accumulates each chroma
+        // plane's sse over the PADDED plane block (`get_plane_block_size` —
+        // a sub-8x8 luma leaf's chroma-ref covers the full 4x4-minimum chroma
+        // block at the COVERING position, not a `bw >> ss_x` strip; the exact
+        // KB-15 skip-arm chroma-extent lesson), clipped to the frame-visible
+        // part (`max_block_wide/high`). `a.off_uv` is the covering-position
+        // source offset (`chroma_plane_offset`); the ref read mirrors it.
         let mut chroma_sse: i64 = 0;
         if !a.monochrome && a.is_chroma_ref {
-            let cw = (vis_w + a.ss_x) >> a.ss_x;
-            let ch = (vis_h + a.ss_y) >> a.ss_y;
-            let cpx_x = px_x >> a.ss_x;
-            let cpx_y = px_y >> a.ss_y;
+            let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(
+                a.bsize, a.ss_x, a.ss_y,
+            );
+            let cw_full = crate::tx_search::BLK_W_B[plane_bsize];
+            let ch_full = crate::tx_search::BLK_H_B[plane_bsize];
+            // Frame-visible chroma extent in 4px units → px.
+            let (cvis_wu, cvis_hu, _, _) = crate::tx_search::max_block_units(
+                a.mi_cols,
+                a.mi_rows,
+                a.mi_col,
+                a.mi_row,
+                mi_w as i32,
+                mi_h as i32,
+                cw_full,
+                ch_full,
+                a.ss_x,
+                a.ss_y,
+            );
+            let cvis_w = (cvis_wu * 4).min(cw_full);
+            let cvis_h = (cvis_hu * 4).min(ch_full);
+            // Covering position (chroma-reference mi base: mi - (mi & ss)).
+            let cpx_x = (((a.mi_col - (a.mi_col & a.ss_x as i32)) as usize) * 4) >> a.ss_x;
+            let cpx_y = (((a.mi_row - (a.mi_row & a.ss_y as i32)) as usize) * 4) >> a.ss_y;
             for (plane_ref, plane_src) in [
                 (&a.ref_frame.u, a.src_u),
                 (&a.ref_frame.v, a.src_v),
             ] {
-                let mut cpred = vec![0u16; cw * ch];
+                let mut cpred = vec![0u16; cw_full * ch_full];
                 copy_colocated(
                     plane_ref,
                     a.ref_frame.stride_uv,
@@ -314,13 +342,13 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
                     a.ref_frame.height_uv,
                     cpx_x,
                     cpx_y,
-                    cw,
-                    ch,
+                    cvis_w,
+                    cvis_h,
                     &mut cpred,
-                    cw,
-                )?;
+                    cw_full,
+                );
                 chroma_sse += sse_visible(
-                    plane_src, a.off_uv, a.stride, &cpred, cw, cw, ch,
+                    plane_src, a.off_uv, a.stride, &cpred, cw_full, cvis_w, cvis_h,
                 );
             }
         }

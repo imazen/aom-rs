@@ -511,6 +511,7 @@ fn rd_pick_intra_mode_sb_matches_c_composition() {
                     re,
                     uv_args,
                     None, // intrabc: non-screen differential envelope
+                    None, // inter: KEY-frame differential envelope
                 )
             };
 

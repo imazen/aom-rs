@@ -402,6 +402,7 @@ fn localize_cell(w: usize, h: usize, cq_level: i32, speed: i32, name: &str) -> b
 
     let sf = SpeedFeatures::set_allintra(speed, p.allow_screen_content_tools, false);
     let env = SbEncodeEnv {
+            ref_frame: None,
         sb_size: SB,
         mi_rows,
         mi_cols,
@@ -443,6 +444,7 @@ fn localize_cell(w: usize, h: usize, cq_level: i32, speed: i32, name: &str) -> b
         deltaq: None,
     };
     let pick_cfg = PickFrameCfg {
+            inter: None,
         intrabc: None,
         intra_tools: Default::default(),
         mode_costs: &real.mode_costs,

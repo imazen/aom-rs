@@ -321,6 +321,7 @@ pub fn pack_leaf(
     mi_col: i32,
     partition: usize,
     sb_current_qindex: i32,
+    inter_cdfs: Option<&mut crate::inter_costs::InterFrameCdfs>,
 ) {
     let bsize = winner.bsize;
     let mi_w = MI_SIZE_WIDE_B[bsize];
@@ -368,6 +369,96 @@ pub fn pack_leaf(
     } else {
         0
     };
+    // ---- 1 (INTER frame): `pack_inter_mode_mvs` (bitstream.c:1092) reduced
+    //      to the §3 envelope — segmentation off, skip_mode off, CDEF off,
+    //      delta-q off ⇒ the prologue is the skip symbol alone, then
+    //      is_inter + ref_frames + inter_mode (write_inter_leaf_mode_info's
+    //      exact scope, byte-locked by `inter_pack_tile_diff`). ----
+    if winner.is_inter {
+        let inter_cdfs = inter_cdfs.expect("an inter leaf needs the frame's inter CDF set");
+        assert!(
+            nbr.cdef.is_none(),
+            "inter pack: CDEF signalling between skip and is_inter is a later rung"
+        );
+        assert!(
+            !kfs.dq_present && !kfs.dlf_present,
+            "inter pack: delta-q/delta-lf are off in the §3 envelope"
+        );
+        // Contexts derived from the search's fully-stamped DV grid — the same
+        // reads `leaf_pick_sb_modes` used (above/left target already-coded
+        // positions, whose stamps are final by pack time), so search and pack
+        // price/code on identical CDF rows.
+        let above_dv = has_above.then(|| grid.dv_at(mi_row - 1, mi_col));
+        let left_dv = has_left.then(|| grid.dv_at(mi_row, mi_col - 1));
+        let nbr_is_inter = |d: &Option<crate::intrabc_search::DvCell>| {
+            d.as_ref().is_some_and(|d| d.use_intrabc || d.ref_frame0 > 0)
+        };
+        let skip_ctx = above_dv.as_ref().map_or(0, |d| usize::from(d.skip_txfm))
+            + left_dv.as_ref().map_or(0, |d| usize::from(d.skip_txfm));
+        let intra_inter_ctx = aom_dsp::entropy::partition::get_intra_inter_context(
+            has_above,
+            nbr_is_inter(&above_dv),
+            has_left,
+            nbr_is_inter(&left_dv),
+        );
+        let rc = aom_dsp::entropy::partition::collect_neighbors_ref_counts(
+            has_above,
+            above_dv.as_ref().is_some_and(|d| d.use_intrabc),
+            above_dv.as_ref().map_or(0, |d| i32::from(d.ref_frame0)),
+            above_dv.as_ref().map_or(-1, |d| i32::from(d.ref_frame1)),
+            has_left,
+            left_dv.as_ref().is_some_and(|d| d.use_intrabc),
+            left_dv.as_ref().map_or(0, |d| i32::from(d.ref_frame0)),
+            left_dv.as_ref().map_or(-1, |d| i32::from(d.ref_frame1)),
+        );
+        let single_ref = crate::inter_costs::SingleRefCtx::from_neighbor_ref_counts(&rc);
+        crate::inter_pack::write_inter_leaf_mode_info(
+            enc,
+            inter_cdfs,
+            &mut kf.skip[skip_ctx],
+            &crate::inter_pack::InterLeafCtx {
+                skip_ctx,
+                intra_inter_ctx,
+                single_ref,
+            },
+            &crate::inter_pack::InterLeafSyntax {
+                skip_txfm: i32::from(winner.skip_txfm),
+                is_inter: 1,
+                ref_frame0: winner.ref_frame0,
+                inter_mode: winner.inter_mode,
+                mode_context: winner.inter_mode_context,
+            },
+        );
+        // No palette / tx-size / coeff syntax on the inter SKIP arm (asserted
+        // by encode_b_intra_dry's inter arm); run the recon walk + the
+        // neighbour stamp shared with the intra path below.
+        let out = encode_b_intra_dry(
+            env, tile, recon_y, recon_u, recon_v, cfl, winner, mi_row, mi_col, partition, true,
+        );
+        debug_assert!(out.y.txbs.is_empty(), "inter SKIP leaf carries no txbs");
+        nbr.stamp(
+            mi_row,
+            mi_col,
+            mi_w,
+            mi_h,
+            env.mi_cols,
+            env.mi_rows,
+            MiNbrKf {
+                y_mode: winner.mode as i32,
+                skip_txfm: i32::from(winner.skip_txfm),
+            },
+            None,
+        );
+        return;
+    }
+    assert!(
+        inter_cdfs.is_none(),
+        "intra leaf inside an inter frame: the intra-in-inter pack \
+         (is_inter=0 + write_intra_prediction_modes) is a later rung — the RD \
+         arm declined where aomenc coded inter, so fail loudly rather than \
+         desync the tile"
+    );
+
     let info = MbModeInfoKf {
         segment_id: 0,
         skip: i32::from(winner.skip_txfm),
@@ -880,6 +971,7 @@ pub fn pack_sb(
     mi_col: i32,
     bsize: usize,
     sb_current_qindex: i32,
+    mut inter_cdfs: Option<&mut crate::inter_costs::InterFrameCdfs>,
 ) {
     if mi_row >= env.mi_rows || mi_col >= env.mi_cols {
         return;
@@ -973,6 +1065,7 @@ pub fn pack_sb(
                 mi_col,
                 PARTITION_NONE as usize,
                 sb_current_qindex,
+                inter_cdfs.as_deref_mut(),
             );
         }
         SbTree::Split(children) => {
@@ -983,6 +1076,7 @@ pub fn pack_sb(
                     enc, env, cfg, kf, kfs, tile, nbr, grid, recon_y, recon_u, recon_v, cfl, child, y, x,
                     subsize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1006,6 +1100,7 @@ pub fn pack_sb(
                 mi_col,
                 PARTITION_HORZ as usize,
                 sb_current_qindex,
+                inter_cdfs.as_deref_mut(),
             );
             if mi_row + hbs < env.mi_rows {
                 pack_leaf(
@@ -1026,6 +1121,7 @@ pub fn pack_sb(
                     mi_col,
                     PARTITION_HORZ as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1049,6 +1145,7 @@ pub fn pack_sb(
                 mi_col,
                 PARTITION_VERT as usize,
                 sb_current_qindex,
+                inter_cdfs.as_deref_mut(),
             );
             if mi_col + hbs < env.mi_cols {
                 pack_leaf(
@@ -1069,6 +1166,7 @@ pub fn pack_sb(
                     mi_col + hbs,
                     PARTITION_VERT as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1099,6 +1197,7 @@ pub fn pack_sb(
                     mi_col,
                     PARTITION_HORZ_4 as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1129,6 +1228,7 @@ pub fn pack_sb(
                     this_mi_col,
                     PARTITION_VERT_4 as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1160,6 +1260,7 @@ pub fn pack_sb(
                     c,
                     PARTITION_HORZ_A as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1189,6 +1290,7 @@ pub fn pack_sb(
                     c,
                     PARTITION_HORZ_B as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1219,6 +1321,7 @@ pub fn pack_sb(
                     c,
                     PARTITION_VERT_A as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1249,6 +1352,7 @@ pub fn pack_sb(
                     c,
                     PARTITION_VERT_B as usize,
                     sb_current_qindex,
+                    inter_cdfs.as_deref_mut(),
                 );
             }
         }
@@ -1297,7 +1401,7 @@ pub fn pack_tile(
 ) -> Vec<SbTree> {
     pack_tile_lr(
         enc, env, pick_cfg, pack_cfg, kf, recon_y, recon_u, recon_v, mi_row0, mi_col0, n_sb_rows,
-        n_sb_cols, sb_mi, sb_size, None,
+        n_sb_cols, sb_mi, sb_size, None, None,
     )
 }
 
@@ -1336,6 +1440,7 @@ pub fn pack_tile_lr(
     sb_mi: i32,
     sb_size: usize,
     lr: Option<&LrPackParams<'_>>,
+    mut inter_cdfs: Option<&mut crate::inter_costs::InterFrameCdfs>,
 ) -> Vec<SbTree> {
     // C write_modes (bitstream.c): `w->allow_update_cdf = !large_scale_tile
     // && !disable_cdf_update` — the tile writer's symbol adaptation gate
@@ -1350,7 +1455,7 @@ pub fn pack_tile_lr(
         env.mi_rows as usize,
         mi_cols,
         pick_cfg.palette_costs.is_some(),
-        pick_cfg.intrabc.is_some(),
+        pick_cfg.intrabc.is_some() || pick_cfg.inter.is_some(),
     );
     let mut nbr = MiNbrGrid::zeroed(mi_cols);
     let mut kfs = kf_block_state(pack_cfg, env, sb_mi);
@@ -1580,6 +1685,13 @@ pub fn pack_tile_lr(
             let cost_upd_off = pick_cfg.allintra && pick_cfg.speed >= 9;
             let sb_real = (!cost_upd_off)
                 .then(|| crate::real_costs::derive_real_costs(kf, pick_cfg.enable_filter_intra));
+            // INTERNAL_COST_UPD_SB, inter arm: `av1_fill_mode_rates`' inter
+            // tables (intra_inter/single_ref/newmv/zeromv/refmv/drl) re-derive
+            // from the CURRENT (adapting) inter CDFs at every SB, exactly like
+            // the intra tables above. SB 0 reads the frame-init defaults.
+            let sb_inter_costs = inter_cdfs
+                .as_deref()
+                .map(|c| crate::inter_costs::derive_inter_mode_costs(c));
             // Variance-Boost delta-q per-SB quantizer rows (None = identity when
             // delta-q is off — env.rows_* — so speeds 0-9 stay byte-unchanged).
             let sb_env = if let Some(sb_real) = &sb_real {
@@ -1626,9 +1738,23 @@ pub fn pack_tile_lr(
                     // measured: C's edge gather rows == default_partition_cdf at
                     // every bottom-edge node of the 196x196 encode while its
                     // interior costs track the adapting tile state).
+                    inter: match (&sb_inter_costs, pick_cfg.inter) {
+                        (Some(c), Some(ic)) => {
+                            Some(crate::partition_pick::InterSearchCfg { costs: c, ..ic })
+                        }
+                        _ => pick_cfg.inter,
+                    },
                     ..*pick_cfg
                 },
-                None => PickFrameCfg { ..*pick_cfg },
+                None => PickFrameCfg {
+                    inter: match (&sb_inter_costs, pick_cfg.inter) {
+                        (Some(c), Some(ic)) => {
+                            Some(crate::partition_pick::InterSearchCfg { costs: c, ..ic })
+                        }
+                        _ => pick_cfg.inter,
+                    },
+                    ..*pick_cfg
+                },
             };
 
             let mut cfl_search = CflCtx::new(env.ss_x as i32, env.ss_y as i32);
@@ -1787,6 +1913,7 @@ pub fn pack_tile_lr(
                 mi_col,
                 sb_size,
                 sb_current_qindex,
+                inter_cdfs.as_deref_mut(),
             );
             trees.push(tree);
         }
@@ -1843,6 +1970,10 @@ pub fn pack_tile_from_trees(
     sb_size: usize,
     cdef: Option<CdefPackState>,
 ) {
+    // The two-pass (CDEF/LR) pack is intra-frame machinery today; an inter
+    // frame with CDEF/LR signalling is a later rung, so no inter CDF set is
+    // threaded here (pack_leaf's inter branch would fail loudly if reached).
+    let mut inter_cdfs: Option<&mut crate::inter_costs::InterFrameCdfs> = None;
     assert_eq!(
         trees.len(),
         (n_sb_rows * n_sb_cols) as usize,
@@ -2030,6 +2161,7 @@ pub fn pack_tile_from_trees(
                 mi_col,
                 sb_size,
                 sb_current_qindex,
+                inter_cdfs.as_deref_mut(),
             );
         }
     }
