@@ -1,0 +1,38 @@
+# intra_tiebreak_deltas_2026-07-23.csv
+# Measured 2026-07-23 on host dev-32gb, aom-rs source 046b897f5e09 (no source modifications; throwaway harness reusing gate machinery).
+# C reference: libaom v3.14.1 (upstream 03087864) via aom-sys-ref shims. ssim2 = SSIMULACRA2 via fast-ssim2-cli 0.6.0; zensim 0.2.7 cross-check.
+# Sizes are FULL temporal-unit bytes (port stream = C stream with the frame OBU payload spliced; identical seq headers).
+# ssim2 of each decode vs the SOURCE pixels after identical BT.601 limited-range YUV->RGB. ssim2_rel_drop_pct = 100*(c-port)/|c|.
+# rd_hurt: C local RD curve from bracket cq encodes (+-3,+-6, clamped 1..63), ssim2 linear-interpolated in ln(bytes) at port_bytes.
+# stream_status: ok = both decoders accept + identical planes; c_decoder_rejects = REAL C decoder errors on the port stream (port decoder parsed leniently); port_no_decode = port stream does not decode at all.
+kb,cell,cq,speed,port_bytes,c_bytes,size_delta_pct,port_ssim2,c_ssim2,ssim2_delta_pts,ssim2_rel_drop_pct,port_zensim,c_zensim,zensim_drop,c_curve_ssim2_at_port_bytes,rd_hurt_ssim2_pts,rd_hurt_ssim2_pct,rd_interp,stream_status,pareto_dominated,exceeds_size,exceeds_ssim2,exceeds_rd,EXCEEDS
+KB-13,196x196 cpu1 cq12,12,1,2220,2400,-7.5000,-168.606587,89.278413,-257.885000,288.8548,-242.112460,89.877717,331.990177,88.561420,257.168007,290.3838,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu1 cq32,32,1,979,1053,-7.0275,-225.454771,80.186970,-305.641742,381.1614,-261.318900,80.789877,342.108776,78.583305,304.038076,386.8991,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu1 cq63,63,1,153,168,-8.9286,-297.727766,-38.147467,-259.580299,680.4654,-336.905197,-35.190098,301.715099,-43.885078,253.842688,578.4260,extrap,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu2 cq12,12,2,2254,2411,-6.5118,-384.038075,89.133782,-473.171856,530.8558,-286.259796,89.636047,375.895844,88.518949,472.557024,533.8484,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu2 cq32,32,2,1029,1096,-6.1131,-113.438830,78.906615,-192.345446,243.7634,-208.250466,80.422275,288.672741,78.259048,191.697879,244.9530,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu2 cq63,63,2,163,177,-7.9096,-341.556639,-33.769184,-307.787455,911.4447,-355.530126,-32.417060,323.113065,-39.589847,301.966792,762.7380,extrap,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu3 cq12,12,3,2268,2404,-5.6572,-192.258191,89.616504,-281.874694,314.5344,-232.375475,89.846574,322.222049,88.753706,281.011896,316.6199,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu3 cq32,32,3,1030,1110,-7.2072,-126.421714,78.218231,-204.639944,261.6269,-207.791962,79.943201,287.735163,77.740175,204.161889,262.6208,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu3 cq63,63,3,167,183,-8.7432,-286.801151,-37.452174,-249.348977,665.7797,-342.511900,-37.854508,304.657392,-44.204732,242.596419,548.8019,extrap,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu4 cq12,12,4,2335,2507,-6.8608,-265.947521,89.030239,-354.977759,398.7159,-292.038233,89.544604,381.582837,88.390490,354.338010,400.8780,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu4 cq32,32,4,1109,1170,-5.2137,-151.691174,78.350604,-230.041777,293.6056,-243.273863,79.990556,323.264419,76.895364,228.586538,297.2696,interp,c_decoder_rejects,false,true,true,true,true
+KB-13,196x196 cpu4 cq63,63,4,163,177,-7.9096,-212.762394,-37.179611,-175.582783,472.2556,-277.194010,-33.507866,243.686144,-42.111431,170.650963,405.2367,extrap,c_decoder_rejects,false,true,true,true,true
+KB-13,q00-64 cpu4 cq32,32,4,558,560,-0.3571,68.781448,68.729327,0.052121,-0.0758,70.914641,70.164894,-0.749746,68.793270,0.011823,0.0172,interp,ok,false,false,false,false,false
+KB-13,q00-128 cpu3 cq63,63,3,90,88,2.2727,-43.366433,-40.679026,-2.687407,6.6064,-63.004671,-58.481329,4.523342,-40.062625,3.303808,8.2466,interp,ok,true,false,true,true,true
+KB-13,q00-128 cpu4 cq12,12,4,4623,4632,-0.1943,87.126847,87.114319,0.012528,-0.0144,87.134860,86.996889,-0.137971,87.089650,-0.037197,-0.0427,interp,ok,false,false,false,false,false
+KB-13,q00-128 cpu4 cq32,32,4,1912,1905,0.3675,67.455545,67.465897,-0.010352,0.0153,67.525701,67.401577,-0.124125,67.580425,0.124879,0.1848,interp,ok,true,false,false,false,false
+KB-13,q00-128 cpu4 cq63,63,4,83,82,1.2195,-45.730832,-45.237084,-0.493748,1.0915,-65.650330,-65.144334,0.505996,-44.757587,0.973245,2.1745,interp,ok,true,false,false,false,false
+KB-13,fg-64 cpu3 cq63,63,3,72,72,0.0000,37.024463,37.918891,-0.894428,2.3588,-25.728347,-26.851557,-1.123210,37.918891,0.894428,2.3588,interp,ok,true,false,false,false,false
+KB-13,fg-64 cpu4 cq32,32,4,521,520,0.1923,77.186445,77.241914,-0.055469,0.0718,76.045989,76.033819,-0.012170,77.248666,0.062221,0.0805,interp,ok,true,false,false,false,false
+KB-10,noise64 s6 mono cq63,63,6,21,21,0.0000,25.836708,26.165384,-0.328676,1.2561,-188.288947,-182.662954,5.625993,26.165384,0.328676,1.2561,interp,c_decoder_rejects,true,false,true,false,true
+KB-10,noise64 s6 420 cq63,63,6,24,24,0.0000,-45.135431,26.165384,-71.300815,272.5006,-353.076109,-182.662954,170.413154,26.165384,71.300815,272.5006,interp,c_decoder_rejects,true,false,true,true,true
+KB-11,noise64 s7 mono cq63,63,7,21,21,0.0000,25.836708,26.165384,-0.328676,1.2561,-188.288947,-182.662954,5.625993,26.165384,0.328676,1.2561,interp,c_decoder_rejects,true,false,true,false,true
+KB-11,noise64 s7 420 cq63,63,7,24,24,0.0000,-45.135431,26.165384,-71.300815,272.5006,-353.076109,-182.662954,170.413154,26.165384,71.300815,272.5006,interp,c_decoder_rejects,true,false,true,true,true
+KB-12,diag64 s8 mono cq12,12,8,136,137,-0.7299,97.354235,97.451531,-0.097297,0.0998,91.954617,92.047114,0.092497,97.457839,0.103604,0.1063,interp,ok,false,false,false,false,false
+KB-12,diag64 s8 420 cq12,12,8,613,613,0.0000,84.552134,84.586154,-0.034020,0.0402,86.743278,86.722937,-0.020341,84.586154,0.034020,0.0402,interp,ok,true,false,false,false,false
+KB-12,diag128 s8 mono cq32,32,8,127,122,4.0984,87.682086,89.381196,-1.699111,1.9010,83.488004,84.194900,0.706896,79.238439,-8.443647,-10.6560,interp,ok,true,false,false,false,false
+KB-12,diag128 s8 420 cq32,32,8,1473,1467,0.4090,60.221465,59.707637,0.513828,-0.8606,61.359434,61.042552,-0.316883,59.873089,-0.348377,-0.5819,interp,ok,false,false,false,false,false
+KB-P29,ui_420_128_cq32,32,0,362,353,2.5496,90.152938,88.965104,1.187834,-1.3352,91.850706,90.809882,-1.040824,92.121757,1.968818,2.1372,interp,ok,false,false,false,false,false
+KB-P29,text_420_128_cq20,20,0,1245,1245,0.0000,95.561062,95.735091,-0.174028,0.1818,96.206752,96.397076,0.190324,95.735091,0.174028,0.1818,interp,ok,true,false,false,false,false
+KB-15,scc_480x180_196_cq48,48,0,1909,1905,0.2100,n/a,61.977752,n/a,n/a,n/a,63.330284,n/a,n/a,n/a,n/a,n/a,port_no_decode,n/a,false,true,n/a,true
