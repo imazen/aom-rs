@@ -1433,6 +1433,42 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   Working notes: `docs/inter-vartx-coeff-arm-notes.md` (updated with the chroma inter path, the
   encode-vs-write walk-order difference, and the `set_skip_txfm` nonzero-rate detail).
 
+### KB-16 — INTER-ENCODE rung 1 ✅ (the port's OWN search codes the zero-MV P byte-exact, single-SB) + two pinned follow-ups
+- **LANDED 2026-07-23.** The inter RD loop is WIRED end-to-end: `PickFrameCfg::inter` →
+  per-leaf `InterLeafArgs` (`leaf_pick_sb_modes`: `find_inter_mv_refs` + intra_inter/single-ref/
+  skip ctx from the DV grid) → the `rd_pick.rs` step-6b inter arm (inter wins RD ties — C
+  evaluates inter first per `av1_default_mode_order`; the intra candidate pays
+  `ref_cost_intra_in_inter` on P frames) → `encode_b_intra_dry` inter recon arm (co-located ref
+  copy, skip resets, padded plane-bsize chroma extents, `SbEncodeEnv::ref_frame`) → `pack_leaf`
+  inter branch (`write_inter_leaf_mode_info`; loud-fail on intra-in-P) with `InterFrameCdfs`
+  threaded through `pack_tile_lr`/`pack_sb` + the per-SB INTERNAL_COST_UPD_SB inter cost refresh.
+  **GATE (hard byte asserts): `aom-bench/tests/inter_e2e_search.rs`** — frame-1 payload ==
+  aomenc at 64² × cq{20,40,60,63} 4:2:0 + cq{20,60} mono through the port's own search, plus
+  decode-both pixel identity. KEY envelope byte-inert by construction (`inter: None` everywhere
+  pre-existing). Harness: `MultiFrameEncodeCell::port_encode_inter_p`.
+- **MEASURED (instrumented sibling C, removed): the §3 GOOD stream codes SB128** at every speed —
+  a 64×128 frame is ONE column-cropped 128×128 SB whose root codes a gathered 2-way SPLIT/VERT
+  symbol. The old "two-superblock SB64" model in `inter_pack_tile_diff.rs` could never match and
+  is superseded (tombstone in file); 64×64 frames are walk-degenerate (why single-SB always
+  matched). `port_encode_inter_p` drives the declared SB size.
+- **PINNED (`zero_mv_p_own_search_64x128_cropped_sb128_pinned_divergent`) — the port models no
+  SWITCHABLE interp-filter rate on inter leaves.** During encoding the frame filter is
+  SWITCHABLE (the coded REGULAR is post-hoc); `use_more_sharp_interp=1` (speed_features.c:1139,
+  GOOD base every speed, non-boosted) gives SHARP a mul=90 discount in `interpolation_filter_rd`,
+  so C's 64×128 VERT candidate lands on SHARP (rs 3931 vs REGULAR 109 at ctx 3) and busts the
+  budget at `av1_txfm_search`'s skip guard (250,728,413 > 247,851,864) → C picks SPLIT; the
+  port's rs=0 leaf picks VERT (`[d7,a0]` vs `[f2,24,80]`). Fix = the CURVFIT model-rd
+  (`MODELRD_TYPE_INTERP_FILTER = MODELRD_CURVFIT`, model_rd.h:31 — NOT the ported lapndz) +
+  `av1_get_pred_context_switchable_interp` + switchable-interp costs + the reduced zero-MV interp
+  compare; then rs joins every inter leaf's mode_rate (C's 64×64 leaves pay 109 each too).
+- **PINNED (`good_usage_key_frame0_pinned_divergent`) — GOOD-usage (usage=0) KEY encode is NOT
+  byte-exact** (64² cq60: header 2 bytes longer + mid-tile divergence). Every landed KEY byte
+  gate is ALLINTRA; chunk-0's "frame-0 control" was decode-side. A GOOD-vs-ALLINTRA speed-feature/
+  header gap, independent of the inter wiring; blocks full-STREAM identity of the 2-frame clip.
+- **Correction: TX_MODE_LARGEST is a POST-encode demotion** (`txb_split_count==0`); the SEARCH
+  runs TX_MODE_SELECT, so a coeff-arm rung needs the var-tx machinery even under a LARGEST header.
+  Full detail + next-rung plan: `INTER-CHUNK2-HANDOFF.md` §SESSION 2026-07-23.
+
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)
 
 Primary config = ALLINTRA (usage=2), speed-0 KEY frame. libaom's own allintra tuning

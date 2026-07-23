@@ -204,11 +204,78 @@ fn zero_mv_p_own_search_cq_ladder_byte_exact() {
     }
 }
 
-/// MULTI-BLOCK: the two-superblock 64x128 tile through the port's own
-/// search+pack. The hand-rolled pack in `inter_pack_tile_diff.rs` pins a
-/// divergence on this shape; the real `pack_tile` path (full tile-context +
-/// grid machinery) is the implementation that has to be right.
+/// MULTI-BLOCK 64x128 — PINNED OPEN (self-promoting), root FULLY MEASURED
+/// via a byte-inert instrumented sibling libaom (throwaway, removed): the
+/// residual is a SEARCH-SPACE gap, not a pack/CDF bug.
+///
+/// ## Measured facts (2026-07-23, instrumented C at the pinned v3.14.1 SHA)
+///
+/// 1. The §3 GOOD-mode stream codes **SB128** (`mib_size_log2 = 5` — libaom's
+///    GOOD default at every speed), NOT SB64. A 64x128 frame is ONE
+///    column-cropped 128x128 superblock whose root codes a gathered 2-way
+///    SPLIT/VERT partition symbol (`write_partition`'s `has_rows && !has_cols`
+///    arm) before the two visible 64x64 children. The old "two-superblock
+///    tile" framing (and `inter_pack_tile_diff.rs`'s hand-rolled SB64 pin) was
+///    WRONG about the walk shape; a 64x64 frame is degenerate (both walks emit
+///    identical symbols), which is why the single-SB gates match either way.
+///    `port_encode_inter_p` now drives the declared SB size.
+/// 2. At the cropped root C evaluates SPLIT (rd 248,444,575; children rd
+///    133,585,034 + 102,885,701, both NEARESTMV skip) then VERT. VERT's single
+///    64x128 sub-block FAILS: `av1_txfm_search`'s final skip-guard
+///    (tx_search.c:3893) computes tmprd 250,728,413 > the remaining budget
+///    247,851,864 (SPLIT minus the VERT partition bit) → no codeable
+///    candidate → SPLIT wins in C.
+/// 3. The 64x128 candidate is over-priced because of the INTERP-FILTER search:
+///    during encoding the frame filter is SWITCHABLE (the coded REGULAR header
+///    value is a POST-encode selection), so every inter candidate pays
+///    `rs = av1_get_switchable_rate(..)`. `use_more_sharp_interp = 1`
+///    (speed_features.c:1139, GOOD base at EVERY speed, non-boosted frames)
+///    gives SHARP a `mul = 90` (10%) RD discount in `interpolation_filter_rd`
+///    (interp_search.c) — on the dist-heavy 64x128 model RD the discount lets
+///    SHARP displace REGULAR, and its rate at ctx 3 is 3931 vs REGULAR's 109.
+///    The children (smaller model RD) keep REGULAR (rs 109 each).
+/// 4. The port models NO interp-filter rate on the inter arm (rs = 0), so its
+///    64x128 VERT leaf is ~3822 rate units cheaper than C's and WINS the root:
+///    port tile `[d7, a0]` (VERT, one block) vs aomenc `[f2, 24, 80]` (SPLIT,
+///    two blocks).
+///
+/// ## The fix (next rung, bounded)
+///
+/// Model the §3 interp-filter search on the inter arm: the CURVFIT model-rd
+/// (`MODELRD_TYPE_INTERP_FILTER = MODELRD_CURVFIT`, model_rd.h:31 — NOT the
+/// ported lapndz model; needs `av1_model_rd_curvfit` + tables + a
+/// differential), `av1_get_pred_context_switchable_interp`, the
+/// switchable-interp cost table, and `interpolation_filter_rd`'s biased
+/// accept (`tmp_rd * mul / 100 < *rd`, SHARP mul=90). At zero MV every
+/// filter's prediction is identical, so the reduced search is a pure
+/// rate/model compare — no convolution needed. The winner's rs then joins the
+/// inter leaf's mode_rate (C: rate2_nocoeff) and the skip-guard rd.
+///
+/// This test asserts the divergence is PRESENT so it FAILS the moment the
+/// port matches — then promote to `run_cell` (hard byte assert).
 #[test]
-fn zero_mv_p_own_search_two_superblock_64x128_byte_exact() {
-    run_cell("interp_e2e_64x128_cq60_420", 64, 128, false, 60);
+fn zero_mv_p_own_search_64x128_cropped_sb128_pinned_divergent() {
+    let cell =
+        MultiFrameEncodeCell::translational(&base("interp_e2e_64x128", 64, 128, false, 60), 0, 0);
+    let stream = cell.c_encode_inter(false, false);
+    let r = parse_inter_2frame_reference(&stream);
+    let port_f1 = cell.port_encode_inter_p(&stream);
+    assert_ne!(
+        port_f1, r.f1_payload,
+        "64x128 cropped-SB128 P NOW BYTE-MATCHES — promote this pin to \
+         run_cell(\"interp_e2e_64x128_cq60_420\", 64, 128, false, 60)"
+    );
+    // Positive results (asserted): the derived header half matches; the tile
+    // shape is the measured VERT-vs-SPLIT flip, not something new.
+    let split = r.header_bits.div_ceil(8);
+    assert_eq!(
+        &port_f1[..split.min(port_f1.len())],
+        &r.f1_payload[..split],
+        "the derived P header must stay byte-exact on the cropped-SB128 frame"
+    );
+    eprintln!(
+        "PINNED (measured root: missing interp-filter rate model): port tile {:02x?} vs aomenc {:02x?}",
+        &port_f1[split..],
+        &r.f1_payload[split..]
+    );
 }

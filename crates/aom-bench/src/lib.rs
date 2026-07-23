@@ -2124,9 +2124,18 @@ impl MultiFrameEncodeCell {
         // --- frame-1 source planes, strided + edge-extended (the KEY recipe) ---
         let mi_cols = mi_dim(w as i32);
         let mi_rows = mi_dim(h as i32);
-        let sb_block = 12usize; // BLOCK_64X64 (the §3 shim codes SB64)
-        let sb_mi = 16i32;
-        let sb_px = 64usize;
+        // The superblock size the STREAM declares. The §3 GOOD-mode shim codes
+        // SB128 (libaom's speed-0 GOOD default), so a 64x128 frame is ONE
+        // column-cropped 128x128 superblock — its root codes a gathered 2-way
+        // partition symbol before the two visible 64x64 children. Driving the
+        // walk at SB64 dropped that symbol (the original "two-superblock tile"
+        // divergence); a 64x64 frame is degenerate (both walks code identical
+        // symbols), which is why the single-SB gate matched either way.
+        let (sb_block, sb_mi, sb_px) = if r.seq_cfg.tile_info.mib_size_log2 == 5 {
+            (15usize, 32i32, 128usize) // BLOCK_128X128
+        } else {
+            (12usize, 16i32, 64usize) // BLOCK_64X64
+        };
         let (cw, ch) = if mono {
             (0, 0)
         } else {

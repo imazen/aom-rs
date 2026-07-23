@@ -201,6 +201,68 @@ step-6 inter arm; the `encode_b_intra_dry` inter recon arm; the `pack_leaf` inte
 `MultiFrameEncodeCell::port_encode_inter`. Rungs 2 (NEWMV/subpel) and 3 (real motion search)
 are untouched.
 
+## SESSION 2026-07-23 — RUNG 1 LANDED: the port's OWN SEARCH codes the zero-MV P byte-exact (single-SB); 64x128 root MEASURED
+
+**THE SKELETON IS MET at single-SB scope.** The §7-step build plan below was executed and the
+end-to-end gate is GREEN: `aom-bench/tests/inter_e2e_search.rs` —
+`zero_mv_p_own_search_64x64_cq60_420_byte_exact` + the cq ladder (64² × cq{20,40,60,63} 4:2:0 +
+cq{20,60} mono) assert the port's frame-1 OBU payload — derived header + a tile whose partition
+tree, inter mode, contexts and skip all come from the port's OWN `pack_tile` search —
+BYTE-IDENTICAL to `aomenc`'s, plus decode-both pixel identity. Wired exactly as planned:
+`PickFrameCfg::inter` (`InterSearchCfg`) + per-leaf `InterLeafArgs` in `leaf_pick_sb_modes`
+(ref-MV scan + intra_inter/single-ref/skip ctx from the DV grid); the `rd_pick.rs` step-6b inter
+arm (inter evaluated after intra but WINS ties, matching C's inter-first `av1_default_mode_order`;
+the intra candidate pays `ref_cost_intra_in_inter` on P frames) + the intra-missed-budget rescue;
+the `encode_b_intra_dry` inter recon arm (co-located ref copy, skip entropy resets, padded
+plane-bsize chroma extents, `SbEncodeEnv::ref_frame`); the `pack_leaf` inter branch
+(`write_inter_leaf_mode_info` at grid-derived contexts, loud-fail on intra-in-P);
+`InterFrameCdfs` threaded through `pack_tile_lr`/`pack_sb` with a per-SB
+INTERNAL_COST_UPD_SB inter cost refresh; `inter_rd` fixes (C mode order
+NEARESTMV→NEARMV→GLOBALMV; padded plane-bsize chroma sse per `set_skip_txfm`; border-replicating
+ref reads); harness `MultiFrameEncodeCell::port_encode_inter_p` + `parse_inter_2frame_reference`.
+
+**The "2-SB tile" divergence is ROOT-CAUSED (instrumented sibling libaom, byte-inert,
+removed) — TWO findings, one fixed, one pinned:**
+
+1. **The §3 GOOD-mode stream codes SB128** (`mib_size_log2=5`, libaom's GOOD default at every
+   speed). A 64x128 frame is ONE column-cropped 128×128 SB whose root codes a gathered 2-way
+   SPLIT/VERT symbol before the two visible 64×64 children — the hand-rolled SB64 "two-superblock"
+   model could never match (it omitted the root symbol); its per-symbol suspect list
+   (skip/single-ref/partition CDF rows) is OBSOLETE. 64×64 frames are walk-degenerate (SB64 ==
+   SB128 symbols), which is why the single-SB gates always matched. `port_encode_inter_p` now
+   drives the DECLARED SB size. The old pinned test in `inter_pack_tile_diff.rs` is superseded
+   (tombstone comment in place); the live pin is
+   `inter_e2e_search.rs::zero_mv_p_own_search_64x128_cropped_sb128_pinned_divergent`.
+2. **The residual 64×128 divergence is a SEARCH-SPACE gap: the port models no switchable
+   interp-filter rate.** Measured in C at the cropped root: SPLIT rd 248,444,575 beats VERT
+   because VERT's single 64×128 sub-block FAILS `av1_txfm_search`'s final skip-guard
+   (tmprd 250,728,413 > budget 247,851,864). The overprice comes from the interp-filter search:
+   during encoding the frame filter is SWITCHABLE (the coded REGULAR is post-hoc), and
+   `use_more_sharp_interp = 1` (speed_features.c:1139 — GOOD base, EVERY speed, non-boosted
+   frames) gives SHARP a `mul=90` (10%) rd discount in `interpolation_filter_rd`; on the
+   dist-heavy 64×128 model rd SHARP displaces REGULAR and costs rs 3931 (ctx 3) vs 109. The
+   port's rs=0 leaf is ~3822 cheaper → picks VERT → tile `[d7,a0]` vs C `[f2,24,80]`.
+   **Fix (the next rung):** port the CURVFIT model-rd (`MODELRD_TYPE_INTERP_FILTER =
+   MODELRD_CURVFIT`, model_rd.h:31 — `av1_model_rd_curvfit` + tables + differential),
+   `av1_get_pred_context_switchable_interp` (encode side), the switchable-interp cost table, and
+   the reduced §3 interp search (zero-MV ⇒ identical predictions ⇒ pure rate/model compare with
+   the SHARP mul=90 accept) — then add the winner's rs to the inter leaf's mode_rate and
+   skip-guard rd. NOTE this also means C's per-block inter rate ALWAYS carries rs (the 64×64
+   children pay 109 each) — the single-SB cells matched because no decision there was near a tie;
+   for C-exact partition RD the rs model is required everywhere.
+
+**Also DISCOVERED + PINNED (`good_usage_key_frame0_pinned_divergent`):** the port's KEY encode
+of frame 0 at GOOD usage (`usage=0`, the §3 inter context) is NOT byte-exact (header 2 bytes
+longer + mid-tile divergence at 64² cq60) — every landed KEY byte gate is ALLINTRA; the chunk-0
+"frame-0 control" was decode-side only. A GOOD-vs-ALLINTRA speed-feature/header-derivation gap,
+independent of the inter wiring (`PickFrameCfg::inter` is None there). Closing it is required for
+full-STREAM byte identity of the 2-frame clip (the frame-1 payload gates are unaffected).
+
+**Note on TX_MODE_LARGEST (corrects the §3 assumption below):** during the SEARCH C runs
+TX_MODE_SELECT — the coded LARGEST header is a POST-encode demotion when `txb_split_count == 0`.
+The all-skip zero-MV P never reaches coeffs so the port's skip-arm model still byte-matches, but
+a COEFF-arm rung must run the var-tx machinery even when the final header says LARGEST.
+
 ## PRECISE 2f BUILD PLAN (zero-MV skip-only P — mirror the intrabc skip arm)
 
 The intrabc SKIP arm is the exact template; the inter zero-MV skip arm is a SIMPLER mirror (the
