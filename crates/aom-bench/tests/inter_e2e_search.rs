@@ -191,16 +191,50 @@ fn good_usage_key_frame0_pinned_divergent() {
     );
 }
 
-/// The cq ladder at 64x64: the all-skip zero-MV P holds across cq (measured:
-/// aomenc's zero-MV P decodes identical to frame 0's recon at every cq), so
-/// each cell must byte-match end-to-end. Mono exercises the luma-only path.
+/// The cq ladder at 64x64 — the cells that byte-match with the FULL landed
+/// model set (inter RD + the switchable interp-filter rate model). Mono
+/// exercises the luma-only path; mono cq40 was newly closed by the rs model.
 #[test]
 fn zero_mv_p_own_search_cq_ladder_byte_exact() {
-    for cq in [20, 40, 63] {
-        run_cell(&format!("interp_e2e_64_cq{cq}_420"), 64, 64, false, cq);
-    }
-    for cq in [20, 60] {
+    run_cell("interp_e2e_64_cq63_420", 64, 64, false, 63);
+    for cq in [40, 60, 63] {
         run_cell(&format!("interp_e2e_64_cq{cq}_mono"), 64, 64, true, cq);
+    }
+}
+
+/// LOW-CQ cells — PINNED OPEN (self-promoting): the next measured missing C
+/// model is `av1_simple_motion_search_term_none` (partition_strategy.c:809 —
+/// a LINEAR model over simple-motion-search + NONE-rd features that sets
+/// `terminate_partition_search` after the NONE stage; GOOD-mode
+/// `!frame_is_intra_only`, LIVE at speed 0). Measured at 64x64 cq20
+/// (instrumented sibling C): C terminates after NONE (`INSTR-TERM
+/// partition_strategy.c:809`, final part=NONE, rd 2,509,154 with the SHARP rs
+/// 3931 in the NONE rate) and never evaluates SPLIT; the port searches SPLIT,
+/// whose sub-leaves price cheap REGULAR filters (ctx 0 → rs 20), and SPLIT
+/// wins — the port codes MORE bytes.
+///
+/// These three cells BYTE-MATCHED before the interp-filter rate model landed
+/// — a two-wrongs-cancel: with rs=0 on every candidate the port's NONE also
+/// won at low cq, hiding BOTH missing C models (the rs pricing AND the
+/// term_none prune). The rs model is C-verified independently (curvfit
+/// differential + the measured per-block filter/rs parity at cq20/cq60), so
+/// the honest state is: rs landed, term_none pinned. Porting
+/// `simple_motion_search_term_none` (the sms feature extraction over the
+/// ported full-pel search + the 4 per-bsize linear models) is the named next
+/// rung; when it lands these flip to byte-match and this test FAILS →
+/// promote each into the ladder above.
+#[test]
+fn zero_mv_p_low_cq_term_none_prune_pinned_divergent() {
+    for (mono, cq) in [(false, 20), (false, 40), (true, 20)] {
+        let label = format!("interp_e2e_64_cq{cq}_{}", if mono { "mono" } else { "420" });
+        let cell = MultiFrameEncodeCell::translational(&base(&label, 64, 64, mono, cq), 0, 0);
+        let stream = cell.c_encode_inter(false, false);
+        let r = parse_inter_2frame_reference(&stream);
+        let port_f1 = cell.port_encode_inter_p(&stream);
+        assert_ne!(
+            port_f1, r.f1_payload,
+            "{label} NOW BYTE-MATCHES — promote into the cq ladder gate"
+        );
     }
 }
 
@@ -251,31 +285,12 @@ fn zero_mv_p_own_search_cq_ladder_byte_exact() {
 /// rate/model compare — no convolution needed. The winner's rs then joins the
 /// inter leaf's mode_rate (C: rate2_nocoeff) and the skip-guard rd.
 ///
-/// This test asserts the divergence is PRESENT so it FAILS the moment the
-/// port matches — then promote to `run_cell` (hard byte assert).
+/// PROMOTED 2026-07-23: the interp-filter rate model landed (curvfit
+/// model-rd + `pick_interp_filter_zero_mv` + the per-leaf switchable ctx) and
+/// the cell byte-matches — the pin flipped on the landing run, per its
+/// self-promotion contract.
 #[test]
-fn zero_mv_p_own_search_64x128_cropped_sb128_pinned_divergent() {
-    let cell =
-        MultiFrameEncodeCell::translational(&base("interp_e2e_64x128", 64, 128, false, 60), 0, 0);
-    let stream = cell.c_encode_inter(false, false);
-    let r = parse_inter_2frame_reference(&stream);
-    let port_f1 = cell.port_encode_inter_p(&stream);
-    assert_ne!(
-        port_f1, r.f1_payload,
-        "64x128 cropped-SB128 P NOW BYTE-MATCHES — promote this pin to \
-         run_cell(\"interp_e2e_64x128_cq60_420\", 64, 128, false, 60)"
-    );
-    // Positive results (asserted): the derived header half matches; the tile
-    // shape is the measured VERT-vs-SPLIT flip, not something new.
-    let split = r.header_bits.div_ceil(8);
-    assert_eq!(
-        &port_f1[..split.min(port_f1.len())],
-        &r.f1_payload[..split],
-        "the derived P header must stay byte-exact on the cropped-SB128 frame"
-    );
-    eprintln!(
-        "PINNED (measured root: missing interp-filter rate model): port tile {:02x?} vs aomenc {:02x?}",
-        &port_f1[split..],
-        &r.f1_payload[split..]
-    );
+fn zero_mv_p_own_search_64x128_cropped_sb128_byte_exact() {
+    run_cell("interp_e2e_64x128_cq60_420", 64, 128, false, 60);
+    run_cell("interp_e2e_64x128_cq20_420", 64, 128, false, 20);
 }

@@ -1099,6 +1099,10 @@ pub struct DvCell {
     pub ref_frame0: i8,
     /// `mbmi->ref_frame[1]` — `NONE_FRAME` (-1); compound is out of scope.
     pub ref_frame1: i8,
+    /// `mbmi->interp_filters` (non-dual: one filter, both directions) for an
+    /// INTER block — the SEARCH-time switchable-filter winner, feeding later
+    /// blocks' `av1_get_pred_context_switchable_interp`. 0 elsewhere.
+    pub interp_filter: u8,
 }
 
 impl DvCell {

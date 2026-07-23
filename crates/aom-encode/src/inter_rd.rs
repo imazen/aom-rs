@@ -100,6 +100,17 @@ pub struct InterLeafArgs<'a> {
     pub intra_inter_ctx: i32,
     /// The six `av1_get_pred_context_single_ref_pN` contexts.
     pub single_ref_ctx: SingleRefCtx,
+
+    // --- the switchable interp-filter RATE model (crate::interp_rd) ---
+    /// `mode_costs->switchable_interp_costs`.
+    pub interp_costs: &'a crate::interp_rd::SwitchableInterpCosts,
+    /// `av1_get_pred_context_switchable_interp(xd, 0)` (non-dual: dir 0).
+    pub interp_ctx: usize,
+    /// `sf->interp_sf.use_more_sharp_interp` (GOOD base: `!boosted`).
+    pub use_more_sharp_interp: bool,
+    /// The AC dequant `dequant_QTX[1]` (raw, pre `dequant_shift`) — identical
+    /// across planes in the §3 zero-delta-q header; the curvefit qstep input.
+    pub dequant_ac: i32,
 }
 
 /// The winning inter candidate — C's `best_mbmi` reduced to the fields the §3
@@ -108,6 +119,12 @@ pub struct InterLeafArgs<'a> {
 pub struct InterBest {
     /// `mbmi->mode` (`NEARESTMV` / `NEARMV` / `GLOBALMV`).
     pub mode: i32,
+    /// `mbmi->interp_filters` (non-dual: one filter both directions) — the
+    /// SEARCH-time winner of the switchable filter pick. Never coded in the §3
+    /// bitstream (the frame filter is non-switchable post-hoc) but stamped on
+    /// the neighbour grid: it feeds later blocks'
+    /// `av1_get_pred_context_switchable_interp`.
+    pub interp_filter: u8,
     /// `mbmi->ref_frame[0]` — always `LAST_FRAME` here.
     pub ref_frame0: i8,
     /// `mbmi->mv[0]`, 1/8-pel.
@@ -265,6 +282,136 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
     let px_x = a.mi_col as usize * 4;
     let px_y = a.mi_row as usize * 4;
 
+    // --- the ZERO-MV predictor + per-plane sse, computed ONCE (every rung-1
+    //     candidate shares the identical co-located-copy prediction) ---
+    //
+    // LUMA: only the VISIBLE extent is differenced — C's `set_skip_txfm` sse
+    // and the residual clip to `max_block_wide/high` at frame edges. `pred_y`
+    // stays zero in the invisible tail, matching `av1_subtract_plane`'s
+    // zero-filled tail.
+    let mut pred_y = vec![0u16; bw * bh];
+    copy_colocated(
+        &a.ref_frame.y,
+        a.ref_frame.stride,
+        a.ref_frame.width,
+        a.ref_frame.height,
+        px_x,
+        px_y,
+        vis_w,
+        vis_h,
+        &mut pred_y,
+        bw,
+    );
+    let luma_sse = sse_visible(a.src_y, a.off_y, a.stride, &pred_y, bw, vis_w, vis_h);
+
+    // CHROMA (when this leaf is a chroma ref): C (`set_skip_txfm`,
+    // tx_search.c:245-281 — and identically `model_rd_for_sb_with_curvfit`'s
+    // `get_txb_dimensions`) works on the PADDED plane block
+    // (`get_plane_block_size` — a sub-8x8 luma leaf's chroma-ref covers the
+    // full 4x4-minimum chroma block at the COVERING position, not a
+    // `bw >> ss_x` strip; the KB-15 skip-arm chroma-extent lesson), clipped to
+    // the frame-visible part. `a.off_uv` is the covering-position source
+    // offset (`chroma_plane_offset`); the ref read mirrors it.
+    let mut chroma_sse: i64 = 0;
+    // Per-plane (sse, plane_bsize, num_samples) for the curvefit model.
+    let mut chroma_model: Vec<(i64, usize, i32)> = Vec::new();
+    if !a.monochrome && a.is_chroma_ref {
+        let plane_bsize =
+            aom_dsp::entropy::partition::get_plane_block_size(a.bsize, a.ss_x, a.ss_y);
+        let cw_full = crate::tx_search::BLK_W_B[plane_bsize];
+        let ch_full = crate::tx_search::BLK_H_B[plane_bsize];
+        // Frame-visible chroma extent in 4px units → px.
+        let (cvis_wu, cvis_hu, _, _) = crate::tx_search::max_block_units(
+            a.mi_cols,
+            a.mi_rows,
+            a.mi_col,
+            a.mi_row,
+            mi_w as i32,
+            mi_h as i32,
+            cw_full,
+            ch_full,
+            a.ss_x,
+            a.ss_y,
+        );
+        let cvis_w = (cvis_wu * 4).min(cw_full);
+        let cvis_h = (cvis_hu * 4).min(ch_full);
+        // Covering position (chroma-reference mi base: mi - (mi & ss)).
+        let cpx_x = (((a.mi_col - (a.mi_col & a.ss_x as i32)) as usize) * 4) >> a.ss_x;
+        let cpx_y = (((a.mi_row - (a.mi_row & a.ss_y as i32)) as usize) * 4) >> a.ss_y;
+        for (plane_ref, plane_src) in [(&a.ref_frame.u, a.src_u), (&a.ref_frame.v, a.src_v)] {
+            let mut cpred = vec![0u16; cw_full * ch_full];
+            copy_colocated(
+                plane_ref,
+                a.ref_frame.stride_uv,
+                a.ref_frame.width_uv,
+                a.ref_frame.height_uv,
+                cpx_x,
+                cpx_y,
+                cvis_w,
+                cvis_h,
+                &mut cpred,
+                cw_full,
+            );
+            let sse = sse_visible(plane_src, a.off_uv, a.stride, &cpred, cw_full, cvis_w, cvis_h);
+            chroma_sse += sse;
+            chroma_model.push((sse, plane_bsize, (cvis_w * cvis_h) as i32));
+        }
+    }
+
+    // --- the switchable interp-filter pick (crate::interp_rd module docs):
+    //     identical predictions across filters ⇒ the model stats are shared
+    //     and the C search collapses to the biased rate compare. The winner's
+    //     `rs` joins every candidate's rate (C: `rate2_nocoeff`), exactly as
+    //     C's SWITCHABLE-during-encode frame filter demands. ---
+    let (model_rate, model_dist) = {
+        let mut rate_sum: i64 = 0;
+        let mut dist_sum: i64 = 0;
+        let (r, d) = crate::interp_rd::model_rd_with_curvfit(
+            a.bsize,
+            luma_sse,
+            (vis_w * vis_h) as i32,
+            a.dequant_ac,
+            a.bd,
+            a.rdmult,
+        );
+        rate_sum += i64::from(r);
+        dist_sum += d;
+        for &(sse, plane_bsize, ns) in &chroma_model {
+            let (r, d) = crate::interp_rd::model_rd_with_curvfit(
+                plane_bsize,
+                sse,
+                ns,
+                a.dequant_ac,
+                a.bd,
+                a.rdmult,
+            );
+            rate_sum += i64::from(r);
+            dist_sum += d;
+        }
+        (rate_sum.min(i64::from(i32::MAX)) as i32, dist_sum)
+    };
+    let (interp_filter, rs) = crate::interp_rd::pick_interp_filter_zero_mv(
+        a.interp_costs,
+        a.interp_ctx,
+        a.use_more_sharp_interp,
+        a.rdmult,
+        model_rate,
+        model_dist,
+    );
+
+    // --- SKIP gate: C's own `predict_skip_txfm` fast path ---
+    let residual = residual_full(a.src_y, a.off_y, a.stride, &pred_y, bw, bh, vis_w, vis_h);
+    let skips = crate::intrabc_search::predict_skip_txfm(
+        &residual,
+        bw,
+        bh,
+        a.bsize,
+        luma_sse,
+        a.qindex,
+        i32::from(a.bd),
+        a.reduced_tx_set_used,
+    );
+
     let mut best: Option<InterBest> = None;
     for (mode, mv) in cands {
         // rung 1 codes only the zero-MV predictor exactly (a plain co-located
@@ -273,100 +420,6 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
         if mv != (0, 0) {
             continue;
         }
-
-        // --- LUMA prediction ---
-        // Only the VISIBLE extent is differenced: C's `set_skip_txfm` sse and
-        // the residual clip to `max_block_wide/high` at frame edges. `pred_y`
-        // stays zero in the invisible tail, matching `av1_subtract_plane`'s
-        // zero-filled tail.
-        let mut pred_y = vec![0u16; bw * bh];
-        copy_colocated(
-            &a.ref_frame.y,
-            a.ref_frame.stride,
-            a.ref_frame.width,
-            a.ref_frame.height,
-            px_x,
-            px_y,
-            vis_w,
-            vis_h,
-            &mut pred_y,
-            bw,
-        );
-
-        let luma_sse = sse_visible(
-            a.src_y, a.off_y, a.stride, &pred_y, bw, vis_w, vis_h,
-        );
-
-        // --- CHROMA prediction + sse (when this leaf is a chroma ref) ---
-        // C (`set_skip_txfm`, tx_search.c:245-281) accumulates each chroma
-        // plane's sse over the PADDED plane block (`get_plane_block_size` —
-        // a sub-8x8 luma leaf's chroma-ref covers the full 4x4-minimum chroma
-        // block at the COVERING position, not a `bw >> ss_x` strip; the exact
-        // KB-15 skip-arm chroma-extent lesson), clipped to the frame-visible
-        // part (`max_block_wide/high`). `a.off_uv` is the covering-position
-        // source offset (`chroma_plane_offset`); the ref read mirrors it.
-        let mut chroma_sse: i64 = 0;
-        if !a.monochrome && a.is_chroma_ref {
-            let plane_bsize = aom_dsp::entropy::partition::get_plane_block_size(
-                a.bsize, a.ss_x, a.ss_y,
-            );
-            let cw_full = crate::tx_search::BLK_W_B[plane_bsize];
-            let ch_full = crate::tx_search::BLK_H_B[plane_bsize];
-            // Frame-visible chroma extent in 4px units → px.
-            let (cvis_wu, cvis_hu, _, _) = crate::tx_search::max_block_units(
-                a.mi_cols,
-                a.mi_rows,
-                a.mi_col,
-                a.mi_row,
-                mi_w as i32,
-                mi_h as i32,
-                cw_full,
-                ch_full,
-                a.ss_x,
-                a.ss_y,
-            );
-            let cvis_w = (cvis_wu * 4).min(cw_full);
-            let cvis_h = (cvis_hu * 4).min(ch_full);
-            // Covering position (chroma-reference mi base: mi - (mi & ss)).
-            let cpx_x = (((a.mi_col - (a.mi_col & a.ss_x as i32)) as usize) * 4) >> a.ss_x;
-            let cpx_y = (((a.mi_row - (a.mi_row & a.ss_y as i32)) as usize) * 4) >> a.ss_y;
-            for (plane_ref, plane_src) in [
-                (&a.ref_frame.u, a.src_u),
-                (&a.ref_frame.v, a.src_v),
-            ] {
-                let mut cpred = vec![0u16; cw_full * ch_full];
-                copy_colocated(
-                    plane_ref,
-                    a.ref_frame.stride_uv,
-                    a.ref_frame.width_uv,
-                    a.ref_frame.height_uv,
-                    cpx_x,
-                    cpx_y,
-                    cvis_w,
-                    cvis_h,
-                    &mut cpred,
-                    cw_full,
-                );
-                chroma_sse += sse_visible(
-                    plane_src, a.off_uv, a.stride, &cpred, cw_full, cvis_w, cvis_h,
-                );
-            }
-        }
-
-        // --- SKIP gate: C's own `predict_skip_txfm` fast path ---
-        let residual = residual_full(
-            a.src_y, a.off_y, a.stride, &pred_y, bw, bh, vis_w, vis_h,
-        );
-        let skips = crate::intrabc_search::predict_skip_txfm(
-            &residual,
-            bw,
-            bh,
-            a.bsize,
-            luma_sse,
-            a.qindex,
-            i32::from(a.bd),
-            a.reduced_tx_set_used,
-        );
         if !skips {
             // The COEFF arm is a later rung — decline instead of coding a block
             // whose transform decisions we cannot yet reproduce exactly.
@@ -374,8 +427,10 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
         }
 
         let dist = scale_dist(luma_sse + chroma_sse, a.bd);
-        let rate =
-            ref_rate + cost_mv_ref(a.costs, mode, a.mode_context) + a.skip_costs[a.skip_ctx][1];
+        let rate = ref_rate
+            + cost_mv_ref(a.costs, mode, a.mode_context)
+            + rs
+            + a.skip_costs[a.skip_ctx][1];
         let rd = rdcost(a.rdmult, rate, dist);
         if rd >= best_rd_in {
             continue;
@@ -387,6 +442,7 @@ pub fn rd_pick_inter_mode_sb(a: &InterLeafArgs, best_rd_in: i64) -> Option<Inter
         if better {
             best = Some(InterBest {
                 mode,
+                interp_filter: interp_filter as u8,
                 ref_frame0: LAST_FRAME as i8,
                 mv_row: mv.0,
                 mv_col: mv.1,
@@ -464,15 +520,24 @@ mod tests {
             skip_ctx: 0,
             intra_inter_ctx: 0,
             single_ref_ctx: SingleRefCtx::default(),
+            interp_costs: &crate::interp_rd::SwitchableInterpCosts::from_default_cdfs(),
+            interp_ctx: 3,
+            use_more_sharp_interp: false,
+            dequant_ac: 0,
         };
         let best = rd_pick_inter_mode_sb(&a, i64::MAX).expect("a perfect match must be codeable");
         assert_eq!(best.mode, NEARESTMV, "NEARESTMV is the cheapest zero-MV mode");
         assert_eq!(best.dist, 0, "identical source and reference ⇒ zero SSE");
         assert!(best.skip_txfm);
         assert_eq!(best.ref_frame0, LAST_FRAME as i8);
-        // Anti-vacuity: the rate must actually contain all three components.
+        // Anti-vacuity: the rate must contain all four components — ref +
+        // mode + the switchable interp-filter rs (REGULAR at ctx 3 here:
+        // zero model stats and no sharp bias keep the baseline filter) +
+        // skip.
+        let interp = crate::interp_rd::SwitchableInterpCosts::from_default_cdfs();
         let expect_rate = ref_cost_single_last(&costs, 0, &SingleRefCtx::default())
             + cost_mv_ref(&costs, NEARESTMV, 0)
+            + crate::interp_rd::SWITCHABLE_INTERP_RATE_FACTOR * interp.0[3][0]
             + skip_costs[0][1];
         assert_eq!(best.rate, expect_rate);
     }
@@ -525,6 +590,10 @@ mod tests {
             skip_ctx: 0,
             intra_inter_ctx: 0,
             single_ref_ctx: SingleRefCtx::default(),
+            interp_costs: &crate::interp_rd::SwitchableInterpCosts::from_default_cdfs(),
+            interp_ctx: 3,
+            use_more_sharp_interp: false,
+            dequant_ac: 0,
         };
         assert!(
             rd_pick_inter_mode_sb(&a, i64::MAX).is_none(),
@@ -574,6 +643,10 @@ mod tests {
                 skip_ctx: 0,
                 intra_inter_ctx: 0,
                 single_ref_ctx: SingleRefCtx::default(),
+            interp_costs: &crate::interp_rd::SwitchableInterpCosts::from_default_cdfs(),
+            interp_ctx: 3,
+            use_more_sharp_interp: false,
+            dequant_ac: 0,
             };
             rd_pick_inter_mode_sb(&a, budget)
         };

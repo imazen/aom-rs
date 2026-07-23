@@ -2201,6 +2201,10 @@ impl MultiFrameEncodeCell {
         // (pack_tile refreshes both per SB, INTERNAL_COST_UPD_SB).
         let mut inter_cdfs = aom_encode::inter_costs::InterFrameCdfs::defaults();
         let frame_inter_costs = aom_encode::inter_costs::derive_inter_mode_costs(&inter_cdfs);
+        // The switchable interp-filter cost table (crate interp_rd): the §3
+        // frame writes no filter symbols so the CDF never adapts — the
+        // default-derived table is the per-SB refresh fixpoint.
+        let interp_costs = aom_encode::interp_rd::SwitchableInterpCosts::from_default_cdfs();
 
         let sf = SpeedFeatures::set_allintra(0, false, bd > 8);
         let pol = sf.tx_type_search_policy(false, 0);
@@ -2246,6 +2250,13 @@ impl MultiFrameEncodeCell {
         let pick_cfg = PickFrameCfg {
             inter: Some(aom_encode::partition_pick::InterSearchCfg {
                 costs: &frame_inter_costs,
+                interp_costs: &interp_costs,
+                // `use_more_sharp_interp = boosted ? 0 : 1` (GOOD base,
+                // speed_features.c:1139): the low-delay P (LF_UPDATE) is
+                // never boosted.
+                use_more_sharp_interp: true,
+                // dequant_QTX[1] — identical across planes (zero delta-q).
+                dequant_ac: i32::from(rows_y.dequant[1]),
                 allow_high_precision_mv: real.allow_high_precision_mv,
                 is_integer_mv: real.cur_frame_force_integer_mv,
                 sign_bias: [0i8; 8],

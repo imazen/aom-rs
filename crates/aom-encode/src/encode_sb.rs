@@ -263,6 +263,11 @@ pub struct LeafWinner {
     /// context slices the RD priced — the search has the neighbour grid live,
     /// the pack re-walk does not.
     pub inter_mode_context: i32,
+    /// `mbmi->interp_filters` (non-dual) for an inter leaf — the SEARCH-time
+    /// switchable-filter winner ([`crate::interp_rd`]); never coded in the §3
+    /// bitstream but stamped on the neighbour grid for later blocks'
+    /// switchable-interp context. 0 on non-inter leaves.
+    pub interp_filter: u8,
     /// `ctx->rd_stats` (the PICK_MODE_CONTEXT's own raw mode-search RD,
     /// BEFORE any enclosing stage adds its partition-type `pt_cost` —
     /// `leaf_pick_sb_modes`'s own returned [`PartRdStats`], unconditionally
@@ -315,6 +320,7 @@ impl LeafWinner {
             mv_row: 0,
             mv_col: 0,
             inter_mode_context: 0,
+            interp_filter: 0,
             raw_rdstats: PartRdStats::invalid(),
         }
     }
@@ -350,6 +356,7 @@ impl LeafWinner {
             },
             ref_frame0: if self.is_inter { self.ref_frame0 } else { 0 },
             ref_frame1: -1,
+            interp_filter: if self.is_inter { self.interp_filter } else { 0 },
         }
     }
 }

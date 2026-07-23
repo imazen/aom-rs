@@ -258,6 +258,27 @@ longer + mid-tile divergence at 64² cq60) — every landed KEY byte gate is ALL
 independent of the inter wiring (`PickFrameCfg::inter` is None there). Closing it is required for
 full-STREAM byte identity of the 2-frame clip (the frame-1 payload gates are unaffected).
 
+**SAME-SESSION FOLLOW-UP — the interp-rate model LANDED and the 64x128 cell is BYTE-EXACT.**
+`crates/aom-encode/src/interp_rd.rs`: `av1_model_rd_curvfit` (bit-exact vs the REAL exported C
+fn, `curvfit_diff.rs`; tables via `xtask/transcribe_curvfit.py`), `model_rd_with_curvfit`,
+`SwitchableInterpCosts` + `pick_interp_filter_zero_mv` (the reduced zero-MV search with the
+SHARP mul=90 accept); per-leaf `get_pred_context_switchable_interp` over the DV grid (which now
+stamps each inter block's winner filter); rs joins the leaf mode_rate + skip-guard. GOTCHA:
+`SWITCHABLE_INTERP_RATE_FACTOR` is **1** (rd.h:58). Gates: the 64x128 pin FLIPPED and is
+promoted (`zero_mv_p_own_search_64x128_cropped_sb128_byte_exact` + a cq20 64x128 cell in the
+map run); mono cq40 closed. NEWLY EXPOSED + PINNED: {420 cq20, 420 cq40, mono cq20} diverge
+because C's **`av1_simple_motion_search_term_none`** (partition_strategy.c:809 — linear model
+over sms + NONE-rd features; GOOD `!frame_is_intra_only`, live at speed 0) TERMINATES the
+partition search after NONE at low cq while the port searches SPLIT (cheap ctx-0 REGULAR
+children win). Those cells' earlier byte-match was a two-wrongs-cancel (rs=0 everywhere).
+NEXT RUNG (named): port `simple_motion_search_prune_part_features` (the sms runs on the ported
+full-pel search) + the per-bsize `term_none` linear models (+ `simple_motion_search_prune_rect`,
+measured firing at interior nodes). Rebuild recipe for the throwaway instrumented sibling C
+(removed): copy `reference/libaom` @ 03087864, cmake `-DCMAKE_BUILD_TYPE=Release
+-DCONFIG_MULTITHREAD=0 -DCONFIG_AV1_DECODER=0 -DCONFIG_AV1_ENCODER=1`, a tiny harness
+replicating `shim_encode_av1_inter_2frame` + the `inter_e2e_search.rs` cell content (validate
+byte-identity vs the shim stream FIRST, then env-gate prints with `INSTR_PART=1`).
+
 **Note on TX_MODE_LARGEST (corrects the §3 assumption below):** during the SEARCH C runs
 TX_MODE_SELECT — the coded LARGEST header is a POST-encode demotion when `txb_split_count == 0`.
 The all-skip zero-MV P never reaches coeffs so the port's skip-arm model still byte-matches, but

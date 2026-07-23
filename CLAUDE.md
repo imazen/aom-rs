@@ -1467,6 +1467,30 @@ Was: `vgrad 256×256 cq32` (base_qindex 128) diverged at byte 5, never re-conver
   header gap, independent of the inter wiring; blocks full-STREAM identity of the 2-frame clip.
 - **Correction: TX_MODE_LARGEST is a POST-encode demotion** (`txb_split_count==0`); the SEARCH
   runs TX_MODE_SELECT, so a coeff-arm rung needs the var-tx machinery even under a LARGEST header.
+- **INTERP-RATE MODEL LANDED (same session)** — `crates/aom-encode/src/interp_rd.rs`: the
+  CURVFIT model-rd core `av1_model_rd_curvfit` (tables via `xtask/transcribe_curvfit.py`;
+  **differential-locked bit-exact vs the REAL exported C fn**, `curvfit_diff.rs`, 281k cases),
+  `model_rd_with_curvfit`, `SwitchableInterpCosts` (DEFAULT_SWITCHABLE_INTERP; the §3 frame
+  writes no filter symbols so the frame-init table is the per-SB refresh fixpoint), and
+  `pick_interp_filter_zero_mv` (the reduced zero-MV filter search incl. the SHARP mul=90
+  accept). Wired: per-leaf `get_pred_context_switchable_interp` from the DV grid (which now
+  stamps each inter block's winner filter — `DvCell::interp_filter`), rs joins the inter leaf's
+  mode_rate + skip-guard rd. GOTCHA fixed en route: `SWITCHABLE_INTERP_RATE_FACTOR` is **1**
+  (rd.h:58), not 2. **The 64x128 cropped-SB128 cell FLIPPED to BYTE-MATCH and is promoted**
+  (`zero_mv_p_own_search_64x128_cropped_sb128_byte_exact`, + the cq20 64x128 cell); mono cq40
+  also closed. Gate map now: 7 hard byte cells {64² cq63 420; 64² cq40/60/63 mono; 64² cq60
+  420; 64×128 cq60 420} + measured-parity of per-block filter/rs at cq20/cq60 vs instrumented C.
+- **PINNED (`zero_mv_p_low_cq_term_none_prune_pinned_divergent`) — the next missing C model:
+  `av1_simple_motion_search_term_none`** (partition_strategy.c:809; a LINEAR model over
+  simple-motion-search + NONE-rd features setting `terminate_partition_search` after NONE;
+  GOOD `!frame_is_intra_only`, LIVE at speed 0). Measured at 64² cq20: C terminates after NONE
+  (rd 2,509,154, SHARP rs in the NONE rate) and never searches SPLIT; the port's SPLIT (cheap
+  ctx-0 REGULAR children) wins → 3 low-cq cells diverge {420 cq20, 420 cq40, mono cq20}. These
+  cells matched BEFORE the rs model — a two-wrongs-cancel (rs=0 everywhere also kept NONE on
+  top), so the pre-model "pass" hid BOTH missing C models. Next rung: the sms feature
+  extraction (`simple_motion_search_prune_part_features` over the ported full-pel search) + the
+  per-bsize linear term/prune models (also covers the measured-firing
+  `simple_motion_search_prune_rect` at interior nodes).
   Full detail + next-rung plan: `INTER-CHUNK2-HANDOFF.md` §SESSION 2026-07-23.
 
 ## Encoder single-frame primary envelope (VERIFIED against reference/libaom)

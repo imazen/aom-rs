@@ -404,7 +404,25 @@ pub fn ref_hbd_sse(a: &[u16], as_: usize, b: &[u16], bs: usize, w: usize, h: usi
     }
 }
 
+/// Safe wrapper over the REAL exported `av1_model_rd_curvfit` (rd.c:1064).
+pub fn ref_model_rd_curvfit(bsize: usize, sse_norm: f64, xqr: f64) -> (f64, f64) {
+    let mut rate_f = 0.0f64;
+    let mut dist_f = 0.0f64;
+    unsafe { av1_model_rd_curvfit(bsize as u8, sse_norm, xqr, &mut rate_f, &mut dist_f) };
+    (rate_f, dist_f)
+}
+
 extern "C" {
+    /// `av1_model_rd_curvfit` (av1/encoder/rd.c:1064) — the CURVFIT model-rd
+    /// core (`MODELRD_TYPE_INTERP_FILTER`). `BLOCK_SIZE` is `UENUM1BYTE` →
+    /// `u8` in the ABI.
+    fn av1_model_rd_curvfit(
+        bsize: u8,
+        sse_norm: f64,
+        xqr: f64,
+        rate_f: *mut f64,
+        distbysse_f: *mut f64,
+    );
     fn av1_block_error_c(
         coeff: *const i32,
         dqcoeff: *const i32,

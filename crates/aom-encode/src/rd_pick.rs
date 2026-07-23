@@ -228,6 +228,9 @@ pub struct RdPickIntraBest {
     /// The `mode_context` the inter mode rate was priced against — frozen so
     /// the pack writes on the same CDF context slices.
     pub inter_mode_context: i32,
+    /// `mbmi->interp_filters` (non-dual) on the inter arm — see
+    /// [`crate::inter_rd::InterBest::interp_filter`].
+    pub interp_filter: u8,
 }
 
 /// The [`rd_pick_intra_mode_sb`] outcome: `best: None` models the
@@ -383,6 +386,7 @@ pub fn rd_pick_intra_mode_sb(
                     mv_row: 0,
                     mv_col: 0,
                     inter_mode_context: 0,
+                    interp_filter: 0,
                 });
             }
         }
@@ -431,6 +435,7 @@ pub fn rd_pick_intra_mode_sb(
                     mv_row: w.mv_row,
                     mv_col: w.mv_col,
                     inter_mode_context: w.mode_context,
+                    interp_filter: w.interp_filter,
                 });
             }
         }
@@ -680,6 +685,7 @@ pub fn rd_pick_intra_mode_sb(
             mv_row: ifields.2,
             mv_col: ifields.3,
             inter_mode_context: ifields.4,
+            interp_filter: inter_win.as_ref().map_or(0, |w| w.interp_filter),
         }),
         intra_modes_rd_cost: rd_table,
     }

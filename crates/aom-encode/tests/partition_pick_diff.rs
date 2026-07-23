@@ -506,6 +506,7 @@ impl CPick<'_> {
                     mv_row: 0,
                     mv_col: 0,
                     inter_mode_context: 0,
+        interp_filter: 0,
                     raw_rdstats: stats,
                     palette_y: None,
                     palette_uv: None,

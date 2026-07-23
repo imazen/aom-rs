@@ -618,6 +618,17 @@ pub struct InterSearchCfg<'a> {
     /// ([`crate::inter_costs::derive_inter_mode_costs`] over the CURRENT
     /// adapting inter CDFs — `av1_fill_mode_rates`' inter arm).
     pub costs: &'a crate::inter_costs::InterModeCosts,
+    /// `mode_costs->switchable_interp_costs` ([`crate::interp_rd`]). The §3
+    /// frame writes no filter symbols so the switchable CDF never adapts —
+    /// the frame-init (default-derived) table is the per-SB refresh fixpoint,
+    /// hence frame-constant here.
+    pub interp_costs: &'a crate::interp_rd::SwitchableInterpCosts,
+    /// `sf->interp_sf.use_more_sharp_interp` — GOOD base `!boosted`
+    /// (speed_features.c:1139); the SHARP mul=90 discount gate.
+    pub use_more_sharp_interp: bool,
+    /// The AC dequant `dequant_QTX[1]` (raw) — the curvefit qstep input
+    /// (identical across planes in the §3 zero-delta-q header).
+    pub dequant_ac: i32,
     /// Frame header `allow_high_precision_mv`.
     pub allow_high_precision_mv: bool,
     /// Frame header `cur_frame_force_integer_mv`.
@@ -1532,6 +1543,27 @@ fn leaf_pick_sb_modes(
             ic.is_integer_mv,
             |rr: i32, rc: i32| grid.dv_at(mi_row + rr, mi_col + rc).to_nbr(),
         );
+        // `av1_get_pred_context_switchable_interp(xd, 0)` — neighbour tuples
+        // (ref0, ref1, y_filter, x_filter) for INTER neighbours only.
+        let interp_nbr = |d: &Option<crate::intrabc_search::DvCell>| {
+            d.as_ref()
+                .filter(|d| d.use_intrabc || d.ref_frame0 > 0)
+                .map(|d| {
+                    (
+                        i32::from(d.ref_frame0),
+                        i32::from(d.ref_frame1),
+                        d.interp_filter as usize,
+                        d.interp_filter as usize,
+                    )
+                })
+        };
+        let interp_ctx = aom_dsp::entropy::partition::get_pred_context_switchable_interp(
+            0,
+            crate::inter_costs::LAST_FRAME,
+            false,
+            interp_nbr(&above_dv),
+            interp_nbr(&left_dv),
+        ) as usize;
         crate::inter_rd::InterLeafArgs {
             bsize,
             mi_row,
@@ -1563,6 +1595,10 @@ fn leaf_pick_sb_modes(
             skip_ctx,
             intra_inter_ctx,
             single_ref_ctx,
+            interp_costs: ic.interp_costs,
+            interp_ctx,
+            use_more_sharp_interp: ic.use_more_sharp_interp,
+            dequant_ac: ic.dequant_ac,
         }
     });
 
@@ -1698,6 +1734,7 @@ fn leaf_pick_sb_modes(
                 mv_row: best.mv_row,
                 mv_col: best.mv_col,
                 inter_mode_context: best.inter_mode_context,
+                interp_filter: best.interp_filter,
                 raw_rdstats: stats,
             };
             (stats, Some(winner), source_variance)
@@ -4893,6 +4930,7 @@ fn nonrd_leaf_pick_and_encode(
         mv_row: 0,
         mv_col: 0,
         inter_mode_context: 0,
+        interp_filter: 0,
         raw_rdstats: pick.rd,
         // Palette is guarded dead on the nonrd estimate arm (init_mbmi_nonrd
         // zeroes palette sizes; the palette search arm needs
