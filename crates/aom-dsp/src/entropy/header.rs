@@ -2189,7 +2189,12 @@ pub fn read_timing_info_header(rb: &mut ReadBitBuffer) -> TimingInfoHeader {
     let time_scale = rb.read_unsigned_literal(32);
     let equal_picture_interval = rb.read_bit() != 0;
     let num_ticks_per_picture = if equal_picture_interval {
-        rb.read_uvlc() + 1
+        // Spec: NumTicksPerPicture = num_ticks_per_picture_minus_1 + 1, where the
+        // minus-1 value is a uvlc that returns u32::MAX for >=32 leading zeros.
+        // `+ 1` would overflow on that (attacker-reachable) edge; saturate to
+        // u32::MAX. Timing info does not affect pixel decode, and this matches
+        // the spec intent (a very large tick count) without the C wrap-to-zero.
+        rb.read_uvlc().saturating_add(1)
     } else {
         1
     };
