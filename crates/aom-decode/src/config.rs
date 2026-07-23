@@ -62,18 +62,30 @@ impl DecodeLimits {
         let h = height.max(0) as u64;
         if let Some(mw) = self.max_width {
             if w > mw as u64 {
-                return Err(DecodeError::LimitExceeded { kind: LimitKind::Width, actual: w, max: mw as u64 });
+                return Err(DecodeError::LimitExceeded {
+                    kind: LimitKind::Width,
+                    actual: w,
+                    max: mw as u64,
+                });
             }
         }
         if let Some(mh) = self.max_height {
             if h > mh as u64 {
-                return Err(DecodeError::LimitExceeded { kind: LimitKind::Height, actual: h, max: mh as u64 });
+                return Err(DecodeError::LimitExceeded {
+                    kind: LimitKind::Height,
+                    actual: h,
+                    max: mh as u64,
+                });
             }
         }
         let px = w.saturating_mul(h);
         let max_px = self.effective_max_pixels();
         if px > max_px {
-            return Err(DecodeError::LimitExceeded { kind: LimitKind::Pixels, actual: px, max: max_px });
+            return Err(DecodeError::LimitExceeded {
+                kind: LimitKind::Pixels,
+                actual: px,
+                max: max_px,
+            });
         }
         Ok(())
     }
@@ -187,7 +199,14 @@ impl core::fmt::Debug for DecodeConfig<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DecodeConfig")
             .field("limits", &self.limits)
-            .field("stop", &if self.stop.is_some() { "<set>" } else { "<none>" })
+            .field(
+                "stop",
+                &if self.stop.is_some() {
+                    "<set>"
+                } else {
+                    "<none>"
+                },
+            )
             .field("alloc", &self.alloc)
             .finish()
     }
@@ -216,16 +235,26 @@ mod tests {
         let over = d.check_dims((1 << 14) + 1, 1 << 14).unwrap_err();
         assert_eq!(kind_of(&over), Some(LimitKind::Pixels));
         // A malformed 65535x65535 header (~4.29 Gpx) is rejected before alloc.
-        assert_eq!(kind_of(&d.check_dims(65535, 65535).unwrap_err()), Some(LimitKind::Pixels));
+        assert_eq!(
+            kind_of(&d.check_dims(65535, 65535).unwrap_err()),
+            Some(LimitKind::Pixels)
+        );
     }
 
     #[test]
     fn caller_max_pixels_rejects_a_larger_header() {
         // The §1 acceptance case: max_pixels = 1_000_000 rejects a 2 Mpx header.
-        let d = DecodeLimits { max_pixels: Some(1_000_000), ..Default::default() };
+        let d = DecodeLimits {
+            max_pixels: Some(1_000_000),
+            ..Default::default()
+        };
         let e = d.check_dims(1920, 1080).unwrap_err(); // ~2.07 Mpx
         match e {
-            DecodeError::LimitExceeded { kind: LimitKind::Pixels, actual, max } => {
+            DecodeError::LimitExceeded {
+                kind: LimitKind::Pixels,
+                actual,
+                max,
+            } => {
                 assert_eq!(actual, 1920 * 1080);
                 assert_eq!(max, 1_000_000);
             }
@@ -237,10 +266,20 @@ mod tests {
 
     #[test]
     fn width_and_height_caps_are_enforced_independently() {
-        let d = DecodeLimits { max_width: Some(1280), max_height: Some(720), ..Default::default() };
+        let d = DecodeLimits {
+            max_width: Some(1280),
+            max_height: Some(720),
+            ..Default::default()
+        };
         assert!(d.check_dims(1280, 720).is_ok());
-        assert_eq!(kind_of(&d.check_dims(1281, 720).unwrap_err()), Some(LimitKind::Width));
-        assert_eq!(kind_of(&d.check_dims(1280, 721).unwrap_err()), Some(LimitKind::Height));
+        assert_eq!(
+            kind_of(&d.check_dims(1281, 720).unwrap_err()),
+            Some(LimitKind::Width)
+        );
+        assert_eq!(
+            kind_of(&d.check_dims(1280, 721).unwrap_err()),
+            Some(LimitKind::Height)
+        );
     }
 
     #[test]
@@ -265,10 +304,17 @@ mod tests {
         }
         // max_memory_bytes is enforced regardless of mode (LimitExceeded).
         let cfg = DecodeConfig::new()
-            .with_limits(DecodeLimits { max_memory_bytes: Some(1000), ..Default::default() })
+            .with_limits(DecodeLimits {
+                max_memory_bytes: Some(1000),
+                ..Default::default()
+            })
             .with_alloc(AllocMode::Infallible);
         match cfg.check_alloc_budget(2000) {
-            Err(DecodeError::LimitExceeded { kind: LimitKind::MemoryBytes, actual, max }) => {
+            Err(DecodeError::LimitExceeded {
+                kind: LimitKind::MemoryBytes,
+                actual,
+                max,
+            }) => {
                 assert_eq!(actual, 2000);
                 assert_eq!(max, 1000);
             }

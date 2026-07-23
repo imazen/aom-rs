@@ -123,6 +123,16 @@ pub struct FrameDecode {
     pub monochrome: bool,
     pub subsampling_x: usize,
     pub subsampling_y: usize,
+    /// Sequence-header CICP color description, verbatim as coded
+    /// (`color_config`): matrix coefficients, primaries, transfer
+    /// characteristics, full-range flag, and 4:2:0 chroma sample position.
+    /// Display metadata for the caller's color pipeline — reconstruction
+    /// does not depend on them (film grain's MC-identity gate excepted).
+    pub matrix_coefficients: i32,
+    pub color_primaries: i32,
+    pub transfer_characteristics: i32,
+    pub full_range: bool,
+    pub chroma_sample_position: i32,
     /// Frame quantizer facts (for harness assertions).
     pub base_qindex: i32,
     /// `[y0, y1, u, v]` loop-filter levels as coded — deblocking was applied
@@ -322,7 +332,9 @@ fn split_tiles<'a>(
 /// Bridge the parsed segmentation frame header into the quantizer-layer
 /// `cm->seg` shape ([`aom_dsp::quant::Segmentation`]) the block layer consumes.
 /// Feature data is post-clamp (`|data| <= 255`), so the i16 narrowing is exact.
-fn bridge_segmentation(h: &aom_dsp::entropy::header::SegmentationHeader) -> aom_dsp::quant::Segmentation {
+fn bridge_segmentation(
+    h: &aom_dsp::entropy::header::SegmentationHeader,
+) -> aom_dsp::quant::Segmentation {
     let mut feature_data = [[0i16; aom_dsp::quant::SEG_LVL_MAX]; aom_dsp::quant::MAX_SEGMENTS];
     for (dst, src) in feature_data.iter_mut().zip(h.feature_data.iter()) {
         for (d, s) in dst.iter_mut().zip(src.iter()) {
@@ -416,7 +428,9 @@ fn parse_frame_header_ext(
     // `TileKf::new`). Both the single-frame and multi-frame paths call this, so
     // no decode path can be driven into a multi-gigabyte allocation by a
     // malformed header.
-    config.limits.check_dims(s.max_frame_width, s.max_frame_height)?;
+    config
+        .limits
+        .check_dims(s.max_frame_width, s.max_frame_height)?;
     // Pre-flight the peak per-frame allocation (recon luma+chroma u16 + the
     // mi / segment grids `TileKf::new` builds), estimated generously from the
     // mi-grid dims (~192 B/mi-cell covers the ~32 B recon-luma + chroma + the
@@ -670,7 +684,9 @@ fn parse_frame_header_ext(
     // path is single-tile; multi-tile superres would need the per-tile-column
     // convolve loop (`av1_upscale_normative_rows`'s tile walk).
     if superres::superres_scaled(p.frame_size.scale_denominator) && p.tile_info.cols > 1 {
-        return Err(DecodeError::UnsupportedFeature("multi-tile superres (out of envelope)"));
+        return Err(DecodeError::UnsupportedFeature(
+            "multi-tile superres (out of envelope)",
+        ));
     }
     // Quantization matrices (`using_qmatrix`): each 2-D-transform coefficient is
     // dequantized with a per-position inverse-QM weight
@@ -848,9 +864,8 @@ pub fn decode_frames_with(
         if !h.obu_has_size_field {
             return Err("OBU without size field".into());
         }
-        let (size, size_len) =
-            uleb_decode(&data[pos + h.header_len..])
-                .ok_or(DecodeError::Truncated("bad OBU size leb128"))?;
+        let (size, size_len) = uleb_decode(&data[pos + h.header_len..])
+            .ok_or(DecodeError::Truncated("bad OBU size leb128"))?;
         let body = pos + h.header_len + size_len;
         let end = body + size as usize;
         if end > data.len() {
@@ -883,7 +898,9 @@ pub fn decode_frames_with(
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
                     let pf = parse_frame_header_ext(sh, payload, true, true, config)?;
-                    let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
+                    let off = pf
+                        .tile_data_off
+                        .ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {
                     let header = pending_header
@@ -895,11 +912,9 @@ pub fn decode_frames_with(
                     (header, &payload[off..])
                 };
                 let (mut t, cfg, hdr) = if header.prefix.frame_type == 1 {
-                    let last = last_ref
-                        .as_ref()
-                        .ok_or(DecodeError::UnsupportedFeature(
-                            "inter frame decoded before any reference frame",
-                        ))?;
+                    let last = last_ref.as_ref().ok_or(DecodeError::UnsupportedFeature(
+                        "inter frame decoded before any reference frame",
+                    ))?;
                     decode_inter_tile_payload(sh, &header, tile_data, last, config.stop)?
                 } else {
                     decode_tile_payload(sh, &header, tile_data, config.stop)?
@@ -1216,9 +1231,8 @@ pub fn decode_frame_obus_prefilter_with(
         if !h.obu_has_size_field {
             return Err("OBU without size field".into());
         }
-        let (size, size_len) =
-            uleb_decode(&data[pos + h.header_len..])
-                .ok_or(DecodeError::Truncated("bad OBU size leb128"))?;
+        let (size, size_len) = uleb_decode(&data[pos + h.header_len..])
+            .ok_or(DecodeError::Truncated("bad OBU size leb128"))?;
         let body = pos + h.header_len + size_len;
         let end = body + size as usize;
         if end > data.len() {
@@ -1271,7 +1285,9 @@ pub fn decode_frame_obus_prefilter_with(
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
                     let pf = parse_frame_header(sh, payload, true, config)?;
-                    let off = pf.tile_data_off.ok_or("frame OBU missing tile data offset")?;
+                    let off = pf
+                        .tile_data_off
+                        .ok_or("frame OBU missing tile data offset")?;
                     (pf.header, &payload[off..])
                 } else {
                     let header = pending_header
@@ -1349,6 +1365,10 @@ fn build_tile_cfg(seq: &SequenceHeaderObu, p: &FrameHeaderObu) -> KfTileConfig {
         subsampling_x: ss_x,
         subsampling_y: ss_y,
         matrix_coefficients: c.matrix_coefficients,
+        color_primaries: c.color_primaries,
+        transfer_characteristics: c.transfer_characteristics,
+        full_range: c.color_range,
+        chroma_sample_position: c.chroma_sample_position,
         cdef_bits: p.cdef.cdef_bits as u32,
         disable_edge_filter: !s.enable_intra_edge_filter,
         enable_filter_intra: s.enable_filter_intra,
@@ -1433,6 +1453,11 @@ fn finish_frame(t: KfTileDecode, cfg: &KfTileConfig, p: &FrameHeaderObu) -> Fram
         monochrome: cfg.monochrome,
         subsampling_x: ss_x,
         subsampling_y: ss_y,
+        matrix_coefficients: cfg.matrix_coefficients,
+        color_primaries: cfg.color_primaries,
+        transfer_characteristics: cfg.transfer_characteristics,
+        full_range: cfg.full_range,
+        chroma_sample_position: cfg.chroma_sample_position,
         base_qindex: p.quant.base_qindex,
         filter_level: [
             p.loopfilter.filter_level[0],

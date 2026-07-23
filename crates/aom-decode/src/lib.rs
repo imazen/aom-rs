@@ -336,11 +336,11 @@ use aom_dsp::entropy::partition::{
 };
 use aom_dsp::intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_dsp::intra::{predict_intra_high, predict_intra_u8};
-use aom_dsp::recon::reconstruct_txb_u8_into;
 use aom_dsp::quant::{
     MAX_SEGMENTS, SEG_LVL_MAX, SEG_LVL_SKIP, Segmentation, av1_ac_quant_qtx, av1_dc_quant_qtx,
     av1_get_qindex,
 };
+use aom_dsp::recon::reconstruct_txb_u8_into;
 use aom_dsp::txb::{
     ext_tx_derive, get_txb_ctx, read_coeffs_txb_full, txb_entropy_context, txb_high, txb_wide,
 };
@@ -546,10 +546,24 @@ pub struct KfTileConfig {
     /// the frame edge).
     pub subsampling_x: usize,
     pub subsampling_y: usize,
-    /// `seq_params->color_config.matrix_coefficients` (CICP). Only needed for
-    /// film-grain synthesis: `AOM_CICP_MC_IDENTITY` (0) selects the luma legal
-    /// range for chroma under `clip_to_restricted_range`.
+    /// `seq_params->color_config.matrix_coefficients` (CICP). Needed for
+    /// film-grain synthesis (`AOM_CICP_MC_IDENTITY` (0) selects the luma legal
+    /// range for chroma under `clip_to_restricted_range`) and carried through
+    /// to [`frame::FrameDecode`] for the caller's color pipeline.
     pub matrix_coefficients: i32,
+    /// `seq_params->color_config.color_primaries` (CICP). Display metadata
+    /// only — no effect on reconstruction; carried to `FrameDecode`.
+    pub color_primaries: i32,
+    /// `seq_params->color_config.transfer_characteristics` (CICP). Display
+    /// metadata only; carried to `FrameDecode`.
+    pub transfer_characteristics: i32,
+    /// `seq_params->color_config.color_range` (true = full range). Display
+    /// metadata only; carried to `FrameDecode`.
+    pub full_range: bool,
+    /// `seq_params->color_config.chroma_sample_position`
+    /// (`AOM_CSP_UNKNOWN`/`_VERTICAL`/`_COLOCATED`). Display metadata only;
+    /// carried to `FrameDecode`.
+    pub chroma_sample_position: i32,
     /// `cdef_info.cdef_bits` (0..=3): per-64x64 CDEF strength literal width.
     pub cdef_bits: u32,
     /// `!seq_params->enable_intra_edge_filter`.
@@ -2836,7 +2850,8 @@ impl<'c> TileKf<'c> {
             // Persist the inter CDFs adapted so far — `read_is_inter` mutated
             // `intra_inter[ii_ctx]`, and the intra path below never touches
             // `icdfs` again except for the Y-mode row (written back inline).
-            let chroma_ref = !cfg.monochrome && is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
+            let chroma_ref =
+                !cfg.monochrome && is_chroma_reference(mi_row, mi_col, bsize, ss_x, ss_y);
             let cfl_allowed =
                 !cfg.monochrome && is_cfl_allowed(bsize, self.st.coded_lossless, ss_x, ss_y);
             let (above_palette, left_palette) = self.palette_neighbours(mi_row, mi_col);
@@ -3058,34 +3073,32 @@ impl<'c> TileKf<'c> {
         // 16 wedge types), so the wedge flag is always read when the mode is —
         // carried as a gate anyway, matching C.
         let mut ref1 = ref1;
-        let (interintra, ii_mode, ii_use_wedge, ii_wedge_idx) = if inter
-            .enable_interintra_compound
-            && is_interintra_allowed(bsize, mode, ref0, ref1)
-        {
-            let grp = SIZE_GROUP_LOOKUP[bsize];
-            // Four DISJOINT fields of `icdfs`, so the borrows do not conflict.
-            let r = ep::read_interintra_info(
-                dec,
-                true,
-                &mut icdfs.interintra[grp],
-                &mut icdfs.interintra_mode[grp],
-                aom_dsp::inter::interintra::is_wedge_used(bsize),
-                &mut icdfs.wedge_interintra[bsize],
-                &mut icdfs.wedge_idx[bsize],
-            );
-            if r.0 != 0 {
-                // `mbmi->ref_frame[1] = INTRA_FRAME` (decodemv.c:1393). This is
-                // load-bearing beyond bookkeeping: `av1_findSamples` counts a warp
-                // sample only for a neighbour with `ref_frame[1] == NONE_FRAME`
-                // (-1), so an interintra neighbour must NOT look single-ref there.
-                // (`collect_neighbors_ref_counts` and the MV scan both gate on
-                // `> INTRA_FRAME`, so they are unaffected either way.)
-                ref1 = 0;
-            }
-            r
-        } else {
-            (0, 0, 0, 0)
-        };
+        let (interintra, ii_mode, ii_use_wedge, ii_wedge_idx) =
+            if inter.enable_interintra_compound && is_interintra_allowed(bsize, mode, ref0, ref1) {
+                let grp = SIZE_GROUP_LOOKUP[bsize];
+                // Four DISJOINT fields of `icdfs`, so the borrows do not conflict.
+                let r = ep::read_interintra_info(
+                    dec,
+                    true,
+                    &mut icdfs.interintra[grp],
+                    &mut icdfs.interintra_mode[grp],
+                    aom_dsp::inter::interintra::is_wedge_used(bsize),
+                    &mut icdfs.wedge_interintra[bsize],
+                    &mut icdfs.wedge_idx[bsize],
+                );
+                if r.0 != 0 {
+                    // `mbmi->ref_frame[1] = INTRA_FRAME` (decodemv.c:1393). This is
+                    // load-bearing beyond bookkeeping: `av1_findSamples` counts a warp
+                    // sample only for a neighbour with `ref_frame[1] == NONE_FRAME`
+                    // (-1), so an interintra neighbour must NOT look single-ref there.
+                    // (`collect_neighbors_ref_counts` and the MV scan both gate on
+                    // `> INTRA_FRAME`, so they are unaffected either way.)
+                    ref1 = 0;
+                }
+                r
+            } else {
+                (0, 0, 0, 0)
+            };
         let interintra = interintra != 0;
 
         // read_motion_mode (decodemv.c:1422 — BEFORE read_mb_interp_filter). A
@@ -3683,7 +3696,8 @@ impl<'c> TileKf<'c> {
         // blended 1:1, while the WEDGE mask is at LUMA resolution and box-averaged
         // down by `subw`/`subh` inside the blend.
         if interintra {
-            let ii_intra_mode = aom_dsp::inter::interintra::INTERINTRA_TO_INTRA_MODE[ii_mode as usize];
+            let ii_intra_mode =
+                aom_dsp::inter::interintra::INTERINTRA_TO_INTRA_MODE[ii_mode as usize];
             // `get_intra_edge_filter_type` (reconintra.c:974). Inert for every
             // inter-intra block — the four modes are DC/V/H/SMOOTH and the angle
             // delta is forced to 0 (decodemv.c:1395), so V/H predict at exactly
@@ -4290,9 +4304,7 @@ impl<'c> TileKf<'c> {
         // bitstream can neg-deinterleave the coded id to a negative or
         // out-of-range value. Reject before it indexes the seg-feature / qmatrix
         // / dequant tables below. Byte-inert on conformant streams.
-        if cfg.seg.enabled
-            && (info.segment_id < 0 || info.segment_id > self.st.last_active_segid)
-        {
+        if cfg.seg.enabled && (info.segment_id < 0 || info.segment_id > self.st.last_active_segid) {
             self.mark_corrupt(format!(
                 "corrupt frame: segment_id {} out of range [0, {}]",
                 info.segment_id, self.st.last_active_segid
@@ -4357,7 +4369,9 @@ impl<'c> TileKf<'c> {
                 ss_x as i32,
                 ss_y as i32,
             ) else {
-                self.mark_corrupt("corrupt frame: intrabc DV failed validity (non-conformant stream)");
+                self.mark_corrupt(
+                    "corrupt frame: intrabc DV failed validity (non-conformant stream)",
+                );
                 return;
             };
             info.dv_row = dv_row;
@@ -5793,7 +5807,6 @@ impl<'c> TileKf<'c> {
         });
     }
 
-
     /// The per-SB restoration-unit parameter reads
     /// (`loop_restoration_read_sb_coeffs` over the
     /// `av1_loop_restoration_corners_in_sb` rectangle, decodeframe.c:1325):
@@ -5903,7 +5916,9 @@ impl<'c> TileKf<'c> {
         // (a malformed bitstream decoded an out-of-range partition for this
         // bsize). libaom rejects it; the port must not index tables with it.
         if subsize == 255 {
-            self.mark_corrupt(format!("corrupt frame: invalid partition {p} for bsize {bsize}"));
+            self.mark_corrupt(format!(
+                "corrupt frame: invalid partition {p} for bsize {bsize}"
+            ));
             return;
         }
         // Conformance (decode_partition, decodeframe.c:1359-1371): a partition

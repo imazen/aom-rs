@@ -46,7 +46,11 @@ impl Rng {
         x
     }
     fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
     }
 }
 
@@ -61,7 +65,9 @@ fn load_tree(sub: &str) -> Vec<(String, Vec<u8>)> {
     let root = fuzz_root().join(sub);
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut ents: Vec<_> = rd.filter_map(|e| e.ok()).collect();
         ents.sort_by_key(|e| e.file_name());
         for e in ents {
@@ -120,7 +126,9 @@ fn mutate(rng: &mut Rng, base: &[u8], others: &[Vec<u8>]) -> Vec<u8> {
         0 => {
             // bit flips (1..=6)
             for _ in 0..1 + rng.below(6) {
-                if v.is_empty() { break; }
+                if v.is_empty() {
+                    break;
+                }
                 let i = rng.below(v.len());
                 v[i] ^= 1u8 << rng.below(8);
             }
@@ -137,7 +145,9 @@ fn mutate(rng: &mut Rng, base: &[u8], others: &[Vec<u8>]) -> Vec<u8> {
             // leb128 + frame-size fields all live in the first ~48 bytes).
             let span = v.len().min(48);
             for _ in 0..1 + rng.below(6) {
-                if span == 0 { break; }
+                if span == 0 {
+                    break;
+                }
                 let i = rng.below(span);
                 v[i] = (rng.next() & 0xff) as u8;
             }
@@ -151,7 +161,9 @@ fn mutate(rng: &mut Rng, base: &[u8], others: &[Vec<u8>]) -> Vec<u8> {
                     let take = 1 + rng.below(src.len());
                     let so = rng.below(src.len());
                     for k in 0..take {
-                        if at + k >= v.len() || so + k >= src.len() { break; }
+                        if at + k >= v.len() || so + k >= src.len() {
+                            break;
+                        }
                         v[at + k] = src[so + k];
                     }
                 }
@@ -173,7 +185,9 @@ fn mutate(rng: &mut Rng, base: &[u8], others: &[Vec<u8>]) -> Vec<u8> {
         _ => {
             // random byte deletion
             for _ in 0..1 + rng.below(8) {
-                if v.is_empty() { break; }
+                if v.is_empty() {
+                    break;
+                }
                 let at = rng.below(v.len());
                 v.remove(at);
             }

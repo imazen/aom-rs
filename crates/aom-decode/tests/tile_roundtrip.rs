@@ -60,7 +60,6 @@ use aom_decode::{
     max_block_units, max_block_units_ss, max_uv_txsize, plane_dequants, scale_chroma_bsize,
     uv_tx_type,
 };
-use aom_encode::{QuantKind, QuantParams, xform_quant};
 use aom_dsp::entropy::dec::OdEcDec;
 use aom_dsp::entropy::enc::OdEcEnc;
 use aom_dsp::entropy::partition::{
@@ -75,6 +74,7 @@ use aom_dsp::intra::cfl::{CflCtx, cfl_predict_block, cfl_store_tx};
 use aom_dsp::intra::predict_intra_high;
 use aom_dsp::quant::{SEG_LVL_ALT_Q, SEG_LVL_SKIP, Segmentation, av1_get_qindex};
 use aom_dsp::txb::{CDF_ARENA_LEN, ext_tx_set_type, get_txb_ctx, write_coeffs_txb_full};
+use aom_encode::{QuantKind, QuantParams, xform_quant};
 
 // ---- deterministic rng + CDF fixtures (repo pattern) -----------------------------
 
@@ -1726,6 +1726,10 @@ fn run_roundtrip(case: &SweepCase, seed: u64, cov: &mut Coverage) {
         subsampling_x: case.ss_x,
         subsampling_y: case.ss_y,
         matrix_coefficients: 2, // AOM_CICP_MC_UNSPECIFIED (no grain in these tests)
+        color_primaries: 2,
+        transfer_characteristics: 2,
+        full_range: false,
+        chroma_sample_position: 0,
         cdef_bits: case.cdef_bits,
         disable_edge_filter: case.disable_edge_filter,
         enable_filter_intra: case.enable_filter_intra,

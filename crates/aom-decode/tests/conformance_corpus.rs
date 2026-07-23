@@ -375,7 +375,10 @@ fn high_qindex_gt64_partition_byte_identical_to_c() {
         let cref = c::ref_decode_av1_kf(tu, w, h);
         let rust = decode_frame_obus(tu)
             .unwrap_or_else(|e| panic!("{name}: port rejected the KEY frame: {e}"));
-        assert_eq!(rust.y, cref.y, "{name} ({w}x{h}): luma differs from C oracle");
+        assert_eq!(
+            rust.y, cref.y,
+            "{name} ({w}x{h}): luma differs from C oracle"
+        );
         assert_eq!(rust.u, cref.u, "{name} ({w}x{h}): U differs from C oracle");
         assert_eq!(rust.v, cref.v, "{name} ({w}x{h}): V differs from C oracle");
     }

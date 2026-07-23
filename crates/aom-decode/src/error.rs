@@ -114,7 +114,11 @@ impl fmt::Display for DecodeError {
             DecodeError::UnsupportedType(m) => write!(f, "unsupported type: {m}"),
             DecodeError::UnsupportedFeature(m) => write!(f, "unsupported feature: {m}"),
             DecodeError::LimitExceeded { kind, actual, max } => {
-                write!(f, "decode limit exceeded: {} = {actual} > {max}", kind.as_str())
+                write!(
+                    f,
+                    "decode limit exceeded: {} = {actual} > {max}",
+                    kind.as_str()
+                )
             }
             DecodeError::AllocFailed { bytes } => {
                 write!(f, "allocation of {bytes} bytes failed (out of memory)")

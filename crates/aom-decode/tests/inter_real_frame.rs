@@ -71,7 +71,10 @@ fn corpus_dir() -> PathBuf {
 }
 
 fn ivf_temporal_units(data: &[u8]) -> Vec<Vec<u8>> {
-    assert!(data.len() >= 32 && &data[0..4] == b"DKIF", "not an IVF file");
+    assert!(
+        data.len() >= 32 && &data[0..4] == b"DKIF",
+        "not an IVF file"
+    );
     let hdr_len = u16::from_le_bytes([data[6], data[7]]) as usize;
     let mut off = hdr_len;
     let mut tus = Vec::new();
@@ -155,6 +158,10 @@ fn real_frame_q63_frame1_inter() {
     let frames = decode_frames(&stream).expect("q63 frame 0 + frame 1 decode");
     assert_eq!(frames.len(), 2, "two shown frames decoded");
     assert_eq!(image_md5(&frames[0]), GOLDEN_F0, "q63 frame 0 golden");
-    assert_eq!(image_md5(&frames[1]), GOLDEN_F1, "q63 frame 1 (inter) golden");
+    assert_eq!(
+        image_md5(&frames[1]),
+        GOLDEN_F1,
+        "q63 frame 1 (inter) golden"
+    );
     eprintln!("real_frame q63: frame 1 (inter) byte-identical to golden");
 }
