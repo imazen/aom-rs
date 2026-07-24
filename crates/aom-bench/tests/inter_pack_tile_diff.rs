@@ -287,6 +287,7 @@ fn port_encode_p_tile_with_mode(
         mi_cols,
         16,    // mib_size (SB64)
         false, // allow_ref_frame_mvs — §3 disables it
+        None,
         (0, 0),
         0, // gm_wmtype = IDENTITY
         [0i8; 8],

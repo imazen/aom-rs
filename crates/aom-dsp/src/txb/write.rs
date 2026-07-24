@@ -47,6 +47,39 @@ pub(crate) const A_DC_SIGN: usize = 4027; // [2][3] n2 s3
 /// Total u16 length of the coefficient-coding CDF arena.
 pub const CDF_ARENA_LEN: usize = 4045;
 
+/// `av1_reset_cdf_symbol_counters`' coefficient slice (entropy.c:85-98): zero
+/// the per-row adaptation COUNTER slot (index `nsymbs` within each
+/// `CDF_SIZE(nsymbs) = nsymbs+1`-stride row) of every coefficient CDF in the
+/// arena. C runs this when a frame's end-of-frame context is SAVED
+/// (`REFRESH_FRAME_CONTEXT_BACKWARD`, decodeframe.c:5492), so a later frame
+/// inheriting the context via `primary_ref_frame` restarts the update-rate
+/// ramp — carrying the counters adapts too slowly and drifts off C within a
+/// few frames (found by the animated-AVIF alpha-track chain, 2026-07-23).
+pub fn reset_arena_cdf_counters(cdfs: &mut [u16]) {
+    // (offset, rows, nsymbs, stride) per segment — the layout constants above.
+    const SEGS: [(usize, usize, usize); 13] = [
+        (A_TXB_SKIP, 5 * 13, 2),
+        (A_EOB16, 4, 5),
+        (A_EOB32, 4, 6),
+        (A_EOB64, 4, 7),
+        (A_EOB128, 4, 8),
+        (A_EOB256, 4, 9),
+        (A_EOB512, 4, 10),
+        (A_EOB1024, 4, 11),
+        (A_EOB_EXTRA, 5 * 2 * 9, 2),
+        (A_BASE_EOB, 5 * 2 * 4, 3),
+        (A_BASE, 5 * 2 * 42, 4),
+        (A_BR, 5 * 2 * 21, 4),
+        (A_DC_SIGN, 2 * 3, 2),
+    ];
+    for (off, rows, nsymbs) in SEGS {
+        let stride = nsymbs + 1;
+        for r in 0..rows {
+            cdfs[off + r * stride + nsymbs] = 0;
+        }
+    }
+}
+
 pub(crate) const EOB_OFF: [usize; 7] = [
     A_EOB16, A_EOB32, A_EOB64, A_EOB128, A_EOB256, A_EOB512, A_EOB1024,
 ];

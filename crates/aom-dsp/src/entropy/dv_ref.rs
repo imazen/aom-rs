@@ -211,6 +211,139 @@ fn lower_mv_precision(row: &mut i32, col: &mut i32, allow_hp: bool, is_integer: 
     }
 }
 
+/// One 8x8 cell of the CURRENT frame's temporal motion field (C `TPL_MV_REF`,
+/// filled by `av1_setup_motion_field`'s per-reference projection): the stored
+/// reference MV (`mfmv0`) and the start-frame-to-its-ref order-hint offset the
+/// per-block temporal scan re-projects with. `valid == false` models C's
+/// `mfmv0.as_int == INVALID_MV` sentinel.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TplMvRef {
+    pub row: i16,
+    pub col: i16,
+    pub ref_frame_offset: i16,
+    pub valid: bool,
+}
+
+/// The temporal motion field of the current frame plus the per-block scan
+/// inputs `add_tpl_ref_mv` consumes: the 8x8 cell grid (stride
+/// `(mi_cols + 1) >> 1`) and `cur_offset[rf]` =
+/// `get_relative_dist(cur_order_hint, ref_order_hint[rf])` per
+/// `MV_REFERENCE_FRAME`.
+#[derive(Clone, Copy)]
+pub struct TplField<'a> {
+    pub cells: &'a [TplMvRef],
+    pub stride: usize,
+    pub cur_offset: [i32; REF_FRAMES],
+}
+
+/// `MAX_FRAME_DISTANCE` (`enums.h`: `(1 << FRAME_OFFSET_BITS) - 1` = 31).
+pub const MAX_FRAME_DISTANCE: i32 = 31;
+
+// `div_mult` (mvref_common.c:19) — all values under 14 bits.
+const DIV_MULT: [i32; 32] = [
+    0, 16384, 8192, 5461, 4096, 3276, 2730, 2340, 2048, 1820, 1638, 1489, 1365, 1260, 1170, 1092,
+    1024, 963, 910, 862, 819, 780, 744, 712, 682, 655, 630, 606, 585, 564, 546, 528,
+];
+
+/// `av1_get_mv_projection` (mvref_common.c:27): scale `ref * num / den` via
+/// the div_mult fixed-point table, clamping distances to
+/// [`MAX_FRAME_DISTANCE`] and the result to the MV range.
+pub fn get_mv_projection(ref_row: i32, ref_col: i32, num: i32, den: i32) -> (i32, i32) {
+    const MV_UPP: i32 = 1 << 14;
+    let den = den.min(MAX_FRAME_DISTANCE);
+    let num = num.clamp(-MAX_FRAME_DISTANCE, MAX_FRAME_DISTANCE);
+    let rps = |v: i32| -> i32 {
+        // ROUND_POWER_OF_TWO_SIGNED(v, 14)
+        if v < 0 {
+            -((-v + (1 << 13)) >> 14)
+        } else {
+            (v + (1 << 13)) >> 14
+        }
+    };
+    let mv_row = rps(ref_row * num * DIV_MULT[den as usize]);
+    let mv_col = rps(ref_col * num * DIV_MULT[den as usize]);
+    (
+        mv_row.clamp(-MV_UPP + 1, MV_UPP - 1),
+        mv_col.clamp(-MV_UPP + 1, MV_UPP - 1),
+    )
+}
+
+/// `check_sb_border` (mvref_common.c:316): the temporal extension sample must
+/// stay inside the block's 64x64 region.
+fn check_sb_border(mi_row: i32, mi_col: i32, row_offset: i32, col_offset: i32) -> bool {
+    let sb_mi_size = 16; // mi_size_wide[BLOCK_64X64]
+    let row = mi_row & (sb_mi_size - 1);
+    let col = mi_col & (sb_mi_size - 1);
+    !(row + row_offset < 0
+        || row + row_offset >= sb_mi_size
+        || col + col_offset < 0
+        || col + col_offset >= sb_mi_size)
+}
+
+/// `add_tpl_ref_mv` (mvref_common.c:329), single-reference arm (`rf[1] ==
+/// NONE`; compound is out of the current decode envelope). Returns 1 when the
+/// tpl cell was valid (a candidate was merged), 0 otherwise.
+#[allow(clippy::too_many_arguments)]
+fn add_tpl_ref_mv(
+    tpl: &TplField,
+    tile: &DvTileBounds,
+    mi_row: i32,
+    mi_col: i32,
+    rf0: i32,
+    blk_row: i32,
+    blk_col: i32,
+    gm_row: i32,
+    gm_col: i32,
+    allow_high_precision_mv: bool,
+    is_integer_mv: bool,
+    refmv_count: &mut u8,
+    stack: &mut [StackEntry; MAX_REF_MV_STACK_SIZE],
+    weight_arr: &mut [u32; MAX_REF_MV_STACK_SIZE],
+    mode_context: &mut i32,
+) -> i32 {
+    let pos_row = if mi_row & 1 != 0 { blk_row } else { blk_row + 1 };
+    let pos_col = if mi_col & 1 != 0 { blk_col } else { blk_col + 1 };
+    if !is_inside(tile, mi_col, mi_row, pos_row, pos_col) {
+        return 0;
+    }
+    let cell = tpl.cells
+        [(((mi_row + pos_row) >> 1) as usize) * tpl.stride + ((mi_col + pos_col) >> 1) as usize];
+    if !cell.valid {
+        return 0;
+    }
+    let cur_offset_0 = tpl.cur_offset[rf0 as usize];
+    let (mut r, mut c) = get_mv_projection(
+        cell.row as i32,
+        cell.col as i32,
+        cur_offset_0,
+        cell.ref_frame_offset as i32,
+    );
+    lower_mv_precision(&mut r, &mut c, allow_high_precision_mv, is_integer_mv);
+
+    if blk_row == 0 && blk_col == 0 && ((r - gm_row).abs() >= 16 || (c - gm_col).abs() >= 16) {
+        *mode_context |= 1 << GLOBALMV_OFFSET;
+    }
+
+    let weight_unit: u32 = 1;
+    let n = *refmv_count as usize;
+    let mut idx = n;
+    for (i, e) in stack.iter().enumerate().take(n) {
+        if e.row == r && e.col == c {
+            idx = i;
+            break;
+        }
+    }
+    if idx < n {
+        weight_arr[idx] += 2 * weight_unit;
+    } else if n < MAX_REF_MV_STACK_SIZE {
+        stack[n].row = r;
+        stack[n].col = c;
+        weight_arr[n] = 2 * weight_unit;
+        *refmv_count += 1;
+    }
+    1
+}
+
 /// One component of `integer_mv_precision` (`mv.h`): round to the nearest
 /// integer pel (1/8-pel units, so a multiple of 8), rounding half away from
 /// zero. C's `%` truncates toward zero for negatives — Rust's `%` on `i32`
@@ -999,6 +1132,7 @@ pub fn find_inter_mv_refs(
     frame_mi_cols: i32,
     mib_size: i32,
     allow_ref_frame_mvs: bool,
+    tpl: Option<&TplField>,
     global_mv: (i32, i32),
     gm_wmtype: i32,
     sign_bias: [i8; REF_FRAMES],
@@ -1117,11 +1251,86 @@ pub fn find_inter_mv_refs(
         *w += REF_CAT_LEVEL;
     }
 
-    // `allow_ref_frame_mvs` temporal block — EMPTY-tpl model only (see fn doc):
-    // every `add_tpl_ref_mv` returns 0 with an all-INVALID motion field, so
-    // `is_available == 0` and no candidate is added; only the GLOBALMV bit sets.
+    // `allow_ref_frame_mvs` temporal block (mvref_common.c:547): the interior
+    // 8x8 (or 16x16 for >=64 dims) tpl-sample walk + the three SB-border
+    // extension samples, each merged via `add_tpl_ref_mv`. `tpl = None`
+    // degrades to the empty-field model (every sample invalid: no candidate,
+    // only the `is_available == 0` GLOBALMV context bit) — byte-identical to
+    // C for a frame whose references carry no motion.
     if allow_ref_frame_mvs {
-        mode_context |= 1 << GLOBALMV_OFFSET;
+        match tpl {
+            None => {
+                mode_context |= 1 << GLOBALMV_OFFSET;
+            }
+            Some(t) => {
+                let mut is_available = 0;
+                let voffset = 2i32.max(height_mi); // mi_size_high[BLOCK_8X8]=2
+                let hoffset = 2i32.max(width_mi);
+                let blk_row_end = height_mi.min(16); // mi_size_high[BLOCK_64X64]
+                let blk_col_end = width_mi.min(16);
+                let tpl_sample_pos: [(i32, i32); 3] =
+                    [(voffset, -2), (voffset, hoffset), (voffset - 2, hoffset)];
+                let allow_extension =
+                    (2..16).contains(&height_mi) && (2..16).contains(&width_mi);
+                let step_h = if height_mi >= 16 { 4 } else { 2 };
+                let step_w = if width_mi >= 16 { 4 } else { 2 };
+                let mut blk_row = 0;
+                while blk_row < blk_row_end {
+                    let mut blk_col = 0;
+                    while blk_col < blk_col_end {
+                        let ret = add_tpl_ref_mv(
+                            t,
+                            &tile,
+                            mi_row,
+                            mi_col,
+                            rf0,
+                            blk_row,
+                            blk_col,
+                            gm_row,
+                            gm_col,
+                            allow_high_precision_mv,
+                            is_integer_mv,
+                            &mut refmv_count,
+                            &mut stack,
+                            &mut weight_arr,
+                            &mut mode_context,
+                        );
+                        if blk_row == 0 && blk_col == 0 {
+                            is_available = ret;
+                        }
+                        blk_col += step_w;
+                    }
+                    blk_row += step_h;
+                }
+                if is_available == 0 {
+                    mode_context |= 1 << GLOBALMV_OFFSET;
+                }
+                if allow_extension {
+                    for (blk_row, blk_col) in tpl_sample_pos {
+                        if !check_sb_border(mi_row, mi_col, blk_row, blk_col) {
+                            continue;
+                        }
+                        add_tpl_ref_mv(
+                            t,
+                            &tile,
+                            mi_row,
+                            mi_col,
+                            rf0,
+                            blk_row,
+                            blk_col,
+                            gm_row,
+                            gm_col,
+                            allow_high_precision_mv,
+                            is_integer_mv,
+                            &mut refmv_count,
+                            &mut stack,
+                            &mut weight_arr,
+                            &mut mode_context,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Second outer area — `dummy_newmv_count` (does NOT feed `newmv_count`).

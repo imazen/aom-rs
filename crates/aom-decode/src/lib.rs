@@ -809,6 +809,16 @@ pub struct KfTileDecode {
     /// points translate this into `DecodeError::Cancelled`; `None` when there
     /// was no token or it never fired.
     pub cancelled: Option<StopReason>,
+    /// The frame's END-OF-FRAME saved entropy context (the
+    /// `context_update_tile_id` tile's adapted CDFs — `REFRESH_FRAME_CONTEXT_
+    /// BACKWARD`), set by `decode_frame_tiles_kf` / `decode_frame_tiles_inter`.
+    /// Consumed as the base context of a later frame naming this one as its
+    /// `primary_ref_frame`. `None` only if the update tile never decoded.
+    pub saved_ctx: Option<Box<FrameContexts>>,
+    /// The per-8x8 frame MV grid this frame stores (C `cur_frame->mvs`), for
+    /// later frames' temporal motion-field projection. Stride
+    /// `(mi_cols + 1) >> 1`, all-`NONE` on a KEY frame.
+    pub frame_mvs: Vec<MvRefCell>,
 }
 
 /// A stored reference frame for inter prediction: the FILTERED reconstruction
@@ -879,8 +889,29 @@ impl RefFrame {
 /// `tx_mode = LARGEST`, no segmentation / skip-mode / delta-q).
 #[derive(Clone, Copy)]
 pub struct InterFrameCfg<'r> {
-    /// The single reference (`LAST_FRAME`): frame 0's filtered recon.
-    pub last: &'r RefFrame,
+    /// The bound reference frames, indexed `LAST(1)..ALTREF(7)` minus 1 — the
+    /// per-frame `ref_frame_idx` mapping already resolved to stored frames.
+    /// `None` for a ref type whose slot is unavailable (a conformant stream
+    /// never codes a block referencing one).
+    pub refs: [Option<&'r RefFrame>; 7],
+    /// `cm->ref_frame_sign_bias[ref]` (`av1_setup_frame_sign_bias`): 1 when
+    /// the ref's order hint is AFTER the current frame. Indexed by
+    /// `MV_REFERENCE_FRAME` (0 unused).
+    pub ref_frame_sign_bias: [i8; 8],
+    /// `cm->ref_frame_side[ref]` (`av1_calculate_ref_frame_side`): 1 when the
+    /// ref is a future frame, feeding `av1_copy_frame_mvs`' store rule.
+    /// Indexed by `MV_REFERENCE_FRAME` (0 unused).
+    pub ref_frame_side: [i8; 8],
+    /// The frame's temporal motion field (`cm->tpl_mvs`, 8x8 cells, built by
+    /// `av1_setup_motion_field`), `None` when `allow_ref_frame_mvs` is off or
+    /// order hints are disabled (the per-block scan then models the empty
+    /// field). Read by the temporal arm of `find_inter_mv_refs`.
+    pub tpl_cells: Option<&'r [aom_dsp::entropy::dv_ref::TplMvRef]>,
+    /// Tpl-grid stride: `(mi_cols + 1) >> 1`.
+    pub tpl_stride: usize,
+    /// `get_relative_dist(cur_order_hint, ref_order_hint[rf])` per
+    /// `MV_REFERENCE_FRAME` — `add_tpl_ref_mv`'s projection numerator.
+    pub tpl_cur_offset: [i32; 8],
     pub allow_high_precision_mv: bool,
     pub cur_frame_force_integer_mv: bool,
     /// Frame-level `interp_filter` (`4 == SWITCHABLE`).
@@ -890,7 +921,9 @@ pub struct InterFrameCfg<'r> {
     pub reference_mode_select: bool,
     pub enable_dual_filter: bool,
     pub allow_warped_motion: bool,
-    pub skip_mode_allowed: bool,
+    /// The frame's `skip_mode_flag` ("skip mode present"): gates the
+    /// per-block `skip_mode` symbol read.
+    pub skip_mode_present: bool,
     /// `seq_header.enable_interintra_compound`: gates the inter-intra flag read
     /// on an interintra-allowed inter block.
     pub enable_interintra_compound: bool,
@@ -912,8 +945,13 @@ pub struct InterFrameCfg<'r> {
 /// through the reads (the `single_ref` sub-tree is assembled into a scratch by
 /// [`InterCdfs::ref_frame_cdfs`] and its adaptations copied back), then persist.
 #[derive(Clone, Copy)]
-struct InterCdfs {
+pub(crate) struct InterCdfs {
     intra_inter: [[u16; 3]; 4],
+    /// `comp_inter_cdf[COMP_INTER_CONTEXTS]` (CDF_SIZE(2)): the single-vs-
+    /// compound reference flag, read for every comp-allowed (min-dim >= 8)
+    /// block of a `REFERENCE_MODE_SELECT` frame
+    /// ([`aom_dsp::entropy::partition::reference_mode_context`]).
+    comp_inter: [[u16; 3]; 5],
     single_ref: [[[u16; 3]; 6]; 3],
     newmv: [[u16; 3]; 6],
     zeromv: [[u16; 3]; 2],
@@ -952,6 +990,7 @@ impl InterCdfs {
         use aom_dsp::entropy::default_cdfs as d;
         InterCdfs {
             intra_inter: d::DEFAULT_INTRA_INTER,
+            comp_inter: d::DEFAULT_COMP_INTER,
             single_ref: d::DEFAULT_SINGLE_REF,
             newmv: d::DEFAULT_NEWMV,
             zeromv: d::DEFAULT_ZEROMV,
@@ -984,6 +1023,138 @@ impl InterCdfs {
         cdfs[14] = self.single_ref[p::pred_ctx_last3_or_gld(rc) as usize][4];
         cdfs[15] = self.single_ref[p::pred_ctx_brf_or_arf2(rc) as usize][5];
         cdfs
+    }
+}
+
+/// The complete adaptive entropy context of a frame — C's `FRAME_CONTEXT`, as
+/// the port splits it: the shared KEY/intra + coefficient + var-tx contexts
+/// ([`KfFrameContext`], whose `txfm_partition` field carries the tile-local
+/// var-tx CDF on save) and the inter mode-info contexts (`InterCdfs`).
+///
+/// Life cycle (multi-frame decode): a frame's base context is either the
+/// defaults for its `base_qindex` (`primary_ref_frame == PRIMARY_REF_NONE`,
+/// `setup_past_independence`) or the SAVED context of the reference slot its
+/// `primary_ref_frame` names (forward CDF inheritance). Each tile starts from
+/// a fresh copy of the base (`tile_data->tctx = *cm->fc`) and adapts
+/// independently; at end of frame the `context_update_tile_id` tile's adapted
+/// context becomes this frame's saved context (`REFRESH_FRAME_CONTEXT_BACKWARD`,
+/// decodeframe.c:5489) unless `disable_frame_end_update_cdf`, in which case the
+/// BASE context is saved unchanged.
+#[derive(Clone)]
+pub struct FrameContexts {
+    pub(crate) kf: aom_dsp::entropy::partition::KfFrameContext,
+    pub(crate) inter: InterCdfs,
+}
+
+impl FrameContexts {
+    /// The default context for a `primary_ref = NONE` frame at `base_qindex`
+    /// (`av1_setup_past_independence` + `av1_default_coef_probs`).
+    pub fn defaults(base_qindex: i32) -> Self {
+        FrameContexts {
+            kf: aom_dsp::entropy::partition::KfFrameContext::default_for_qindex(base_qindex),
+            inter: InterCdfs::defaults(),
+        }
+    }
+
+    /// `av1_reset_cdf_symbol_counters` (entropy.c:85, called at the
+    /// end-of-frame context save, decodeframe.c:5492): zero every CDF row's
+    /// adaptation-counter slot so a frame inheriting this context via
+    /// `primary_ref_frame` restarts the update-rate ramp exactly as C does.
+    /// Without this the carried counters slow later frames' adaptation and
+    /// the chain drifts off the reference within a few frames.
+    pub fn reset_cdf_counters(&mut self) {
+        self.kf.reset_cdf_counters();
+        let ic = &mut self.inter;
+        #[inline]
+        fn r1<const L: usize>(row: &mut [u16; L], nsymbs: usize) {
+            row[nsymbs] = 0;
+        }
+        for a in ic.intra_inter.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.comp_inter.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.single_ref.iter_mut().flatten() {
+            r1(a, 2);
+        }
+        for a in ic.newmv.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.zeromv.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.refmv.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.drl.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.switchable_interp.iter_mut() {
+            r1(a, 3); // SWITCHABLE_FILTERS
+        }
+        r1(&mut ic.nmv_joints, 4);
+        for c in ic.nmv_comps.iter_mut() {
+            aom_dsp::entropy::partition::reset_nmv_comp_counters(c);
+        }
+        for a in ic.obmc.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.motion_mode.iter_mut() {
+            r1(a, 3); // MOTION_MODES
+        }
+        for a in ic.interintra.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.interintra_mode.iter_mut() {
+            r1(a, 4); // INTERINTRA_MODES
+        }
+        for a in ic.wedge_interintra.iter_mut() {
+            r1(a, 2);
+        }
+        for a in ic.wedge_idx.iter_mut() {
+            r1(a, 16);
+        }
+        for a in ic.y_mode.iter_mut() {
+            r1(a, 13); // INTRA_MODES
+        }
+    }
+}
+
+impl std::fmt::Debug for FrameContexts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FrameContexts { .. }")
+    }
+}
+
+/// Cached `AOM_DBG_BLOCKS` env flag: per-block decode tracing (block position,
+/// mode facts, arithmetic-decoder `tell_frac`) for differential debugging
+/// against the instrumented libaom accounting dump. One env lookup total.
+pub(crate) fn dbg_blocks() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("AOM_DBG_BLOCKS").is_some())
+}
+
+/// One 8x8 cell of a stored frame's motion grid (C `MV_REF`): the reference
+/// frame (`-1` = `NONE_FRAME` — intra / OOB-mv / backward-ref cells) and the
+/// stored MV in 1/8-pel. Written per block by `av1_copy_frame_mvs`' rule and
+/// consumed by the temporal motion-field projection
+/// (`av1_setup_motion_field`) of LATER frames that reference this one.
+#[derive(Clone, Copy, Debug)]
+pub struct MvRefCell {
+    pub row: i16,
+    pub col: i16,
+    /// `MV_REFERENCE_FRAME` (`LAST=1..ALTREF=7`), `-1` = none.
+    pub ref_frame: i8,
+}
+
+impl Default for MvRefCell {
+    fn default() -> Self {
+        MvRefCell {
+            row: 0,
+            col: 0,
+            ref_frame: -1,
+        }
     }
 }
 
@@ -1602,6 +1773,20 @@ struct TileKf<'c> {
     /// frames read it (KEY frames never reach the switchable-interp path), so
     /// ordinary KEY decodes never index it.
     mi_interp: Vec<(u8, u8)>,
+    /// The per-8x8 frame MV grid this frame STORES for later frames' temporal
+    /// motion-field projection (C `cur_frame->mvs`, one [`MvRefCell`] per 8x8,
+    /// stride `ROUND_POWER_OF_TWO(mi_cols, 1)`). Filled by
+    /// [`Self::stamp_frame_mvs`] on the inter path; stays all-`NONE` on a KEY
+    /// frame (`intra_copy_frame_mvs` stores `NONE` everywhere).
+    frame_mvs: Vec<MvRefCell>,
+    /// The frame's BASE entropy context for the inter mode-info CDFs: the
+    /// defaults (`primary_ref = NONE`) or the primary reference's saved
+    /// context. `start_tile` reloads [`Self::inter_cdfs`] from this per tile
+    /// (`tile_data->tctx = *cm->fc`).
+    base_inter_cdfs: InterCdfs,
+    /// Same for the var-tx partition CDF (the tile-local authoritative copy of
+    /// `KfFrameContext::txfm_partition`).
+    base_txfm_partition: [[u16; 3]; TXFM_PARTITION_CONTEXTS],
     /// Per-mi luma transform-type grid (`cm->tx_type_map`, mi granularity): the
     /// luma tx-type each 4x4 unit resolved to, stamped over every luma txb's mi
     /// footprint. Read only by colour intrabc chroma reconstruction, where the
@@ -1844,6 +2029,12 @@ impl<'c> TileKf<'c> {
             ],
             mi_dv: vec![DvNbr::default(); (cfg.mi_rows * cfg.mi_cols) as usize],
             mi_interp: vec![(0u8, 0u8); (cfg.mi_rows * cfg.mi_cols) as usize],
+            frame_mvs: vec![
+                MvRefCell::default();
+                (((cfg.mi_rows + 1) >> 1) * ((cfg.mi_cols + 1) >> 1)) as usize
+            ],
+            base_inter_cdfs: InterCdfs::defaults(),
+            base_txfm_partition: DEFAULT_TXFM_PARTITION_CDF,
             luma_tt: if cfg.allow_intrabc && !cfg.monochrome {
                 vec![0u8; (cfg.mi_rows * cfg.mi_cols) as usize]
             } else {
@@ -1951,10 +2142,12 @@ impl<'c> TileKf<'c> {
         self.above_t[a0..a0 + aligned_width].fill(TXFM_CTX_INIT);
         // Per-tile fresh var-tx CDF, mirroring the per-tile `KfFrameContext`
         // reload (`tile_data->tctx = *cm->fc`); adapts within the tile only.
-        self.txfm_partition = DEFAULT_TXFM_PARTITION_CDF;
-        // Same per-tile reload for the inter mode-info CDFs (primary_ref = NONE →
-        // default context); they then adapt across the tile's inter blocks.
-        self.inter_cdfs = InterCdfs::defaults();
+        // The base is the frame's loaded context: defaults for
+        // `primary_ref = NONE`, else the primary reference's saved context.
+        self.txfm_partition = self.base_txfm_partition;
+        // Same per-tile reload for the inter mode-info CDFs; they then adapt
+        // across the tile's inter blocks.
+        self.inter_cdfs = self.base_inter_cdfs;
 
         self.cfl = CflCtx::new(ss_x as i32, ss_y as i32);
         self.lr_refs = aom_dsp::entropy::lr::LrRefState::default();
@@ -2041,6 +2234,8 @@ impl<'c> TileKf<'c> {
             lr_units: self.lr_units,
             corrupt: self.corrupt,
             cancelled: self.cancelled,
+            saved_ctx: None,
+            frame_mvs: self.frame_mvs,
         }
     }
 
@@ -2094,6 +2289,55 @@ impl<'c> TileKf<'c> {
         for r in 0..y_mis {
             let base = ((mi_row + r) * self.cfg.mi_cols + mi_col) as usize;
             self.mi_interp[base..base + x_mis as usize].fill(cell);
+        }
+    }
+
+    /// `av1_copy_frame_mvs` (mvref_common.c:41): store an inter block's motion
+    /// into the per-8x8 frame MV grid (`cur_frame->mvs`) consumed by LATER
+    /// frames' temporal motion-field projection (`av1_setup_motion_field`).
+    /// Per 8x8 cell: `NONE` unless one of the block's refs is a non-future ref
+    /// (`ref_frame_side[ref] == 0`) with both MV components within
+    /// `REFMVS_LIMIT` — C iterates `idx = 0, 1`, the last qualifying ref wins.
+    /// Intra blocks store `NONE`, which equals the grid's init value, so only
+    /// the inter arm stamps. The stored MV is the CODED `mi->mv` (pre the
+    /// MC-only UMV border clamp).
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_frame_mvs(
+        &mut self,
+        inter: &InterFrameCfg,
+        mi_row: i32,
+        mi_col: i32,
+        bsize: usize,
+        refs: [i32; 2],
+        mvs: [(i32, i32); 2],
+    ) {
+        const REFMVS_LIMIT: i32 = (1 << 12) - 1;
+        let stride = ((self.cfg.mi_cols + 1) >> 1) as usize;
+        let x_mis = ((MI_SIZE_WIDE[bsize].min(self.cfg.mi_cols - mi_col) + 1) >> 1) as usize;
+        let y_mis = ((MI_SIZE_HIGH[bsize].min(self.cfg.mi_rows - mi_row) + 1) >> 1) as usize;
+        let mut cell = MvRefCell::default();
+        for idx in 0..2 {
+            let rf = refs[idx];
+            if rf > 0 {
+                if inter.ref_frame_side[rf as usize] != 0 {
+                    continue;
+                }
+                let (mr, mc) = mvs[idx];
+                if mr.abs() > REFMVS_LIMIT || mc.abs() > REFMVS_LIMIT {
+                    continue;
+                }
+                cell = MvRefCell {
+                    row: mr as i16,
+                    col: mc as i16,
+                    ref_frame: rf as i8,
+                };
+            }
+        }
+        let base_row = (mi_row >> 1) as usize;
+        let base_col = (mi_col >> 1) as usize;
+        for r in 0..y_mis {
+            let b = (base_row + r) * stride + base_col;
+            self.frame_mvs[b..b + x_mis].fill(cell);
         }
     }
 
@@ -2425,8 +2669,19 @@ impl<'c> TileKf<'c> {
         let block_mb_to_bottom = (self.cfg.mi_rows - MI_SIZE_HIGH[bsize] - mi_row) * 32;
         let nb_mb_to_bottom = block_mb_to_bottom + (this_height - pred_height) * 8;
         let nb_mb_to_top = -(mi_row * 32);
-        let last = inter.last;
         for (rel_mi_col, op_mi_size, nb, nb_if) in neighbours {
+            // The OBMC strip is MC'd from the NEIGHBOUR's reference frame
+            // (dec_build_prediction_by_above_pred uses `above_mbmi->ref_frame`).
+            let Some(last) = ((1..=7).contains(&nb.ref_frame0))
+                .then(|| inter.refs[(nb.ref_frame0 - 1) as usize])
+                .flatten()
+            else {
+                self.mark_corrupt(format!(
+                    "inter OBMC: above neighbour references unavailable ref {}",
+                    nb.ref_frame0
+                ));
+                return;
+            };
             // The OBMC strip is MC'd with the NEIGHBOUR's coded interp filter
             // (av1_setup_build_prediction_by_above_pred keeps `above_mbmi->
             // interp_filters`). (y_filter, x_filter) = (nb_if.0, nb_if.1).
@@ -2583,9 +2838,18 @@ impl<'c> TileKf<'c> {
         let block_mb_to_right = (self.cfg.mi_cols - MI_SIZE_WIDE[bsize] - mi_col) * 32;
         let nb_mb_to_right = block_mb_to_right + (this_width - pred_width) * 8;
         let nb_mb_to_left = -(mi_col * 32);
-        let last = inter.last;
         for (rel_mi_row, op_mi_size, nb, nb_if) in neighbours {
-            // Strip MC uses the NEIGHBOUR's coded interp filter.
+            // Strip MC reads the NEIGHBOUR's reference frame + coded filter.
+            let Some(last) = ((1..=7).contains(&nb.ref_frame0))
+                .then(|| inter.refs[(nb.ref_frame0 - 1) as usize])
+                .flatten()
+            else {
+                self.mark_corrupt(format!(
+                    "inter OBMC: left neighbour references unavailable ref {}",
+                    nb.ref_frame0
+                ));
+                return;
+            };
             let (nb_filter_y, nb_filter_x) = (nb_if.0 as usize, nb_if.1 as usize);
             let left_mi_row = mi_row + rel_mi_row;
             let bw = (bsize_wide >> 1).clamp(4, 32) as usize;
@@ -2745,6 +3009,10 @@ impl<'c> TileKf<'c> {
         let up_available = mi_row > self.tile.mi_row_start;
         let left_available = mi_col > self.tile.mi_col_start;
 
+        if dbg_blocks() {
+            eprintln!("ENTER mi({mi_row},{mi_col}) bs={bsize} tellq={}", dec.tell_frac() as i32);
+        }
+
         // Envelope invariants (STEP-0 census): these pre-mode reads are inert.
         // Out-of-envelope inter features are rejected as a clean error (not a
         // panic) so a malformed / unsupported inter frame from untrusted input
@@ -2753,7 +3021,7 @@ impl<'c> TileKf<'c> {
             self.mark_corrupt("inter: segmentation not supported in this decode envelope");
             return;
         }
-        if inter.skip_mode_allowed {
+        if inter.skip_mode_present {
             self.mark_corrupt("inter: skip_mode not supported in this decode envelope");
             return;
         }
@@ -2907,6 +3175,12 @@ impl<'c> TileKf<'c> {
             );
             icdfs.y_mode[grp] = y_cdf;
             self.inter_cdfs = icdfs;
+            if dbg_blocks() {
+                eprintln!(
+                    "BLK mi({mi_row},{mi_col}) bs={bsize} intra skip={skip} y_mode={} fi={}",
+                    info.y_mode, info.use_filter_intra
+                );
+            }
             self.decode_intra_block_body(
                 dec,
                 cdfs,
@@ -2936,14 +3210,25 @@ impl<'c> TileKf<'c> {
             left_dv.map_or(-1, |d| d.ref_frame1),
         );
         let mut ref_cdfs = icdfs.ref_frame_cdfs(&rc);
+        // `comp_inter` (read_ref_frames' first symbol): read for every
+        // comp-allowed block (`is_comp_ref_allowed`: min dim >= 8) of a
+        // REFERENCE_MODE_SELECT frame, on the neighbour-derived context
+        // (av1_get_reference_mode_context). Slot 0 of the assembled array.
+        let comp_allowed = BLOCK_SIZE_WIDE[bsize].min(BLOCK_SIZE_HIGH[bsize]) >= 8;
+        let rm_ctx = ep::reference_mode_context(
+            above_dv.map(|d| (d.ref_frame0, d.ref_frame1, dv_inter(d))),
+            left_dv.map(|d| (d.ref_frame0, d.ref_frame1, dv_inter(d))),
+        ) as usize;
+        ref_cdfs[0] = icdfs.comp_inter[rm_ctx];
         let (is_compound, _crt, ref0, ref1) = ep::read_ref_frames(
             dec,
             &mut ref_cdfs,
             false,
             false,
             inter.reference_mode_select,
-            false,
+            comp_allowed,
         );
+        icdfs.comp_inter[rm_ctx] = ref_cdfs[0];
         // `ref_frame_cdfs` assembled `ref_cdfs` from disjoint `single_ref` rows
         // (each single-ref sub-tree at its own pred context); copy the adapted
         // rows back so the adaptation persists across blocks. Only the rows
@@ -2955,10 +3240,10 @@ impl<'c> TileKf<'c> {
         icdfs.single_ref[ep::pred_ctx_last_or_last2(&rc) as usize][3] = ref_cdfs[13];
         icdfs.single_ref[ep::pred_ctx_last3_or_gld(&rc) as usize][4] = ref_cdfs[14];
         icdfs.single_ref[ep::pred_ctx_brf_or_arf2(&rc) as usize][5] = ref_cdfs[15];
-        if is_compound || ref0 != 1 || ref1 != -1 {
+        if is_compound || !(1..=7).contains(&ref0) || ref1 != -1 {
             self.mark_corrupt(
-                "inter: only a single LAST reference is decoded in this envelope \
-                 (compound / non-LAST references unsupported)",
+                "inter: only single-reference blocks are decoded in this envelope \
+                 (compound references unsupported)",
             );
             return;
         }
@@ -2968,10 +3253,10 @@ impl<'c> TileKf<'c> {
         // is_global_mv_block gating — a later chunk. Guarded so such a frame pins
         // cleanly here rather than reading a wrong NEWMV base and desyncing (every
         // target through 16x18 is identity-GM; e.g. 16x66 uses global motion).
-        if inter.gm_wmtype[ref0 as usize] != 0 {
+        if inter.gm_wmtype[(ref0 - 1) as usize] != 0 {
             self.mark_corrupt(format!(
                 "inter: non-identity global motion not supported (ref {ref0} wmtype {})",
-                inter.gm_wmtype[ref0 as usize]
+                inter.gm_wmtype[(ref0 - 1) as usize]
             ));
             return;
         }
@@ -2991,6 +3276,11 @@ impl<'c> TileKf<'c> {
             mi_row,
             mi_col,
         };
+        let tpl_field = inter.tpl_cells.map(|cells| aom_dsp::entropy::dv_ref::TplField {
+            cells,
+            stride: inter.tpl_stride,
+            cur_offset: inter.tpl_cur_offset,
+        });
         let imv = find_inter_mv_refs(
             ref0,
             mi_row,
@@ -3004,9 +3294,10 @@ impl<'c> TileKf<'c> {
             cfg.mi_cols,
             mib_size,
             inter.allow_ref_frame_mvs,
+            tpl_field.as_ref(),
             (0, 0),
             0,
-            [0i8; 8],
+            inter.ref_frame_sign_bias,
             inter.allow_high_precision_mv,
             inter.cur_frame_force_integer_mv,
             grid,
@@ -3413,9 +3704,29 @@ impl<'c> TileKf<'c> {
 
         // --- motion compensation (predict phase; NO entropy reads) ---
         let (cmv_row, cmv_col) = clamp_mv_to_umv_border(mv_row, mv_col, mi_row, mi_col, bsize, cfg);
+        // Above bd8 only the INTEGER-pel (zero-subpel, convolve-copy) MC path
+        // is depth-exact — the sub-pel filter chain runs on a u8 scratch and
+        // would truncate >8-bit samples. Conservatively require a fully zero
+        // MV (a nonzero integer-pel MV is fine in principle, but the chroma
+        // phase derivation differs per subsampling; widen when highbd subpel
+        // convolve lands). Fail-loud, never corrupt (bd10/12 envelope:
+        // zero-MV NEARESTMV per the animated-AVIF census).
+        if cfg.bd > 8 && (cmv_row != 0 || cmv_col != 0) {
+            self.mark_corrupt(format!(
+                "inter: sub/nonzero-pel MC above bd8 not yet supported (bd {}, mv ({cmv_row},{cmv_col}))",
+                cfg.bd
+            ));
+            return;
+        }
         let bw_px = (MI_SIZE_WIDE[bsize] * 4) as usize;
         let bh_px = (MI_SIZE_HIGH[bsize] * 4) as usize;
-        let last = inter.last;
+        // Bind the block's coded reference (ref0 was range-checked at read).
+        let Some(last) = inter.refs[(ref0 - 1) as usize] else {
+            self.mark_corrupt(format!(
+                "inter: block references unavailable ref {ref0} (no stored frame)"
+            ));
+            return;
+        };
         let blk_x = (mi_col * 4) as usize;
         let blk_y = (mi_row * 4) as usize;
         let dst_off = blk_y * self.stride + blk_x;
@@ -4173,6 +4484,20 @@ impl<'c> TileKf<'c> {
         // Stamp the block's coded interp filters so later switchable inter blocks'
         // av1_get_pred_context_switchable_interp neighbour reads see them.
         self.stamp_interp(mi_row, mi_col, bsize, (filter_y as u8, filter_x as u8));
+        if dbg_blocks() {
+            eprintln!(
+                "BLK mi({mi_row},{mi_col}) bs={bsize} inter ref={ref0} mode={mode} skip={skip} mv=({mv_row},{mv_col}) f=({filter_y},{filter_x})"
+            );
+        }
+        // (av1_copy_frame_mvs) for LATER frames' temporal projection.
+        self.stamp_frame_mvs(
+            inter,
+            mi_row,
+            mi_col,
+            bsize,
+            [ref0, ref1],
+            [(mv_row, mv_col), (0, 0)],
+        );
         // Minimal per-block record for the post-filter / output structures. The
         // inter block carries no intra fields; `skip`/`current_qindex` are what
         // the deblock reads (the mode-info's inter-ness lives in the DV grid).
@@ -6069,9 +6394,32 @@ pub fn decode_frame_tiles_kf(
     recon_init: u16,
     stop: Option<&dyn enough::Stop>,
 ) -> KfTileDecode {
+    decode_frame_tiles_kf_ctx(tiles, cfg, recon_init, None, 0, stop)
+}
+
+/// [`decode_frame_tiles_kf`] with an explicit BASE entropy context and the
+/// `context_update_tile_id` whose end-of-tile adapted CDFs become the frame's
+/// saved context ([`KfTileDecode::saved_ctx`], `REFRESH_FRAME_CONTEXT_BACKWARD`).
+/// `base_ctx = None` loads the qindex defaults (`primary_ref = NONE`, exactly
+/// the old behaviour); a KEY frame is always `primary_ref = NONE` but its
+/// SAVED context feeds later inter frames, so the multi-frame driver calls
+/// this form.
+pub fn decode_frame_tiles_kf_ctx(
+    tiles: &[TileBytesKf],
+    cfg: &KfTileConfig,
+    recon_init: u16,
+    base_ctx: Option<&FrameContexts>,
+    context_update_tile_id: i32,
+    stop: Option<&dyn enough::Stop>,
+) -> KfTileDecode {
     assert!(!tiles.is_empty(), "at least one tile");
     let mut t = TileKf::new(cfg, recon_init);
-    for tb in tiles {
+    if let Some(b) = base_ctx {
+        t.base_inter_cdfs = b.inter;
+        t.base_txfm_partition = b.kf.txfm_partition;
+    }
+    let mut saved: Option<Box<FrameContexts>> = None;
+    for (tile_idx, tb) in tiles.iter().enumerate() {
         // Poll at each tile boundary too (SB-row polling in `decode_one_tile`
         // gives finer granularity within a tile).
         if let Some(s) = stop {
@@ -6089,11 +6437,30 @@ pub fn decode_frame_tiles_kf(
         // (`aom_dsp::txb::read_coeffs_txb_full`, whose `rsym` delegates to
         // `read_symbol`), since `read_symbol` is the sole `update_cdf` site.
         dec.allow_update_cdf = !cfg.disable_cdf_update;
-        let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
+        let mut cdfs = match base_ctx {
+            Some(b) => b.kf.clone(),
+            None => KfFrameContext::default_for_qindex(cfg.base_qindex),
+        };
         t.start_tile(tb.bounds);
         t.decode_one_tile(&mut dec, &mut cdfs, stop);
+        if tile_idx as i32 == context_update_tile_id {
+            // `*cm->fc = pbi->tile_data[context_update_tile_id].tctx`
+            // (decodeframe.c:5489). `txfm_partition` rides the KfFrameContext
+            // slot (the tile-local copy is the authoritative adapting one).
+            // C then zeroes every CDF counter on the SAVED copy
+            // (av1_reset_cdf_symbol_counters, :5492).
+            cdfs.txfm_partition = t.txfm_partition;
+            let mut fcx = FrameContexts {
+                kf: cdfs,
+                inter: t.inter_cdfs,
+            };
+            fcx.reset_cdf_counters();
+            saved = Some(Box::new(fcx));
+        }
     }
-    t.into_decode()
+    let mut out = t.into_decode();
+    out.saved_ctx = saved;
+    out
 }
 
 /// Decode the tiles of an INTER frame (single reference, the walking-skeleton
@@ -6108,12 +6475,19 @@ pub fn decode_frame_tiles_inter(
     cfg: &KfTileConfig,
     inter: &InterFrameCfg,
     recon_init: u16,
+    base_ctx: Option<&FrameContexts>,
+    context_update_tile_id: i32,
     stop: Option<&dyn enough::Stop>,
 ) -> KfTileDecode {
     assert!(!tiles.is_empty(), "at least one tile");
     let mut t = TileKf::new(cfg, recon_init);
     t.inter = Some(*inter);
-    for tb in tiles {
+    if let Some(b) = base_ctx {
+        t.base_inter_cdfs = b.inter;
+        t.base_txfm_partition = b.kf.txfm_partition;
+    }
+    let mut saved: Option<Box<FrameContexts>> = None;
+    for (tile_idx, tb) in tiles.iter().enumerate() {
         if let Some(s) = stop {
             if let Err(r) = s.check() {
                 t.cancelled = Some(r);
@@ -6122,11 +6496,25 @@ pub fn decode_frame_tiles_inter(
         }
         let mut dec = OdEcDec::new(tb.bytes);
         dec.allow_update_cdf = !cfg.disable_cdf_update;
-        let mut cdfs = KfFrameContext::default_for_qindex(cfg.base_qindex);
+        let mut cdfs = match base_ctx {
+            Some(b) => b.kf.clone(),
+            None => KfFrameContext::default_for_qindex(cfg.base_qindex),
+        };
         t.start_tile(tb.bounds);
         t.decode_one_tile(&mut dec, &mut cdfs, stop);
+        if tile_idx as i32 == context_update_tile_id {
+            cdfs.txfm_partition = t.txfm_partition;
+            let mut fcx = FrameContexts {
+                kf: cdfs,
+                inter: t.inter_cdfs,
+            };
+            fcx.reset_cdf_counters();
+            saved = Some(Box::new(fcx));
+        }
     }
-    t.into_decode()
+    let mut out = t.into_decode();
+    out.saved_ctx = saved;
+    out
 }
 
 /// `clamp_mv_to_umv_border_sb` (reconinter.h:343), the general **per-plane** form.

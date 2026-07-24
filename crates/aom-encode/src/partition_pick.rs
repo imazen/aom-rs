@@ -1536,6 +1536,9 @@ fn leaf_pick_sb_modes(
             env.mi_cols,
             MI_SIZE_WIDE_B[env.sb_size] as i32,
             ic.allow_ref_frame_mvs,
+            // Temporal motion field: None = empty-field model (the encoder's
+            // current envelope decodes/encodes against all-intra references).
+            None,
             ic.global_mv,
             ic.gm_wmtype,
             ic.sign_bias,

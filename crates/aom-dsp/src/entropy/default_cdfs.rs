@@ -671,6 +671,17 @@ pub const DEFAULT_INTER_EXT_TX: [[[u16; 17]; 4]; 4] = [
 pub const DEFAULT_INTRA_INTER: [[u16; 3]; 4] =
     [[31962, 0, 0], [16106, 0, 0], [12582, 0, 0], [6230, 0, 0]];
 
+/// `default_comp_inter_cdf[COMP_INTER_CONTEXTS]` — the single-vs-compound
+/// reference flag (`read_ref_frames`' `comp_inter` symbol, read on every
+/// comp-allowed block of a `REFERENCE_MODE_SELECT` frame).
+pub const DEFAULT_COMP_INTER: [[u16; 3]; 5] = [
+    [5940, 0, 0],
+    [8733, 0, 0],
+    [20737, 0, 0],
+    [22128, 0, 0],
+    [29867, 0, 0],
+];
+
 /// `default_single_ref_cdf[REF_CONTEXTS][SINGLE_REFS-1]`.
 pub const DEFAULT_SINGLE_REF: [[[u16; 3]; 6]; 3] = [
     [

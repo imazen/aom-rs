@@ -491,6 +491,28 @@ pub fn build_inter_predictor(
     // both reproduce C's output whether or not C's optimizer skipped the copy.
     let pad_x = subpel_x != 0;
     let pad_y = subpel_y != 0;
+
+    // Zero sub-pel phase in both directions: C's `inter_predictor` routes to
+    // `aom_convolve_copy` (`aom_highbd_convolve_copy` above bd8) — a pure
+    // edge-replicated copy with NO filtering, valid at every bit depth. The
+    // u8-scratch filter path below truncates >8-bit samples, so this arm is
+    // also what keeps bd10/12 inter MC exact for integer-pel motion (the
+    // sub-pel highbd filter path is guarded by the caller until the highbd
+    // convolve kernels land).
+    if !pad_x && !pad_y {
+        for row in 0..h as i32 {
+            // Edge-replicated source row/col (build_mc_border's clamp).
+            let sy = (y0 + row).clamp(0, ref_h as i32 - 1) as usize;
+            let row_base = sy * ref_stride;
+            for col in 0..w as i32 {
+                let sx = (x0 + col).clamp(0, ref_w as i32 - 1) as usize;
+                dst[dst_off + row as usize * dst_stride + col as usize] =
+                    ref_plane[row_base + sx];
+            }
+        }
+        return;
+    }
+
     let mx = if pad_x { AOM_INTERP_EXTEND - 1 } else { 0 }; // 3
     let my = if pad_y { AOM_INTERP_EXTEND - 1 } else { 0 };
     let gx = x0 - mx;

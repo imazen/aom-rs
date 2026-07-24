@@ -1708,6 +1708,7 @@ fn minimal_frame_header_obu() -> aom_dsp::entropy::header::FrameHeaderObu {
         tx_mode_select: false,
         reference_mode_select: false,
         skip_mode_allowed: false,
+        derive_skip_mode_allowed: false,
         skip_mode_flag: false,
         might_allow_warped_motion: false,
         allow_warped_motion: false,

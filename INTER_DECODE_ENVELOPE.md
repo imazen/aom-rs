@@ -24,7 +24,7 @@ for the per-block census, on IVF-wrapped tracks.
 | 8bpc color (== 8bpc-audio color) | 150x150 8-bit 420, order_hint bits 7, ref_frame_mvs=1, dual_filter=0, jnt_comp=0, sb128=0, restoration=0 | KEY(show,0xff) ; TU{INTER hidden oh=4 r=0x02 pri=NONE ; INTER hidden oh=2 r=0x04 pri=NONE ; INTER shown oh=1 r=0x08 pri=NONE} ; SHOW_EXISTING idx=2 ; INTER shown oh=3 r=0x10 pri=1 ; INTER shown oh=4 r=0x00 pri=0 |
 | 8bpc-alpha / 8bpc-depth color | 150x150 8-bit 420, dual_filter=1, jnt_comp=1, sb128=1, restoration=1 | KEY(0xff) ; 4x INTER shown, refresh {0x02,0x04,0x08,0x10}, primary_ref {6,3,3,3}, interp=SWITCHABLE(4) on... (color track interp=0 f1? measured: color interp=0/4 mixed; alpha track interp=4) |
 | 8bpc-alpha / 8bpc-depth alpha | 150x150 8-bit **monochrome**, sb128=1 | same shape as color track; ALL blocks DC_PRED (intra-in-inter), primary_ref {6,3,3,3} |
-| 12bpc color | 64x64 **12-bit** 420 profile 2, sb128=1 | KEY ; INTER shown pri=6 (all DC_PRED) ; SEQ+KEY ; SEQ+KEY ; INTER shown pri=6 (NEARESTMV, gm wmtype[2]=3 parsed — unused by blocks) |
+| 12bpc color | 64x64 **12-bit** 4:2:2 profile 2, sb128=1 | KEY ; INTER shown pri=6 (all DC_PRED) ; SEQ+KEY ; SEQ+KEY ; INTER shown pri=6 (NEARESTMV, gm wmtype[2]=3 parsed — unused by blocks) |
 | 12bpc alpha | 64x64 12-bit monochrome, sb128=1 | KEY ; INTER pri=6 (NEARESTMV/LAST zero-MV) ; SEQ+KEY ; SEQ+KEY ; SEQ+KEY |
 
 All: superres inert (denom 8), 1x1 tiles, seg=0, no film grain, err_res=0,
@@ -86,11 +86,59 @@ frame-id numbers, temporal/spatial layers, multi-tile-group frames (poc_b only).
 | Chunk | What | Status |
 |---|---|---|
 | 0 | Corpus extraction + characterization + this doc | DONE (2026-07-23) |
-| 1 | DPB + hidden frames + show_existing + multi-slot driver | not started |
-| 2 | primary_ref CDF inheritance + per-slot contexts | not started |
-| 3 | temporal MV field + temporal arm of ref-MV list | not started |
-| 4 | multi-ref single-ref reads + switchable/dual interp reads | not started |
-| 5 | Full-corpus per-frame byte gate vs golden md5 | not started |
+| 1 | DPB + hidden frames + show_existing + multi-slot driver + comp_inter read + frame-MV grid capture | DONE (2026-07-23) |
+| 2 | primary_ref CDF inheritance + per-slot contexts (+ lf-delta/gm carry, derived skip_mode_allowed, CDF-counter reset on save) | DONE (2026-07-23) |
+| 3 | temporal MV field (`av1_setup_motion_field` + `motion_field_projection` + `add_tpl_ref_mv` scan) | DONE (2026-07-23) |
+| 4 | non-uniform var-tx reconstruction walk | NOT NEEDED for this corpus — the "non-uniform var-tx" errors were downstream fallout of the missing temporal candidates (wrong ref-MV stack -> wrong symbol stream); gone with chunk 3 |
+| 5 | Full-corpus per-frame byte gate vs golden md5 | DONE — `tests/animated_avif.rs`: **8/8 tracks, 40/40 shown frames byte-exact**, all in the hard `EXPECTED_EXACT` ratchet |
+
+### Per-track state after chunks 1-3 (2026-07-23, `tests/animated_avif.rs`)
+
+**Every track fully byte-exact vs aomdec 3.14.1 (and rav1d-safe by
+transitivity with zenavif's animation tests):**
+
+| track | frames byte-exact |
+|---|---|
+| 8bpc color (+ audio twin) | 5/5 |
+| 8bpc-alpha color (+ depth twin) | 5/5 |
+| 8bpc-alpha alpha (+ depth twin) | 5/5 |
+| 12bpc color (bd12 4:2:2 sb128) | 5/5 |
+| 12bpc alpha (mono bd12) | 5/5 |
+
+What the chunks verified end-to-end byte-exact: 8-slot DPB install/borrow,
+hidden (unshown) frame decode, `show_existing_frame` output of a stored hidden
+frame, `primary_ref != NONE` forward CDF inheritance through chain depth 4
+(the whole alpha-track chain KEY -> f1 -> f2 -> f3 -> f4), `comp_inter` reads
+under `REFERENCE_MODE_SELECT`, single-ref reads from non-LAST slots, zero-MV
+NEARESTMV MC at bd8 4:2:0 and bd12 4:2:2 (integer-pel highbd convolve-copy
+path), monochrome inter frames, SB128 inter frames, gm-AFFINE header carry,
+the derived (mid-parse) `skip_mode_allowed` arm, repeated mid-stream sequence
+headers, and (chunk 3) the full temporal-MV pipeline: per-frame 8x8 MV-grid
+capture (`av1_copy_frame_mvs` with `ref_frame_side`), the motion-field
+projection (`av1_setup_motion_field`/`motion_field_projection`/
+`get_block_position`/`av1_get_mv_projection` with the div_mult table), and the
+`add_tpl_ref_mv` temporal arm of `setup_ref_mv_list` (interior sample walk +
+SB-border extension samples + GLOBALMV context bit), driving NEARESTMV
+candidates and mode contexts on frames whose references carry motion.
+
+**Two root-caused fixes along the way:**
+1. `build_inter_predictor` gathered the reference into a u8 scratch —
+   truncating bd10/12 samples. Zero-subpel MC now takes a depth-generic
+   convolve-copy arm (C `aom_highbd_convolve_copy`); highbd SUB-pel MC stays
+   fail-loud-guarded until the highbd convolve kernels land.
+2. **CDF adaptation-counter reset on context save** (`av1_reset_cdf_symbol_
+   counters`, decodeframe.c:5492): C zeroes every CDF row's counter slot when
+   saving a frame's end context, restarting the update-rate ramp for frames
+   that inherit it. Carrying the counters adapts too slowly and drifted our
+   alpha-track chain off C at depth 3 (first value flip: a `skip_txfm` read,
+   localized with the new `OdEcDec::tell_frac()` + the instrumented libaom's
+   per-symbol accounting). Ported across all three context pieces
+   (`KfFrameContext::reset_cdf_counters`, `txb::reset_arena_cdf_counters`,
+   `FrameContexts::reset_cdf_counters`).
+
+Debug tooling added: `OdEcDec::tell`/`tell_frac` (od_ec_dec_tell{,_frac}),
+`AOM_DBG_BLOCKS=1` block-walk tracing, `examples/decode_animated_dbg.rs`,
+`examples/inspect_headers.rs`.
 
 ## 3. Verification
 

@@ -19,7 +19,10 @@ pub use tables::nz_map_ctx_offset;
 mod scan;
 pub use scan::{iscan, scan, SCAN_ORDERS};
 mod write;
-pub use write::{txsize_entropy_ctx, write_coeffs_txb, write_coeffs_txb_full, CDF_ARENA_LEN};
+pub use write::{
+    reset_arena_cdf_counters, txsize_entropy_ctx, write_coeffs_txb, write_coeffs_txb_full,
+    CDF_ARENA_LEN,
+};
 mod read;
 pub use read::{dequant_txb, read_coeffs_txb, read_coeffs_txb_full, tx_scale};
 mod cost;

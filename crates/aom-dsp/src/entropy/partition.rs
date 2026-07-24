@@ -463,6 +463,23 @@ const MV_SUBPEL_LOW: i32 = 0;
 /// sign, magnitude class, then the class-0 integer symbol or the per-class integer
 /// bits, then (precision-gated) the fractional bits and the high-precision bit, all on
 /// the component's adapted nmv CDFs.
+/// `reset_nmv_counter`'s per-component slice (entropy.c:71): zero the counter
+/// slot of every sub-CDF in the packed 69-u16 `nmv_component` blob (layout
+/// documented above).
+pub fn reset_nmv_comp_counters(cdf: &mut [u16; 69]) {
+    cdf[0 + 2] = 0; // sign (2-sym)
+    cdf[3 + 11] = 0; // classes (11-sym)
+    cdf[15 + 2] = 0; // class0 (2-sym)
+    for k in 0..10 {
+        cdf[18 + 3 * k + 2] = 0; // bits[k] (2-sym)
+    }
+    cdf[48 + 4] = 0; // class0_fp[0] (4-sym)
+    cdf[53 + 4] = 0; // class0_fp[1]
+    cdf[58 + 4] = 0; // fp (4-sym)
+    cdf[63 + 2] = 0; // class0_hp (2-sym)
+    cdf[66 + 2] = 0; // hp (2-sym)
+}
+
 pub fn encode_mv_component(enc: &mut OdEcEnc, cdf: &mut [u16; 69], comp: i32, precision: i32) {
     let sign = (comp < 0) as i32;
     let mag = comp.abs();
@@ -1058,6 +1075,47 @@ pub fn get_comp_reference_type_context(
 /// `av1_get_pred_context_single_ref_p1` (`pred_common.c`): the P1 single-ref CDF context
 /// from the neighbours' forward vs backward reference counts — 1 if equal, 0 if forward
 /// < backward, else 2. `ref_counts` is `neighbors_ref_counts[REF_FRAMES]`.
+/// `av1_get_reference_mode_context` (av1/common/pred_common.c:145): the
+/// `comp_inter_cdf` context for the single-vs-compound flag, from the above /
+/// left neighbours' `(ref_frame[0], ref_frame[1], is_inter_block)`. A
+/// neighbour tuple is `None` when the edge is unavailable.
+/// `IS_BACKWARD_REF_FRAME(r)` = `BWDREF(5) <= r <= ALTREF(7)`;
+/// `has_second_ref` = `ref_frame[1] > INTRA_FRAME(0)`.
+pub fn reference_mode_context(
+    above: Option<(i32, i32, bool)>,
+    left: Option<(i32, i32, bool)>,
+) -> i32 {
+    #[inline]
+    fn bwd(r: i32) -> bool {
+        (5..=7).contains(&r)
+    }
+    #[inline]
+    fn second(r1: i32) -> bool {
+        r1 > 0
+    }
+    match (above, left) {
+        (Some((a0, a1, a_inter)), Some((l0, l1, l_inter))) => {
+            if !second(a1) && !second(l1) {
+                (bwd(a0) ^ bwd(l0)) as i32
+            } else if !second(a1) {
+                2 + (bwd(a0) || !a_inter) as i32
+            } else if !second(l1) {
+                2 + (bwd(l0) || !l_inter) as i32
+            } else {
+                4
+            }
+        }
+        (Some((e0, e1, _)), None) | (None, Some((e0, e1, _))) => {
+            if !second(e1) {
+                bwd(e0) as i32
+            } else {
+                3
+            }
+        }
+        (None, None) => 1,
+    }
+}
+
 pub fn single_ref_p1_context(ref_counts: &[u8; 8]) -> i32 {
     let fwd =
         ref_counts[1] as i32 + ref_counts[2] as i32 + ref_counts[3] as i32 + ref_counts[4] as i32;
@@ -6105,6 +6163,120 @@ impl KfFrameContext {
     /// `av1_default_coef_probs` selects the coefficient band by
     /// [`coeff_cdf_q_ctx`]. Byte-identical to the compiled C defaults
     /// (tests/default_cdfs_diff.rs).
+    /// The KfFrameContext slice of `av1_reset_cdf_symbol_counters`
+    /// (av1/common/entropy.c:85): zero every CDF row's adaptation-counter slot
+    /// (index `nsymbs` within the row). Run when a frame's end-of-frame
+    /// context is saved (`REFRESH_FRAME_CONTEXT_BACKWARD`), so forward CDF
+    /// inheritance restarts the update-rate ramp exactly as C does. Rows whose
+    /// array length exceeds `nsymbs + 1` (uv_mode[0], partition, tx_size[0],
+    /// inter_ext_tx sets, palette colour-index sizes) reset at their true
+    /// per-row `nsymbs`, mirroring C's RESET_CDF_COUNTER_STRIDE arms.
+    pub fn reset_cdf_counters(&mut self) {
+        #[inline]
+        fn r1<const L: usize>(row: &mut [u16; L], nsymbs: usize) {
+            row[nsymbs] = 0;
+        }
+        for a in self.kf_y.iter_mut().flatten() {
+            r1(a, 13);
+        }
+        for a in self.uv_mode[0].iter_mut() {
+            r1(a, 13); // UV_INTRA_MODES - 1 (cfl-disallowed rows)
+        }
+        for a in self.uv_mode[1].iter_mut() {
+            r1(a, 14);
+        }
+        for a in self.angle_delta.iter_mut() {
+            r1(a, 7);
+        }
+        for a in self.skip.iter_mut() {
+            r1(a, 2);
+        }
+        for a in self.seg_spatial.iter_mut() {
+            r1(a, 8); // MAX_SEGMENTS
+        }
+        for (i, a) in self.partition.iter_mut().enumerate() {
+            let n = if i < 4 {
+                4
+            } else if i < 16 {
+                10
+            } else {
+                8
+            };
+            r1(a, n);
+        }
+        for a in self.palette_y_mode.iter_mut().flatten() {
+            r1(a, 2);
+        }
+        for a in self.palette_uv_mode.iter_mut() {
+            r1(a, 2);
+        }
+        for a in self.palette_y_size.iter_mut() {
+            r1(a, 7); // PALETTE_SIZES
+        }
+        for a in self.palette_uv_size.iter_mut() {
+            r1(a, 7);
+        }
+        for (j, rows) in self.palette_y_color_index.iter_mut().enumerate() {
+            for a in rows.iter_mut() {
+                r1(a, j + 2); // PALETTE_MIN_SIZE + j
+            }
+        }
+        for (j, rows) in self.palette_uv_color_index.iter_mut().enumerate() {
+            for a in rows.iter_mut() {
+                r1(a, j + 2);
+            }
+        }
+        for a in self.filter_intra.iter_mut() {
+            r1(a, 2);
+        }
+        r1(&mut self.filter_intra_mode, 5);
+        r1(&mut self.cfl_sign, 8);
+        for a in self.cfl_alpha.iter_mut() {
+            r1(a, 16);
+        }
+        r1(&mut self.delta_q, 4); // DELTA_Q_PROBS + 1
+        for a in self.delta_lf_multi.iter_mut() {
+            r1(a, 4);
+        }
+        r1(&mut self.delta_lf, 4);
+        r1(&mut self.intrabc, 2);
+        r1(&mut self.ndvc_joints, 4);
+        reset_nmv_comp_counters(&mut self.ndvc_comp0);
+        reset_nmv_comp_counters(&mut self.ndvc_comp1);
+        for (cat, rows) in self.tx_size.iter_mut().enumerate() {
+            let n = if cat == 0 { 2 } else { 3 }; // MAX_TX_DEPTH / +1
+            for a in rows.iter_mut() {
+                r1(a, n);
+            }
+        }
+        for a in self.ext_tx_1ddct.iter_mut().flatten() {
+            r1(a, 7); // intra_ext_tx_cdf[1]
+        }
+        for a in self.ext_tx_dtt4.iter_mut().flatten() {
+            r1(a, 5); // intra_ext_tx_cdf[2]
+        }
+        for (set, rows) in self.inter_ext_tx.iter_mut().enumerate() {
+            // inter_ext_tx_cdf sets 1..3 code {16, 12, 2} symbols; set 0
+            // (identity) codes none — C resets only sets 1..3.
+            let n = match set {
+                1 => 16,
+                2 => 12,
+                3 => 2,
+                _ => continue,
+            };
+            for a in rows.iter_mut() {
+                r1(a, n);
+            }
+        }
+        r1(&mut self.switchable_restore, 3);
+        r1(&mut self.wiener_restore, 2);
+        r1(&mut self.sgrproj_restore, 2);
+        for a in self.txfm_partition.iter_mut() {
+            r1(a, 2);
+        }
+        crate::txb::reset_arena_cdf_counters(&mut self.coeff);
+    }
+
     pub fn default_for_qindex(base_qindex: i32) -> Self {
         use crate::entropy::default_cdfs as d;
         KfFrameContext {

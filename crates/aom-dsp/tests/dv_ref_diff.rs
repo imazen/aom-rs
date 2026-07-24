@@ -603,6 +603,8 @@ fn run_one_inter(
         b.frame_mi_cols,
         b.mib_size,
         case.allow_ref_frame_mvs,
+        // Empty temporal field (the differential shim decodes intra-only refs).
+        None,
         (0, 0),
         0,
         case.sign_bias,

@@ -89,12 +89,14 @@
 
 use crate::superres;
 use crate::{
-    DecodeConfig, DecodeError, KfTileConfig, KfTileDecode, MI_SIZE_HIGH, MI_SIZE_WIDE, ReconPlane,
-    TileBoundsKf, TileBytesKf, decode_frame_tiles_kf,
+    DecodeConfig, DecodeError, FrameContexts, KfTileConfig, KfTileDecode, MI_SIZE_HIGH,
+    MI_SIZE_WIDE, MvRefCell, ReconPlane, TileBoundsKf, TileBytesKf, decode_frame_tiles_kf,
+    decode_frame_tiles_kf_ctx,
 };
+use std::rc::Rc;
 use aom_dsp::entropy::header::{
     CdefHeader, FilmGrainParams, FrameHeaderObu, FrameHeaderPrefix, FrameSizeHeader,
-    LoopfilterHeader, RestorationHeader, SequenceHeaderObu, TileInfoHeader,
+    LoopfilterHeader, RestorationHeader, SequenceHeaderObu, TileInfoHeader, WarpedMotionParams,
     read_sequence_header_obu, read_tile_group_header, read_uncompressed_header,
 };
 use aom_dsp::entropy::leb128::uleb_decode;
@@ -396,8 +398,28 @@ fn parse_frame_header(
     is_obu_frame: bool,
     config: &DecodeConfig,
 ) -> Result<ParsedFrame, DecodeError> {
-    parse_frame_header_ext(seq, payload, is_obu_frame, false, config)
+    parse_frame_header_ext(seq, payload, is_obu_frame, false, false, None, config)
 }
+
+/// The header-parse inputs a multi-frame INTER final parse carries in from the
+/// decoder's reference state (the pieces `read_uncompressed_header` consumes
+/// as reader context that only the DRIVER can resolve):
+/// the primary reference's loop-filter deltas + global-motion params
+/// (`setup_past_independence` defaults when `primary_ref = NONE`), and the
+/// order-hint half of `av1_setup_skip_mode_allowed` computed over the SEVEN
+/// bound reference slots.
+struct InterParseCtx {
+    lf_ref_deltas: [i8; 8],
+    lf_mode_deltas: [i8; 2],
+    gm_ref: [WarpedMotionParams; 7],
+    skip_mode_refs_allowed: bool,
+}
+
+/// `default_warp_params` (identity; diagonal `1 << WARPEDMODEL_PREC_BITS`).
+const IDENTITY_GM: WarpedMotionParams = WarpedMotionParams {
+    wmtype: 0,
+    wmmat: [0, 0, 1 << 16, 0, 0, 1 << 16],
+};
 
 /// [`parse_frame_header`] with an `allow_inter` gate. When `false` (the
 /// single-KEY-frame path), an inter frame is rejected as before. When `true`
@@ -411,6 +433,8 @@ fn parse_frame_header_ext(
     payload: &[u8],
     is_obu_frame: bool,
     allow_inter: bool,
+    probe_pass: bool,
+    inter_ctx: Option<&InterParseCtx>,
     config: &DecodeConfig,
 ) -> Result<ParsedFrame, DecodeError> {
     let s = &seq.seq_header;
@@ -524,6 +548,22 @@ fn parse_frame_header_ext(
         // slip is hidden by the header's trailing byte-alignment, so modes still
         // parsed but the tx-type set was wrong.
         cfg.might_allow_warped_motion = s.enable_warped_motion;
+        // Global-motion delta decode is RELATIVE to the previous (primary-ref)
+        // frame's params — `default_warp_params` (identity, 1<<16 diagonal)
+        // under `setup_past_independence`. The struct-literal default above is
+        // all-zeros, which desyncs any coded non-identity model.
+        cfg.ref_global_motion = [IDENTITY_GM; 7];
+    }
+    if let Some(ic) = inter_ctx {
+        // Primary-ref carry (final multi-frame parse): the reference's
+        // loop-filter deltas + global motion seed the reader context, and the
+        // order-hint half of skip-mode-allowed arms the reader's mid-parse
+        // combine with `reference_mode_select`.
+        cfg.loopfilter.last_ref_deltas = ic.lf_ref_deltas;
+        cfg.loopfilter.last_mode_deltas = ic.lf_mode_deltas;
+        cfg.ref_global_motion = ic.gm_ref;
+        cfg.skip_mode_allowed = ic.skip_mode_refs_allowed;
+        cfg.derive_skip_mode_allowed = true;
     }
 
     // Two-phase header parse for coded-lossless. `read_uncompressed_header` gates
@@ -604,6 +644,21 @@ fn parse_frame_header_ext(
         None => (probe, rb),
     };
 
+    // PROBE pass (multi-frame pass 1): the caller only needs the prefix
+    // (frame type / show flags / refresh / primary_ref / order hint) and the
+    // reference signaling — everything parsed BEFORE the fields whose reader
+    // context the driver must first resolve (skip-mode-allowed, lf deltas,
+    // global motion). The tail may be misparsed on this pass (e.g. a stream
+    // whose skip-mode bit the default context skips), so neither `rb.error`
+    // nor the envelope gates are meaningful here; the FINAL parse re-runs
+    // them with the resolved context.
+    if probe_pass {
+        return Ok(ParsedFrame {
+            header: p,
+            tile_data_off: None,
+        });
+    }
+
     // A bit-reader overread past the OBU payload, or an out-of-range syntax
     // value flagged during the header parse (e.g. a film-grain scaling-point
     // count exceeding its spec maximum), sets `rb.error`. libaom rejects such
@@ -637,6 +692,16 @@ fn parse_frame_header_ext(
 
     // --- envelope gates, in bitstream order ---
     if p.prefix.show_existing_frame {
+        // Multi-frame path: a legal 1-line frame header naming a stored slot
+        // to output; the reader early-returned, so only the prefix is
+        // meaningful. The driver resolves the slot. Single-frame path: out of
+        // envelope as before.
+        if allow_inter {
+            return Ok(ParsedFrame {
+                header: p,
+                tile_data_off: None,
+            });
+        }
         return Err(DecodeError::UnsupportedFeature("show_existing_frame"));
     }
     // frame_type: 0=KEY, 1=INTER, 2=INTRA_ONLY, 3=SWITCH. The single-frame path
@@ -647,7 +712,10 @@ fn parse_frame_header_ext(
             format!("frame_type {} (unsupported)", p.prefix.frame_type).into(),
         ));
     }
-    if !p.prefix.show_frame {
+    if !p.prefix.show_frame && !allow_inter {
+        // Multi-frame path: a hidden (show_frame=0, showable) frame is decoded
+        // and installed into the DPB without being output (shown later via
+        // show_existing_frame or referenced only). Single-frame path: reject.
         return Err(DecodeError::UnsupportedFeature("unshown frame"));
     }
     // `disable_cdf_update` IS in the envelope: when set (the encoder's
@@ -855,9 +923,11 @@ pub fn decode_frames_with(
     let mut seq: Option<SequenceHeaderObu> = None;
     let mut pending_header: Option<FrameHeaderObu> = None;
     let mut out: Vec<FrameDecode> = Vec::new();
-    // The reference DPB: for this envelope a single stored `LAST` reference is
-    // sufficient (frame 0's filtered recon feeds every following inter frame).
-    let mut last_ref: Option<crate::RefFrame> = None;
+    // The decoded-picture buffer: `ref_frame_map[REF_FRAMES]`. Each decoded
+    // frame is installed into every slot set in its `refresh_frame_flags`
+    // (`update_frame_buffers`, decoder.c:365); a frame may occupy several
+    // slots (`Rc`-shared).
+    let mut slots: [Option<Rc<RefSlot>>; 8] = Default::default();
 
     while pos < data.len() {
         let h = read_obu_header(&data[pos..]).ok_or("bad OBU header")?;
@@ -891,13 +961,31 @@ pub fn decode_frames_with(
             }
             3 => {
                 let sh = seq.as_ref().ok_or("frame header before sequence header")?;
-                let pf = parse_frame_header_ext(sh, payload, false, true, config)?;
-                pending_header = Some(pf.header);
+                // Pass 1 (probe): prefix + reference signaling only — enough to
+                // resolve show_existing_frame and the reader context the final
+                // parse needs (primary-ref carry, skip-mode order-hint half).
+                let probe = parse_frame_header_ext(sh, payload, false, true, true, None, config)?;
+                if probe.header.prefix.show_existing_frame {
+                    out.push(show_existing_output(&slots, &probe.header)?);
+                } else {
+                    let ic = build_inter_parse_ctx(sh, &probe.header, &slots)?;
+                    let pf =
+                        parse_frame_header_ext(sh, payload, false, true, false, ic.as_ref(), config)?;
+                    pending_header = Some(pf.header);
+                }
             }
             4 | 6 => {
                 let sh = seq.as_ref().ok_or("frame before sequence header")?;
                 let (header, tile_data) = if h.obu_type == 6 {
-                    let pf = parse_frame_header_ext(sh, payload, true, true, config)?;
+                    let probe = parse_frame_header_ext(sh, payload, true, true, true, None, config)?;
+                    if probe.header.prefix.show_existing_frame {
+                        return Err(
+                            "show_existing_frame inside an OBU_FRAME (non-conformant)".into()
+                        );
+                    }
+                    let ic = build_inter_parse_ctx(sh, &probe.header, &slots)?;
+                    let pf =
+                        parse_frame_header_ext(sh, payload, true, true, false, ic.as_ref(), config)?;
                     let off = pf
                         .tile_data_off
                         .ok_or("frame OBU missing tile data offset")?;
@@ -911,39 +999,7 @@ pub fn decode_frames_with(
                     let off = rb.bytes_read();
                     (header, &payload[off..])
                 };
-                let (mut t, cfg, hdr) = if header.prefix.frame_type == 1 {
-                    let last = last_ref.as_ref().ok_or(DecodeError::UnsupportedFeature(
-                        "inter frame decoded before any reference frame",
-                    ))?;
-                    decode_inter_tile_payload(sh, &header, tile_data, last, config.stop)?
-                } else {
-                    decode_tile_payload(sh, &header, tile_data, config.stop)?
-                };
-                run_post_filters(&mut t, &cfg, &hdr);
-                // Store the FILTERED reconstruction (pre-crop, pre-film-grain) as
-                // the reference for later frames. Every `01-size-*` frame refreshes
-                // at least one slot; a single stored `LAST` covers this envelope.
-                if hdr.prefix.refresh_frame_flags != 0 {
-                    // MC clamps reference reads to the VISIBLE (crop) dims — the
-                    // reference's `y_crop_width/height` / `uv_crop_width/height`
-                    // (the coded post-superres-upscale visible size), matching
-                    // `finish_frame`'s crop derivation. On a partial-edge frame
-                    // these are smaller than the mi-aligned recon extent.
-                    let crop_w = hdr.frame_size.superres_upscaled_width as usize;
-                    let crop_h = hdr.frame_size.superres_upscaled_height as usize;
-                    let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
-                    let crop_w_uv = (crop_w + ss_x) >> ss_x;
-                    let crop_h_uv = (crop_h + ss_y) >> ss_y;
-                    last_ref = Some(crate::RefFrame::from_filtered(
-                        &t,
-                        hdr.prefix.order_hint,
-                        crop_w,
-                        crop_h,
-                        crop_w_uv,
-                        crop_h_uv,
-                    ));
-                }
-                out.push(finish_and_grain(t, &cfg, &hdr));
+                decode_frame_and_install(sh, &header, tile_data, &mut slots, &mut out, config)?;
             }
             5 | 15 => {} // OBU_METADATA | OBU_PADDING
             t => {
@@ -961,19 +1017,516 @@ pub fn decode_frames_with(
     Ok(out)
 }
 
-/// The INTER analogue of [`decode_tile_payload`]: build the shared tile config +
-/// the inter frame-level config (single `LAST` reference) and drive the inter
-/// tile decode.
+/// One stored DPB slot of the multi-frame decoder: the reference planes, the
+/// finished (crop + film-grain) output for `show_existing_frame`, the saved
+/// end-of-frame entropy context (forward CDF inheritance), the loop-filter
+/// deltas / global motion the NEXT frame's header parse may carry in, the
+/// per-8x8 MV grid + this frame's own ref order hints (temporal motion-field
+/// inputs), and the show bookkeeping.
+pub(crate) struct RefSlot {
+    pub frame: crate::RefFrame,
+    pub output: FrameDecode,
+    pub ctx: FrameContexts,
+    pub lf_ref_deltas: [i8; 8],
+    pub lf_mode_deltas: [i8; 2],
+    pub gm: [WarpedMotionParams; 7],
+    /// `cur_frame->ref_order_hints`, indexed by `MV_REFERENCE_FRAME` (1..=7);
+    /// `[0]` unused. Zeros for a KEY frame.
+    pub ref_order_hints: [i32; 8],
+    /// The frame's stored per-8x8 MV grid (`cur_frame->mvs`), stride
+    /// `(mi_cols + 1) >> 1`. All-`NONE` for a KEY frame.
+    pub mvs: Vec<MvRefCell>,
+    /// Coded mi dims (`buf->mi_rows/mi_cols`) — the motion-field projection
+    /// skips a reference whose mi grid differs from the current frame's.
+    pub mi_rows: i32,
+    pub mi_cols: i32,
+    pub frame_type: i32,
+    pub showable: bool,
+}
+
+/// `get_block_position` (mvref_common.c:881): map a projected MV at 8x8 cell
+/// `(blk_row, blk_col)` to the tpl-grid cell it lands in, bounded by the frame
+/// and a +-64px horizontal / 0px vertical window around the source cell.
+fn get_block_position(
+    mi_rows: i32,
+    mi_cols: i32,
+    blk_row: i32,
+    blk_col: i32,
+    mv_row: i32,
+    mv_col: i32,
+    sign_bias: i32,
+) -> Option<(i32, i32)> {
+    const MAX_OFFSET_WIDTH: i32 = 64;
+    const MAX_OFFSET_HEIGHT: i32 = 0;
+    let base_blk_row = (blk_row >> 3) << 3;
+    let base_blk_col = (blk_col >> 3) << 3;
+    let row_offset = if mv_row >= 0 {
+        mv_row >> 6 // 4 + MI_SIZE_LOG2
+    } else {
+        -((-mv_row) >> 6)
+    };
+    let col_offset = if mv_col >= 0 {
+        mv_col >> 6
+    } else {
+        -((-mv_col) >> 6)
+    };
+    let row = if sign_bias == 1 {
+        blk_row - row_offset
+    } else {
+        blk_row + row_offset
+    };
+    let col = if sign_bias == 1 {
+        blk_col - col_offset
+    } else {
+        blk_col + col_offset
+    };
+    if row < 0 || row >= (mi_rows >> 1) || col < 0 || col >= (mi_cols >> 1) {
+        return None;
+    }
+    if row < base_blk_row - (MAX_OFFSET_HEIGHT >> 3)
+        || row >= base_blk_row + 8 + (MAX_OFFSET_HEIGHT >> 3)
+        || col < base_blk_col - (MAX_OFFSET_WIDTH >> 3)
+        || col >= base_blk_col + 8 + (MAX_OFFSET_WIDTH >> 3)
+    {
+        return None;
+    }
+    Some((row, col))
+}
+
+/// `motion_field_projection` (mvref_common.c:920): project one start frame's
+/// stored 8x8 MV grid into the current frame's temporal field. Returns true
+/// when the start frame was usable (C's ref_stamp accounting).
+fn motion_field_projection(
+    seq: &SequenceHeaderObu,
+    cur_order_hint: i32,
+    mi_rows: i32,
+    mi_cols: i32,
+    slot: &RefSlot,
+    dir: i32,
+    cells: &mut [aom_dsp::entropy::dv_ref::TplMvRef],
+    stride: usize,
+) -> bool {
+    // KEY_FRAME / INTRA_ONLY_FRAME store no motion.
+    if slot.frame_type == 0 || slot.frame_type == 2 {
+        return false;
+    }
+    if slot.mi_rows != mi_rows || slot.mi_cols != mi_cols {
+        return false;
+    }
+    let start_oh = slot.frame.order_hint;
+    let mut start_to_cur = get_relative_dist(seq, start_oh, cur_order_hint);
+    let mut ref_offset = [0i32; 8];
+    for rf in 1..=7usize {
+        ref_offset[rf] = get_relative_dist(seq, start_oh, slot.ref_order_hints[rf]);
+    }
+    if dir == 2 {
+        start_to_cur = -start_to_cur;
+    }
+    let mvs_rows = ((mi_rows + 1) >> 1) as usize;
+    let mvs_cols = ((mi_cols + 1) >> 1) as usize;
+    for blk_row in 0..mvs_rows as i32 {
+        for blk_col in 0..mvs_cols as i32 {
+            let cell = slot.mvs[blk_row as usize * mvs_cols + blk_col as usize];
+            if cell.ref_frame <= 0 {
+                continue;
+            }
+            let rfo = ref_offset[cell.ref_frame as usize];
+            if !(rfo.abs() <= aom_dsp::entropy::dv_ref::MAX_FRAME_DISTANCE
+                && rfo > 0
+                && start_to_cur.abs() <= aom_dsp::entropy::dv_ref::MAX_FRAME_DISTANCE)
+            {
+                continue;
+            }
+            let (pr, pc) = aom_dsp::entropy::dv_ref::get_mv_projection(
+                cell.row as i32,
+                cell.col as i32,
+                start_to_cur,
+                rfo,
+            );
+            if let Some((mi_r, mi_c)) =
+                get_block_position(mi_rows, mi_cols, blk_row, blk_col, pr, pc, dir >> 1)
+            {
+                cells[mi_r as usize * stride + mi_c as usize] =
+                    aom_dsp::entropy::dv_ref::TplMvRef {
+                        row: cell.row,
+                        col: cell.col,
+                        ref_frame_offset: rfo as i16,
+                        valid: true,
+                    };
+            }
+        }
+    }
+    true
+}
+
+/// `av1_setup_motion_field` (mvref_common.c:1015): build the current frame's
+/// temporal motion field from up to `MFMV_STACK_SIZE` (3) projected
+/// references, in C's fixed order (LAST unless it is the GOLDEN overlay,
+/// then future BWDREF/ALTREF2/ALTREF, then LAST2). Returns `None` when order
+/// hints are disabled (the per-block scan then behaves as an empty field —
+/// but note C still runs the scan with an all-invalid field when
+/// `allow_ref_frame_mvs` is set, which the caller models via `tpl = None`...
+/// with the GLOBALMV context bit still applied).
+fn setup_motion_field(
+    seq: &SequenceHeaderObu,
+    p: &FrameHeaderObu,
+    mi_rows: i32,
+    mi_cols: i32,
+    bound: &[Option<Rc<RefSlot>>; 7],
+) -> Option<Vec<aom_dsp::entropy::dv_ref::TplMvRef>> {
+    if !seq.seq_header.enable_order_hint {
+        return None;
+    }
+    let cur_oh = p.prefix.order_hint;
+    let stride = ((mi_cols + 1) >> 1) as usize;
+    let rows = ((mi_rows + 1) >> 1) as usize;
+    let mut cells = vec![aom_dsp::entropy::dv_ref::TplMvRef::default(); rows * stride];
+    let ref_oh: [i32; 7] =
+        std::array::from_fn(|i| bound[i].as_deref().map_or(0, |s| s.frame.order_hint));
+    let mut ref_stamp = 2; // MFMV_STACK_SIZE - 1
+    if let Some(lst) = bound[0].as_deref() {
+        // is_lst_overlay: LAST's own ALTREF order hint equals our GOLDEN's.
+        let alt_of_lst = lst.ref_order_hints[7];
+        if alt_of_lst != ref_oh[3] {
+            motion_field_projection(seq, cur_oh, mi_rows, mi_cols, lst, 2, &mut cells, stride);
+        }
+        ref_stamp -= 1;
+    }
+    if get_relative_dist(seq, ref_oh[4], cur_oh) > 0 {
+        if let Some(b) = bound[4].as_deref() {
+            if motion_field_projection(seq, cur_oh, mi_rows, mi_cols, b, 0, &mut cells, stride) {
+                ref_stamp -= 1;
+            }
+        }
+    }
+    if get_relative_dist(seq, ref_oh[5], cur_oh) > 0 {
+        if let Some(b) = bound[5].as_deref() {
+            if motion_field_projection(seq, cur_oh, mi_rows, mi_cols, b, 0, &mut cells, stride) {
+                ref_stamp -= 1;
+            }
+        }
+    }
+    if get_relative_dist(seq, ref_oh[6], cur_oh) > 0 && ref_stamp >= 0 {
+        if let Some(b) = bound[6].as_deref() {
+            if motion_field_projection(seq, cur_oh, mi_rows, mi_cols, b, 0, &mut cells, stride) {
+                ref_stamp -= 1;
+            }
+        }
+    }
+    if ref_stamp >= 0 {
+        if let Some(b) = bound[1].as_deref() {
+            motion_field_projection(seq, cur_oh, mi_rows, mi_cols, b, 2, &mut cells, stride);
+        }
+    }
+    Some(cells)
+}
+
+/// `get_relative_dist` (mvref_common.h:37): signed wrap-around order-hint
+/// distance `a - b` at the sequence's order-hint bit width; 0 when order
+/// hints are disabled.
+fn get_relative_dist(seq: &SequenceHeaderObu, a: i32, b: i32) -> i32 {
+    let s = &seq.seq_header;
+    if !s.enable_order_hint {
+        return 0;
+    }
+    let bits = s.order_hint_bits_minus_1 + 1;
+    let m = 1i32 << (bits - 1);
+    let diff = a - b;
+    (diff & (m - 1)) - (diff & m)
+}
+
+/// The order-hint half of `av1_setup_skip_mode_allowed` (mvref_common.c:1246):
+/// TRUE when the bound references contain a nearest-forward + nearest-backward
+/// pair, or (forward-only) two distinct-order-hint forward refs. The reader
+/// combines this with its mid-parse `reference_mode_select`
+/// (`FrameHeaderObu::derive_skip_mode_allowed`).
+fn skip_mode_refs_allowed(
+    seq: &SequenceHeaderObu,
+    cur_order_hint: i32,
+    refs: &[Option<Rc<RefSlot>>; 7],
+) -> bool {
+    if !seq.seq_header.enable_order_hint {
+        return false;
+    }
+    let mut fwd: Option<i32> = None; // nearest forward (rel dist < 0)
+    let mut bwd: Option<i32> = None; // nearest backward (rel dist > 0)
+    for slot in refs.iter().flatten() {
+        let oh = slot.frame.order_hint;
+        let d = get_relative_dist(seq, oh, cur_order_hint);
+        if d < 0 {
+            if fwd.is_none_or(|f| get_relative_dist(seq, oh, f) > 0) {
+                fwd = Some(oh);
+            }
+        } else if d > 0 && bwd.is_none_or(|b| get_relative_dist(seq, oh, b) < 0) {
+            bwd = Some(oh);
+        }
+    }
+    match (fwd, bwd) {
+        (Some(_), Some(_)) => true,
+        (Some(f), None) => {
+            // Second-nearest DISTINCT forward reference.
+            let mut second: Option<i32> = None;
+            for slot in refs.iter().flatten() {
+                let oh = slot.frame.order_hint;
+                if get_relative_dist(seq, oh, f) < 0
+                    && second.is_none_or(|s2| get_relative_dist(seq, oh, s2) > 0)
+                {
+                    second = Some(oh);
+                }
+            }
+            second.is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Resolve a `show_existing_frame` header against the DPB: clone the stored
+/// slot's finished output. The corpus target only shows previously-decoded
+/// showable NON-KEY frames; showing a stored KEY frame additionally resets
+/// decoder state (spec 7.4/7.20) and stays out of envelope until needed.
+fn show_existing_output(
+    slots: &[Option<Rc<RefSlot>>; 8],
+    hdr: &FrameHeaderObu,
+) -> Result<FrameDecode, DecodeError> {
+    let idx = hdr.prefix.existing_fb_idx_to_show;
+    let slot = slots
+        .get(idx.max(0) as usize)
+        .and_then(|s| s.as_ref())
+        .ok_or("show_existing_frame names an empty reference slot")?;
+    if slot.frame_type == 0 {
+        return Err(DecodeError::UnsupportedFeature(
+            "show_existing_frame of a KEY frame (ref-state reset out of envelope)",
+        ));
+    }
+    if !slot.showable {
+        return Err("show_existing_frame of a non-showable frame".into());
+    }
+    Ok(slot.output.clone())
+}
+
+/// Build the final-parse reader context for an INTER frame header from the
+/// probe parse + the DPB ([`InterParseCtx`]); `None` for a non-inter frame.
+fn build_inter_parse_ctx(
+    seq: &SequenceHeaderObu,
+    probe: &FrameHeaderObu,
+    slots: &[Option<Rc<RefSlot>>; 8],
+) -> Result<Option<InterParseCtx>, DecodeError> {
+    if probe.prefix.frame_type != 1 {
+        return Ok(None);
+    }
+    if probe.inter_ref.frame_refs_short_signaling {
+        // Needs the av1_set_frame_refs order-hint derivation — not ported.
+        return Err(DecodeError::UnsupportedFeature(
+            "frame_refs_short_signaling (set_frame_refs derivation out of envelope)",
+        ));
+    }
+    let bound = bind_refs(probe, slots);
+    let sm = skip_mode_refs_allowed(seq, probe.prefix.order_hint, &bound);
+    let pri = probe.prefix.primary_ref_frame;
+    let (lf_r, lf_m, gm) = if (0..7).contains(&pri) {
+        let slot = bound[pri as usize]
+            .as_deref()
+            .ok_or("primary_ref_frame names an empty reference slot")?;
+        (slot.lf_ref_deltas, slot.lf_mode_deltas, slot.gm)
+    } else {
+        // PRIMARY_REF_NONE -> setup_past_independence defaults.
+        (KF_REF_DELTAS, KF_MODE_DELTAS, [IDENTITY_GM; 7])
+    };
+    Ok(Some(InterParseCtx {
+        lf_ref_deltas: lf_r,
+        lf_mode_deltas: lf_m,
+        gm_ref: gm,
+        skip_mode_refs_allowed: sm,
+    }))
+}
+
+/// Resolve the frame's `ref_frame_idx` mapping against the DPB: the seven
+/// bound reference slots, `LAST..ALTREF` order.
+fn bind_refs(
+    hdr: &FrameHeaderObu,
+    slots: &[Option<Rc<RefSlot>>; 8],
+) -> [Option<Rc<RefSlot>>; 7] {
+    std::array::from_fn(|i| {
+        let m = hdr.inter_ref.ref_map_idx[i];
+        slots.get(m.clamp(0, 7) as usize).and_then(|s| s.clone())
+    })
+}
+
+/// Decode one (non-show-existing) frame's tile payload, run the post filters,
+/// install the result into the DPB per `refresh_frame_flags`, and append the
+/// finished output when the frame is shown. Shared by the OBU_FRAME and
+/// FRAME_HEADER+TILE_GROUP arms of [`decode_frames_with`].
+fn decode_frame_and_install(
+    sh: &SequenceHeaderObu,
+    header: &FrameHeaderObu,
+    tile_data: &[u8],
+    slots: &mut [Option<Rc<RefSlot>>; 8],
+    out: &mut Vec<FrameDecode>,
+    config: &DecodeConfig,
+) -> Result<(), DecodeError> {
+    let ft = header.prefix.frame_type;
+    let is_inter = ft == 1;
+    let bound: [Option<Rc<RefSlot>>; 7] = if is_inter {
+        bind_refs(header, slots)
+    } else {
+        Default::default()
+    };
+    let base_ctx: Option<FrameContexts> = if is_inter {
+        let pri = header.prefix.primary_ref_frame;
+        if (0..7).contains(&pri) {
+            Some(
+                bound[pri as usize]
+                    .as_deref()
+                    .ok_or("primary_ref_frame names an empty reference slot")?
+                    .ctx
+                    .clone(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let (mut t, cfg, hdr) = if is_inter {
+        decode_inter_tile_payload(sh, header, tile_data, &bound, base_ctx.as_ref(), config.stop)?
+    } else {
+        decode_tile_payload(sh, header, tile_data, config.stop)?
+    };
+    run_post_filters(&mut t, &cfg, &hdr);
+
+    let refresh = hdr.prefix.refresh_frame_flags;
+    // End-of-frame saved entropy context (`REFRESH_FRAME_CONTEXT_BACKWARD`):
+    // the update tile's adapted CDFs, or the LOADED base when
+    // `disable_frame_end_update_cdf` kept backward adaptation off.
+    let saved_ctx: Option<FrameContexts> = if refresh != 0 {
+        Some(if hdr.refresh_frame_context_disabled {
+            match base_ctx {
+                Some(b) => b,
+                None => FrameContexts::defaults(hdr.quant.base_qindex),
+            }
+        } else {
+            *t.saved_ctx
+                .take()
+                .ok_or("frame did not produce a saved entropy context")?
+        })
+    } else {
+        None
+    };
+    let (frame, mvs) = if refresh != 0 {
+        // MC clamps reference reads to the VISIBLE (crop) dims — the
+        // reference's coded post-superres-upscale visible size, matching
+        // `finish_frame`'s crop derivation.
+        let crop_w = hdr.frame_size.superres_upscaled_width as usize;
+        let crop_h = hdr.frame_size.superres_upscaled_height as usize;
+        let (ss_x, ss_y) = (cfg.subsampling_x, cfg.subsampling_y);
+        let crop_w_uv = (crop_w + ss_x) >> ss_x;
+        let crop_h_uv = (crop_h + ss_y) >> ss_y;
+        (
+            Some(crate::RefFrame::from_filtered(
+                &t,
+                hdr.prefix.order_hint,
+                crop_w,
+                crop_h,
+                crop_w_uv,
+                crop_h_uv,
+            )),
+            std::mem::take(&mut t.frame_mvs),
+        )
+    } else {
+        (None, Vec::new())
+    };
+    let output = finish_and_grain(t, &cfg, &hdr);
+    if refresh != 0 {
+        // `cur_frame->ref_order_hints`: the order hints of THIS frame's own
+        // refs, for later frames' temporal motion-field projection.
+        let mut roh = [0i32; 8];
+        for (i, b) in bound.iter().enumerate() {
+            roh[i + 1] = b.as_deref().map_or(0, |s| s.frame.order_hint);
+        }
+        let slot = Rc::new(RefSlot {
+            frame: frame.expect("refresh != 0 captured a RefFrame"),
+            output: output.clone(),
+            ctx: saved_ctx.expect("refresh != 0 captured a saved context"),
+            lf_ref_deltas: hdr.loopfilter.ref_deltas,
+            lf_mode_deltas: hdr.loopfilter.mode_deltas,
+            gm: hdr.global_motion,
+            ref_order_hints: roh,
+            mvs,
+            mi_rows: cfg.mi_rows,
+            mi_cols: cfg.mi_cols,
+            frame_type: ft,
+            showable: hdr.prefix.showable_frame,
+        });
+        for (i, s) in slots.iter_mut().enumerate() {
+            if refresh & (1 << i) != 0 {
+                *s = Some(slot.clone());
+            }
+        }
+    }
+    if hdr.prefix.show_frame {
+        out.push(output);
+    }
+    Ok(())
+}
+
+/// The INTER analogue of [`decode_tile_payload`]: build the shared tile config
+/// + the inter frame-level config (the SEVEN bound references + order-hint
+/// sign/side tables) and drive the inter tile decode. `base_ctx` is the
+/// primary reference's saved entropy context (`None` = qindex defaults).
 fn decode_inter_tile_payload(
     seq: &SequenceHeaderObu,
     p: &FrameHeaderObu,
     tile_data: &[u8],
-    last: &crate::RefFrame,
+    bound: &[Option<Rc<RefSlot>>; 7],
+    base_ctx: Option<&FrameContexts>,
     stop: Option<&dyn enough::Stop>,
 ) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let cfg = build_tile_cfg(seq, p);
+    let cur_oh = p.prefix.order_hint;
+    let refs: [Option<&crate::RefFrame>; 7] =
+        std::array::from_fn(|i| bound[i].as_deref().map(|s| &s.frame));
+    // `av1_setup_motion_field`: the temporal MV field, built when the frame
+    // allows ref-frame MVs. `tpl_cur_offset[rf]` =
+    // `get_relative_dist(cur_order_hint, ref_order_hint)` (add_tpl_ref_mv's
+    // per-ref projection numerator).
+    let tpl_cells: Option<Vec<aom_dsp::entropy::dv_ref::TplMvRef>> = if p.allow_ref_frame_mvs {
+        setup_motion_field(seq, p, cfg.mi_rows, cfg.mi_cols, bound)
+    } else {
+        None
+    };
+    let mut tpl_cur_offset = [0i32; 8];
+    for (i, b) in bound.iter().enumerate() {
+        if let Some(slot) = b.as_deref() {
+            tpl_cur_offset[i + 1] = get_relative_dist(seq, cur_oh, slot.frame.order_hint);
+        }
+    }
+    // `av1_setup_frame_sign_bias` + `av1_calculate_ref_frame_side` (both over
+    // the bound refs' order hints; an unbound ref reads order_hint 0 for the
+    // side table, matching C's NULL-buf arm).
+    let mut sign_bias = [0i8; 8];
+    let mut side = [0i8; 8];
+    if seq.seq_header.enable_order_hint {
+        for (i, b) in bound.iter().enumerate() {
+            let rf = i + 1;
+            if let Some(slot) = b {
+                sign_bias[rf] =
+                    (get_relative_dist(seq, slot.frame.order_hint, cur_oh) > 0) as i8;
+            }
+            let oh = b.as_deref().map_or(0, |slot| slot.frame.order_hint);
+            if get_relative_dist(seq, oh, cur_oh) > 0 {
+                side[rf] = 1;
+            } else if oh == cur_oh {
+                side[rf] = -1;
+            }
+        }
+    }
     let inter = crate::InterFrameCfg {
-        last,
+        refs,
+        ref_frame_sign_bias: sign_bias,
+        ref_frame_side: side,
+        tpl_cells: tpl_cells.as_deref(),
+        tpl_stride: ((cfg.mi_cols + 1) >> 1) as usize,
+        tpl_cur_offset,
         allow_high_precision_mv: p.allow_high_precision_mv,
         cur_frame_force_integer_mv: p.cur_frame_force_integer_mv,
         interp_filter: p.interp_filter,
@@ -982,13 +1535,36 @@ fn decode_inter_tile_payload(
         reference_mode_select: p.reference_mode_select,
         enable_dual_filter: seq.seq_header.enable_dual_filter,
         allow_warped_motion: p.allow_warped_motion,
-        skip_mode_allowed: p.skip_mode_allowed,
+        skip_mode_present: p.skip_mode_flag,
         enable_interintra_compound: seq.seq_header.enable_interintra_compound,
         gm_wmtype: std::array::from_fn(|i| p.global_motion[i].wmtype),
-        order_hint: p.prefix.order_hint,
+        order_hint: cur_oh,
     };
+    if crate::dbg_blocks() {
+        eprintln!(
+            "FRAME oh={} pri={} refresh={:#x} refmap={:?} txsel={} cdef_bits={} lr={:?} rms={} smf={} rtx={}",
+            p.prefix.order_hint,
+            p.prefix.primary_ref_frame,
+            p.prefix.refresh_frame_flags,
+            p.inter_ref.ref_map_idx,
+            p.tx_mode_select as u8,
+            p.cdef.cdef_bits,
+            p.restoration.frame_restoration_type,
+            p.reference_mode_select as u8,
+            p.skip_mode_flag as u8,
+            p.reduced_tx_set_used as u8,
+        );
+    }
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
-    let t = crate::decode_frame_tiles_inter(&tiles, &cfg, &inter, 0, stop);
+    let t = crate::decode_frame_tiles_inter(
+        &tiles,
+        &cfg,
+        &inter,
+        0,
+        base_ctx,
+        p.context_update_tile_id,
+        stop,
+    );
     if let Some(reason) = t.corrupt {
         return Err(reason.into());
     }
@@ -1326,7 +1902,10 @@ fn decode_tile_payload(
 ) -> Result<(KfTileDecode, KfTileConfig, FrameHeaderObu), DecodeError> {
     let cfg = build_tile_cfg(seq, p);
     let tiles = split_tiles(tile_data, &p.tile_info, p.tile_size_bytes)?;
-    let t = decode_frame_tiles_kf(&tiles, &cfg, 0, stop);
+    // KEY frames always load the qindex defaults (`primary_ref = NONE`); the
+    // `context_update_tile_id` tile's end-of-frame adapted CDFs ride out on
+    // `t.saved_ctx` for the multi-frame driver (single-frame callers ignore it).
+    let t = decode_frame_tiles_kf_ctx(&tiles, &cfg, 0, None, p.context_update_tile_id, stop);
     if let Some(reason) = t.corrupt {
         return Err(reason.into());
     }

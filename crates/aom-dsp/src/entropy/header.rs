@@ -1448,6 +1448,15 @@ pub struct FrameHeaderObu {
     pub tx_mode_select: bool,
     pub reference_mode_select: bool,
     pub skip_mode_allowed: bool,
+    /// READER-only semantic switch for `skip_mode_allowed`: when set, the
+    /// input `skip_mode_allowed` carries only the ORDER-HINT half of
+    /// `av1_setup_skip_mode_allowed` (a nearest fwd/bwd — or two distinct
+    /// forward — reference pair exists) and the reader combines it with the
+    /// just-parsed `reference_mode_select` (skip mode is never allowed for a
+    /// SINGLE_REFERENCE frame), exactly as the C decoder derives it mid-parse.
+    /// `false` (default) keeps the legacy writer-mirror semantic (the input is
+    /// the final value) — byte-identical for all existing paths.
+    pub derive_skip_mode_allowed: bool,
     pub skip_mode_flag: bool,
     pub might_allow_warped_motion: bool,
     pub allow_warped_motion: bool,
@@ -3119,8 +3128,32 @@ pub fn read_uncompressed_header(rb: &mut ReadBitBuffer, cfg: &FrameHeaderObu) ->
     // roundtrips, whose inter frames are non-error-resilient).
     let might_allow_warped =
         cfg.might_allow_warped_motion && !intra_only && !p.prefix.error_resilient_mode;
-    let (rms, smf, awm, rts) =
-        read_frame_header_trailing_flags(rb, intra_only, cfg.skip_mode_allowed, might_allow_warped);
+    // `av1_setup_skip_mode_allowed` runs BETWEEN the reference-select read and
+    // the skip-mode-present read (decodeframe.c), and returns 0 for a
+    // SINGLE_REFERENCE frame. The order-hint half (a nearest fwd/bwd — or two
+    // distinct-fwd — reference pair exists) cannot be derived here, so the
+    // caller supplies it as `cfg.skip_mode_allowed`; the reference-mode half is
+    // the `reference_mode_select` bit just parsed. Combine them exactly as C
+    // does; `p.skip_mode_allowed` carries the COMBINED value out.
+    let reference_mode_select = if !intra_only { rb.read_bit() != 0 } else { false };
+    let skip_mode_allowed = if cfg.derive_skip_mode_allowed {
+        cfg.skip_mode_allowed && reference_mode_select
+    } else {
+        cfg.skip_mode_allowed
+    };
+    let skip_mode_flag = if skip_mode_allowed {
+        rb.read_bit() != 0
+    } else {
+        false
+    };
+    let awm = if might_allow_warped {
+        rb.read_bit() != 0
+    } else {
+        false
+    };
+    let rts = rb.read_bit() != 0;
+    let (rms, smf) = (reference_mode_select, skip_mode_flag);
+    p.skip_mode_allowed = skip_mode_allowed;
     p.reference_mode_select = rms;
     p.skip_mode_flag = smf;
     p.allow_warped_motion = awm;

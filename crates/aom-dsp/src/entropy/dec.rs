@@ -58,6 +58,30 @@ pub struct OdEcDec<'a> {
 }
 
 impl<'a> OdEcDec<'a> {
+    /// `od_ec_dec_tell` (entdec.c:231): the number of bits consumed by the
+    /// decoded symbols so far (slightly over-counting, all rounding error
+    /// positive). Debug/diff instrumentation.
+    pub fn tell(&self) -> i32 {
+        (self.bptr as i32) * 8 - self.cnt + self.tell_offs
+    }
+
+    /// `od_ec_dec_tell_frac` (entdec.c:245): bits consumed scaled by 2^3
+    /// (1/8-bit resolution), matching the accounting units of the
+    /// CONFIG_ACCOUNTING libaom build. Debug/diff instrumentation.
+    pub fn tell_frac(&self) -> u32 {
+        const OD_BITRES: u32 = 3;
+        let nbits = (self.tell() as u32) << OD_BITRES;
+        let mut l: u32 = 0;
+        let mut rng = self.rng as u32;
+        for _ in 0..OD_BITRES {
+            rng = rng.wrapping_mul(rng) >> 15;
+            let b = rng >> 16;
+            l = (l << 1) | b;
+            rng >>= b;
+        }
+        nbits.wrapping_sub(l)
+    }
+
     pub fn new(buf: &'a [u8]) -> Self {
         let mut d = OdEcDec {
             buf,
