@@ -19,6 +19,7 @@ crates/aom-decode/fuzz/target/
 crates/aom-decode/fuzz/corpus/
 crates/aom-decode/fuzz/artifacts/
 crates/aom-decode/fuzz/coverage/
+crates/aom-decode/fuzz/fuzz-*.log
 local-corpus/
 tools/avif-extract/target/
 tools/avif-extract/Cargo.lock

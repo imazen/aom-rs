@@ -1724,6 +1724,44 @@ demand** — so zenavif can map cleanly without losing information. Optional
   (`bbd7bc4`, `5922c47`), with a stable-toolchain regression harness
   (`606813d`). Panic-freedom on the *current* untrusted surface is
   substantially met and mechanically guarded.
+- **Fuzz-status (2026-07-23/24 sustained campaign, ~5.3 CPU-hours):** the two
+  targets were built and driven on nightly `cargo-fuzz` 0.13.2, seeded from the
+  553-file `decode_frame_obus` + 39-file `decode_frames` conformance corpora.
+  A crash-finding round (short) plus a clean round of **4 workers × 2400 s per
+  target** (≈2.67 CPU-h each, ≈5.3 CPU-h total) accumulated corpora of 9,474
+  (`decode_obus`) / 7,189 (`decode_frames`) inputs. Two issues found and fixed:
+  - **`9069a95` — spurious OOM (harness):** the targets called the bare
+    `decode_frame_obus` / `decode_frames` (default `1<<28` ≈268 Mpx ceiling); a
+    234-byte OBU can declare a ~268 Mpx frame whose in-bounds recon/mi alloc is
+    ~3.2 GiB and trips libFuzzer's 2 GiB malloc limit. Not a decoder bug (the
+    alloc IS bounded by the ceiling). Per §5 the targets + the stable
+    `fuzz_regression.rs`/`fuzz_sweep.rs` harnesses now decode via `*_with` under
+    a low `max_pixels = 1<<22` (4 Mpx). Seed:
+    `fuzz/regression/decode_obus_oom_268mpx_declared_frame.obu`.
+  - **`d7aa3c8` — real panic, arithmetic overflow:** `read_timing_info_header`
+    computed `read_uvlc() + 1` for `NumTicksPerPicture`; `read_uvlc()` returns
+    `u32::MAX` for ≥32 leading zeros (attacker-reachable in the seq-header
+    timing_info), so `+1` panicked under overflow-checks — a DoS on untrusted
+    input. Both entry points found it (12 crash inputs, one root cause). Fixed
+    with `saturating_add(1)` (timing info is pixel-decode-irrelevant; matches
+    spec intent, strictly better than libaom's C wrap-to-zero). Seed:
+    `fuzz/regression/decode_frames_timing_num_ticks_uvlc_overflow.obu`.
+  - **No remaining crashes/panics/OOMs** over the clean round on either target;
+    the full `-p zenav1-aom-decode` suite (byte-identity tests included) stays
+    green. One `slow-unit` (277 B → ~834 ms optimized / ~8–13 s instrumented)
+    was triaged as **legitimate O(pixels) work**: it declares a 4.06 Mpx frame
+    just under the fuzz cap; any smaller `max_pixels` rejects it in ~50 µs
+    (`LimitExceeded`). Not a loop/leak — the pixel ceiling governs decode cost
+    exactly as designed; a latency-sensitive caller uses a tighter `max_pixels`
+    and the (speced §6) stop token. Fixed crashes archived to
+    `/root/fuzz-corpus/zenav1-aom/`.
+  - **Remaining fuzz risks / not-yet-done:** (a) the campaign fuzzed the default
+    runtime-SIMD path — the `AOM_FORCE_SCALAR=1` scalar path was only
+    *replayed* over the accumulated corpus (deterministic, clean), not fuzzed
+    for new coverage; a future round should fuzz under `AOM_FORCE_SCALAR=1`.
+    (b) Coverage is bounded by the `1<<22` fuzz cap (the reject path above that
+    is not exercised for deep decode). (c) The inter-frame decode surface grows;
+    per the bar below, each new feature must land with its own fuzz coverage.
 - **Bar (keep it clean as features grow):** every NEW decode feature (inter,
   intraBC coeff arm, extended tools) must land with its fuzz coverage and must
   convert any new bitstream-derived `panic!`/`expect`/`unreachable!` into an
