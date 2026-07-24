@@ -1,4 +1,7 @@
 [submodule "upstream"]
 	path = upstream
-	url = https://aomedia.googlesource.com/aom
+	# Imazen's browsable daily mirror of https://aomedia.googlesource.com/aom
+	# (github.com/imazen/libaom-mirror) so the pinned oracle commit is clickable
+	# on GitHub. The gitlink SHA is unchanged; the mirror serves the same objects.
+	url = https://github.com/imazen/libaom-mirror.git
 	ignore = dirty
